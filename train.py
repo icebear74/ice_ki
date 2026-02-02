@@ -22,23 +22,23 @@ DATA_ROOT      = "/mnt/data/training/Universal/Mastermodell/Learn"
 CONFIG_FILE    = os.path.join(DATA_ROOT, "train_config.json")
 DATASET_ROOT   = "/mnt/data/training/Dataset/Universal/Mastermodell"
 
-N_BLOCKS       = 30
-BATCH_SIZE     = 4  # Erhöht von 4
+N_BLOCKS       = 32
+BATCH_SIZE     = 6
 NUM_WORKERS    = 4
 PATCH_GT, PATCH_LR = 540, 180
 
 defaults = {
-    "LR_EXPONENT": -5,  # REDUZIERT von -4! Wichtig gegen Explosion!
-    "WEIGHT_DECAY": 0.01,
+    "LR_EXPONENT": -5,
+    "WEIGHT_DECAY": 0.001,
     "MAX_STEPS": 100000,
-    "VAL_STEP_EVERY": 250,
+    "VAL_STEP_EVERY": 500,
     "SAVE_STEP_EVERY": 5000,
-    "LOG_TBOARD_EVERY": 10,
-    "LOG_LAYERS_EVERY": 50,
+    "LOG_TBOARD_EVERY": 100,
+    "LOG_LAYERS_EVERY": 100,
     "HIST_STEP_EVERY": 500,
-    "ACCUMULATION_STEPS": 1,  # Geändert von 3!
-    "DISPLAY_MODE": "grouped",
-    "GRAD_CLIP": 1.0  # NEU: Gradient Clipping!
+    "ACCUMULATION_STEPS": 1,
+    "DISPLAY_MODE": 0,
+    "GRAD_CLIP": 1.5
 }
 
 activity_history = {i+1: [] for i in range(N_BLOCKS)}
@@ -48,9 +48,75 @@ WINDOW_SIZE = 50
 ema_grads = {}
 alpha = 0.2
 last_term_size = (0, 0)
+last_quality_metrics = {
+    'lr_quality': 0.0,
+    'ki_quality': 0.0,
+    'improvement': 0.0
+}
+
 C_GREEN, C_GRAY, C_RESET, C_BOLD, C_CYAN, C_RED, C_YELLOW = "\033[92m", "\033[90m", "\033[0m", "\033[1m", "\033[96m", "\033[91m", "\033[93m"
 ANSI_HOME, ANSI_CLEAR = "\033[H", "\033[2J"
 ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+
+DISPLAY_MODE_NAMES = [
+    "Grouped by Trunk → Sorted by Position",
+    "Grouped by Trunk → Sorted by Activity",
+    "Flat List → Sorted by Position",
+    "Flat List → Sorted by Activity"
+]
+
+# --- QUALITY METRICS (IN %) ---
+def calculate_psnr(img1, img2):
+    """Calculate PSNR between two images (tensor 0-1 range)"""
+    mse = torch.mean((img1 - img2) ** 2)
+    if mse == 0:
+        return 50.0  # Perfect = 50 dB
+    psnr = 20 * torch.log10(1.0 / torch.sqrt(mse))
+    return psnr.item()
+
+def calculate_ssim(img1, img2):
+    """Calculate SSIM between two images (simplified, returns 0-1)"""
+    C1 = 0.01 ** 2
+    C2 = 0.03 ** 2
+    
+    mu1 = F.avg_pool2d(img1, 11, stride=1, padding=5)
+    mu2 = F.avg_pool2d(img2, 11, stride=1, padding=5)
+    
+    mu1_sq = mu1 ** 2
+    mu2_sq = mu2 ** 2
+    mu1_mu2 = mu1 * mu2
+    
+    sigma1_sq = F.avg_pool2d(img1 ** 2, 11, stride=1, padding=5) - mu1_sq
+    sigma2_sq = F.avg_pool2d(img2 ** 2, 11, stride=1, padding=5) - mu2_sq
+    sigma12 = F.avg_pool2d(img1 * img2, 11, stride=1, padding=5) - mu1_mu2
+    
+    ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
+    return ssim_map.mean().item()
+
+def quality_to_percent(psnr, ssim):
+    """
+    Convert PSNR + SSIM to a single Quality Score (0-100%)
+    
+    PSNR scale:
+      20 dB = 0%  (sehr schlecht)
+      30 dB = 33% (mittelmäßig)
+      40 dB = 66% (gut)
+      50 dB = 100% (perfekt)
+    
+    SSIM: bereits 0-1 (direkt zu %)
+    
+    Final: 50% SSIM + 50% PSNR
+    """
+    # PSNR normalisieren (20-50 dB → 0-100%)
+    psnr_percent = min(100.0, max(0.0, (psnr - 20.0) * 3.33))
+    
+    # SSIM zu %
+    ssim_percent = ssim * 100.0
+    
+    # Kombiniert (50/50 Gewichtung)
+    quality = (psnr_percent * 0.5) + (ssim_percent * 0.5)
+    
+    return quality
 
 # --- HELPER FUNKTIONEN ---
 def cleanup_logs(log_base, min_events=15):
@@ -63,7 +129,7 @@ def cleanup_logs(log_base, min_events=15):
     deleted = 0
     for i, subdir in enumerate(subdirs):
         prog = (i + 1) / len(subdirs) * 100
-        sys.stdout.write(f"\r {C_GRAY}[{C_GREEN}{'��' * int(prog//5)}{C_GRAY}{'░' * (20 - int(prog//5))}{C_GRAY}] {prog:>5.1f}%{C_RESET}")
+        sys.stdout.write(f"\r {C_GRAY}[{C_GREEN}{'█' * int(prog//5)}{C_GRAY}{'░' * (20 - int(prog//5))}{C_GRAY}] {prog:>5.1f}%{C_RESET}")
         sys.stdout.flush()
         path = os.path.join(log_base, subdir)
         try:
@@ -92,10 +158,8 @@ def start_tensorboard(log_dir, port=6006):
     try:
         subprocess.run(['pkill', '-f', 'tensorboard'], stderr=subprocess.DEVNULL)
         time.sleep(1)
-        
         cmd = ['tensorboard', f'--logdir={log_dir}', f'--port={port}', '--bind_all', '--reload_interval=5']
         subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        
         for _ in range(10):
             time.sleep(0.5)
             if is_tensorboard_running(port):
@@ -135,25 +199,19 @@ class HybridLoss(nn.Module):
         self.l1 = nn.L1Loss()
     
     def forward(self, pred, target):
-        # CLAMP output to prevent explosion!
         pred = torch.clamp(pred, 0.0, 1.0)
-        
-        # 1. Pixel Loss
         l1_loss = self.l1(pred, target)
         
-        # 2. Multi-Scale Loss (sanfter)
         pred_h = F.avg_pool2d(pred, 2)
         target_h = F.avg_pool2d(target, 2)
         ms_loss = 0.5 * self.l1(pred_h, target_h)
         
-        # 3. Gradient Loss (reduziertes Gewicht)
         pred_dx = pred[:, :, :, 1:] - pred[:, :, :, :-1]
         pred_dy = pred[:, :, 1:, :] - pred[:, :, :-1, :]
         target_dx = target[:, :, :, 1:] - target[:, :, :, :-1]
         target_dy = target[:, :, 1:, :] - target[:, :, :-1, :]
         grad_loss = self.l1(pred_dx, target_dx) + self.l1(pred_dy, target_dy)
         
-        # Kombiniert: 70% L1, 20% Multi-Scale, 10% Gradient (stabiler!)
         total = 0.7 * l1_loss + 0.2 * ms_loss + 0.1 * grad_loss
         
         return {
@@ -194,7 +252,7 @@ def calculate_convergence_status(loss_history):
     else:
         return f"{C_RED}Diverging ✗{C_RESET}"
 
-def get_activity_data(model, sort_by_activity=False):
+def get_activity_data(model):
     m = model.module if hasattr(model, 'module') else model
     
     if not hasattr(m, 'get_layer_activity'):
@@ -207,85 +265,188 @@ def get_activity_data(model, sort_by_activity=False):
     activities = [(i+1, int((v / max_val) * 100), trends[i], v) 
                   for i, v in enumerate(activities_raw)]
     
-    if sort_by_activity:
-        return sorted(activities, key=lambda x: x[1], reverse=True)
     return activities
 
 def draw_ui(step, epoch, losses, it_time, activities, cfg, num_images, steps_per_epoch, current_epoch_step, paused=False):
-    global last_term_size
+    global last_term_size, last_quality_metrics
     term_size = shutil.get_terminal_size()
-    if term_size != last_term_size: print(ANSI_CLEAR); last_term_size = term_size
-    print(ANSI_HOME + "\033[?25l")
     
-    ui_w = term_size.columns
+    if term_size != last_term_size:
+        print(ANSI_CLEAR)
+        last_term_size = term_size
+    
+    print(ANSI_CLEAR + ANSI_HOME + "\033[?25l")
+    
+    ui_w = max(90, term_size.columns - 4)
     total_prog = (step / cfg["MAX_STEPS"]) * 100 if cfg["MAX_STEPS"] > 0 else 0
     total_eta = format_time((cfg["MAX_STEPS"] - step) * it_time) if not paused else "PAUSIERT"
     epoch_prog = (current_epoch_step / steps_per_epoch) * 100 if steps_per_epoch > 0 else 0
+    epoch_eta = format_time((steps_per_epoch - current_epoch_step) * it_time) if not paused else "PAUSIERT"
 
     def print_line(content):
-        padding = max(0, ui_w - get_visible_len(content))
-        sys.stdout.write(f"{content}{' ' * padding}\n")
+        padding = max(0, ui_w - get_visible_len(content) - 4)
+        sys.stdout.write(f" ║ {content}{' ' * padding} ║\n")
 
     # Header
-    print_line(f"{C_GRAY}{'═' * ui_w}{C_RESET}")
-    status = f"{C_RED}⏸ PAUSED{C_RESET}" if paused else f"{C_GREEN}▶ RUNNING{C_RESET}"
-    print_line(f"{C_BOLD}VSR+++ TRAINING{C_RESET} │ {status} │ Step {step}/{cfg['MAX_STEPS']} │ Epoch {epoch} │ LR: 1e{cfg['LR_EXPONENT']}")
-    print_line(f"Progress: {make_bar(total_prog, ui_w-20)} {total_prog:>5.1f}% │ ETA: {total_eta}")
-    print_line(f"{C_GRAY}{'─' * ui_w}{C_RESET}")
+    sys.stdout.write(f" {C_GRAY}╔{'═'*(ui_w-2)}╗{C_RESET}\n")
+    status = f"{C_RED}⏸ PAUSIERT (P){C_RESET}" if paused else f"{C_GREEN}▶ RUNNING{C_RESET}"
+    print_line(f"{C_BOLD}MISSION CONTROL{C_RESET} │ {status} │ STEP: {step}/{cfg['MAX_STEPS']} │ LR: 1e{cfg['LR_EXPONENT']}")
+    print_line(f"TOTAL PROG: {make_bar(total_prog, ui_w-65)} {total_prog:>5.1f}% │ ETA: {total_eta}")
+    sys.stdout.write(f" {C_GRAY}╠{'═'*(ui_w-2)}╣{C_RESET}\n")
     
-    # Loss
-    loss_str = f"L1: {C_CYAN}{losses.get('l1',0):.5f}{C_RESET} │ MS: {C_CYAN}{losses.get('ms',0):.5f}{C_RESET} │ Grad: {C_CYAN}{losses.get('grad',0):.5f}{C_RESET} │ Total: {C_BOLD}{C_GREEN}{losses.get('total',0):.5f}{C_RESET}"
-    print_line(loss_str)
+    # Epoch Info
+    print_line(f"EPOCH: {epoch:<4} │ STEP: {current_epoch_step}/{steps_per_epoch} │ ETA: {epoch_eta}")
+    print_line(f"EPOCH PROG: {make_bar(epoch_prog, ui_w-65)} {epoch_prog:>5.1f}%")
+    sys.stdout.write(f" {C_GRAY}╠{'═'*(ui_w-2)}╣{C_RESET}\n")
+    
+    # Loss Info
+    loss_str = f"L1: {C_CYAN}{losses.get('l1',0):.4f}{C_RESET} │ MS: {C_CYAN}{losses.get('ms',0):.4f}{C_RESET} │ Grad: {C_CYAN}{losses.get('grad',0):.4f}{C_RESET} │ Total: {C_BOLD}{C_GREEN}{losses.get('total',0):.4f}{C_RESET}"
+    print_line(f"LOSS → {loss_str}")
     vram = f"{torch.cuda.memory_reserved() / 1024**3:.2f}GB"
-    print_line(f"Dataset: {num_images} imgs │ VRAM: {vram} │ Speed: {it_time:.3f}s/it │ {calculate_convergence_status(loss_history)}")
-    print_line(f"{C_GRAY}{'─' * ui_w}{C_RESET}")
+    print_line(f"DATASET: {num_images:<7} imgs │ VRAM: {vram} │ SPEED: {it_time:.2f}s/it │ {calculate_convergence_status(loss_history)}")
+    sys.stdout.write(f" {C_GRAY}╠{'═'*(ui_w-2)}╣{C_RESET}\n")
+    
+    # QUALITY METRICS (last validation)
+    lr_q = last_quality_metrics['lr_quality']
+    ki_q = last_quality_metrics['ki_quality']
+    imp = last_quality_metrics['improvement']
+    
+    print_line(f"{C_BOLD}📊 QUALITY METRICS{C_RESET} (last validation)")
+    sys.stdout.write(f" {C_GRAY}╠{'─'*(ui_w-2)}╣{C_RESET}\n")
+    
+    # LR Quality (Baseline)
+    lr_bar = make_bar(lr_q, ui_w-50)
+    lr_color = C_RED if lr_q < 50 else (C_YELLOW if lr_q < 70 else C_GREEN)
+    print_line(f"LR→GT:   Quality: {lr_bar} {lr_color}{lr_q:>5.1f}%{C_RESET}  (Baseline)")
+    
+    # KI Quality (Your Model)
+    ki_bar = make_bar(ki_q, ui_w-50)
+    ki_color = C_RED if ki_q < 60 else (C_YELLOW if ki_q < 80 else C_GREEN)
+    print_line(f"KI→GT:   Quality: {ki_bar} {ki_color}{ki_q:>5.1f}%{C_RESET}  (Your Model)")
+    
+    # Improvement
+    imp_bar = make_bar(min(100, imp), ui_w-50)
+    imp_color = C_RED if imp < 10 else (C_YELLOW if imp < 25 else C_GREEN)
+    imp_sign = "+" if imp >= 0 else ""
+    print_line(f"Improve: {imp_bar} {imp_color}{imp_sign}{imp:>5.1f}%{C_RESET}  (Gain!)")
+    
+    sys.stdout.write(f" {C_GRAY}╠{'═'*(ui_w-2)}╣{C_RESET}\n")
 
-    # LAYER DISPLAY - DYNAMISCH ANPASSEND
-    display_mode = cfg.get("DISPLAY_MODE", "grouped")
+    # LAYER DISPLAY - 4 MODI
+    display_mode = cfg.get("DISPLAY_MODE", 0)
+    available_lines = term_size.lines - 22
     
-    # Berechne wie viele Layer pro Zeile passen
-    # Pro Layer: "L01:████ 50% │ " = ca. 18 chars
-    chars_per_layer = 18
-    layers_per_row = max(1, (ui_w - 4) // chars_per_layer)
+    mode_name = DISPLAY_MODE_NAMES[display_mode]
+    print_line(f"{C_BOLD}📊 VIEW MODE: {mode_name}{C_RESET}")
+    sys.stdout.write(f" {C_GRAY}╠{'─'*(ui_w-2)}╣{C_RESET}\n")
     
-    if display_mode == "grouped":
-        print_line(f"{C_BOLD}BACKWARD TRUNK (1-15):{C_RESET}")
+    if display_mode == 0:
+        # MODE 0: Grouped by Trunk → Sorted by Position
         backward = activities[:15]
-        for row_start in range(0, 15, layers_per_row):
-            row = backward[row_start:min(row_start+layers_per_row, 15)]
-            line = ""
-            for idx, act, trend, raw in row:
-                bar = make_bar(act, 4)
-                line += f"L{idx:02d}:{bar}{act:3}% │ "
-            print_line(line.rstrip(" │ "))
-        
-        print_line(f"{C_GRAY}{'─' * ui_w}{C_RESET}")
-        print_line(f"{C_BOLD}FORWARD TRUNK (16-30):{C_RESET}")
         forward = activities[15:30]
-        for row_start in range(0, 15, layers_per_row):
-            row = forward[row_start:min(row_start+layers_per_row, 15)]
-            line = ""
-            for idx, act, trend, raw in row:
-                bar = make_bar(act, 4)
-                line += f"L{idx:02d}:{bar}{act:3}% │ "
-            print_line(line.rstrip(" │ "))
-    else:
-        print_line(f"{C_BOLD}ALL LAYERS (sorted):{C_RESET}")
+        backward_overall = int(np.mean([act for _, act, _, _ in backward]))
+        forward_overall = int(np.mean([act for _, act, _, _ in forward]))
+        
+        print_line(f"{C_BOLD}🔥 BACKWARD TRUNK (L1-L15){C_RESET} - Overall: {make_bar(backward_overall, 20)} {backward_overall}%")
+        sys.stdout.write(f" {C_GRAY}╠{'─'*(ui_w-2)}╣{C_RESET}\n")
+        
+        if available_lines >= 30:
+            for idx, act, trend, raw in backward:
+                print_line(f"LAYER {idx:>2}: {make_bar(act, ui_w-25)} {act:>3}%")
+        else:
+            for row in range(0, 15, 2):
+                left = backward[row]
+                right = backward[row+1] if row+1 < 15 else None
+                left_str = f"L{left[0]:02d}:{make_bar(left[1], (ui_w-30)//2)}{left[1]:3}%"
+                right_str = f"L{right[0]:02d}:{make_bar(right[1], (ui_w-30)//2)}{right[1]:3}%" if right else ""
+                print_line(f"{left_str} │ {right_str}")
+        
+        sys.stdout.write(f" {C_GRAY}╠{'═'*(ui_w-2)}╣{C_RESET}\n")
+        print_line(f"{C_BOLD}⚡ FORWARD TRUNK (L16-L30){C_RESET} - Overall: {make_bar(forward_overall, 20)} {forward_overall}%")
+        sys.stdout.write(f" {C_GRAY}╠{'─'*(ui_w-2)}╣{C_RESET}\n")
+        
+        if available_lines >= 30:
+            for idx, act, trend, raw in forward:
+                print_line(f"LAYER {idx:>2}: {make_bar(act, ui_w-25)} {act:>3}%")
+        else:
+            for row in range(0, 15, 2):
+                left = forward[row]
+                right = forward[row+1] if row+1 < 15 else None
+                left_str = f"L{left[0]:02d}:{make_bar(left[1], (ui_w-30)//2)}{left[1]:3}%"
+                right_str = f"L{right[0]:02d}:{make_bar(right[1], (ui_w-30)//2)}{right[1]:3}%" if right else ""
+                print_line(f"{left_str} │ {right_str}")
+    
+    elif display_mode == 1:
+        # MODE 1: Grouped by Trunk → Sorted by Activity
+        backward = sorted(activities[:15], key=lambda x: x[1], reverse=True)
+        forward = sorted(activities[15:30], key=lambda x: x[1], reverse=True)
+        backward_overall = int(np.mean([act for _, act, _, _ in backward]))
+        forward_overall = int(np.mean([act for _, act, _, _ in forward]))
+        
+        print_line(f"{C_BOLD}🔥 BACKWARD TRUNK (L1-L15 sorted){C_RESET} - Overall: {make_bar(backward_overall, 20)} {backward_overall}%")
+        sys.stdout.write(f" {C_GRAY}╠{'─'*(ui_w-2)}╣{C_RESET}\n")
+        
+        if available_lines >= 30:
+            for idx, act, trend, raw in backward:
+                print_line(f"LAYER {idx:>2}: {make_bar(act, ui_w-25)} {act:>3}%")
+        else:
+            for row in range(0, 15, 2):
+                left = backward[row]
+                right = backward[row+1] if row+1 < 15 else None
+                left_str = f"L{left[0]:02d}:{make_bar(left[1], (ui_w-30)//2)}{left[1]:3}%"
+                right_str = f"L{right[0]:02d}:{make_bar(right[1], (ui_w-30)//2)}{right[1]:3}%" if right else ""
+                print_line(f"{left_str} │ {right_str}")
+        
+        sys.stdout.write(f" {C_GRAY}╠{'═'*(ui_w-2)}╣{C_RESET}\n")
+        print_line(f"{C_BOLD}⚡ FORWARD TRUNK (L16-L30 sorted){C_RESET} - Overall: {make_bar(forward_overall, 20)} {forward_overall}%")
+        sys.stdout.write(f" {C_GRAY}╠{'─'*(ui_w-2)}╣{C_RESET}\n")
+        
+        if available_lines >= 30:
+            for idx, act, trend, raw in forward:
+                print_line(f"LAYER {idx:>2}: {make_bar(act, ui_w-25)} {act:>3}%")
+        else:
+            for row in range(0, 15, 2):
+                left = forward[row]
+                right = forward[row+1] if row+1 < 15 else None
+                left_str = f"L{left[0]:02d}:{make_bar(left[1], (ui_w-30)//2)}{left[1]:3}%"
+                right_str = f"L{right[0]:02d}:{make_bar(right[1], (ui_w-30)//2)}{right[1]:3}%" if right else ""
+                print_line(f"{left_str} │ {right_str}")
+    
+    elif display_mode == 2:
+        # MODE 2: Flat List → Sorted by Position
+        if available_lines >= 30:
+            for idx, act, trend, raw in activities:
+                print_line(f"LAYER {idx:>2}: {make_bar(act, ui_w-25)} {act:>3}%")
+        else:
+            for row in range(0, 30, 2):
+                left = activities[row]
+                right = activities[row+1] if row+1 < 30 else None
+                left_str = f"L{left[0]:02d}:{make_bar(left[1], (ui_w-30)//2)}{left[1]:3}%"
+                right_str = f"L{right[0]:02d}:{make_bar(right[1], (ui_w-30)//2)}{right[1]:3}%" if right else ""
+                print_line(f"{left_str} │ {right_str}")
+    
+    else:  # display_mode == 3
+        # MODE 3: Flat List → Sorted by Activity
         sorted_acts = sorted(activities, key=lambda x: x[1], reverse=True)
-        for row_start in range(0, 30, layers_per_row):
-            row = sorted_acts[row_start:min(row_start+layers_per_row, 30)]
-            line = ""
-            for idx, act, trend, raw in row:
-                bar = make_bar(act, 4)
-                line += f"L{idx:02d}:{bar}{act:3}% │ "
-            print_line(line.rstrip(" │ "))
+        
+        if available_lines >= 30:
+            for idx, act, trend, raw in sorted_acts:
+                print_line(f"LAYER {idx:>2}: {make_bar(act, ui_w-25)} {act:>3}%")
+        else:
+            for row in range(0, 30, 2):
+                left = sorted_acts[row]
+                right = sorted_acts[row+1] if row+1 < 30 else None
+                left_str = f"L{left[0]:02d}:{make_bar(left[1], (ui_w-30)//2)}{left[1]:3}%"
+                right_str = f"L{right[0]:02d}:{make_bar(right[1], (ui_w-30)//2)}{right[1]:3}%" if right else ""
+                print_line(f"{left_str} │ {right_str}")
 
-    print_line(f"{C_GRAY}{'═' * ui_w}{C_RESET}")
+    # Footer
+    sys.stdout.write(f" {C_GRAY}╠{'═'*(ui_w-2)}╣{C_RESET}\n")
     nv = cfg['VAL_STEP_EVERY']-(step%cfg['VAL_STEP_EVERY'])
     ns = cfg['SAVE_STEP_EVERY']-(step%cfg['SAVE_STEP_EVERY'])
-    print_line(f"Next Val: {nv} │ Next Save: {ns} │ Batch: {BATCH_SIZE}x{cfg['ACCUMULATION_STEPS']}={BATCH_SIZE*cfg['ACCUMULATION_STEPS']} │ Grad Clip: {cfg.get('GRAD_CLIP', 1.0)}")
-    print_line(f"{C_GRAY}{'─' * ui_w}{C_RESET}")
-    print_line(f"{C_BOLD}ENTER{C_RESET}: Config │ {C_BOLD}S{C_RESET}: Toggle View │ {C_BOLD}P{C_RESET}: Pause │ {C_BOLD}V{C_RESET}: Validate")
+    print_line(f"VAL IN: {nv:<5} │ SAVE IN: {ns:<5} │ BATCH: {BATCH_SIZE}x{cfg['ACCUMULATION_STEPS']}={BATCH_SIZE*cfg['ACCUMULATION_STEPS']} │ GRAD CLIP: {cfg.get('GRAD_CLIP', 1.0)}")
+    sys.stdout.write(f" {C_GRAY}╚{'═'*(ui_w-2)}╝{C_RESET}\n")
+    sys.stdout.write(f"{' ' * ((ui_w - 55) // 2)}{C_BOLD}( ENTER: Config | S: Next View | P: Pause | V: Val ){C_RESET}\n")
     sys.stdout.flush()
 
 def live_menu(cfg, optimizer, old_settings, model, step, epoch, loss, it_t, ds_len, steps_ep, curr_ep_step):
@@ -294,7 +455,9 @@ def live_menu(cfg, optimizer, old_settings, model, step, epoch, loss, it_t, ds_l
     while True:
         print(f"{C_BOLD}🛠️  LIVE CONFIG{C_RESET}\n" + "-"*45)
         keys = list(cfg.keys())
-        for idx, k in enumerate(keys): print(f" {idx+1}. {k:<20}: {cfg[k]}")
+        for idx, k in enumerate(keys): 
+            val_display = DISPLAY_MODE_NAMES[cfg[k]] if k == "DISPLAY_MODE" else cfg[k]
+            print(f" {idx+1}. {k:<20}: {val_display}")
         print("-" * 45 + "\n 0. ZURÜCK")
         wahl = input("\n Auswahl: ").lower()
         if wahl == "0": break
@@ -308,6 +471,8 @@ def live_menu(cfg, optimizer, old_settings, model, step, epoch, loss, it_t, ds_l
                     for pg in optimizer.param_groups: pg['lr'] = 10**val
                 elif k_name == "GRAD_CLIP":
                     cfg[k_name] = float(new_val)
+                elif k_name == "DISPLAY_MODE":
+                    cfg[k_name] = int(new_val) % 4
                 else:
                     cfg[k_name] = type(cfg[k_name])(new_val)
                 save_config(cfg)
@@ -325,13 +490,19 @@ class VSRDataset(Dataset):
         self.filenames = []
         for f in raw_filenames:
             if dataset_type == 'Val':
-                if os.path.exists(os.path.join(self.lr_dir, f)): self.filenames.append((f, self.lr_dir))
-                elif os.path.exists(os.path.join(self.patch_lr_dir, f)): self.filenames.append((f, self.patch_lr_dir))
+                if os.path.exists(os.path.join(self.lr_dir, f)): 
+                    self.filenames.append((f, self.lr_dir))
+                elif os.path.exists(os.path.join(self.patch_lr_dir, f)): 
+                    self.filenames.append((f, self.patch_lr_dir))
                 else:
                     try: os.remove(os.path.join(self.gt_dir, f))
                     except: pass
-            else: self.filenames.append((f, self.lr_dir))
-    def __len__(self): return len(self.filenames)
+            else: 
+                self.filenames.append((f, self.lr_dir))
+    
+    def __len__(self): 
+        return len(self.filenames)
+    
     def __getitem__(self, idx):
         name, lr_folder = self.filenames[idx]
         gt = cv2.cvtColor(cv2.imread(os.path.join(self.gt_dir, name)), cv2.COLOR_BGR2RGB) / 255.0
@@ -355,6 +526,8 @@ class VSRDataset(Dataset):
         return torch.stack([torch.from_numpy(f).permute(2, 0, 1) for f in lrs]).float(), torch.from_numpy(gt).permute(2, 0, 1).float(), name
 
 def train(old_settings):
+    global last_quality_metrics
+    
     cfg = load_config()
     LOG_BASE, CHECKPOINT_DIR = os.path.join(DATA_ROOT, "logs"), os.path.join(DATA_ROOT, "checkpoints")
     termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
@@ -409,7 +582,7 @@ def train(old_settings):
             for i, (lrs, gt, _) in enumerate(train_loader):
                 while paused:
                     draw_ui(global_step, epoch, {'l1': 0, 'ms': 0, 'grad': 0, 'total': 0}, 0.1, 
-                            get_activity_data(model, False), cfg, 
+                            get_activity_data(model), cfg, 
                             len(train_ds), steps_per_epoch, (i+1)//cfg["ACCUMULATION_STEPS"], paused=True)
                     time.sleep(0.5)
                     if sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
@@ -423,7 +596,6 @@ def train(old_settings):
                 scaler.scale(loss / cfg["ACCUMULATION_STEPS"]).backward()
                 
                 if (i + 1) % cfg["ACCUMULATION_STEPS"] == 0:
-                    # GRADIENT CLIPPING!
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.get("GRAD_CLIP", 1.0))
                     
@@ -442,7 +614,7 @@ def train(old_settings):
                             loss_history.pop(0)
                         
                         draw_ui(global_step, epoch, losses_dict, it_t, 
-                                get_activity_data(model, cfg.get("DISPLAY_MODE", "grouped") == "sorted"), 
+                                get_activity_data(model), 
                                 cfg, len(train_ds), steps_per_epoch, curr_ep_step)
                     
                     scaler.step(optimizer)
@@ -473,43 +645,160 @@ def train(old_settings):
                         s_time, s_step = time.time(), global_step
                     elif k == 'p': paused = True
                     elif k == 's':
-                        current = cfg.get("DISPLAY_MODE", "grouped")
-                        cfg["DISPLAY_MODE"] = "sorted" if current == "grouped" else "grouped"
+                        cfg["DISPLAY_MODE"] = (cfg.get("DISPLAY_MODE", 0) + 1) % 4
                         save_config(cfg)
+                        it_t = (time.time() - s_time) / max(1, global_step - s_step) if global_step > s_step else 0.1
+                        draw_ui(global_step, epoch, losses_dict, it_t, get_activity_data(model), cfg, len(train_ds), steps_per_epoch, curr_ep_step)
                     elif k == 'v': do_val = True
 
                 if (global_step % cfg["VAL_STEP_EVERY"] == 0 and (i+1) % cfg["ACCUMULATION_STEPS"] == 0) or do_val:
                     model.eval()
+                    
+                    print(f"\n{C_CYAN}{'='*80}{C_RESET}")
+                    print(f"{C_BOLD}{C_GREEN}⚡ VALIDATION + QUALITY CHECK{C_RESET}")
+                    print(f"{C_CYAN}{'='*80}{C_RESET}\n")
+                    
                     v_loss = 0
                     val_ds = VSRDataset(DATASET_ROOT, "Val")
                     val_loader = DataLoader(val_ds, batch_size=1)
+                    val_total = len(val_loader)
+                    
+                    # Quality accumulators
+                    lr_psnrs, lr_ssims = [], []
+                    ki_psnrs, ki_ssims = [], []
+                    
+                    val_start = time.time()
                     
                     with torch.no_grad():
                         for v_idx, (v_lrs, v_gt, v_name) in enumerate(val_loader):
+                            # Progress Bar
+                            progress = (v_idx + 1) / val_total * 100
+                            filled = int(50 * (v_idx + 1) / val_total)
+                            bar = f"{C_GREEN}{'█' * filled}{C_GRAY}{'░' * (50 - filled)}{C_RESET}"
+                            eta = ((time.time() - val_start) / (v_idx + 1)) * (val_total - v_idx - 1) if v_idx > 0 else 0
+                            sys.stdout.write(f"\r{C_CYAN}Progress:{C_RESET} [{bar}] {v_idx+1}/{val_total} ({progress:.1f}%) | ETA: {eta:.1f}s")
+                            sys.stdout.flush()
+                            
+                            v_gt_gpu = v_gt.to(device)
                             v_out = model(v_lrs.to(device))
-                            v_loss_dict = hybrid_criterion(v_out, v_gt.to(device))
+                            
+                            # Loss
+                            v_loss_dict = hybrid_criterion(v_out, v_gt_gpu)
                             v_loss += v_loss_dict['total_tensor'].item()
                             
-                            if v_idx < 20:
-                                lr_up = F.interpolate(v_lrs[0, 2].unsqueeze(0), size=(PATCH_GT, PATCH_GT), mode='nearest').squeeze(0)
-                                img_lr = (lr_up.cpu().permute(1, 2, 0).numpy() * 255).astype(np.uint8).copy()
+                            # Quality Metrics
+                            # LR upscaled (Bilinear Baseline)
+                            lr_up = F.interpolate(v_lrs[0, 2].unsqueeze(0), size=(PATCH_GT, PATCH_GT), mode='bilinear', align_corners=False).to(device)
+                            
+                            # Calculate PSNR & SSIM
+                            lr_psnr = calculate_psnr(lr_up, v_gt_gpu)
+                            lr_ssim = calculate_ssim(lr_up, v_gt_gpu)
+                            ki_psnr = calculate_psnr(torch.clamp(v_out, 0, 1), v_gt_gpu)
+                            ki_ssim = calculate_ssim(torch.clamp(v_out, 0, 1), v_gt_gpu)
+                            
+                            lr_psnrs.append(lr_psnr)
+                            lr_ssims.append(lr_ssim)
+                            ki_psnrs.append(ki_psnr)
+                            ki_ssims.append(ki_ssim)
+                            
+                            # Save images with quality % (max 100 images)
+                            if v_idx < min(100, len(val_loader)):
+                                img_lr = (lr_up.cpu()[0].permute(1, 2, 0).numpy() * 255).astype(np.uint8).copy()
                                 img_ki = (torch.clamp(v_out[0], 0, 1).cpu().permute(1, 2, 0).numpy() * 255).astype(np.uint8).copy()
                                 img_gt = (v_gt[0].permute(1, 2, 0).numpy() * 255).astype(np.uint8).copy()
                                 
-                                for img, text in [(img_lr, "LR"), (img_ki, "KI"), (img_gt, "GT")]:
-                                    cv2.putText(img, text, (12, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,0), 3, cv2.LINE_AA)
-                                    cv2.putText(img, text, (12, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 1, cv2.LINE_AA)
+                                # Calculate Quality % for THIS image
+                                this_lr_quality = quality_to_percent(lr_psnr, lr_ssim)
+                                this_ki_quality = quality_to_percent(ki_psnr, ki_ssim)
+                                
+                                # Add Text with Quality %
+                                font = cv2.FONT_HERSHEY_SIMPLEX
+                                font_scale = 0.7
+                                thickness_bg = 3
+                                thickness_fg = 1
+                                
+                                # LR Image
+                                cv2.putText(img_lr, "LR", (12, 35), font, font_scale, (0,0,0), thickness_bg, cv2.LINE_AA)
+                                cv2.putText(img_lr, "LR", (12, 35), font, font_scale, (255,255,255), thickness_fg, cv2.LINE_AA)
+                                quality_text_lr = f"Quality: {this_lr_quality:.1f}%"
+                                cv2.putText(img_lr, quality_text_lr, (12, 65), font, font_scale, (0,0,0), thickness_bg, cv2.LINE_AA)
+                                cv2.putText(img_lr, quality_text_lr, (12, 65), font, font_scale, (255,165,0), thickness_fg, cv2.LINE_AA)  # Orange
+                                
+                                # KI Image
+                                cv2.putText(img_ki, "KI", (12, 35), font, font_scale, (0,0,0), thickness_bg, cv2.LINE_AA)
+                                cv2.putText(img_ki, "KI", (12, 35), font, font_scale, (255,255,255), thickness_fg, cv2.LINE_AA)
+                                quality_text_ki = f"Quality: {this_ki_quality:.1f}%"
+                                cv2.putText(img_ki, quality_text_ki, (12, 65), font, font_scale, (0,0,0), thickness_bg, cv2.LINE_AA)
+                                cv2.putText(img_ki, quality_text_ki, (12, 65), font, font_scale, (0,255,0), thickness_fg, cv2.LINE_AA)  # Green
+                                
+                                # GT Image
+                                cv2.putText(img_gt, "GT", (12, 35), font, font_scale, (0,0,0), thickness_bg, cv2.LINE_AA)
+                                cv2.putText(img_gt, "GT", (12, 35), font, font_scale, (255,255,255), thickness_fg, cv2.LINE_AA)
+                                quality_text_gt = "Quality: 100.0%"
+                                cv2.putText(img_gt, quality_text_gt, (12, 65), font, font_scale, (0,0,0), thickness_bg, cv2.LINE_AA)
+                                cv2.putText(img_gt, quality_text_gt, (12, 65), font, font_scale, (0,255,255), thickness_fg, cv2.LINE_AA)  # Cyan
                                 
                                 spacer = np.ones((PATCH_GT, 2, 3), dtype=np.uint8) * 255
                                 combined = np.hstack([img_lr, spacer, img_ki, spacer, img_gt])
                                 writer.add_image(f"Val/{v_name[0]}", torch.from_numpy(combined).permute(2, 0, 1).float()/255.0, global_step)
                     
+                    sys.stdout.write("\n")
+                    
+                    # Calculate average metrics
+                    avg_lr_psnr = np.mean(lr_psnrs)
+                    avg_lr_ssim = np.mean(lr_ssims)
+                    avg_ki_psnr = np.mean(ki_psnrs)
+                    avg_ki_ssim = np.mean(ki_ssims)
+                    
+                    # Convert to Quality %
+                    lr_quality = quality_to_percent(avg_lr_psnr, avg_lr_ssim)
+                    ki_quality = quality_to_percent(avg_ki_psnr, avg_ki_ssim)
+                    improvement = ki_quality - lr_quality
+                    
+                    # Update global metrics
+                    last_quality_metrics = {
+                        'lr_quality': lr_quality,
+                        'ki_quality': ki_quality,
+                        'improvement': improvement
+                    }
+                    
+                    # Log to TensorBoard
                     v_loss_avg = v_loss / len(val_loader) if len(val_loader) > 0 else 0
                     writer.add_scalar("Validation/Loss_Total", v_loss_avg, global_step)
+                    writer.add_scalar("Quality/LR_Percent", lr_quality, global_step)
+                    writer.add_scalar("Quality/KI_Percent", ki_quality, global_step)
+                    writer.add_scalar("Quality/Improvement_Percent", improvement, global_step)
+                    writer.add_scalar("Quality/LR_PSNR", avg_lr_psnr, global_step)
+                    writer.add_scalar("Quality/KI_PSNR", avg_ki_psnr, global_step)
+                    writer.add_scalar("Quality/LR_SSIM", avg_lr_ssim * 100, global_step)
+                    writer.add_scalar("Quality/KI_SSIM", avg_ki_ssim * 100, global_step)
+                    
+                    val_duration = time.time() - val_start
+                    print(f"\n{C_CYAN}{'='*80}{C_RESET}")
+                    print(f"{C_BOLD}📊 VALIDATION RESULTS{C_RESET}")
+                    print(f"{C_CYAN}{'-'*80}{C_RESET}")
+                    print(f"  Samples:        {val_total}")
+                    print(f"  Loss:           {C_GREEN}{v_loss_avg:.6f}{C_RESET}")
+                    print(f"  Duration:       {val_duration:.2f}s")
+                    print(f"{C_CYAN}{'-'*80}{C_RESET}")
+                    print(f"  {C_BOLD}QUALITY SCORES:{C_RESET}")
+                    print(f"  LR Quality:     {C_YELLOW}{lr_quality:.1f}%{C_RESET}  (PSNR: {avg_lr_psnr:.2f} dB, SSIM: {avg_lr_ssim*100:.1f}%)")
+                    print(f"  KI Quality:     {C_GREEN}{ki_quality:.1f}%{C_RESET}  (PSNR: {avg_ki_psnr:.2f} dB, SSIM: {avg_ki_ssim*100:.1f}%)")
+                    print(f"  Improvement:    {C_BOLD}{C_GREEN}+{improvement:.1f}%{C_RESET}")
+                    print(f"{C_CYAN}{'='*80}{C_RESET}\n")
+                    
+                    if do_val:
+                        input(f"{C_YELLOW}Press ENTER to continue...{C_RESET}")
+                    
                     model.train()
                     do_val = False
                     
+                    # UI NEU ZEICHNEN
+                    draw_ui(global_step, epoch, losses_dict, it_t, get_activity_data(model), cfg, len(train_ds), steps_per_epoch, curr_ep_step)
+                    
                 if global_step % cfg["SAVE_STEP_EVERY"] == 0 and (i+1) % cfg["ACCUMULATION_STEPS"] == 0:
+                    print(f"\n{C_YELLOW}💾 SAVING CHECKPOINT...{C_RESET}")
+                    
                     checkpoint = {
                         'step': global_step,
                         'epoch': epoch,
@@ -519,12 +808,42 @@ def train(old_settings):
                         'scheduler_state_dict': scheduler.state_dict(),
                         'config': cfg
                     }
-                    torch.save(checkpoint, os.path.join(CHECKPOINT_DIR, "latest.pth"))
+                    
+                    save_path = os.path.join(CHECKPOINT_DIR, "latest.pth")
+                    torch.save(checkpoint, save_path)
+                    print(f"{C_GREEN}✓ Saved: {save_path}{C_RESET}")
+                    
                     if global_step % 25000 == 0:
-                        torch.save(checkpoint, os.path.join(CHECKPOINT_DIR, f"step_{global_step}.pth"))
+                        milestone_path = os.path.join(CHECKPOINT_DIR, f"step_{global_step}.pth")
+                        torch.save(checkpoint, milestone_path)
+                        print(f"{C_GREEN}✓ Milestone: {milestone_path}{C_RESET}\n")
+                    
+                    draw_ui(global_step, epoch, losses_dict, it_t, get_activity_data(model), cfg, len(train_ds), steps_per_epoch, curr_ep_step)
+                    
     except KeyboardInterrupt:
-        print("\033[?25h"); termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
-        print(f"\n{C_RED}TRAINING STOPPED{C_RESET}")
+        print("\033[?25h")
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+        print(f"\n{C_BOLD}{C_RED}⚠️  TRAINING UNTERBROCHEN{C_RESET}")
+        save_choice = input("Checkpoint speichern? (y/n): ").lower()
+        
+        if save_choice == 'y':
+            checkpoint = {
+                'step': global_step,
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scaler_state_dict': scaler.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'config': cfg,
+                'training_phase': 'pretrain'
+            }
+            
+            save_path = os.path.join(CHECKPOINT_DIR, f"vsr_INTERRUPT_{global_step}.pth")
+            torch.save(checkpoint, save_path)
+            print(f"{C_GREEN}✅ Checkpoint gespeichert: {save_path}{C_RESET}")
+        else:
+            print(f"{C_YELLOW}⚠️  Checkpoint NICHT gespeichert!{C_RESET}")
+        
         sys.exit(0)
 
 if __name__ == "__main__":
