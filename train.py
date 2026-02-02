@@ -3,11 +3,13 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.tensorboard import SummaryWriter
+from torch.cuda.amp import autocast, GradScaler
+from torchvision.models import vgg19
 import cv2, os, time, shutil, sys, glob, json, re, random
 import numpy as np
 from datetime import datetime
 # NUR DAS NÖTIGSTE: Modell-Import angepasst
-from model_vsrppp import VSRTriplePlus_3x 
+from model_vsrppp_v2 import VSRTriplePlus_3x 
 import select
 import termios
 import tty
@@ -38,6 +40,8 @@ defaults = {
 }
 
 activity_history = {i+1: [] for i in range(N_BLOCKS)}
+loss_history = []
+TREND_WINDOW = 50
 WINDOW_SIZE = 50
 ema_grads = {}
 alpha = 0.2
@@ -95,23 +99,75 @@ def load_config():
 def save_config(cfg):
     with open(CONFIG_FILE, 'w') as f_out: json.dump(cfg, f_out, indent=4)
 
+class VGGLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+        vgg = vgg19(pretrained=True).features[:36].eval().cuda()
+        for p in vgg.parameters():
+            p.requires_grad = False
+        self.vgg = vgg
+        self.criterion = nn.L1Loss()
+    
+    def forward(self, x, y):
+        x_vgg = self.vgg(x)
+        y_vgg = self.vgg(y)
+        return self.criterion(x_vgg, y_vgg)
+
+def calculate_trends(activities):
+    """Calculate activity trends for each layer"""
+    trends = []
+    for layer_id, current_val in enumerate(activities, 1):
+        activity_history[layer_id].append(current_val)
+        if len(activity_history[layer_id]) > TREND_WINDOW:
+            activity_history[layer_id].pop(0)
+        
+        if len(activity_history[layer_id]) >= 20:
+            recent = np.mean(activity_history[layer_id][-10:])
+            old = np.mean(activity_history[layer_id][-20:-10])
+            trend = ((recent - old) / (old + 1e-8)) * 100
+        else:
+            trend = 0.0
+        
+        trends.append(trend)
+    
+    return trends
+
+def calculate_convergence_status(loss_history):
+    """Determine if training is converging, plateauing, or diverging"""
+    if len(loss_history) < 100:
+        return "Warming up..."
+    
+    recent = loss_history[-100:]
+    x = np.arange(len(recent))
+    slope = np.polyfit(x, recent, 1)[0]
+    
+    if slope < -0.00005:
+        return f"{C_GREEN}Converging ✓{C_RESET}"
+    elif abs(slope) < 0.00005:
+        return f"{C_CYAN}Plateauing ⚠{C_RESET}"
+    else:
+        return f"{C_RED}Diverging ✗{C_RESET}"
+
 def get_activity_data(model, sort_by_activity=True):
     # Zugriff auf das Modell (auch hinter DataParallel)
     m = model.module if hasattr(model, 'module') else model
     
     if not hasattr(m, 'get_layer_activity'):
-        return [(i+1, 0) for i in range(30)] # Fallback
+        return [(i+1, 0, 0, 0.0) for i in range(30)]
 
-    block_scores = m.get_layer_activity()
-    max_val = max(block_scores) if max(block_scores) > 1e-12 else 1e-12
+    activities_raw = m.get_layer_activity()
+    trends = calculate_trends(activities_raw)
+    max_val = max(activities_raw) if max(activities_raw) > 1e-12 else 1e-12
     
-    activities = [(i+1, int((v / max_val) * 100)) for i, v in enumerate(block_scores)]
+    # Format: (layer_id, percentage, trend, raw_value)
+    activities = [(i+1, int((v / max_val) * 100), trends[i], v) 
+                  for i, v in enumerate(activities_raw)]
     
     if sort_by_activity:
         return sorted(activities, key=lambda x: x[1], reverse=True)
     return activities
                     
-def draw_ui(step, epoch, loss, it_time, activities, stats, cfg, num_images, steps_per_epoch, current_epoch_step, paused=False):
+def draw_ui(step, epoch, losses, it_time, activities, cfg, num_images, steps_per_epoch, current_epoch_step, paused=False):
     global last_term_size
     term_size = shutil.get_terminal_size()
     if term_size != last_term_size: print(ANSI_CLEAR); last_term_size = term_size
@@ -132,22 +188,41 @@ def draw_ui(step, epoch, loss, it_time, activities, stats, cfg, num_images, step
     print_line(f"TOTAL PROG: {make_bar(total_prog, ui_w-65)} {total_prog:>5.1f}% │ ETA: {total_eta}")
     sys.stdout.write(f" {C_GRAY}╠{'═'*(ui_w-2)}╣{C_RESET}\n")
     
-    # NUR DAS NÖTIGSTE: Frame Analyse Werte in die Epoch-Zeile integriert
-    f_val = f"F1: {stats.get('F1',0):.2f} | F2: {stats.get('F2',0):.2f} | F4: {stats.get('F4',0):.2f} | F5: {stats.get('F5',0):.2f}"
-    print_line(f"EPOCH: {epoch:<4} │ {C_CYAN}{f_val}{C_RESET} │ ETA: {epoch_eta}")
+    # Enhanced: Loss Breakdown
+    loss_str = f"L1: {losses.get('l1',0):.4f} | Perc: {losses.get('perc',0):.4f} | Total: {losses.get('total',0):.4f}"
+    print_line(f"EPOCH: {epoch:<4} │ {C_CYAN}{loss_str}{C_RESET} │ ETA: {epoch_eta}")
     print_line(f"EPOCH PROG: {make_bar(epoch_prog, ui_w-65)} {epoch_prog:>5.1f}%")
     sys.stdout.write(f" {C_GRAY}╠{'═'*(ui_w-2)}╣{C_RESET}\n")
     
     vram = f"{torch.cuda.memory_reserved() / 1024**3:.2f}GB"
-    print_line(f"DATASET: {num_images:<7} imgs │ LOSS: {loss:.6f} │ VRAM: {vram} │ SPEED: {it_time:.2f}s/it")
+    print_line(f"DATASET: {num_images:<7} imgs │ LOSS: {losses.get('total',0):.6f} │ VRAM: {vram} │ SPEED: {it_time:.2f}s/it")
     sys.stdout.write(f" {C_GRAY}╠{'═'*(ui_w-2)}╣{C_RESET}\n")
 
-    for idx, s in activities:
-        print_line(f"LAYER {idx:>2}: {make_bar(s, ui_w-25)} {s:>3}%")
+    # Enhanced: Top Layers with trends
+    print_line(f"{C_BOLD}🔥 TOP LAYERS (by activity):{C_RESET}")
+    top_layers = activities[:5] if len(activities) > 5 else activities
+    for item in top_layers:
+        idx, act, trend, raw_val = item
+        trend_icon = "⬆" if trend > 2 else ("⬇" if trend < -2 else "═")
+        trend_color = C_GREEN if trend > 0 else (C_RED if trend < -2 else C_GRAY)
+        activity_icon = "⚡" if act > 50 else "💤"
+        bar = make_bar(act, ui_w-70)
+        print_line(f"LAYER {idx:>2}: {bar} {act:>3}% │ {trend_color}{trend_icon} {trend:+4.0f}%{C_RESET} │ {activity_icon} {raw_val:.4f}")
+    
+    # Enhanced: Cold Layers warning
+    cold_layers = [item for item in activities if item[1] < 20]
+    if cold_layers:
+        sys.stdout.write(f" {C_GRAY}╠{'═'*(ui_w-2)}╣{C_RESET}\n")
+        print_line(f"{C_BOLD}🧊 COLD LAYERS (sleeping):{C_RESET}")
+        for item in cold_layers[-2:]:
+            idx, act, trend, raw_val = item
+            bar = make_bar(act, ui_w-70)
+            print_line(f"LAYER {idx:>2}: {bar} {act:>3}% │ {C_GRAY}⬇ {trend:+4.0f}%{C_RESET} │ 💤 {raw_val:.4f}")
 
     sys.stdout.write(f" {C_GRAY}╠{'═'*(ui_w-2)}╣{C_RESET}\n")
     nv, ns = cfg['VAL_STEP_EVERY']-(step%cfg['VAL_STEP_EVERY']), cfg['SAVE_STEP_EVERY']-(step%cfg['SAVE_STEP_EVERY'])
-    print_line(f"VAL IN: {nv:<5} │ SAVE IN: {ns:<5} │ EFF-BATCH: {BATCH_SIZE * cfg['ACCUMULATION_STEPS']}")
+    convergence = calculate_convergence_status(loss_history)
+    print_line(f"VAL IN: {nv:<5} │ SAVE IN: {ns:<5} │ EFF-BATCH: {BATCH_SIZE * cfg['ACCUMULATION_STEPS']} │ 📈 {convergence}")
     sys.stdout.write(f" {C_GRAY}╚{'═'*(ui_w-2)}╝{C_RESET}\n")
     sys.stdout.write(f"{' ' * ((ui_w - 45) // 2)}{C_BOLD}( ENTER: Setup | S: Sort | P: Pause | V: Instant-Val ){C_RESET}\n")
     sys.stdout.flush()
@@ -176,7 +251,7 @@ def live_menu(cfg, optimizer, old_settings, model, step, epoch, loss, it_t, ds_l
         except: pass
     tty.setcbreak(sys.stdin.fileno())
     print(ANSI_CLEAR)
-    draw_ui(step, epoch, loss, it_t, get_activity_data(model, cfg["SORT_BY_ACTIVITY"]), model.frame_stats, cfg, ds_len, steps_ep, curr_ep_step)
+    draw_ui(step, epoch, {'l1': 0, 'perc': 0, 'total': loss}, it_t, get_activity_data(model, cfg["SORT_BY_ACTIVITY"]), cfg, ds_len, steps_ep, curr_ep_step)
 
 class VSRDataset(Dataset):
     def __init__(self, root_dir, dataset_type='Patches'):
@@ -200,6 +275,25 @@ class VSRDataset(Dataset):
         gt = cv2.cvtColor(cv2.imread(os.path.join(self.gt_dir, name)), cv2.COLOR_BGR2RGB) / 255.0
         lr_stack = cv2.cvtColor(cv2.imread(os.path.join(lr_folder, name)), cv2.COLOR_BGR2RGB) / 255.0
         lrs = [lr_stack[i*PATCH_LR:(i+1)*PATCH_LR, :] for i in range(5)]
+        
+        # Data Augmentation (only for training)
+        if self.dataset_type == 'Patches' and random.random() > 0.5:
+            # Horizontal flip
+            lrs = [f[:, ::-1].copy() for f in lrs]
+            gt = gt[:, ::-1].copy()
+        
+        if self.dataset_type == 'Patches' and random.random() > 0.5:
+            # Vertical flip
+            lrs = [f[::-1, :].copy() for f in lrs]
+            gt = gt[::-1, :].copy()
+        
+        if self.dataset_type == 'Patches':
+            # Random rotation (90, 180, 270 degrees)
+            k = random.choice([0, 1, 2, 3])
+            if k > 0:
+                lrs = [np.rot90(f, k).copy() for f in lrs]
+                gt = np.rot90(gt, k).copy()
+        
         return torch.stack([torch.from_numpy(f).permute(2, 0, 1) for f in lrs]).float(), torch.from_numpy(gt).permute(2, 0, 1).float(), name
 
 def train(old_settings):
@@ -228,11 +322,28 @@ def train(old_settings):
     # NUR DAS NÖTIGSTE: Neues Modell geladen
     model = VSRTriplePlus_3x(n_blocks=N_BLOCKS).to(device)
     optimizer = optim.AdamW(model.parameters(), lr=10**cfg["LR_EXPONENT"], weight_decay=cfg["WEIGHT_DECAY"])
-    criterion = nn.L1Loss()
+
+    # Mixed Precision
+    scaler = GradScaler()
+
+    # Loss Functions
+    l1_criterion = nn.L1Loss()
+    perceptual_criterion = VGGLoss()
+
+    # Learning Rate Scheduler
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg["MAX_STEPS"], eta_min=1e-7)
+    
     global_step = 0
     ckpts = sorted(glob.glob(os.path.join(CHECKPOINT_DIR, "*.pth")), key=os.path.getmtime)
     if ckpts and choice != 'l':
-        ckpt = torch.load(ckpts[-1]); model.load_state_dict(ckpt['model_state_dict']); optimizer.load_state_dict(ckpt['optimizer_state_dict']); global_step = ckpt.get('step', 0)
+        ckpt = torch.load(ckpts[-1])
+        model.load_state_dict(ckpt['model_state_dict'])
+        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+        global_step = ckpt.get('step', 0)
+        if 'scaler_state_dict' in ckpt:
+            scaler.load_state_dict(ckpt['scaler_state_dict'])
+        if 'scheduler_state_dict' in ckpt:
+            scheduler.load_state_dict(ckpt['scheduler_state_dict'])
 
     s_time, s_step, paused, do_val = time.time(), global_step, False, False
 
@@ -244,24 +355,60 @@ def train(old_settings):
             model.train()
             for i, (lrs, gt, _) in enumerate(train_loader):
                 while paused:
-                    draw_ui(global_step, epoch, 0, 0.1, get_activity_data(model, cfg["SORT_BY_ACTIVITY"]), model.frame_stats, cfg, len(train_ds), steps_per_epoch, (i+1)//cfg["ACCUMULATION_STEPS"], paused=True)
+                    draw_ui(global_step, epoch, {'l1': 0, 'perc': 0, 'total': 0}, 0.1, 
+                            get_activity_data(model, cfg["SORT_BY_ACTIVITY"]), cfg, 
+                            len(train_ds), steps_per_epoch, (i+1)//cfg["ACCUMULATION_STEPS"], paused=True)
                     time.sleep(0.5)
                     if sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
                         if sys.stdin.read(1).lower() == 'p': paused = False; s_time = time.time(); s_step = global_step
-                output = model(lrs.to(device))
-                loss = criterion(output, gt.to(device))
-                (loss / cfg["ACCUMULATION_STEPS"]).backward()
+                
+                # Mixed Precision Training
+                with autocast():
+                    output = model(lrs.to(device))
+                    loss_l1 = l1_criterion(output, gt.to(device))
+                    loss_perc = perceptual_criterion(output, gt.to(device))
+                    loss = loss_l1 + 0.1 * loss_perc
+                
+                scaler.scale(loss / cfg["ACCUMULATION_STEPS"]).backward()
+                
                 if (i + 1) % cfg["ACCUMULATION_STEPS"] == 0:
                     it_t = (time.time() - s_time) / max(1, global_step - s_step) if global_step > s_step else 0.1
                     curr_ep_step = (i + 1) // cfg["ACCUMULATION_STEPS"]
-                    if global_step % 5 == 0: draw_ui(global_step, epoch, loss.item(), it_t, get_activity_data(model, cfg["SORT_BY_ACTIVITY"]), model.frame_stats, cfg, len(train_ds), steps_per_epoch, curr_ep_step)
-                    optimizer.step(); optimizer.zero_grad(); global_step += 1
+                    
+                    if global_step % 5 == 0:
+                        losses_dict = {
+                            'l1': loss_l1.item(),
+                            'perc': loss_perc.item(),
+                            'total': loss.item()
+                        }
+                        loss_history.append(loss.item())
+                        if len(loss_history) > 500:
+                            loss_history.pop(0)
+                        
+                        draw_ui(global_step, epoch, losses_dict, it_t, 
+                                get_activity_data(model, cfg["SORT_BY_ACTIVITY"]), 
+                                cfg, len(train_ds), steps_per_epoch, curr_ep_step)
+                    
+                    scaler.step(optimizer)
+                    scaler.update()
+                    optimizer.zero_grad()
+                    scheduler.step()
+                    global_step += 1
+                    
                     if global_step % cfg["LOG_TBOARD_EVERY"] == 0:
-                        writer.add_scalar("Loss/Train", loss.item(), global_step)
-                        writer.add_scalar("LR/Log10", cfg["LR_EXPONENT"], global_step)
-                        # NUR DAS NÖTIGSTE: Analysewerte in Tensorboard loggen
-                        for f_n, f_v in model.frame_stats.items():
-                            writer.add_scalar(f"Analysis/{f_n}", f_v, global_step)
+                        # Enhanced TensorBoard Logging
+                        writer.add_scalar("Training/Loss_L1", loss_l1.item(), global_step)
+                        writer.add_scalar("Training/Loss_Perceptual", loss_perc.item(), global_step)
+                        writer.add_scalar("Training/Loss_Total", loss.item(), global_step)
+                        writer.add_scalar("Training/LearningRate", scheduler.get_last_lr()[0], global_step)
+                        
+                        # Layer Activity
+                        activities = model.get_layer_activity()
+                        for idx, act in enumerate(activities, 1):
+                            writer.add_scalar(f"Layers/Block_{idx:02d}", act, global_step)
+                        writer.add_histogram("Layers/ActivityDistribution", torch.tensor(activities), global_step)
+                        
+                        writer.flush()
 
                 if sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
                     k = sys.stdin.read(1).lower()
@@ -278,7 +425,7 @@ def train(old_settings):
                     with torch.no_grad():
                         for v_idx, (v_lrs, v_gt, v_name) in enumerate(val_loader):
                             v_out = model(v_lrs.to(device))
-                            v_loss += criterion(v_out, v_gt.to(device)).item()
+                            v_loss += l1_criterion(v_out, v_gt.to(device)).item()
                             if v_idx < 20:
                                 lr_up = torch.nn.functional.interpolate(v_lrs[0, 2].unsqueeze(0), size=(PATCH_GT, PATCH_GT), mode='nearest').squeeze(0)
                                 img_lr = (lr_up.cpu().permute(1, 2, 0).numpy() * 255).astype(np.uint8).copy()
@@ -296,12 +443,37 @@ def train(old_settings):
                         writer.add_scalar("Ratio/Val_Train", v_loss_avg / loss.item(), global_step)
                     model.train(); do_val = False
                 if global_step % cfg["SAVE_STEP_EVERY"] == 0 and (i+1) % cfg["ACCUMULATION_STEPS"] == 0:
-                    torch.save({'step': global_step, 'model_state_dict': model.state_dict(), 'optimizer_state_dict': optimizer.state_dict()}, os.path.join(CHECKPOINT_DIR, f"vsrppp_step_{global_step}.pth"))
+                    checkpoint = {
+                        'step': global_step,
+                        'epoch': epoch,
+                        'model_state_dict': model.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'scaler_state_dict': scaler.state_dict(),
+                        'scheduler_state_dict': scheduler.state_dict(),
+                        'config': cfg,
+                        'training_phase': 'pretrain'
+                    }
+                    
+                    # Save latest (overwrite)
+                    torch.save(checkpoint, os.path.join(CHECKPOINT_DIR, "latest.pth"))
+                    
+                    # Save milestone every 25k steps
+                    if global_step % 25000 == 0:
+                        torch.save(checkpoint, os.path.join(CHECKPOINT_DIR, f"pretrain_step_{global_step}.pth"))
     except KeyboardInterrupt:
         print("\033[?25h"); termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
         print(f"\n{C_BOLD}{C_RED}⚠️ TRAINING UNTERBROCHEN{C_RESET}")
         if input("Checkpoint speichern? (y/n): ").lower() == 'y':
-            torch.save({'step': global_step, 'model_state_dict': model.state_dict(), 'optimizer_state_dict': optimizer.state_dict()}, os.path.join(CHECKPOINT_DIR, f"vsrppp_INTERRUPT_{global_step}.pth"))
+            checkpoint = {
+                'step': global_step,
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scaler_state_dict': scaler.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'config': cfg
+            }
+            torch.save(checkpoint, os.path.join(CHECKPOINT_DIR, f"vsrppp_INTERRUPT_{global_step}.pth"))
             print(f"{C_GREEN}✅ Gespeichert.{C_RESET}")
         sys.exit(0)
 
