@@ -403,7 +403,8 @@ def train(old_settings):
                         writer.add_scalar("Training/LearningRate", scheduler.get_last_lr()[0], global_step)
                         
                         # Layer Activity
-                        activities = model.get_layer_activity()
+                        m = model.module if hasattr(model, 'module') else model
+                        activities = m.get_layer_activity()
                         for idx, act in enumerate(activities, 1):
                             writer.add_scalar(f"Layers/Block_{idx:02d}", act, global_step)
                         writer.add_histogram("Layers/ActivityDistribution", torch.tensor(activities), global_step)
