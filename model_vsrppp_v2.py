@@ -64,7 +64,7 @@ class VSRTriplePlus_3x(nn.Module):
         out = f[:, 2] * w[1] + back * w[0] + forw * w[2]
         out = self.fusion(out)
 
-        return self.upsample(out) + base
+        return self.upsample(out)
     
     def get_layer_activity(self):
         """Returns activity levels for all blocks"""
