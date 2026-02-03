@@ -148,15 +148,15 @@ class DynamicLossWeights:
         
         # Check extreme conditions
         extreme = False
-        trigger_reason = []
+        trigger_reasons = []
         
         if sharpness_ratio < self.extreme_sharpness_threshold:
             extreme = True
-            trigger_reason.append(f"Blur: {sharpness_ratio:.2%}")
+            trigger_reasons.append(f"Blur: {sharpness_ratio:.2%}")
             
         if current_grad_loss and current_grad_loss > self.extreme_grad_threshold:
             extreme = True
-            trigger_reason.append(f"GradLoss: {current_grad_loss:.4f}")
+            trigger_reasons.append(f"GradLoss: {current_grad_loss:.4f}")
         
         if extreme and not self.aggressive_mode:
             self.aggressive_mode = True
@@ -169,7 +169,7 @@ class DynamicLossWeights:
             # Store notification instead of printing
             self.last_notification = {
                 'type': 'aggressive_mode_activated',
-                'message': f"⚡ AGGRESSIVE MODE → {', '.join(trigger_reason)}",
+                'message': f"⚡ AGGRESSIVE MODE → {', '.join(trigger_reasons)}",
                 'details': f"Weights: L1=0.55, MS=0.20, Grad=0.30"
             }
         
