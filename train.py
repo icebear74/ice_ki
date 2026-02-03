@@ -271,7 +271,7 @@ def get_activity_data(model):
     
     return activities
 
-def draw_ui(step, epoch, losses, it_time, activities, cfg, num_images, steps_per_epoch, current_epoch_step, paused=False):
+def draw_ui(step, epoch, losses, it_time, activities, cfg, num_images, steps_per_epoch, current_epoch_step, adaptive_status=None, paused=False):
     global last_term_size, last_quality_metrics
     term_size = shutil.get_terminal_size()
     
@@ -294,7 +294,7 @@ def draw_ui(step, epoch, losses, it_time, activities, cfg, num_images, steps_per
     # Header
     sys.stdout.write(f" {C_GRAY}╔{'═'*(ui_w-2)}╗{C_RESET}\n")
     status = f"{C_RED}⏸ PAUSIERT (P){C_RESET}" if paused else f"{C_GREEN}▶ RUNNING{C_RESET}"
-    print_line(f"{C_BOLD}MISSION CONTROL{C_RESET} │ {status} │ STEP: {step}/{cfg['MAX_STEPS']} │ LR: 1e{cfg['LR_EXPONENT']}")
+    print_line(f"{C_BOLD}MISSION CONTROL{C_RESET} │ {status} │ STEP: {step}/{cfg['MAX_STEPS']}")
     print_line(f"TOTAL PROG: {make_bar(total_prog, ui_w-65)} {total_prog:>5.1f}% │ ETA: {total_eta}")
     sys.stdout.write(f" {C_GRAY}╠{'═'*(ui_w-2)}╣{C_RESET}\n")
     
@@ -302,6 +302,21 @@ def draw_ui(step, epoch, losses, it_time, activities, cfg, num_images, steps_per
     print_line(f"EPOCH: {epoch:<4} │ STEP: {current_epoch_step}/{steps_per_epoch} │ ETA: {epoch_eta}")
     print_line(f"EPOCH PROG: {make_bar(epoch_prog, ui_w-65)} {epoch_prog:>5.1f}%")
     sys.stdout.write(f" {C_GRAY}╠{'═'*(ui_w-2)}╣{C_RESET}\n")
+    
+    # Adaptive Parameters Section
+    if adaptive_status:
+        lr = adaptive_status['lr']
+        l1_w, ms_w, grad_w = adaptive_status['loss_weights']
+        grad_clip = adaptive_status['grad_clip']
+        best_loss = adaptive_status['best_loss']
+        plateau_count = adaptive_status['plateau_counter']
+        plateau_max = 300  # from AdaptiveLRScheduler patience
+        
+        print_line(f"{C_BOLD}🤖 ADAPTIVE PARAMETERS{C_RESET}")
+        sys.stdout.write(f" {C_GRAY}╠{'─'*(ui_w-2)}╣{C_RESET}\n")
+        print_line(f"LR: {C_CYAN}{lr:.2e}{C_RESET} │ Grad Clip: {C_CYAN}{grad_clip:.2f}{C_RESET} │ Best Loss: {C_CYAN}{best_loss:.6f}{C_RESET} │ Plateau: {plateau_count}/{plateau_max}")
+        print_line(f"Loss Weights → L1: {C_CYAN}{l1_w:.3f}{C_RESET} │ MS: {C_CYAN}{ms_w:.3f}{C_RESET} │ Grad: {C_CYAN}{grad_w:.3f}{C_RESET}")
+        sys.stdout.write(f" {C_GRAY}╠{'═'*(ui_w-2)}╣{C_RESET}\n")
     
     # Loss Info
     loss_str = f"L1: {C_CYAN}{losses.get('l1',0):.4f}{C_RESET} │ MS: {C_CYAN}{losses.get('ms',0):.4f}{C_RESET} │ Grad: {C_CYAN}{losses.get('grad',0):.4f}{C_RESET} │ Total: {C_BOLD}{C_GREEN}{losses.get('total',0):.4f}{C_RESET}"
@@ -626,7 +641,8 @@ def train(old_settings):
                 while paused:
                     draw_ui(global_step, epoch, {'l1': 0, 'ms': 0, 'grad': 0, 'total': 0}, 0.1, 
                             get_activity_data(model), cfg, 
-                            len(train_ds), steps_per_epoch, (i+1)//cfg["ACCUMULATION_STEPS"], paused=True)
+                            len(train_ds), steps_per_epoch, (i+1)//cfg["ACCUMULATION_STEPS"], 
+                            adaptive_status=adaptive_system.get_status(), paused=True)
                     time.sleep(0.5)
                     if sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
                         if sys.stdin.read(1).lower() == 'p': paused = False; s_time = time.time(); s_step = global_step
@@ -672,7 +688,8 @@ def train(old_settings):
                         
                         draw_ui(global_step, epoch, losses_dict, it_t, 
                                 get_activity_data(model), 
-                                cfg, len(train_ds), steps_per_epoch, curr_ep_step)
+                                cfg, len(train_ds), steps_per_epoch, curr_ep_step,
+                                adaptive_status=adaptive_system.get_status())
                     
                     scaler.step(optimizer)
                     scaler.update()
@@ -686,6 +703,16 @@ def train(old_settings):
                         writer.add_scalar("Training/Loss_Gradient", loss_dict['grad'], global_step)
                         writer.add_scalar("Training/Loss_Total", loss.item(), global_step)
                         writer.add_scalar("Training/LearningRate", scheduler.get_last_lr()[0], global_step)
+                        
+                        # Log adaptive parameters
+                        status = adaptive_system.get_status()
+                        writer.add_scalar("Adaptive/LearningRate", status['lr'], global_step)
+                        writer.add_scalar("Adaptive/LossWeight_L1", status['loss_weights'][0], global_step)
+                        writer.add_scalar("Adaptive/LossWeight_MS", status['loss_weights'][1], global_step)
+                        writer.add_scalar("Adaptive/LossWeight_Grad", status['loss_weights'][2], global_step)
+                        writer.add_scalar("Adaptive/GradientClip", status['grad_clip'], global_step)
+                        writer.add_scalar("Adaptive/BestLoss", status['best_loss'], global_step)
+                        writer.add_scalar("Adaptive/PlateauCounter", status['plateau_counter'], global_step)
                         
                         m = model.module if hasattr(model, 'module') else model
                         activities = m.get_layer_activity()
@@ -715,7 +742,8 @@ def train(old_settings):
                         cfg["DISPLAY_MODE"] = (cfg.get("DISPLAY_MODE", 0) + 1) % 4
                         save_config(cfg)
                         it_t = (time.time() - s_time) / max(1, global_step - s_step) if global_step > s_step else 0.1
-                        draw_ui(global_step, epoch, losses_dict, it_t, get_activity_data(model), cfg, len(train_ds), steps_per_epoch, curr_ep_step)
+                        draw_ui(global_step, epoch, losses_dict, it_t, get_activity_data(model), cfg, len(train_ds), steps_per_epoch, curr_ep_step,
+                                adaptive_status=adaptive_system.get_status())
                     elif k == 'v': do_val = True
 
                 if (global_step % cfg["VAL_STEP_EVERY"] == 0 and (i+1) % cfg["ACCUMULATION_STEPS"] == 0) or do_val:
@@ -871,7 +899,8 @@ def train(old_settings):
                     do_val = False
                     
                     # UI NEU ZEICHNEN
-                    draw_ui(global_step, epoch, losses_dict, it_t, get_activity_data(model), cfg, len(train_ds), steps_per_epoch, curr_ep_step)
+                    draw_ui(global_step, epoch, losses_dict, it_t, get_activity_data(model), cfg, len(train_ds), steps_per_epoch, curr_ep_step,
+                            adaptive_status=adaptive_system.get_status())
                     
                 if global_step % cfg["SAVE_STEP_EVERY"] == 0 and (i+1) % cfg["ACCUMULATION_STEPS"] == 0:
                     print(f"\n{C_YELLOW}💾 SAVING CHECKPOINT...{C_RESET}")
@@ -895,7 +924,8 @@ def train(old_settings):
                         torch.save(checkpoint, milestone_path)
                         print(f"{C_GREEN}✓ Milestone: {milestone_path}{C_RESET}\n")
                     
-                    draw_ui(global_step, epoch, losses_dict, it_t, get_activity_data(model), cfg, len(train_ds), steps_per_epoch, curr_ep_step)
+                    draw_ui(global_step, epoch, losses_dict, it_t, get_activity_data(model), cfg, len(train_ds), steps_per_epoch, curr_ep_step,
+                            adaptive_status=adaptive_system.get_status())
                     
     except KeyboardInterrupt:
         print("\033[?25h")
