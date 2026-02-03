@@ -115,6 +115,19 @@ class DynamicLossWeights:
         # Extreme condition thresholds
         self.extreme_grad_threshold = 0.025
         self.extreme_sharpness_threshold = 0.70
+        
+        # Aggressive mode parameters (extracted for easier tuning)
+        self.aggressive_update_frequency = 1  # Every step
+        self.aggressive_min_measurements = 2  # Only 2 needed
+        self.aggressive_adjustment_factor = 1.15  # Aggressive boost
+        self.aggressive_blur_threshold = 0.72  # More aggressive threshold
+        self.aggressive_stabilization_threshold = 0.75  # Exit threshold
+        
+        # Fine-tuning mode parameters
+        self.normal_update_frequency = 50  # Every 50 steps
+        self.normal_min_measurements = 10  # Need 10 measurements
+        self.normal_adjustment_factor = 1.05  # Conservative
+        self.normal_blur_threshold = 0.75  # Normal threshold
     
     def detect_extreme_conditions(self, pred, target, current_grad_loss=None):
         """Check if immediate intervention needed"""
@@ -150,6 +163,7 @@ class DynamicLossWeights:
             # Immediate boost!
             self.grad_weight = 0.30
             self.l1_weight = 0.55
+            self.ms_weight = 0.20  # Explicitly set for consistency
             print(f"\n⚡ AGGRESSIVE MODE ACTIVATED!")
             print(f"📊 Immediate adjustment: L1=0.55, MS=0.20, Grad=0.30\n")
         
@@ -163,27 +177,27 @@ class DynamicLossWeights:
         
         # Update frequency based on mode
         if self.aggressive_mode:
-            update_frequency = 1  # EVERY step!
-            min_measurements = 2  # Only 2 needed!
-            adjustment_factor = 1.15  # Aggressive!
-            blur_threshold = 0.72  # More aggressive
+            update_frequency = self.aggressive_update_frequency
+            min_measurements = self.aggressive_min_measurements
+            adjustment_factor = self.aggressive_adjustment_factor
+            blur_threshold = self.aggressive_blur_threshold
             
             self.aggressive_counter += 1
             
-            # Deactivate after 5000 steps or if stabilized
+            # Deactivate after max steps or if stabilized
             if self.aggressive_counter >= self.aggressive_max_steps:
                 self.aggressive_mode = False
                 print(f"\n✅ Aggressive mode completed ({self.aggressive_max_steps} steps). Switching to fine-tuning.\n")
-            elif sharpness_ratio > 0.75 and len(self.sharpness_history) > 50:
+            elif sharpness_ratio > self.aggressive_stabilization_threshold and len(self.sharpness_history) > 50:
                 avg_recent = np.mean(self.sharpness_history[-20:])
-                if avg_recent > 0.75:
+                if avg_recent > self.aggressive_stabilization_threshold:
                     self.aggressive_mode = False
                     print(f"\n✅ Stabilized! Sharpness: {avg_recent:.2%}. Switching to fine-tuning.\n")
         else:
-            update_frequency = 50  # Every 50 steps
-            min_measurements = 10  # Need 10 measurements
-            adjustment_factor = 1.05  # Conservative
-            blur_threshold = 0.75  # Normal threshold
+            update_frequency = self.normal_update_frequency
+            min_measurements = self.normal_min_measurements
+            adjustment_factor = self.normal_adjustment_factor
+            blur_threshold = self.normal_blur_threshold
         
         # Update check
         if step % update_frequency != 0:
