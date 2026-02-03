@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.tensorboard import SummaryWriter
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 import cv2, os, time, shutil, sys, glob, json, re, random
 import numpy as np
 from datetime import datetime
@@ -281,11 +281,13 @@ def draw_ui(step, epoch, losses, it_time, activities, cfg, num_images, steps_per
     global last_term_size, last_quality_metrics
     term_size = shutil.get_terminal_size()
     
+    # Only clear screen if terminal size changed
     if term_size != last_term_size:
         print(ANSI_CLEAR)
         last_term_size = term_size
     
-    print(ANSI_CLEAR + ANSI_HOME + "\033[?25l")
+    # Move cursor to home and hide cursor (no full clear)
+    print(ANSI_HOME + "\033[?25l", end='')
     
     ui_w = max(90, term_size.columns - 4)
     total_prog = (step / cfg["MAX_STEPS"]) * 100 if cfg["MAX_STEPS"] > 0 else 0
@@ -631,7 +633,7 @@ def train(old_settings):
     # Initialize Adaptive System
     adaptive_system = FullAdaptiveSystem(optimizer)
 
-    scaler = GradScaler()
+    scaler = GradScaler('cuda')
     hybrid_criterion = HybridLoss()
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg["MAX_STEPS"], eta_min=1e-7)
     
@@ -665,7 +667,7 @@ def train(old_settings):
                     if sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
                         if sys.stdin.read(1).lower() == 'p': paused = False; s_time = time.time(); s_step = global_step
                 
-                with autocast():
+                with autocast('cuda'):
                     output = model(lrs.to(device))
                     gt_gpu = gt.to(device)
                     
