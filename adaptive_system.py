@@ -107,23 +107,34 @@ class DynamicLossWeights:
         self.adjustment_step = 0
         self.last_notification = None  # Store last change notification
         
-    def update(self, pred, target, step):
-        """Update weights based on prediction sharpness"""
+        # Aggressive mode
+        self.aggressive_mode = False
+        self.aggressive_counter = 0
+        self.aggressive_max_steps = 5000
         
-        # Only adjust every 100 steps
-        if step % 100 != 0:
-            return self.l1_weight, self.ms_weight, self.grad_weight
+        # Extreme condition thresholds
+        self.extreme_grad_threshold = 0.025
+        self.extreme_sharpness_threshold = 0.70
         
-        # Store old weights for comparison
-        old_l1 = self.l1_weight
-        old_ms = self.ms_weight
-        old_grad = self.grad_weight
+        # Aggressive mode parameters (extracted for easier tuning)
+        self.aggressive_update_frequency = 10  # Every 10 steps (5x faster than normal)
+        self.aggressive_min_measurements = 2  # Only 2 needed
+        self.aggressive_adjustment_factor = 1.15  # Aggressive boost
+        self.aggressive_blur_threshold = 0.72  # More aggressive threshold
+        self.aggressive_stabilization_threshold = 0.75  # Exit threshold
         
-        # Compute sharpness ratio
+        # Fine-tuning mode parameters
+        self.normal_update_frequency = 50  # Every 50 steps
+        self.normal_min_measurements = 10  # Need 10 measurements
+        self.normal_adjustment_factor = 1.05  # Conservative
+        self.normal_blur_threshold = 0.75  # Normal threshold
+    
+    def detect_extreme_conditions(self, pred, target, current_grad_loss=None):
+        """Check if immediate intervention needed"""
+        # Compute sharpness
         with torch.no_grad():
             pred_grad_x = torch.abs(pred[:, :, :, 1:] - pred[:, :, :, :-1])
             target_grad_x = torch.abs(target[:, :, :, 1:] - target[:, :, :, :-1])
-            
             pred_grad_y = torch.abs(pred[:, :, 1:, :] - pred[:, :, :-1, :])
             target_grad_y = torch.abs(target[:, :, 1:, :] - target[:, :, :-1, :])
             
@@ -135,53 +146,97 @@ class DynamicLossWeights:
             else:
                 sharpness_ratio = 1.0
         
-        self.sharpness_history.append(sharpness_ratio)
+        # Check extreme conditions
+        extreme = False
         
-        # Keep last 100 measurements
-        if len(self.sharpness_history) > 100:
-            self.sharpness_history.pop(0)
+        if sharpness_ratio < self.extreme_sharpness_threshold:
+            extreme = True
+            print(f"\n🚨 EXTREME BLUR DETECTED! Sharpness: {sharpness_ratio:.2%}")
+            
+        if current_grad_loss and current_grad_loss > self.extreme_grad_threshold:
+            extreme = True
+            print(f"\n🚨 EXTREME GRADIENT LOSS! {current_grad_loss:.4f}")
         
-        # Need at least 20 measurements
-        if len(self.sharpness_history) < 20:
+        if extreme and not self.aggressive_mode:
+            self.aggressive_mode = True
+            self.aggressive_counter = 0
+            # Immediate boost!
+            self.grad_weight = 0.30
+            self.l1_weight = 0.55
+            self.ms_weight = 0.20  # Explicitly set for consistency
+            print(f"\n⚡ AGGRESSIVE MODE ACTIVATED!")
+            print(f"📊 Immediate adjustment: L1=0.55, MS=0.20, Grad=0.30\n")
+        
+        return sharpness_ratio
+        
+    def update(self, pred, target, step, current_grad_loss=None):
+        """Update weights - now with aggressive mode!"""
+        
+        # Detect extreme conditions first
+        sharpness_ratio = self.detect_extreme_conditions(pred, target, current_grad_loss)
+        
+        # Update frequency based on mode
+        if self.aggressive_mode:
+            update_frequency = self.aggressive_update_frequency
+            min_measurements = self.aggressive_min_measurements
+            adjustment_factor = self.aggressive_adjustment_factor
+            blur_threshold = self.aggressive_blur_threshold
+            
+            self.aggressive_counter += 1
+            
+            # Deactivate after max steps or if stabilized
+            if self.aggressive_counter >= self.aggressive_max_steps:
+                self.aggressive_mode = False
+                print(f"\n✅ Aggressive mode completed ({self.aggressive_max_steps} steps). Switching to fine-tuning.\n")
+            elif sharpness_ratio > self.aggressive_stabilization_threshold and len(self.sharpness_history) > 50:
+                avg_recent = np.mean(self.sharpness_history[-20:])
+                if avg_recent > self.aggressive_stabilization_threshold:
+                    self.aggressive_mode = False
+                    print(f"\n✅ Stabilized! Sharpness: {avg_recent:.2%}. Switching to fine-tuning.\n")
+        else:
+            update_frequency = self.normal_update_frequency
+            min_measurements = self.normal_min_measurements
+            adjustment_factor = self.normal_adjustment_factor
+            blur_threshold = self.normal_blur_threshold
+        
+        # Update check
+        if step % update_frequency != 0:
             return self.l1_weight, self.ms_weight, self.grad_weight
         
-        avg_sharpness = np.mean(self.sharpness_history[-20:])
-        weights_changed = False
+        # Add to history
+        self.sharpness_history.append(sharpness_ratio)
+        if len(self.sharpness_history) > 200:
+            self.sharpness_history.pop(0)
         
-        # Too blurry? Increase gradient loss!
-        if avg_sharpness < 0.75:
-            self.grad_weight = min(0.5, self.grad_weight * 1.05)
+        # Warmup
+        if len(self.sharpness_history) < min_measurements:
+            return self.l1_weight, self.ms_weight, self.grad_weight
+        
+        # Compute average
+        window = min(20, len(self.sharpness_history))
+        avg_sharpness = np.mean(self.sharpness_history[-window:])
+        
+        # Adjust weights
+        if avg_sharpness < blur_threshold:
+            self.grad_weight = min(0.5, self.grad_weight * adjustment_factor)
             self.ms_weight = min(0.2, self.ms_weight)
             self.l1_weight = max(0.3, 1.0 - self.grad_weight - self.ms_weight)
-            weights_changed = True
             
-            # Store notification every 10th adjustment
-            if self.adjustment_step % 10 == 0:
-                self.last_notification = {
-                    'type': 'blur',
-                    'step': step,
-                    'message': f"🔍 BLUR → Weights: L1 {old_l1:.2f}→{self.l1_weight:.2f} MS {old_ms:.2f}→{self.ms_weight:.2f} Grad {old_grad:.2f}→{self.grad_weight:.2f}",
-                    'details': f"Sharpness: {avg_sharpness:.1%}"
-                }
+            if self.adjustment_step % 5 == 0:
+                mode = "AGGRESSIVE" if self.aggressive_mode else "normal"
+                print(f"\n🔍 Blur detected ({mode})! Sharpness: {avg_sharpness:.2%}")
+                print(f"📊 Loss weights: L1={self.l1_weight:.2f}, MS={self.ms_weight:.2f}, Grad={self.grad_weight:.2f}\n")
         
-        # Sharp enough? Focus on color accuracy
         elif avg_sharpness > 0.92:
             self.grad_weight = max(0.15, self.grad_weight * 0.95)
             self.ms_weight = min(0.2, self.ms_weight)
             self.l1_weight = 1.0 - self.grad_weight - self.ms_weight
-            weights_changed = True
             
-            # Store notification every 10th adjustment
             if self.adjustment_step % 10 == 0:
-                self.last_notification = {
-                    'type': 'sharp',
-                    'step': step,
-                    'message': f"✅ SHARP → Weights: L1 {old_l1:.2f}→{self.l1_weight:.2f} MS {old_ms:.2f}→{self.ms_weight:.2f} Grad {old_grad:.2f}→{self.grad_weight:.2f}",
-                    'details': f"Sharpness: {avg_sharpness:.1%}"
-                }
+                print(f"\n✅ Sharp! Sharpness: {avg_sharpness:.2%}")
+                print(f"📊 Loss weights: L1={self.l1_weight:.2f}, MS={self.ms_weight:.2f}, Grad={self.grad_weight:.2f}\n")
         
         self.adjustment_step += 1
-        
         return self.l1_weight, self.ms_weight, self.grad_weight
 
 
@@ -247,13 +302,13 @@ class FullAdaptiveSystem:
         print("✂️  Adaptive Grad Clip: initial=1.5, auto-adjusting")
         print("="*80 + "\n")
         
-    def on_train_step(self, loss, pred, target, step):
+    def on_train_step(self, loss, pred, target, step, current_grad_loss=None):
         """Call this every training step"""
         # Update LR based on loss (pass step for logging)
         self.lr_scheduler.step(loss, global_step=step)
         
-        # Get dynamic loss weights
-        l1_w, ms_w, grad_w = self.loss_weights.update(pred, target, step)
+        # Get dynamic loss weights (now with grad_loss for aggressive mode)
+        l1_w, ms_w, grad_w = self.loss_weights.update(pred, target, step, current_grad_loss)
         
         return l1_w, ms_w, grad_w
     
@@ -273,7 +328,8 @@ class FullAdaptiveSystem:
             ),
             'grad_clip': self.grad_clipper.clip_value,
             'best_loss': self.lr_scheduler.best_loss,
-            'plateau_counter': self.lr_scheduler.plateau_counter
+            'plateau_counter': self.lr_scheduler.plateau_counter,
+            'aggressive_mode': self.loss_weights.aggressive_mode  # NEW!
         }
     
     def get_last_notification(self):

@@ -335,7 +335,13 @@ def draw_ui(step, epoch, losses, it_time, activities, cfg, num_images, steps_per
         print_line(f"{C_BOLD}🤖 ADAPTIVE PARAMETERS{C_RESET}")
         sys.stdout.write(f" {C_GRAY}╠{'─'*(ui_w-2)}╣{C_RESET}\n")
         print_line(f"LR: {C_CYAN}{lr:.2e}{C_RESET} │ Grad Clip: {C_CYAN}{grad_clip:.2f}{C_RESET} │ Best Loss: {C_CYAN}{best_loss:.6f}{C_RESET} │ Plateau: {plateau_count}/{plateau_max}")
-        print_line(f"Loss Weights → L1: {C_CYAN}{l1_w:.3f}{C_RESET} │ MS: {C_CYAN}{ms_w:.3f}{C_RESET} │ Grad: {C_CYAN}{grad_w:.3f}{C_RESET}")
+        
+        # Loss weights line with aggressive mode indicator
+        weights_line = f"Loss Weights → L1: {C_CYAN}{l1_w:.3f}{C_RESET} │ MS: {C_CYAN}{ms_w:.3f}{C_RESET} │ Grad: {C_CYAN}{grad_w:.3f}{C_RESET}"
+        if adaptive_status.get('aggressive_mode', False):
+            weights_line += f" │ {C_BOLD}{C_YELLOW}⚡ AGGRESSIVE MODE{C_RESET}"
+        print_line(weights_line)
+        
         sys.stdout.write(f" {C_GRAY}╠{'═'*(ui_w-2)}╣{C_RESET}\n")
     
     # Loss Info
@@ -675,11 +681,22 @@ def train(old_settings):
                     current_loss = 0.0
                     if 'loss' in locals():
                         current_loss = loss.item()
+                    
+                    # Quick grad loss check for aggressive mode detection
+                    with torch.no_grad():
+                        pred_dx = output[:, :, :, 1:] - output[:, :, :, :-1]
+                        target_dx = gt_gpu[:, :, :, 1:] - gt_gpu[:, :, :, :-1]
+                        pred_dy = output[:, :, 1:, :] - output[:, :, :-1, :]
+                        target_dy = gt_gpu[:, :, 1:, :] - gt_gpu[:, :, :-1, :]
+                        quick_grad_loss = (F.l1_loss(pred_dx, target_dx) + F.l1_loss(pred_dy, target_dy)).item()
+                    
+                    # Get adaptive loss weights with grad_loss for aggressive mode
                     l1_w, ms_w, grad_w = adaptive_system.on_train_step(
                         current_loss if current_loss > 0 else 1.0,
                         output,
                         gt_gpu,
-                        global_step
+                        global_step,
+                        current_grad_loss=quick_grad_loss  # NEW parameter!
                     )
                     
                     # Compute loss with dynamic weights
