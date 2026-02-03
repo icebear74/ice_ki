@@ -26,7 +26,7 @@ class AdaptiveLRScheduler:
         self.cooldown_counter = 0
         self.loss_history = []
         
-    def step(self, current_loss):
+    def step(self, current_loss, global_step=None):
         """Call every training step with current loss"""
         self.loss_history.append(current_loss)
         
@@ -56,9 +56,11 @@ class AdaptiveLRScheduler:
                 for pg in self.optimizer.param_groups:
                     pg['lr'] = new_lr
                 
+                step_info = f" @ Step {global_step}" if global_step else ""
                 print(f"\n{'='*80}")
-                print(f"⚡ PLATEAU DETECTED @ Loss {current_loss:.6f}")
-                print(f"📈 LR BOOST: {current_lr:.2e} → {new_lr:.2e} ({self.factor}x)")
+                print(f"⚡ PLATEAU DETECTED{step_info}")
+                print(f"   Loss: {current_loss:.6f} (Best: {self.best_loss:.6f})")
+                print(f"   📈 LR: {current_lr:.2e} → {new_lr:.2e} (+{((new_lr/current_lr - 1)*100):.1f}%)")
                 print(f"{'='*80}\n")
                 
                 self.plateau_counter = 0
@@ -73,9 +75,11 @@ class AdaptiveLRScheduler:
                 for pg in self.optimizer.param_groups:
                     pg['lr'] = new_lr
                 
+                step_info = f" @ Step {global_step}" if global_step else ""
                 print(f"\n{'='*80}")
-                print(f"⚠️  DIVERGENCE DETECTED @ Loss {current_loss:.6f}")
-                print(f"📉 LR REDUCTION: {current_lr:.2e} → {new_lr:.2e} (0.6x)")
+                print(f"⚠️  DIVERGENCE DETECTED{step_info}")
+                print(f"   Loss: {current_loss:.6f} (Best: {self.best_loss:.6f})")
+                print(f"   📉 LR: {current_lr:.2e} → {new_lr:.2e} ({((new_lr/current_lr - 1)*100):.1f}%)")
                 print(f"{'='*80}\n")
                 
                 self.best_loss = current_loss
@@ -104,6 +108,11 @@ class DynamicLossWeights:
         if step % 100 != 0:
             return self.l1_weight, self.ms_weight, self.grad_weight
         
+        # Store old weights for comparison
+        old_l1 = self.l1_weight
+        old_ms = self.ms_weight
+        old_grad = self.grad_weight
+        
         # Compute sharpness ratio
         with torch.no_grad():
             pred_grad_x = torch.abs(pred[:, :, :, 1:] - pred[:, :, :, :-1])
@@ -131,26 +140,37 @@ class DynamicLossWeights:
             return self.l1_weight, self.ms_weight, self.grad_weight
         
         avg_sharpness = np.mean(self.sharpness_history[-20:])
+        weights_changed = False
         
         # Too blurry? Increase gradient loss!
         if avg_sharpness < 0.75:
             self.grad_weight = min(0.5, self.grad_weight * 1.05)
             self.ms_weight = min(0.2, self.ms_weight)
             self.l1_weight = max(0.3, 1.0 - self.grad_weight - self.ms_weight)
+            weights_changed = True
             
+            # Only show every 10th adjustment
             if self.adjustment_step % 10 == 0:
-                print(f"\n🔍 Blur detected! Sharpness: {avg_sharpness:.2%}")
-                print(f"📊 Loss weights: L1={self.l1_weight:.2f}, MS={self.ms_weight:.2f}, Grad={self.grad_weight:.2f}\n")
+                print(f"\n{'='*80}")
+                print(f"🔍 BLUR DETECTED @ Step {step}")
+                print(f"   Sharpness: {avg_sharpness:.2%}")
+                print(f"   📊 Weights: L1 {old_l1:.3f}→{self.l1_weight:.3f} │ MS {old_ms:.3f}→{self.ms_weight:.3f} │ Grad {old_grad:.3f}→{self.grad_weight:.3f}")
+                print(f"{'='*80}\n")
         
         # Sharp enough? Focus on color accuracy
         elif avg_sharpness > 0.92:
             self.grad_weight = max(0.15, self.grad_weight * 0.95)
             self.ms_weight = min(0.2, self.ms_weight)
             self.l1_weight = 1.0 - self.grad_weight - self.ms_weight
+            weights_changed = True
             
+            # Only show every 10th adjustment
             if self.adjustment_step % 10 == 0:
-                print(f"\n✅ Sharp! Sharpness: {avg_sharpness:.2%}")
-                print(f"📊 Loss weights: L1={self.l1_weight:.2f}, MS={self.ms_weight:.2f}, Grad={self.grad_weight:.2f}\n")
+                print(f"\n{'='*80}")
+                print(f"✅ SHARP IMAGE @ Step {step}")
+                print(f"   Sharpness: {avg_sharpness:.2%}")
+                print(f"   📊 Weights: L1 {old_l1:.3f}→{self.l1_weight:.3f} │ MS {old_ms:.3f}→{self.ms_weight:.3f} │ Grad {old_grad:.3f}→{self.grad_weight:.3f}")
+                print(f"{'='*80}\n")
         
         self.adjustment_step += 1
         
@@ -221,8 +241,8 @@ class FullAdaptiveSystem:
         
     def on_train_step(self, loss, pred, target, step):
         """Call this every training step"""
-        # Update LR based on loss
-        self.lr_scheduler.step(loss)
+        # Update LR based on loss (pass step for logging)
+        self.lr_scheduler.step(loss, global_step=step)
         
         # Get dynamic loss weights
         l1_w, ms_w, grad_w = self.loss_weights.update(pred, target, step)

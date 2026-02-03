@@ -720,16 +720,6 @@ def train(old_settings):
                             writer.add_scalar(f"Layers/Block_{idx:02d}", act, global_step)
                         
                         writer.flush()
-                    
-                    # Log adaptive system status every 100 steps
-                    if global_step % 100 == 0:
-                        status = adaptive_system.get_status()
-                        print(f"\n🤖 ADAPTIVE STATUS:")
-                        print(f"   LR: {status['lr']:.2e}")
-                        print(f"   Loss Weights: L1={status['loss_weights'][0]:.3f}, MS={status['loss_weights'][1]:.3f}, Grad={status['loss_weights'][2]:.3f}")
-                        print(f"   Grad Clip: {status['grad_clip']:.2f}")
-                        print(f"   Best Loss: {status['best_loss']:.6f}")
-                        print(f"   Plateau Count: {status['plateau_counter']}/{adaptive_system.lr_scheduler.patience}\n")
 
                 if sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
                     k = sys.stdin.read(1).lower()
