@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.tensorboard import SummaryWriter
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 import cv2, os, time, shutil, sys, glob, json, re, random
 import numpy as np
 from datetime import datetime
@@ -14,6 +14,7 @@ import termios
 import tty
 import subprocess
 import socket
+from adaptive_system import FullAdaptiveSystem
 
 # ============================================================
 # --- KONFIGURATION & PFADE ---
@@ -198,7 +199,7 @@ class HybridLoss(nn.Module):
         super().__init__()
         self.l1 = nn.L1Loss()
     
-    def forward(self, pred, target):
+    def forward(self, pred, target, l1_weight=0.7, ms_weight=0.2, grad_weight=0.1):
         pred = torch.clamp(pred, 0.0, 1.0)
         l1_loss = self.l1(pred, target)
         
@@ -212,13 +213,16 @@ class HybridLoss(nn.Module):
         target_dy = target[:, :, 1:, :] - target[:, :, :-1, :]
         grad_loss = self.l1(pred_dx, target_dx) + self.l1(pred_dy, target_dy)
         
-        total = 0.7 * l1_loss + 0.2 * ms_loss + 0.1 * grad_loss
+        total = l1_weight * l1_loss + ms_weight * ms_loss + grad_weight * grad_loss
         
         return {
             'l1': l1_loss.item(),
             'ms': ms_loss.item(), 
             'grad': grad_loss.item(),
-            'total_tensor': total
+            'total_tensor': total,
+            'l1_tensor': l1_loss,
+            'ms_tensor': ms_loss,
+            'grad_tensor': grad_loss
         }
 
 def calculate_trends(activities):
@@ -267,15 +271,23 @@ def get_activity_data(model):
     
     return activities
 
-def draw_ui(step, epoch, losses, it_time, activities, cfg, num_images, steps_per_epoch, current_epoch_step, paused=False):
+def get_adaptive_status_with_notification(adaptive_system):
+    """Get adaptive status including last notification"""
+    status = adaptive_system.get_status()
+    status['last_notification'] = adaptive_system.get_last_notification()
+    return status
+
+def draw_ui(step, epoch, losses, it_time, activities, cfg, num_images, steps_per_epoch, current_epoch_step, adaptive_status=None, paused=False):
     global last_term_size, last_quality_metrics
     term_size = shutil.get_terminal_size()
     
+    # Only clear screen if terminal size changed
     if term_size != last_term_size:
         print(ANSI_CLEAR)
         last_term_size = term_size
     
-    print(ANSI_CLEAR + ANSI_HOME + "\033[?25l")
+    # Move cursor to home and hide cursor (no full clear)
+    print(ANSI_HOME + "\033[?25l", end='')
     
     ui_w = max(90, term_size.columns - 4)
     total_prog = (step / cfg["MAX_STEPS"]) * 100 if cfg["MAX_STEPS"] > 0 else 0
@@ -290,14 +302,41 @@ def draw_ui(step, epoch, losses, it_time, activities, cfg, num_images, steps_per
     # Header
     sys.stdout.write(f" {C_GRAY}╔{'═'*(ui_w-2)}╗{C_RESET}\n")
     status = f"{C_RED}⏸ PAUSIERT (P){C_RESET}" if paused else f"{C_GREEN}▶ RUNNING{C_RESET}"
-    print_line(f"{C_BOLD}MISSION CONTROL{C_RESET} │ {status} │ STEP: {step}/{cfg['MAX_STEPS']} │ LR: 1e{cfg['LR_EXPONENT']}")
-    print_line(f"TOTAL PROG: {make_bar(total_prog, ui_w-65)} {total_prog:>5.1f}% │ ETA: {total_eta}")
+    print_line(f"{C_BOLD}MISSION CONTROL{C_RESET} │ {status} │ STEP: {step}/{cfg['MAX_STEPS']}")
+    
+    # Combined Progress Line: Overall (left) | Epoch (right)
+    overall_bar_width = (ui_w - 80) // 2  # Shorter bars
+    epoch_bar_width = (ui_w - 80) // 2
+    overall_bar = make_bar(total_prog, overall_bar_width)
+    epoch_bar = make_bar(epoch_prog, epoch_bar_width)
+    print_line(f"TOTAL: {overall_bar} {total_prog:>4.1f}% ETA:{total_eta} │ EPOCH {epoch}: {epoch_bar} {epoch_prog:>4.1f}% ETA:{epoch_eta}")
     sys.stdout.write(f" {C_GRAY}╠{'═'*(ui_w-2)}╣{C_RESET}\n")
     
-    # Epoch Info
-    print_line(f"EPOCH: {epoch:<4} │ STEP: {current_epoch_step}/{steps_per_epoch} │ ETA: {epoch_eta}")
-    print_line(f"EPOCH PROG: {make_bar(epoch_prog, ui_w-65)} {epoch_prog:>5.1f}%")
-    sys.stdout.write(f" {C_GRAY}╠{'═'*(ui_w-2)}╣{C_RESET}\n")
+    # Adaptive Change Notification (if any)
+    if adaptive_status:
+        notification = adaptive_status.get('last_notification')
+        if notification:
+            notif_color = C_YELLOW if notification['type'] in ['plateau', 'divergence'] else C_CYAN
+            step_info = f"@ Step {notification['step']}" if notification['step'] else ""
+            print_line(f"{notif_color}{notification['message']}{C_RESET} {step_info}")
+            if notification.get('details'):
+                print_line(f"  {C_GRAY}{notification['details']}{C_RESET}")
+            sys.stdout.write(f" {C_GRAY}╠{'─'*(ui_w-2)}╣{C_RESET}\n")
+    
+    # Adaptive Parameters Section
+    if adaptive_status:
+        lr = adaptive_status['lr']
+        l1_w, ms_w, grad_w = adaptive_status['loss_weights']
+        grad_clip = adaptive_status['grad_clip']
+        best_loss = adaptive_status['best_loss']
+        plateau_count = adaptive_status['plateau_counter']
+        plateau_max = 300  # from AdaptiveLRScheduler patience
+        
+        print_line(f"{C_BOLD}🤖 ADAPTIVE PARAMETERS{C_RESET}")
+        sys.stdout.write(f" {C_GRAY}╠{'─'*(ui_w-2)}╣{C_RESET}\n")
+        print_line(f"LR: {C_CYAN}{lr:.2e}{C_RESET} │ Grad Clip: {C_CYAN}{grad_clip:.2f}{C_RESET} │ Best Loss: {C_CYAN}{best_loss:.6f}{C_RESET} │ Plateau: {plateau_count}/{plateau_max}")
+        print_line(f"Loss Weights → L1: {C_CYAN}{l1_w:.3f}{C_RESET} │ MS: {C_CYAN}{ms_w:.3f}{C_RESET} │ Grad: {C_CYAN}{grad_w:.3f}{C_RESET}")
+        sys.stdout.write(f" {C_GRAY}╠{'═'*(ui_w-2)}╣{C_RESET}\n")
     
     # Loss Info
     loss_str = f"L1: {C_CYAN}{losses.get('l1',0):.4f}{C_RESET} │ MS: {C_CYAN}{losses.get('ms',0):.4f}{C_RESET} │ Grad: {C_CYAN}{losses.get('grad',0):.4f}{C_RESET} │ Total: {C_BOLD}{C_GREEN}{losses.get('total',0):.4f}{C_RESET}"
@@ -344,13 +383,15 @@ def draw_ui(step, epoch, losses, it_time, activities, cfg, num_images, steps_per
         # MODE 0: Grouped by Trunk → Sorted by Position
         backward = activities[:15]
         forward = activities[15:30]
+        fusion = activities[30:32] if len(activities) >= 32 else []
         backward_overall = int(np.mean([act for _, act, _, _ in backward]))
         forward_overall = int(np.mean([act for _, act, _, _ in forward]))
+        fusion_overall = int(np.mean([act for _, act, _, _ in fusion])) if fusion else 0
         
         print_line(f"{C_BOLD}🔥 BACKWARD TRUNK (L1-L15){C_RESET} - Overall: {make_bar(backward_overall, 20)} {backward_overall}%")
         sys.stdout.write(f" {C_GRAY}╠{'─'*(ui_w-2)}╣{C_RESET}\n")
         
-        if available_lines >= 30:
+        if available_lines >= 32:
             for idx, act, trend, raw in backward:
                 print_line(f"LAYER {idx:>2}: {make_bar(act, ui_w-25)} {act:>3}%")
         else:
@@ -365,7 +406,7 @@ def draw_ui(step, epoch, losses, it_time, activities, cfg, num_images, steps_per
         print_line(f"{C_BOLD}⚡ FORWARD TRUNK (L16-L30){C_RESET} - Overall: {make_bar(forward_overall, 20)} {forward_overall}%")
         sys.stdout.write(f" {C_GRAY}╠{'─'*(ui_w-2)}╣{C_RESET}\n")
         
-        if available_lines >= 30:
+        if available_lines >= 32:
             for idx, act, trend, raw in forward:
                 print_line(f"LAYER {idx:>2}: {make_bar(act, ui_w-25)} {act:>3}%")
         else:
@@ -375,18 +416,35 @@ def draw_ui(step, epoch, losses, it_time, activities, cfg, num_images, steps_per
                 left_str = f"L{left[0]:02d}:{make_bar(left[1], (ui_w-30)//2)}{left[1]:3}%"
                 right_str = f"L{right[0]:02d}:{make_bar(right[1], (ui_w-30)//2)}{right[1]:3}%" if right else ""
                 print_line(f"{left_str} │ {right_str}")
+        
+        if fusion:
+            sys.stdout.write(f" {C_GRAY}╠{'═'*(ui_w-2)}╣{C_RESET}\n")
+            print_line(f"{C_BOLD}🔗 FUSION (L31-L32){C_RESET} - Overall: {make_bar(fusion_overall, 20)} {fusion_overall}%")
+            sys.stdout.write(f" {C_GRAY}╠{'─'*(ui_w-2)}╣{C_RESET}\n")
+            
+            if available_lines >= 32:
+                for idx, act, trend, raw in fusion:
+                    print_line(f"LAYER {idx:>2}: {make_bar(act, ui_w-25)} {act:>3}%")
+            else:
+                left = fusion[0]
+                right = fusion[1] if len(fusion) > 1 else None
+                left_str = f"L{left[0]:02d}:{make_bar(left[1], (ui_w-30)//2)}{left[1]:3}%"
+                right_str = f"L{right[0]:02d}:{make_bar(right[1], (ui_w-30)//2)}{right[1]:3}%" if right else ""
+                print_line(f"{left_str} │ {right_str}")
     
     elif display_mode == 1:
         # MODE 1: Grouped by Trunk → Sorted by Activity
         backward = sorted(activities[:15], key=lambda x: x[1], reverse=True)
         forward = sorted(activities[15:30], key=lambda x: x[1], reverse=True)
+        fusion = sorted(activities[30:32], key=lambda x: x[1], reverse=True) if len(activities) >= 32 else []
         backward_overall = int(np.mean([act for _, act, _, _ in backward]))
         forward_overall = int(np.mean([act for _, act, _, _ in forward]))
+        fusion_overall = int(np.mean([act for _, act, _, _ in fusion])) if fusion else 0
         
         print_line(f"{C_BOLD}🔥 BACKWARD TRUNK (L1-L15 sorted){C_RESET} - Overall: {make_bar(backward_overall, 20)} {backward_overall}%")
         sys.stdout.write(f" {C_GRAY}╠{'─'*(ui_w-2)}╣{C_RESET}\n")
         
-        if available_lines >= 30:
+        if available_lines >= 32:
             for idx, act, trend, raw in backward:
                 print_line(f"LAYER {idx:>2}: {make_bar(act, ui_w-25)} {act:>3}%")
         else:
@@ -401,7 +459,7 @@ def draw_ui(step, epoch, losses, it_time, activities, cfg, num_images, steps_per
         print_line(f"{C_BOLD}⚡ FORWARD TRUNK (L16-L30 sorted){C_RESET} - Overall: {make_bar(forward_overall, 20)} {forward_overall}%")
         sys.stdout.write(f" {C_GRAY}╠{'─'*(ui_w-2)}╣{C_RESET}\n")
         
-        if available_lines >= 30:
+        if available_lines >= 32:
             for idx, act, trend, raw in forward:
                 print_line(f"LAYER {idx:>2}: {make_bar(act, ui_w-25)} {act:>3}%")
         else:
@@ -411,16 +469,32 @@ def draw_ui(step, epoch, losses, it_time, activities, cfg, num_images, steps_per
                 left_str = f"L{left[0]:02d}:{make_bar(left[1], (ui_w-30)//2)}{left[1]:3}%"
                 right_str = f"L{right[0]:02d}:{make_bar(right[1], (ui_w-30)//2)}{right[1]:3}%" if right else ""
                 print_line(f"{left_str} │ {right_str}")
+        
+        if fusion:
+            sys.stdout.write(f" {C_GRAY}╠{'═'*(ui_w-2)}╣{C_RESET}\n")
+            print_line(f"{C_BOLD}🔗 FUSION (L31-L32 sorted){C_RESET} - Overall: {make_bar(fusion_overall, 20)} {fusion_overall}%")
+            sys.stdout.write(f" {C_GRAY}╠{'─'*(ui_w-2)}╣{C_RESET}\n")
+            
+            if available_lines >= 32:
+                for idx, act, trend, raw in fusion:
+                    print_line(f"LAYER {idx:>2}: {make_bar(act, ui_w-25)} {act:>3}%")
+            else:
+                left = fusion[0]
+                right = fusion[1] if len(fusion) > 1 else None
+                left_str = f"L{left[0]:02d}:{make_bar(left[1], (ui_w-30)//2)}{left[1]:3}%"
+                right_str = f"L{right[0]:02d}:{make_bar(right[1], (ui_w-30)//2)}{right[1]:3}%" if right else ""
+                print_line(f"{left_str} │ {right_str}")
     
     elif display_mode == 2:
         # MODE 2: Flat List → Sorted by Position
-        if available_lines >= 30:
+        num_layers = len(activities)
+        if available_lines >= num_layers:
             for idx, act, trend, raw in activities:
                 print_line(f"LAYER {idx:>2}: {make_bar(act, ui_w-25)} {act:>3}%")
         else:
-            for row in range(0, 30, 2):
+            for row in range(0, num_layers, 2):
                 left = activities[row]
-                right = activities[row+1] if row+1 < 30 else None
+                right = activities[row+1] if row+1 < num_layers else None
                 left_str = f"L{left[0]:02d}:{make_bar(left[1], (ui_w-30)//2)}{left[1]:3}%"
                 right_str = f"L{right[0]:02d}:{make_bar(right[1], (ui_w-30)//2)}{right[1]:3}%" if right else ""
                 print_line(f"{left_str} │ {right_str}")
@@ -428,14 +502,15 @@ def draw_ui(step, epoch, losses, it_time, activities, cfg, num_images, steps_per
     else:  # display_mode == 3
         # MODE 3: Flat List → Sorted by Activity
         sorted_acts = sorted(activities, key=lambda x: x[1], reverse=True)
+        num_layers = len(sorted_acts)
         
-        if available_lines >= 30:
+        if available_lines >= num_layers:
             for idx, act, trend, raw in sorted_acts:
                 print_line(f"LAYER {idx:>2}: {make_bar(act, ui_w-25)} {act:>3}%")
         else:
-            for row in range(0, 30, 2):
+            for row in range(0, num_layers, 2):
                 left = sorted_acts[row]
-                right = sorted_acts[row+1] if row+1 < 30 else None
+                right = sorted_acts[row+1] if row+1 < num_layers else None
                 left_str = f"L{left[0]:02d}:{make_bar(left[1], (ui_w-30)//2)}{left[1]:3}%"
                 right_str = f"L{right[0]:02d}:{make_bar(right[1], (ui_w-30)//2)}{right[1]:3}%" if right else ""
                 print_line(f"{left_str} │ {right_str}")
@@ -555,7 +630,10 @@ def train(old_settings):
     model = VSRTriplePlus_3x(n_blocks=N_BLOCKS).to(device)
     optimizer = optim.AdamW(model.parameters(), lr=10**cfg["LR_EXPONENT"], weight_decay=cfg["WEIGHT_DECAY"])
 
-    scaler = GradScaler()
+    # Initialize Adaptive System
+    adaptive_system = FullAdaptiveSystem(optimizer)
+
+    scaler = GradScaler('cuda')
     hybrid_criterion = HybridLoss()
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg["MAX_STEPS"], eta_min=1e-7)
     
@@ -583,21 +661,36 @@ def train(old_settings):
                 while paused:
                     draw_ui(global_step, epoch, {'l1': 0, 'ms': 0, 'grad': 0, 'total': 0}, 0.1, 
                             get_activity_data(model), cfg, 
-                            len(train_ds), steps_per_epoch, (i+1)//cfg["ACCUMULATION_STEPS"], paused=True)
+                            len(train_ds), steps_per_epoch, (i+1)//cfg["ACCUMULATION_STEPS"], 
+                            adaptive_status=get_adaptive_status_with_notification(adaptive_system), paused=True)
                     time.sleep(0.5)
                     if sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
                         if sys.stdin.read(1).lower() == 'p': paused = False; s_time = time.time(); s_step = global_step
                 
-                with autocast():
+                with autocast('cuda'):
                     output = model(lrs.to(device))
-                    loss_dict = hybrid_criterion(output, gt.to(device))
+                    gt_gpu = gt.to(device)
+                    
+                    # Get adaptive loss weights before computing loss
+                    current_loss = 0.0
+                    if 'loss' in locals():
+                        current_loss = loss.item()
+                    l1_w, ms_w, grad_w = adaptive_system.on_train_step(
+                        current_loss if current_loss > 0 else 1.0,
+                        output,
+                        gt_gpu,
+                        global_step
+                    )
+                    
+                    # Compute loss with dynamic weights
+                    loss_dict = hybrid_criterion(output, gt_gpu, l1_w, ms_w, grad_w)
                     loss = loss_dict['total_tensor']
                 
                 scaler.scale(loss / cfg["ACCUMULATION_STEPS"]).backward()
                 
                 if (i + 1) % cfg["ACCUMULATION_STEPS"] == 0:
                     scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.get("GRAD_CLIP", 1.0))
+                    grad_norm, clip_val = adaptive_system.on_backward(model)
                     
                     it_t = (time.time() - s_time) / max(1, global_step - s_step) if global_step > s_step else 0.1
                     curr_ep_step = (i + 1) // cfg["ACCUMULATION_STEPS"]
@@ -615,7 +708,8 @@ def train(old_settings):
                         
                         draw_ui(global_step, epoch, losses_dict, it_t, 
                                 get_activity_data(model), 
-                                cfg, len(train_ds), steps_per_epoch, curr_ep_step)
+                                cfg, len(train_ds), steps_per_epoch, curr_ep_step,
+                                adaptive_status=get_adaptive_status_with_notification(adaptive_system))
                     
                     scaler.step(optimizer)
                     scaler.update()
@@ -629,6 +723,16 @@ def train(old_settings):
                         writer.add_scalar("Training/Loss_Gradient", loss_dict['grad'], global_step)
                         writer.add_scalar("Training/Loss_Total", loss.item(), global_step)
                         writer.add_scalar("Training/LearningRate", scheduler.get_last_lr()[0], global_step)
+                        
+                        # Log adaptive parameters
+                        status = adaptive_system.get_status()
+                        writer.add_scalar("Adaptive/LearningRate", status['lr'], global_step)
+                        writer.add_scalar("Adaptive/LossWeight_L1", status['loss_weights'][0], global_step)
+                        writer.add_scalar("Adaptive/LossWeight_MS", status['loss_weights'][1], global_step)
+                        writer.add_scalar("Adaptive/LossWeight_Grad", status['loss_weights'][2], global_step)
+                        writer.add_scalar("Adaptive/GradientClip", status['grad_clip'], global_step)
+                        writer.add_scalar("Adaptive/BestLoss", status['best_loss'], global_step)
+                        writer.add_scalar("Adaptive/PlateauCounter", status['plateau_counter'], global_step)
                         
                         m = model.module if hasattr(model, 'module') else model
                         activities = m.get_layer_activity()
@@ -648,7 +752,8 @@ def train(old_settings):
                         cfg["DISPLAY_MODE"] = (cfg.get("DISPLAY_MODE", 0) + 1) % 4
                         save_config(cfg)
                         it_t = (time.time() - s_time) / max(1, global_step - s_step) if global_step > s_step else 0.1
-                        draw_ui(global_step, epoch, losses_dict, it_t, get_activity_data(model), cfg, len(train_ds), steps_per_epoch, curr_ep_step)
+                        draw_ui(global_step, epoch, losses_dict, it_t, get_activity_data(model), cfg, len(train_ds), steps_per_epoch, curr_ep_step,
+                                adaptive_status=get_adaptive_status_with_notification(adaptive_system))
                     elif k == 'v': do_val = True
 
                 if (global_step % cfg["VAL_STEP_EVERY"] == 0 and (i+1) % cfg["ACCUMULATION_STEPS"] == 0) or do_val:
@@ -788,13 +893,24 @@ def train(old_settings):
                     print(f"{C_CYAN}{'='*80}{C_RESET}\n")
                     
                     if do_val:
-                        input(f"{C_YELLOW}Press ENTER to continue...{C_RESET}")
+                        # Auto-continue nach 10 Sekunden, oder sofort bei Enter
+                        print(f"{C_YELLOW}Auto-continue in 10s (Press ENTER to skip)...{C_RESET}", end='', flush=True)
+                        start_wait = time.time()
+                        while time.time() - start_wait < 10.0:
+                            if sys.stdin in select.select([sys.stdin], [], [], 0.1)[0]:
+                                sys.stdin.read(1)  # Enter pressed
+                                break
+                            remaining = int(10.0 - (time.time() - start_wait))
+                            if remaining >= 0:
+                                print(f"\r{C_YELLOW}Auto-continue in {remaining}s (Press ENTER to skip)...{C_RESET}", end='', flush=True)
+                        print()  # Neue Zeile
                     
                     model.train()
                     do_val = False
                     
                     # UI NEU ZEICHNEN
-                    draw_ui(global_step, epoch, losses_dict, it_t, get_activity_data(model), cfg, len(train_ds), steps_per_epoch, curr_ep_step)
+                    draw_ui(global_step, epoch, losses_dict, it_t, get_activity_data(model), cfg, len(train_ds), steps_per_epoch, curr_ep_step,
+                            adaptive_status=get_adaptive_status_with_notification(adaptive_system))
                     
                 if global_step % cfg["SAVE_STEP_EVERY"] == 0 and (i+1) % cfg["ACCUMULATION_STEPS"] == 0:
                     print(f"\n{C_YELLOW}💾 SAVING CHECKPOINT...{C_RESET}")
@@ -818,7 +934,8 @@ def train(old_settings):
                         torch.save(checkpoint, milestone_path)
                         print(f"{C_GREEN}✓ Milestone: {milestone_path}{C_RESET}\n")
                     
-                    draw_ui(global_step, epoch, losses_dict, it_t, get_activity_data(model), cfg, len(train_ds), steps_per_epoch, curr_ep_step)
+                    draw_ui(global_step, epoch, losses_dict, it_t, get_activity_data(model), cfg, len(train_ds), steps_per_epoch, curr_ep_step,
+                            adaptive_status=get_adaptive_status_with_notification(adaptive_system))
                     
     except KeyboardInterrupt:
         print("\033[?25h")
