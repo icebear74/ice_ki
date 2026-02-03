@@ -148,14 +148,15 @@ class DynamicLossWeights:
         
         # Check extreme conditions
         extreme = False
+        trigger_reason = []
         
         if sharpness_ratio < self.extreme_sharpness_threshold:
             extreme = True
-            print(f"\n🚨 EXTREME BLUR DETECTED! Sharpness: {sharpness_ratio:.2%}")
+            trigger_reason.append(f"Blur: {sharpness_ratio:.2%}")
             
         if current_grad_loss and current_grad_loss > self.extreme_grad_threshold:
             extreme = True
-            print(f"\n🚨 EXTREME GRADIENT LOSS! {current_grad_loss:.4f}")
+            trigger_reason.append(f"GradLoss: {current_grad_loss:.4f}")
         
         if extreme and not self.aggressive_mode:
             self.aggressive_mode = True
@@ -164,8 +165,13 @@ class DynamicLossWeights:
             self.grad_weight = 0.30
             self.l1_weight = 0.55
             self.ms_weight = 0.20  # Explicitly set for consistency
-            print(f"\n⚡ AGGRESSIVE MODE ACTIVATED!")
-            print(f"📊 Immediate adjustment: L1=0.55, MS=0.20, Grad=0.30\n")
+            
+            # Store notification instead of printing
+            self.last_notification = {
+                'type': 'aggressive_mode_activated',
+                'message': f"⚡ AGGRESSIVE MODE → {', '.join(trigger_reason)}",
+                'details': f"Weights: L1=0.55, MS=0.20, Grad=0.30"
+            }
         
         return sharpness_ratio
         
@@ -187,12 +193,22 @@ class DynamicLossWeights:
             # Deactivate after max steps or if stabilized
             if self.aggressive_counter >= self.aggressive_max_steps:
                 self.aggressive_mode = False
-                print(f"\n✅ Aggressive mode completed ({self.aggressive_max_steps} steps). Switching to fine-tuning.\n")
+                # Store notification
+                self.last_notification = {
+                    'type': 'aggressive_mode_completed',
+                    'message': f"✅ AGGRESSIVE MODE COMPLETE → {self.aggressive_max_steps} steps",
+                    'details': "Switching to fine-tuning mode"
+                }
             elif sharpness_ratio > self.aggressive_stabilization_threshold and len(self.sharpness_history) > 50:
                 avg_recent = np.mean(self.sharpness_history[-20:])
                 if avg_recent > self.aggressive_stabilization_threshold:
                     self.aggressive_mode = False
-                    print(f"\n✅ Stabilized! Sharpness: {avg_recent:.2%}. Switching to fine-tuning.\n")
+                    # Store notification
+                    self.last_notification = {
+                        'type': 'aggressive_mode_stabilized',
+                        'message': f"✅ STABILIZED → Sharpness: {avg_recent:.2%}",
+                        'details': "Switching to fine-tuning mode"
+                    }
         else:
             update_frequency = self.normal_update_frequency
             min_measurements = self.normal_min_measurements
@@ -218,23 +234,33 @@ class DynamicLossWeights:
         
         # Adjust weights
         if avg_sharpness < blur_threshold:
+            old_grad = self.grad_weight
             self.grad_weight = min(0.5, self.grad_weight * adjustment_factor)
             self.ms_weight = min(0.2, self.ms_weight)
             self.l1_weight = max(0.3, 1.0 - self.grad_weight - self.ms_weight)
             
-            if self.adjustment_step % 5 == 0:
-                mode = "AGGRESSIVE" if self.aggressive_mode else "normal"
-                print(f"\n🔍 Blur detected ({mode})! Sharpness: {avg_sharpness:.2%}")
-                print(f"📊 Loss weights: L1={self.l1_weight:.2f}, MS={self.ms_weight:.2f}, Grad={self.grad_weight:.2f}\n")
+            # Store notification (only when weights actually changed)
+            if abs(self.grad_weight - old_grad) > 0.001:
+                mode = "AGGRESSIVE" if self.aggressive_mode else "NORMAL"
+                self.last_notification = {
+                    'type': 'blur_correction',
+                    'message': f"🔍 {mode} BLUR → Sharpness: {avg_sharpness:.2%}",
+                    'details': f"L1={self.l1_weight:.2f}, MS={self.ms_weight:.2f}, Grad={self.grad_weight:.2f}"
+                }
         
         elif avg_sharpness > 0.92:
+            old_grad = self.grad_weight
             self.grad_weight = max(0.15, self.grad_weight * 0.95)
             self.ms_weight = min(0.2, self.ms_weight)
             self.l1_weight = 1.0 - self.grad_weight - self.ms_weight
             
-            if self.adjustment_step % 10 == 0:
-                print(f"\n✅ Sharp! Sharpness: {avg_sharpness:.2%}")
-                print(f"📊 Loss weights: L1={self.l1_weight:.2f}, MS={self.ms_weight:.2f}, Grad={self.grad_weight:.2f}\n")
+            # Store notification (only when weights changed)
+            if abs(self.grad_weight - old_grad) > 0.001:
+                self.last_notification = {
+                    'type': 'sharp_reduction',
+                    'message': f"✅ SHARP → Sharpness: {avg_sharpness:.2%}",
+                    'details': f"L1={self.l1_weight:.2f}, MS={self.ms_weight:.2f}, Grad={self.grad_weight:.2f}"
+                }
         
         self.adjustment_step += 1
         return self.l1_weight, self.ms_weight, self.grad_weight
