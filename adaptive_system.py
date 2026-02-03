@@ -25,6 +25,7 @@ class AdaptiveLRScheduler:
         self.plateau_counter = 0
         self.cooldown_counter = 0
         self.loss_history = []
+        self.last_notification = None  # Store last change notification
         
     def step(self, current_loss, global_step=None):
         """Call every training step with current loss"""
@@ -56,12 +57,14 @@ class AdaptiveLRScheduler:
                 for pg in self.optimizer.param_groups:
                     pg['lr'] = new_lr
                 
-                step_info = f" @ Step {global_step}" if global_step else ""
-                print(f"\n{'='*80}")
-                print(f"⚡ PLATEAU DETECTED{step_info}")
-                print(f"   Loss: {current_loss:.6f} (Best: {self.best_loss:.6f})")
-                print(f"   📈 LR: {current_lr:.2e} → {new_lr:.2e} (+{((new_lr/current_lr - 1)*100):.1f}%)")
-                print(f"{'='*80}\n")
+                # Store notification instead of printing
+                change_pct = ((new_lr/current_lr - 1)*100)
+                self.last_notification = {
+                    'type': 'plateau',
+                    'step': global_step,
+                    'message': f"⚡ PLATEAU → LR: {current_lr:.2e}→{new_lr:.2e} (+{change_pct:.1f}%)",
+                    'details': f"Loss: {current_loss:.6f} (Best: {self.best_loss:.6f})"
+                }
                 
                 self.plateau_counter = 0
                 self.cooldown_counter = self.cooldown
@@ -75,12 +78,14 @@ class AdaptiveLRScheduler:
                 for pg in self.optimizer.param_groups:
                     pg['lr'] = new_lr
                 
-                step_info = f" @ Step {global_step}" if global_step else ""
-                print(f"\n{'='*80}")
-                print(f"⚠️  DIVERGENCE DETECTED{step_info}")
-                print(f"   Loss: {current_loss:.6f} (Best: {self.best_loss:.6f})")
-                print(f"   📉 LR: {current_lr:.2e} → {new_lr:.2e} ({((new_lr/current_lr - 1)*100):.1f}%)")
-                print(f"{'='*80}\n")
+                # Store notification instead of printing
+                change_pct = ((new_lr/current_lr - 1)*100)
+                self.last_notification = {
+                    'type': 'divergence',
+                    'step': global_step,
+                    'message': f"⚠️  DIVERGENCE → LR: {current_lr:.2e}→{new_lr:.2e} ({change_pct:.1f}%)",
+                    'details': f"Loss: {current_loss:.6f} (Best: {self.best_loss:.6f})"
+                }
                 
                 self.best_loss = current_loss
                 self.plateau_counter = 0
@@ -100,6 +105,7 @@ class DynamicLossWeights:
         
         self.sharpness_history = []
         self.adjustment_step = 0
+        self.last_notification = None  # Store last change notification
         
     def update(self, pred, target, step):
         """Update weights based on prediction sharpness"""
@@ -149,13 +155,14 @@ class DynamicLossWeights:
             self.l1_weight = max(0.3, 1.0 - self.grad_weight - self.ms_weight)
             weights_changed = True
             
-            # Only show every 10th adjustment
+            # Store notification every 10th adjustment
             if self.adjustment_step % 10 == 0:
-                print(f"\n{'='*80}")
-                print(f"🔍 BLUR DETECTED @ Step {step}")
-                print(f"   Sharpness: {avg_sharpness:.2%}")
-                print(f"   📊 Weights: L1 {old_l1:.3f}→{self.l1_weight:.3f} │ MS {old_ms:.3f}→{self.ms_weight:.3f} │ Grad {old_grad:.3f}→{self.grad_weight:.3f}")
-                print(f"{'='*80}\n")
+                self.last_notification = {
+                    'type': 'blur',
+                    'step': step,
+                    'message': f"🔍 BLUR → Weights: L1 {old_l1:.2f}→{self.l1_weight:.2f} MS {old_ms:.2f}→{self.ms_weight:.2f} Grad {old_grad:.2f}→{self.grad_weight:.2f}",
+                    'details': f"Sharpness: {avg_sharpness:.1%}"
+                }
         
         # Sharp enough? Focus on color accuracy
         elif avg_sharpness > 0.92:
@@ -164,13 +171,14 @@ class DynamicLossWeights:
             self.l1_weight = 1.0 - self.grad_weight - self.ms_weight
             weights_changed = True
             
-            # Only show every 10th adjustment
+            # Store notification every 10th adjustment
             if self.adjustment_step % 10 == 0:
-                print(f"\n{'='*80}")
-                print(f"✅ SHARP IMAGE @ Step {step}")
-                print(f"   Sharpness: {avg_sharpness:.2%}")
-                print(f"   📊 Weights: L1 {old_l1:.3f}→{self.l1_weight:.3f} │ MS {old_ms:.3f}→{self.ms_weight:.3f} │ Grad {old_grad:.3f}→{self.grad_weight:.3f}")
-                print(f"{'='*80}\n")
+                self.last_notification = {
+                    'type': 'sharp',
+                    'step': step,
+                    'message': f"✅ SHARP → Weights: L1 {old_l1:.2f}→{self.l1_weight:.2f} MS {old_ms:.2f}→{self.ms_weight:.2f} Grad {old_grad:.2f}→{self.grad_weight:.2f}",
+                    'details': f"Sharpness: {avg_sharpness:.1%}"
+                }
         
         self.adjustment_step += 1
         
@@ -267,3 +275,19 @@ class FullAdaptiveSystem:
             'best_loss': self.lr_scheduler.best_loss,
             'plateau_counter': self.lr_scheduler.plateau_counter
         }
+    
+    def get_last_notification(self):
+        """Get and clear last notification from any component"""
+        # Check LR scheduler first
+        if self.lr_scheduler.last_notification:
+            notification = self.lr_scheduler.last_notification
+            self.lr_scheduler.last_notification = None
+            return notification
+        
+        # Then check loss weights
+        if self.loss_weights.last_notification:
+            notification = self.loss_weights.last_notification
+            self.loss_weights.last_notification = None
+            return notification
+        
+        return None

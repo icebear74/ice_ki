@@ -271,6 +271,12 @@ def get_activity_data(model):
     
     return activities
 
+def get_adaptive_status_with_notification(adaptive_system):
+    """Get adaptive status including last notification"""
+    status = adaptive_system.get_status()
+    status['last_notification'] = adaptive_system.get_last_notification()
+    return status
+
 def draw_ui(step, epoch, losses, it_time, activities, cfg, num_images, steps_per_epoch, current_epoch_step, adaptive_status=None, paused=False):
     global last_term_size, last_quality_metrics
     term_size = shutil.get_terminal_size()
@@ -295,13 +301,25 @@ def draw_ui(step, epoch, losses, it_time, activities, cfg, num_images, steps_per
     sys.stdout.write(f" {C_GRAY}╔{'═'*(ui_w-2)}╗{C_RESET}\n")
     status = f"{C_RED}⏸ PAUSIERT (P){C_RESET}" if paused else f"{C_GREEN}▶ RUNNING{C_RESET}"
     print_line(f"{C_BOLD}MISSION CONTROL{C_RESET} │ {status} │ STEP: {step}/{cfg['MAX_STEPS']}")
-    print_line(f"TOTAL PROG: {make_bar(total_prog, ui_w-65)} {total_prog:>5.1f}% │ ETA: {total_eta}")
+    
+    # Combined Progress Line: Overall (left) | Epoch (right)
+    overall_bar_width = (ui_w - 80) // 2  # Shorter bars
+    epoch_bar_width = (ui_w - 80) // 2
+    overall_bar = make_bar(total_prog, overall_bar_width)
+    epoch_bar = make_bar(epoch_prog, epoch_bar_width)
+    print_line(f"TOTAL: {overall_bar} {total_prog:>4.1f}% ETA:{total_eta} │ EPOCH {epoch}: {epoch_bar} {epoch_prog:>4.1f}% ETA:{epoch_eta}")
     sys.stdout.write(f" {C_GRAY}╠{'═'*(ui_w-2)}╣{C_RESET}\n")
     
-    # Epoch Info
-    print_line(f"EPOCH: {epoch:<4} │ STEP: {current_epoch_step}/{steps_per_epoch} │ ETA: {epoch_eta}")
-    print_line(f"EPOCH PROG: {make_bar(epoch_prog, ui_w-65)} {epoch_prog:>5.1f}%")
-    sys.stdout.write(f" {C_GRAY}╠{'═'*(ui_w-2)}╣{C_RESET}\n")
+    # Adaptive Change Notification (if any)
+    if adaptive_status:
+        notification = adaptive_status.get('last_notification')
+        if notification:
+            notif_color = C_YELLOW if notification['type'] in ['plateau', 'divergence'] else C_CYAN
+            step_info = f"@ Step {notification['step']}" if notification['step'] else ""
+            print_line(f"{notif_color}{notification['message']}{C_RESET} {step_info}")
+            if notification.get('details'):
+                print_line(f"  {C_GRAY}{notification['details']}{C_RESET}")
+            sys.stdout.write(f" {C_GRAY}╠{'─'*(ui_w-2)}╣{C_RESET}\n")
     
     # Adaptive Parameters Section
     if adaptive_status:
@@ -642,7 +660,7 @@ def train(old_settings):
                     draw_ui(global_step, epoch, {'l1': 0, 'ms': 0, 'grad': 0, 'total': 0}, 0.1, 
                             get_activity_data(model), cfg, 
                             len(train_ds), steps_per_epoch, (i+1)//cfg["ACCUMULATION_STEPS"], 
-                            adaptive_status=adaptive_system.get_status(), paused=True)
+                            adaptive_status=get_adaptive_status_with_notification(adaptive_system), paused=True)
                     time.sleep(0.5)
                     if sys.stdin in select.select([sys.stdin], [], [], 0)[0]:
                         if sys.stdin.read(1).lower() == 'p': paused = False; s_time = time.time(); s_step = global_step
@@ -689,7 +707,7 @@ def train(old_settings):
                         draw_ui(global_step, epoch, losses_dict, it_t, 
                                 get_activity_data(model), 
                                 cfg, len(train_ds), steps_per_epoch, curr_ep_step,
-                                adaptive_status=adaptive_system.get_status())
+                                adaptive_status=get_adaptive_status_with_notification(adaptive_system))
                     
                     scaler.step(optimizer)
                     scaler.update()
@@ -733,7 +751,7 @@ def train(old_settings):
                         save_config(cfg)
                         it_t = (time.time() - s_time) / max(1, global_step - s_step) if global_step > s_step else 0.1
                         draw_ui(global_step, epoch, losses_dict, it_t, get_activity_data(model), cfg, len(train_ds), steps_per_epoch, curr_ep_step,
-                                adaptive_status=adaptive_system.get_status())
+                                adaptive_status=get_adaptive_status_with_notification(adaptive_system))
                     elif k == 'v': do_val = True
 
                 if (global_step % cfg["VAL_STEP_EVERY"] == 0 and (i+1) % cfg["ACCUMULATION_STEPS"] == 0) or do_val:
@@ -890,7 +908,7 @@ def train(old_settings):
                     
                     # UI NEU ZEICHNEN
                     draw_ui(global_step, epoch, losses_dict, it_t, get_activity_data(model), cfg, len(train_ds), steps_per_epoch, curr_ep_step,
-                            adaptive_status=adaptive_system.get_status())
+                            adaptive_status=get_adaptive_status_with_notification(adaptive_system))
                     
                 if global_step % cfg["SAVE_STEP_EVERY"] == 0 and (i+1) % cfg["ACCUMULATION_STEPS"] == 0:
                     print(f"\n{C_YELLOW}💾 SAVING CHECKPOINT...{C_RESET}")
@@ -915,7 +933,7 @@ def train(old_settings):
                         print(f"{C_GREEN}✓ Milestone: {milestone_path}{C_RESET}\n")
                     
                     draw_ui(global_step, epoch, losses_dict, it_t, get_activity_data(model), cfg, len(train_ds), steps_per_epoch, curr_ep_step,
-                            adaptive_status=adaptive_system.get_status())
+                            adaptive_status=get_adaptive_status_with_notification(adaptive_system))
                     
     except KeyboardInterrupt:
         print("\033[?25h")
