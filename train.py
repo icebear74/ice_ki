@@ -855,7 +855,17 @@ def train(old_settings):
                     print(f"{C_CYAN}{'='*80}{C_RESET}\n")
                     
                     if do_val:
-                        input(f"{C_YELLOW}Press ENTER to continue...{C_RESET}")
+                        # Auto-continue nach 10 Sekunden, oder sofort bei Enter
+                        print(f"{C_YELLOW}Auto-continue in 10s (Press ENTER to skip)...{C_RESET}", end='', flush=True)
+                        start_wait = time.time()
+                        while time.time() - start_wait < 10.0:
+                            if sys.stdin in select.select([sys.stdin], [], [], 0.1)[0]:
+                                sys.stdin.read(1)  # Enter pressed
+                                break
+                            remaining = int(10.0 - (time.time() - start_wait))
+                            if remaining >= 0:
+                                print(f"\r{C_YELLOW}Auto-continue in {remaining}s (Press ENTER to skip)...{C_RESET}", end='', flush=True)
+                        print()  # Neue Zeile
                     
                     model.train()
                     do_val = False
