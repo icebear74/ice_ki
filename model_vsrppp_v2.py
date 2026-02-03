@@ -27,7 +27,7 @@ class VSRTriplePlus_3x(nn.Module):
         # 1. Feature Extraction
         self.feat_extract = nn.Conv2d(3, n_feats, 3, 1, 1)
 
-        # 2. Adaptive Fusion (instead of addition)
+        # 2. Adaptive Fusion (instead of naive addition)
         self.back_fusion = nn.Conv2d(n_feats * 2, n_feats, 1)
         self.forw_fusion = nn.Conv2d(n_feats * 2, n_feats, 1)
         
@@ -36,7 +36,7 @@ class VSRTriplePlus_3x(nn.Module):
         self.forward_trunk  = nn.Sequential(*[HeavyBlock(n_feats) for _ in range(half_blocks)])
         
         # 4. Learnable Temporal Weights
-        self.temp_weight = nn.Parameter(torch.tensor([0.3, 1.0, 0.3]))  # [back, center, forw]
+        self.temp_weight = nn.Parameter(torch.tensor([0.3, 1.0, 0.3]))
         
         # 5. Fusion
         self.fusion = nn.Conv2d(n_feats, n_feats, 3, 1, 1)
@@ -51,10 +51,8 @@ class VSRTriplePlus_3x(nn.Module):
     def forward(self, x):
         b, t, c, h, w = x.size()
         
-        # Bilinear anchor for color stability
         base = F.interpolate(x[:, 2], scale_factor=3, mode='bilinear', align_corners=False)
 
-        # Extract features
         f = self.feat_extract(x.view(-1, c, h, w)).view(b, t, -1, h, w)
 
         # Adaptive fusion instead of addition
@@ -66,11 +64,10 @@ class VSRTriplePlus_3x(nn.Module):
         out = f[:, 2] * w[1] + back * w[0] + forw * w[2]
         out = self.fusion(out)
 
-        # Reconstruction + Base upscale
-        return self.upsample(out) + base
+        return self.upsample(out)
     
     def get_layer_activity(self):
-        """Returns activity levels for all blocks (required by train.py)"""
+        """Returns activity levels for all blocks"""
         acts = []
         for m in self.backward_trunk:
             if isinstance(m, HeavyBlock):
