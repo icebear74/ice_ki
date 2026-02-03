@@ -117,7 +117,7 @@ class DynamicLossWeights:
         self.extreme_sharpness_threshold = 0.70
         
         # Aggressive mode parameters (extracted for easier tuning)
-        self.aggressive_update_frequency = 1  # Every step
+        self.aggressive_update_frequency = 10  # Every 10 steps (5x faster than normal)
         self.aggressive_min_measurements = 2  # Only 2 needed
         self.aggressive_adjustment_factor = 1.15  # Aggressive boost
         self.aggressive_blur_threshold = 0.72  # More aggressive threshold
