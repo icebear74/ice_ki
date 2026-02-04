@@ -204,13 +204,27 @@ class VSRTrainer:
                     self.tb_logger.log_validation_loss(self.global_step, metrics.get('val_loss', 0.0))
                     
                     # Log ALL images (like in original)
-                    if metrics.get('labeled_images') is not None:
-                        for idx, img_tensor in enumerate(metrics['labeled_images']):
-                            self.tb_logger.writer.add_image(
-                                f"Val/sample_{idx:04d}", 
-                                img_tensor, 
-                                self.global_step
-                            )
+                    labeled_images = metrics.get('labeled_images')
+                    if labeled_images is not None and len(labeled_images) > 0:
+                        for idx, img_tensor in enumerate(labeled_images):
+                            try:
+                                # Ensure tensor is in correct format for TensorBoard
+                                if img_tensor.device.type != 'cpu':
+                                    img_tensor = img_tensor.cpu()
+                                if not img_tensor.is_contiguous():
+                                    img_tensor = img_tensor.contiguous()
+                                
+                                self.tb_logger.writer.add_image(
+                                    f"Val/sample_{idx:04d}", 
+                                    img_tensor, 
+                                    self.global_step
+                                )
+                            except Exception as e:
+                                self.train_logger.log_event(
+                                    f"Warning: Failed to log validation image {idx}: {e}"
+                                )
+                                # Continue with other images even if one fails
+                                continue
                     
                     self.train_logger.log_event(
                         f"Step {self.global_step} | Validation | "

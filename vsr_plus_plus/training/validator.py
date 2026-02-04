@@ -176,7 +176,9 @@ class VSRValidator:
             combined = np.concatenate([lr_img, ki_img, gt_img], axis=1)
             
             # Convert back to tensor (CHW format for TensorBoard)
-            combined_tensor = torch.from_numpy(combined).permute(2, 0, 1).float() / 255.0
+            combined_tensor = torch.from_numpy(combined).permute(2, 0, 1)
+            combined_tensor = combined_tensor.float() / 255.0
+            combined_tensor = combined_tensor.contiguous()  # Ensure contiguous memory
             labeled_images.append(combined_tensor)
         
         return {
