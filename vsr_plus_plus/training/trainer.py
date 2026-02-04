@@ -12,6 +12,12 @@ Coordinates all training components:
 import time
 import torch
 
+# ANSI colors
+C_GREEN = "\033[92m"
+C_CYAN = "\033[96m"
+C_YELLOW = "\033[93m"
+C_RESET = "\033[0m"
+
 
 class VSRTrainer:
     """
@@ -213,13 +219,23 @@ class VSRTrainer:
                     break
         
         except KeyboardInterrupt:
+            print("\n")  # New line after ^C
             self.train_logger.log_event("⚠️  Training interrupted by user")
-            self.checkpoint_mgr.save_emergency_checkpoint(
-                self.model, self.optimizer, self.lr_scheduler,
-                self.global_step, self.last_metrics or {},
-                self.train_logger.log_file
-            )
-            self.tb_logger.log_checkpoint(self.global_step, 'emergency')
+            
+            # Ask user if they want to save checkpoint
+            save_choice = input(f"{C_YELLOW}Checkpoint speichern? (y/n): {C_RESET}").lower()
+            
+            if save_choice == 'y':
+                print(f"{C_CYAN}💾 Saving interrupt checkpoint...{C_RESET}")
+                self.checkpoint_mgr.save_emergency_checkpoint(
+                    self.model, self.optimizer, self.lr_scheduler,
+                    self.global_step, self.last_metrics or {},
+                    self.train_logger.log_file
+                )
+                self.tb_logger.log_checkpoint(self.global_step, 'emergency')
+                print(f"{C_GREEN}✅ Checkpoint saved!{C_RESET}")
+            else:
+                print(f"{C_YELLOW}Checkpoint not saved.{C_RESET}")
         
         except Exception as e:
             self.train_logger.log_event(f"❌ Training crashed: {e}")
