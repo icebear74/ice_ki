@@ -110,7 +110,8 @@ class TensorBoardLogger:
     
     def __init__(self, log_dir):
         self.log_dir = log_dir
-        self.writer = SummaryWriter(log_dir)
+        # Log to 'active_run' subdirectory (like original train.py)
+        self.writer = SummaryWriter(log_dir=os.path.join(log_dir, "active_run"))
     
     def log_losses(self, step, losses):
         """Log loss components"""

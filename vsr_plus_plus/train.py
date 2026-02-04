@@ -179,6 +179,9 @@ def main():
         min_lr=config['MIN_LR']
     )
     
+    # Initialize LR for step 0 (warmup start)
+    lr_scheduler.step(0)
+    
     # Create adaptive system
     if config['ADAPTIVE_LOSS_WEIGHTS'] or config['ADAPTIVE_GRAD_CLIP']:
         adaptive_system = AdaptiveSystem(
