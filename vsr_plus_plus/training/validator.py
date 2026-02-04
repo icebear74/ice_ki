@@ -129,6 +129,9 @@ class VSRValidator:
         # Clear progress line
         print()  # New line after progress bar
         
+        # CLEANUP - Force release GPU memory
+        torch.cuda.empty_cache()
+        
         self.model.train()
         
         # Compute averages

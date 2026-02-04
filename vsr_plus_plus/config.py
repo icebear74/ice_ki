@@ -128,6 +128,17 @@ INITIAL_GRAD_CLIP = 1.5
 
 
 # ============================================================================
+# MEMORY OPTIMIZATION
+# ============================================================================
+
+# Enable gradient checkpointing (saves ~30-40% VRAM, ~10% slower)
+USE_GRADIENT_CHECKPOINTING = True
+
+# Validation batch size (set to 1 to save VRAM)
+VAL_BATCH_SIZE = 1
+
+
+# ============================================================================
 # HELPER FUNCTION
 # ============================================================================
 
@@ -177,6 +188,10 @@ def get_config():
         'ADAPTIVE_LOSS_WEIGHTS': ADAPTIVE_LOSS_WEIGHTS,
         'ADAPTIVE_GRAD_CLIP': ADAPTIVE_GRAD_CLIP,
         'INITIAL_GRAD_CLIP': INITIAL_GRAD_CLIP,
+        
+        # Memory optimization
+        'USE_GRADIENT_CHECKPOINTING': USE_GRADIENT_CHECKPOINTING,
+        'VAL_BATCH_SIZE': VAL_BATCH_SIZE,
     }
 
 
@@ -222,6 +237,10 @@ def print_config():
     print(f"  Adaptive Loss Weights:  {ADAPTIVE_LOSS_WEIGHTS}")
     print(f"  Adaptive Grad Clip:     {ADAPTIVE_GRAD_CLIP}")
     print(f"  Initial Grad Clip:      {INITIAL_GRAD_CLIP}")
+    
+    print("\nMEMORY OPTIMIZATION:")
+    print(f"  Gradient Checkpointing: {USE_GRADIENT_CHECKPOINTING}")
+    print(f"  Val Batch Size:         {VAL_BATCH_SIZE}")
     
     print("\n" + "="*80 + "\n")
 

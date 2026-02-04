@@ -182,6 +182,21 @@ class VSRTrainer:
                     self.tb_logger.log_system(self.global_step, avg_time, vram)
                     self.tb_logger.log_gradients(self.global_step, grad_norm, self.last_activities)
                     self.tb_logger.log_lr_phase(self.global_step, lr_phase)
+                    
+                    # Log VRAM usage every 100 steps
+                    if torch.cuda.is_available():
+                        allocated = torch.cuda.memory_allocated() / 1024**3
+                        reserved = torch.cuda.memory_reserved() / 1024**3
+                        max_allocated = torch.cuda.max_memory_allocated() / 1024**3
+                        
+                        # Log to TensorBoard
+                        self.tb_logger.writer.add_scalar('Memory/Allocated_GB', allocated, self.global_step)
+                        self.tb_logger.writer.add_scalar('Memory/Reserved_GB', reserved, self.global_step)
+                        self.tb_logger.writer.add_scalar('Memory/Peak_GB', max_allocated, self.global_step)
+                        
+                        # Print to console every 500 steps
+                        if self.global_step % 500 == 0:
+                            print(f"  📊 VRAM: {allocated:.2f}GB allocated, {reserved:.2f}GB reserved, {max_allocated:.2f}GB peak")
                 
                 # Status file update (every 5 steps)
                 if self.global_step % 5 == 0:
