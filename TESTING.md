@@ -28,7 +28,6 @@ python << 'EOF'
 import torch
 import torch.nn as nn
 from torch.cuda.amp import autocast, GradScaler
-from torchvision.models import vgg19
 from model_vsrppp_v2 import VSRTriplePlus_3x
 import cv2
 import numpy as np
@@ -264,12 +263,14 @@ EOF
 # You'll need to create minimal test data first
 
 python << 'EOF'
+import sys
+sys.path.insert(0, '.')
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.cuda.amp import autocast, GradScaler
-from torchvision.models import vgg19
 from model_vsrppp_v2 import VSRTriplePlus_3x
+from vsr_plus_plus.core.loss import HybridLoss
 
 print("Setting up training components...")
 
@@ -280,24 +281,13 @@ optimizer = optim.AdamW(model.parameters(), lr=1e-4)
 scaler = GradScaler()
 scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=1000)
 
-# Loss functions
-l1_criterion = nn.L1Loss()
-
-class VGGLoss(nn.Module):
-    def __init__(self):
-        super().__init__()
-        vgg = vgg19(pretrained=True).features[:36].eval().to(device)
-        for p in vgg.parameters():
-            p.requires_grad = False
-        self.vgg = vgg
-        self.criterion = nn.L1Loss()
-    
-    def forward(self, x, y):
-        x_vgg = self.vgg(x)
-        y_vgg = self.vgg(y)
-        return self.criterion(x_vgg, y_vgg)
-
-perceptual_criterion = VGGLoss()
+# Loss function (with custom perceptual loss)
+loss_fn = HybridLoss(
+    l1_weight=0.6,
+    ms_weight=0.2,
+    grad_weight=0.2,
+    perceptual_weight=0.0  # Can be enabled with 0.2 if desired
+).to(device)
 
 print("Running test iteration...")
 
@@ -311,9 +301,8 @@ optimizer.zero_grad()
 
 with autocast():
     output = model(lrs)
-    loss_l1 = l1_criterion(output, gt)
-    loss_perc = perceptual_criterion(output, gt)
-    loss = loss_l1 + 0.1 * loss_perc
+    loss_dict = loss_fn(output, gt)
+    loss = loss_dict['total']
 
 scaler.scale(loss).backward()
 scaler.step(optimizer)
@@ -321,8 +310,10 @@ scaler.update()
 scheduler.step()
 
 print(f"✓ Training iteration completed")
-print(f"  L1 Loss: {loss_l1.item():.6f}")
-print(f"  Perceptual Loss: {loss_perc.item():.6f}")
+print(f"  L1 Loss: {loss_dict['l1']:.6f}")
+print(f"  MS Loss: {loss_dict['ms']:.6f}")
+print(f"  Grad Loss: {loss_dict['grad']:.6f}")
+print(f"  Perceptual Loss: {loss_dict['perceptual']:.6f}")
 print(f"  Total Loss: {loss.item():.6f}")
 print(f"  Learning Rate: {scheduler.get_last_lr()[0]:.2e}")
 
@@ -366,17 +357,12 @@ EOF
 - Increase ACCUMULATION_STEPS
 - Ensure other GPU processes are closed
 
-**2. VGG Model Download Issues**
-- VGG19 will auto-download on first run
-- Requires internet connection
-- Downloads to `~/.cache/torch/hub/checkpoints/`
-
-**3. Dataset Not Found**
+**2. Dataset Not Found**
 - Verify dataset paths in train.py
 - Ensure directory structure is correct
 - Check read permissions
 
-**4. Training Crashes**
+**3. Training Crashes**
 - Check VRAM usage
 - Verify CUDA compatibility
 - Update PyTorch to latest version
@@ -389,7 +375,7 @@ Before starting full training:
 - [ ] All import tests passed
 - [ ] Model instantiation works
 - [ ] Mixed precision works (if using CUDA)
-- [ ] VGG perceptual loss works
+- [ ] Custom perceptual loss works
 - [ ] Data augmentation verified
 - [ ] Checkpoint save/load works
 - [ ] Dataset paths configured correctly

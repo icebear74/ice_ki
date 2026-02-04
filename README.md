@@ -12,9 +12,10 @@ This repository implements **Option B** comprehensive training improvements for 
 - Maintains training quality while improving speed
 
 ### 2. **Perceptual Loss**
-- VGG19-based perceptual loss (features[:36])
-- Combined with L1 loss: `Total = L1 + 0.1 * Perceptual`
-- Improves visual quality and texture preservation
+- Custom self-learned feature extractor (139K params)
+- Multi-scale features (3 stages: full, 1/2, 1/4 resolution)
+- 100% trainable - learns discriminative features from scratch
+- No pretrained weights or external dependencies
 
 ### 3. **Enhanced Model Architecture** (`model_vsrppp_v2.py`)
 - **Adaptive Fusion**: Learnable 1x1 convolutions instead of naive addition
@@ -204,7 +205,7 @@ tensorboard --logdir /mnt/data/training/Universal/Mastermodell/Learn/logs/active
 
 **Available Metrics:**
 - `Training/Loss_L1`: L1 reconstruction loss
-- `Training/Loss_Perceptual`: VGG perceptual loss
+- `Training/Loss_Perceptual`: Custom perceptual loss (self-learned features)
 - `Training/Loss_Total`: Combined loss
 - `Training/LearningRate`: Current learning rate
 - `Layers/Block_XX`: Individual layer activities
@@ -262,6 +263,6 @@ After pretraining (100k steps), the model is ready for fine-tuning:
 
 - Model: VSR+++ (Video Super Resolution Triple Plus)
 - Base Architecture: Residual learning with temporal propagation
-- Perceptual Loss: VGG19 feature matching
+- Perceptual Loss: Custom self-learned feature extractor (100% trainable)
 - Training: Mixed Precision with gradient accumulation
 
