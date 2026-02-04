@@ -216,6 +216,16 @@ def main():
     # Set start step
     trainer.set_start_step(start_step)
     
+    # TensorBoard information
+    print("\n" + "="*80)
+    print("📊 TENSORBOARD LOGGING")
+    print("="*80)
+    print(f"TensorBoard logs: {log_dir}")
+    print("\nTo view training progress in real-time, open a new terminal and run:")
+    print(f"  tensorboard --logdir {log_dir} --bind_all")
+    print("\nThen open your browser to: http://localhost:6006")
+    print("="*80 + "\n")
+    
     # Start training
     print("="*80)
     print("🚀 Starting training...")

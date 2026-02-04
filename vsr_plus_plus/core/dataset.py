@@ -33,11 +33,34 @@ class VSRDataset(Dataset):
         self.gt_dir = os.path.join(dataset_root, mode, 'GT')
         self.lr_dir = os.path.join(dataset_root, mode, 'LR')
         
-        # Get file list
-        self.gt_files = sorted([f for f in os.listdir(self.gt_dir) if f.endswith('.png')])
+        # Get all GT files
+        all_gt_files = sorted([f for f in os.listdir(self.gt_dir) if f.endswith('.png')])
+        
+        if not all_gt_files:
+            raise ValueError(f"No PNG files found in {self.gt_dir}")
+        
+        # Filter to only keep GT files that have corresponding LR files
+        self.gt_files = []
+        skipped_files = []
+        
+        for gt_file in all_gt_files:
+            lr_path = os.path.join(self.lr_dir, gt_file)
+            if os.path.exists(lr_path):
+                self.gt_files.append(gt_file)
+            else:
+                skipped_files.append(gt_file)
+        
+        # Report skipped files
+        if skipped_files:
+            print(f"\n⚠️  Skipped {len(skipped_files)} GT files without matching LR files in {mode}:")
+            for i, f in enumerate(skipped_files[:10]):  # Show first 10
+                print(f"  - {f}")
+            if len(skipped_files) > 10:
+                print(f"  ... and {len(skipped_files) - 10} more")
+            print()
         
         if not self.gt_files:
-            raise ValueError(f"No PNG files found in {self.gt_dir}")
+            raise ValueError(f"No valid GT-LR pairs found in {self.gt_dir} and {self.lr_dir}")
         
         # Validate a few samples
         self._validate_samples()
@@ -46,29 +69,42 @@ class VSRDataset(Dataset):
         """Validate dataset integrity by checking a few samples"""
         samples_to_check = min(5, len(self.gt_files))
         
+        issues_found = []
+        
         for i in range(samples_to_check):
             gt_path = os.path.join(self.gt_dir, self.gt_files[i])
             lr_path = os.path.join(self.lr_dir, self.gt_files[i])
             
-            # Check if files exist
+            # Check if files exist (should exist since we filtered them)
             if not os.path.exists(gt_path):
-                raise FileNotFoundError(f"GT file not found: {gt_path}")
+                issues_found.append(f"GT file not found: {gt_path}")
+                continue
             if not os.path.exists(lr_path):
-                raise FileNotFoundError(f"LR file not found: {lr_path}")
+                issues_found.append(f"LR file not found: {lr_path}")
+                continue
             
             # Load and validate shapes
             gt = cv2.imread(gt_path)
             lr = cv2.imread(lr_path)
             
             if gt is None:
-                raise ValueError(f"Corrupted GT image: {gt_path}")
+                issues_found.append(f"Corrupted GT image: {gt_path}")
+                continue
             if lr is None:
-                raise ValueError(f"Corrupted LR image: {lr_path}")
+                issues_found.append(f"Corrupted LR image: {lr_path}")
+                continue
             
             if gt.shape != (540, 540, 3):
-                raise ValueError(f"Invalid GT shape {gt.shape}, expected (540, 540, 3): {gt_path}")
+                issues_found.append(f"Invalid GT shape {gt.shape}, expected (540, 540, 3): {gt_path}")
             if lr.shape != (900, 180, 3):
-                raise ValueError(f"Invalid LR shape {lr.shape}, expected (900, 180, 3): {lr_path}")
+                issues_found.append(f"Invalid LR shape {lr.shape}, expected (900, 180, 3): {lr_path}")
+        
+        # Report issues as warnings instead of errors
+        if issues_found:
+            print(f"\n⚠️  Dataset validation warnings in {self.mode}:")
+            for issue in issues_found:
+                print(f"  - {issue}")
+            print()
     
     def __len__(self):
         return len(self.gt_files)
