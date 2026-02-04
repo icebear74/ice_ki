@@ -256,6 +256,17 @@ class VSRTrainer:
                             print(f"✅ Successfully logged all {logged_count} validation images to TensorBoard")
                         else:
                             print(f"⚠️  Logged {logged_count}/{len(labeled_images)} images ({failed_count} failed)")
+                        
+                        # CRITICAL: Remove labeled_images from metrics to prevent memory leak
+                        # These images can be 2GB+ and were being held in self.last_metrics
+                        del labeled_images
+                        metrics.pop('labeled_images', None)
+                        
+                        # Force garbage collection and GPU memory cleanup
+                        import gc
+                        gc.collect()
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
                     else:
                         print("⚠️  No labeled images to log to TensorBoard")
                     
@@ -439,7 +450,6 @@ class VSRTrainer:
         self.train_logger.log_event(f"Manual validation triggered at step {self.global_step}")
         
         metrics = self.validator.validate(self.global_step)
-        self.last_metrics = metrics
         
         # Log to TensorBoard
         self.tb_logger.log_quality(self.global_step, metrics)
@@ -447,13 +457,27 @@ class VSRTrainer:
         self.tb_logger.log_validation_loss(self.global_step, metrics.get('val_loss', 0.0))
         
         # Log ALL images (like in original)
-        if metrics.get('labeled_images') is not None:
-            for idx, img_tensor in enumerate(metrics['labeled_images']):
+        labeled_images = metrics.get('labeled_images')
+        if labeled_images is not None:
+            for idx, img_tensor in enumerate(labeled_images):
                 self.tb_logger.writer.add_image(
                     f"Val/sample_{idx:04d}", 
                     img_tensor, 
                     self.global_step
                 )
+            
+            # CRITICAL: Remove labeled_images to prevent memory leak
+            del labeled_images
+            metrics.pop('labeled_images', None)
+            
+            # Force cleanup
+            import gc
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        
+        # Store metrics WITHOUT labeled_images
+        self.last_metrics = metrics
         
         self.train_logger.log_event(
             f"Manual Validation | KI Quality: {metrics['ki_quality']*100:.1f}%"
