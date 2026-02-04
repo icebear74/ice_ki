@@ -411,7 +411,7 @@ def _draw_activity_display(activities, display_mode, available_lines, ui_w,
         backward_overall = int(np.mean([act for _, act, _, _ in backward])) if backward else 0
         forward_overall = int(np.mean([act for _, act, _, _ in forward])) if forward else 0
         
-        print_line(f"{C_BOLD}🔥 BACKWARD TRUNK{C_RESET} - Overall: {make_bar(backward_overall, BAR_LENGTH)} {backward_overall}%", ui_w)
+        print_line(f"{C_BOLD}🔥 BACKWARD TRUNK{C_RESET} - Overall: {make_bar(backward_overall, bar_width_single)} {backward_overall}%", ui_w)
         print_separator(ui_w, 'single')
         
         if available_lines >= num_activities:
@@ -427,7 +427,7 @@ def _draw_activity_display(activities, display_mode, available_lines, ui_w,
                 print_two_columns(left_str, right_str, ui_w)
         
         print_separator(ui_w, 'double')
-        print_line(f"{C_BOLD}⚡ FORWARD TRUNK{C_RESET} - Overall: {make_bar(forward_overall, BAR_LENGTH)} {forward_overall}%", ui_w)
+        print_line(f"{C_BOLD}⚡ FORWARD TRUNK{C_RESET} - Overall: {make_bar(forward_overall, bar_width_single)} {forward_overall}%", ui_w)
         print_separator(ui_w, 'single')
         
         if available_lines >= num_activities:
@@ -451,7 +451,7 @@ def _draw_activity_display(activities, display_mode, available_lines, ui_w,
         backward_overall = int(np.mean([act for _, act, _, _ in backward])) if backward else 0
         forward_overall = int(np.mean([act for _, act, _, _ in forward])) if forward else 0
         
-        print_line(f"{C_BOLD}🔥 BACKWARD TRUNK (sorted){C_RESET} - Overall: {make_bar(backward_overall, BAR_LENGTH)} {backward_overall}%", ui_w)
+        print_line(f"{C_BOLD}🔥 BACKWARD TRUNK (sorted){C_RESET} - Overall: {make_bar(backward_overall, bar_width_single)} {backward_overall}%", ui_w)
         print_separator(ui_w, 'single')
         
         if available_lines >= num_activities:
@@ -466,7 +466,7 @@ def _draw_activity_display(activities, display_mode, available_lines, ui_w,
                 print_two_columns(left_str, right_str, ui_w)
         
         print_separator(ui_w, 'double')
-        print_line(f"{C_BOLD}⚡ FORWARD TRUNK (sorted){C_RESET} - Overall: {make_bar(forward_overall, BAR_LENGTH)} {forward_overall}%", ui_w)
+        print_line(f"{C_BOLD}⚡ FORWARD TRUNK (sorted){C_RESET} - Overall: {make_bar(forward_overall, bar_width_single)} {forward_overall}%", ui_w)
         print_separator(ui_w, 'single')
         
         if available_lines >= num_activities:
