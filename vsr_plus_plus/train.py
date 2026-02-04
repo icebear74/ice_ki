@@ -167,7 +167,8 @@ def main():
         ms_weight=config['MS_WEIGHT'],
         grad_weight=config['GRAD_WEIGHT'],
         perceptual_weight=config.get('PERCEPTUAL_WEIGHT', 0.0)
-    )
+    ).to(device)  # FIXED: Move loss function to same device as model
+    
     
     # Create optimizer with layer-wise learning rates
     # Give Final Fusion layer 10x higher learning rate to activate it
