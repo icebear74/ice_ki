@@ -309,7 +309,20 @@ class VSRTrainer:
                         print(f"  {C_BOLD}QUALITY SCORES:{C_RESET}")
                         print(f"  LR Quality:     {C_YELLOW}{metrics['lr_quality']*100:.1f}%{C_RESET}  (PSNR: {metrics['lr_psnr']:.2f} dB, SSIM: {metrics['lr_ssim']*100:.1f}%)")
                         print(f"  KI Quality:     {C_GREEN}{metrics['ki_quality']*100:.1f}%{C_RESET}  (PSNR: {metrics['ki_psnr']:.2f} dB, SSIM: {metrics['ki_ssim']*100:.1f}%)")
-                        print(f"  Improvement:    {C_BOLD}{C_GREEN}+{metrics['improvement']*100:.1f}%{C_RESET}")
+                        
+                        # Display improvement (sum of per-image KI-LR)
+                        imp = metrics['improvement'] * 100
+                        imp_sign = "+" if imp >= 0 else ""
+                        imp_color = C_GREEN if imp >= 0 else C_RED
+                        print(f"  Improvement (Sum): {C_BOLD}{imp_color}{imp_sign}{imp:.1f}%{C_RESET}")
+                        
+                        # Display GT differences if available
+                        if 'ki_to_gt' in metrics and 'lr_to_gt' in metrics:
+                            ki_gt = metrics['ki_to_gt'] * 100
+                            lr_gt = metrics['lr_to_gt'] * 100
+                            print(f"  KI to GT (Sum): {C_CYAN}{ki_gt:+.1f}%{C_RESET}")
+                            print(f"  LR to GT (Sum): {C_CYAN}{lr_gt:+.1f}%{C_RESET}")
+                        
                         print(f"{C_CYAN}{'='*80}{C_RESET}\n")
                         
                         # Auto-continue timer (10 seconds)
@@ -349,7 +362,7 @@ class VSRTrainer:
                 if self.global_step >= self.config.get('MAX_STEPS', 100000):
                     return
     
-    def _update_gui(self, epoch, loss_dict, avg_time, steps_per_epoch, current_epoch_step, paused=False):
+    def _update_gui(self, epoch=1, loss_dict=None, avg_time=0.1, steps_per_epoch=1, current_epoch_step=0, paused=False):
         """Update the GUI display"""
         # Get activities
         activities = get_activity_data(self.model)
@@ -380,6 +393,11 @@ class VSRTrainer:
                 'ki_quality': self.last_metrics.get('ki_quality', 0.0) * 100,
                 'improvement': self.last_metrics.get('improvement', 0.0) * 100,
             }
+            # Add GT difference metrics if available
+            if 'ki_to_gt' in self.last_metrics:
+                quality_metrics['ki_to_gt'] = self.last_metrics.get('ki_to_gt', 0.0) * 100
+            if 'lr_to_gt' in self.last_metrics:
+                quality_metrics['lr_to_gt'] = self.last_metrics.get('lr_to_gt', 0.0) * 100
         
         # Adaptive status
         adaptive_status = self.adaptive_system.get_status()

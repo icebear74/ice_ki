@@ -230,8 +230,11 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
         lr_quality = quality_metrics.get('lr_quality', 0.0)
         ki_quality = quality_metrics.get('ki_quality', 0.0)
         improvement = quality_metrics.get('improvement', 0.0)
+        ki_to_gt = quality_metrics.get('ki_to_gt', None)
+        lr_to_gt = quality_metrics.get('lr_to_gt', None)
     else:
         lr_quality = ki_quality = improvement = 0.0
+        ki_to_gt = lr_to_gt = None
     
     # Adaptive status
     if adaptive_status:
@@ -297,7 +300,7 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
     }.get(lr_phase, lr_phase)
     
     print_two_columns(
-        f"LR: {C_GREEN}{current_lr:.2e}{C_RESET} ({lr_phase_str})",
+        f"LR: {C_GREEN}{current_lr:.6f}{C_RESET} ({lr_phase_str})",
         f"Speed: {C_CYAN}{it_time:.2f}s/it{C_RESET}",
         ui_w
     )
@@ -319,10 +322,20 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
             ui_w
         )
         
-        # Fix: Don't add extra '+' if improvement is negative (already has '-')
+        # Improvement (Sum of per-image KI-LR differences)
         imp_sign = "+" if improvement >= 0 else ""
         imp_color = C_GREEN if improvement >= 0 else C_RED
-        print_line(f"Improvement: {C_BOLD}{imp_color}{imp_sign}{improvement:.1f}%{C_RESET}", ui_w)
+        print_line(f"Improvement (Sum): {C_BOLD}{imp_color}{imp_sign}{improvement:.1f}%{C_RESET}", ui_w)
+        
+        # Display GT differences if available
+        if ki_to_gt is not None and lr_to_gt is not None:
+            ki_gt_sign = "+" if ki_to_gt >= 0 else ""
+            lr_gt_sign = "+" if lr_to_gt >= 0 else ""
+            print_two_columns(
+                f"KI to GT: {C_CYAN}{ki_gt_sign}{ki_to_gt:.1f}%{C_RESET}",
+                f"LR to GT: {C_CYAN}{lr_gt_sign}{lr_to_gt:.1f}%{C_RESET}",
+                ui_w
+            )
         
         print_separator(ui_w, 'double')
     
