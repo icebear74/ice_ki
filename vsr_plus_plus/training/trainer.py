@@ -349,7 +349,7 @@ class VSRTrainer:
                 if self.global_step >= self.config.get('MAX_STEPS', 100000):
                     return
     
-    def _update_gui(self, epoch, loss_dict, avg_time, steps_per_epoch, current_epoch_step, paused=False):
+    def _update_gui(self, epoch=1, loss_dict=None, avg_time=0.1, steps_per_epoch=1, current_epoch_step=0, paused=False):
         """Update the GUI display"""
         # Get activities
         activities = get_activity_data(self.model)

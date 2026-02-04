@@ -113,16 +113,23 @@ class TensorBoardLogger:
         # Log to 'active_run' subdirectory (like original train.py)
         self.writer = SummaryWriter(log_dir=os.path.join(log_dir, "active_run"))
     
+    def _to_float(self, value):
+        """Convert value to float, handling Tensors"""
+        import torch
+        if isinstance(value, torch.Tensor):
+            return value.item()
+        return float(value) if value is not None else 0.0
+    
     def log_losses(self, step, losses):
         """Log loss components"""
-        self.writer.add_scalar('Loss/L1', losses.get('l1', 0), step)
-        self.writer.add_scalar('Loss/MS', losses.get('ms', 0), step)
-        self.writer.add_scalar('Loss/Grad', losses.get('grad', 0), step)
-        self.writer.add_scalar('Loss/Total', losses.get('total', 0) if isinstance(losses.get('total'), (int, float)) else 0, step)
+        self.writer.add_scalar('Loss/L1', self._to_float(losses.get('l1', 0)), step)
+        self.writer.add_scalar('Loss/MS', self._to_float(losses.get('ms', 0)), step)
+        self.writer.add_scalar('Loss/Grad', self._to_float(losses.get('grad', 0)), step)
+        self.writer.add_scalar('Loss/Total', self._to_float(losses.get('total', 0)), step)
     
     def log_lr(self, step, lr):
         """Log learning rate"""
-        self.writer.add_scalar('Training/LearningRate', lr, step)
+        self.writer.add_scalar('Training/LearningRate', self._to_float(lr), step)
     
     def log_adaptive(self, step, adaptive_info):
         """Log adaptive system info"""
@@ -130,45 +137,45 @@ class TensorBoardLogger:
             return
         
         l1_w, ms_w, grad_w = adaptive_info.get('loss_weights', (0.6, 0.2, 0.2))
-        self.writer.add_scalar('Adaptive/L1_Weight', l1_w, step)
-        self.writer.add_scalar('Adaptive/MS_Weight', ms_w, step)
-        self.writer.add_scalar('Adaptive/Grad_Weight', grad_w, step)
-        self.writer.add_scalar('Adaptive/GradientClip', adaptive_info.get('grad_clip', 1.5), step)
+        self.writer.add_scalar('Adaptive/L1_Weight', self._to_float(l1_w), step)
+        self.writer.add_scalar('Adaptive/MS_Weight', self._to_float(ms_w), step)
+        self.writer.add_scalar('Adaptive/Grad_Weight', self._to_float(grad_w), step)
+        self.writer.add_scalar('Adaptive/GradientClip', self._to_float(adaptive_info.get('grad_clip', 1.5)), step)
         self.writer.add_scalar('Adaptive/AggressiveMode', 1 if adaptive_info.get('aggressive_mode') else 0, step)
         
         # Add BestLoss and PlateauCounter (like in original)
         if 'best_loss' in adaptive_info:
-            self.writer.add_scalar('Adaptive/BestLoss', adaptive_info['best_loss'], step)
+            self.writer.add_scalar('Adaptive/BestLoss', self._to_float(adaptive_info['best_loss']), step)
         if 'plateau_counter' in adaptive_info:
-            self.writer.add_scalar('Adaptive/PlateauCounter', adaptive_info['plateau_counter'], step)
+            self.writer.add_scalar('Adaptive/PlateauCounter', self._to_float(adaptive_info['plateau_counter']), step)
     
     def log_quality(self, step, metrics):
         """Log quality metrics"""
         if not metrics:
             return
         
-        self.writer.add_scalar('Quality/LR_Quality', metrics.get('lr_quality', 0), step)
-        self.writer.add_scalar('Quality/KI_Quality', metrics.get('ki_quality', 0), step)
-        self.writer.add_scalar('Quality/Improvement', metrics.get('improvement', 0), step)
+        self.writer.add_scalar('Quality/LR_Quality', self._to_float(metrics.get('lr_quality', 0)), step)
+        self.writer.add_scalar('Quality/KI_Quality', self._to_float(metrics.get('ki_quality', 0)), step)
+        self.writer.add_scalar('Quality/Improvement', self._to_float(metrics.get('improvement', 0)), step)
     
     def log_metrics(self, step, metrics):
         """Log PSNR/SSIM metrics"""
         if not metrics:
             return
         
-        self.writer.add_scalar('Metrics/LR_PSNR', metrics.get('lr_psnr', 0), step)
-        self.writer.add_scalar('Metrics/LR_SSIM', metrics.get('lr_ssim', 0), step)
-        self.writer.add_scalar('Metrics/KI_PSNR', metrics.get('ki_psnr', 0), step)
-        self.writer.add_scalar('Metrics/KI_SSIM', metrics.get('ki_ssim', 0), step)
+        self.writer.add_scalar('Metrics/LR_PSNR', self._to_float(metrics.get('lr_psnr', 0)), step)
+        self.writer.add_scalar('Metrics/LR_SSIM', self._to_float(metrics.get('lr_ssim', 0)), step)
+        self.writer.add_scalar('Metrics/KI_PSNR', self._to_float(metrics.get('ki_psnr', 0)), step)
+        self.writer.add_scalar('Metrics/KI_SSIM', self._to_float(metrics.get('ki_ssim', 0)), step)
     
     def log_system(self, step, speed, vram):
         """Log system metrics"""
-        self.writer.add_scalar('System/Speed_s_per_iter', speed, step)
-        self.writer.add_scalar('System/VRAM_GB', vram, step)
+        self.writer.add_scalar('System/Speed_s_per_iter', self._to_float(speed), step)
+        self.writer.add_scalar('System/VRAM_GB', self._to_float(vram), step)
     
     def log_gradients(self, step, grad_norm, activities):
         """Log gradient norms and activity"""
-        self.writer.add_scalar('Gradients/TotalNorm', grad_norm, step)
+        self.writer.add_scalar('Gradients/TotalNorm', self._to_float(grad_norm), step)
         
         if activities:
             back_acts = activities.get('backward_trunk', [])
@@ -220,7 +227,7 @@ class TensorBoardLogger:
     
     def log_validation_loss(self, step, val_loss):
         """Log validation loss (like in original)"""
-        self.writer.add_scalar('Validation/Loss_Total', val_loss, step)
+        self.writer.add_scalar('Validation/Loss_Total', self._to_float(val_loss), step)
     
     def close(self):
         """Close writer"""

@@ -297,7 +297,7 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
     }.get(lr_phase, lr_phase)
     
     print_two_columns(
-        f"LR: {C_GREEN}{current_lr:.2e}{C_RESET} ({lr_phase_str})",
+        f"LR: {C_GREEN}{current_lr:.6f}{C_RESET} ({lr_phase_str})",
         f"Speed: {C_CYAN}{it_time:.2f}s/it{C_RESET}",
         ui_w
     )
