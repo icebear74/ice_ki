@@ -83,8 +83,11 @@ class VSRDataset(Dataset):
         issues_found = []
         
         for i in range(samples_to_check):
-            gt_path = os.path.join(self.gt_dir, self.gt_files[i])
-            lr_path = os.path.join(self.lr_dir, self.gt_files[i])
+            gt_file = self.gt_files[i]
+            gt_path = os.path.join(self.gt_dir, gt_file)
+            # Use the correct LR directory from lr_paths mapping
+            lr_dir = self.lr_paths[gt_file]
+            lr_path = os.path.join(lr_dir, gt_file)
             
             # Check if files exist (should exist since we filtered them)
             if not os.path.exists(gt_path):
@@ -128,8 +131,11 @@ class VSRDataset(Dataset):
             lr_stack: [5, 3, 180, 180] - 5 LR frames
             gt: [3, 540, 540] - GT frame
         """
-        gt_path = os.path.join(self.gt_dir, self.gt_files[idx])
-        lr_path = os.path.join(self.lr_dir, self.gt_files[idx])
+        gt_file = self.gt_files[idx]
+        gt_path = os.path.join(self.gt_dir, gt_file)
+        # Use the correct LR directory from lr_paths mapping
+        lr_dir = self.lr_paths[gt_file]
+        lr_path = os.path.join(lr_dir, gt_file)
         
         # Load images
         gt = cv2.imread(gt_path)
