@@ -8,6 +8,8 @@ import sys
 import time
 import torch
 import torch.nn.functional as F
+import numpy as np
+import cv2
 from vsr_plus_plus.utils.metrics import calculate_psnr, calculate_ssim, quality_to_percent
 from vsr_plus_plus.utils.ui_terminal import C_GREEN, C_GRAY, C_CYAN, C_RESET
 
@@ -59,10 +61,12 @@ class VSRValidator:
         
         num_samples = 0
         
-        # For image logging (save first batch)
-        first_lr = None
-        first_ki = None
-        first_gt = None
+        # For image logging (save ALL samples like in original)
+        all_lr_images = []
+        all_ki_images = []
+        all_gt_images = []
+        all_lr_qualities = []
+        all_ki_qualities = []
         
         val_total = len(self.val_loader)
         val_start = time.time()
@@ -105,13 +109,18 @@ class VSRValidator:
                     total_ki_psnr += ki_psnr
                     total_ki_ssim += ki_ssim
                     
+                    # Calculate quality percentages
+                    lr_qual = quality_to_percent(lr_psnr, lr_ssim)
+                    ki_qual = quality_to_percent(ki_psnr, ki_ssim)
+                    
+                    # Store images for ALL samples (like in original)
+                    all_lr_images.append(lr_upscaled[i].cpu())
+                    all_ki_images.append(ki_output[i].cpu())
+                    all_gt_images.append(gt[i].cpu())
+                    all_lr_qualities.append(lr_qual)
+                    all_ki_qualities.append(ki_qual)
+                    
                     num_samples += 1
-                
-                # Save first batch for visualization
-                if batch_idx == 0:
-                    first_lr = lr_upscaled[0].cpu()
-                    first_ki = ki_output[0].cpu()
-                    first_gt = gt[0].cpu()
                 
                 # Limit validation samples
                 if num_samples >= 100:
@@ -134,6 +143,46 @@ class VSRValidator:
         ki_quality = quality_to_percent(avg_ki_psnr, avg_ki_ssim)
         improvement = ki_quality - lr_quality
         
+        # Add labels to images (like in original train.py)
+        labeled_images = []
+        for idx in range(len(all_lr_images)):
+            # Convert to numpy for cv2
+            lr_img = all_lr_images[idx].permute(1, 2, 0).numpy()
+            ki_img = all_ki_images[idx].permute(1, 2, 0).numpy()
+            gt_img = all_gt_images[idx].permute(1, 2, 0).numpy()
+            
+            # Clip and convert to 0-255
+            lr_img = np.clip(lr_img * 255, 0, 255).astype(np.uint8)
+            ki_img = np.clip(ki_img * 255, 0, 255).astype(np.uint8)
+            gt_img = np.clip(gt_img * 255, 0, 255).astype(np.uint8)
+            
+            # Add text labels (like original)
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 1.5
+            thickness = 3
+            
+            # LR label
+            text = f"LR {all_lr_qualities[idx]*100:.1f}%"
+            cv2.putText(lr_img, text, (10, 40), font, font_scale, (255, 255, 255), thickness)
+            cv2.putText(lr_img, text, (10, 40), font, font_scale, (0, 255, 0), thickness-1)
+            
+            # KI label
+            text = f"KI {all_ki_qualities[idx]*100:.1f}%"
+            cv2.putText(ki_img, text, (10, 40), font, font_scale, (255, 255, 255), thickness)
+            cv2.putText(ki_img, text, (10, 40), font, font_scale, (0, 255, 255), thickness-1)
+            
+            # GT label
+            text = "GT 100.0%"
+            cv2.putText(gt_img, text, (10, 40), font, font_scale, (255, 255, 255), thickness)
+            cv2.putText(gt_img, text, (10, 40), font, font_scale, (255, 0, 0), thickness-1)
+            
+            # Concatenate side by side: LR | KI | GT
+            combined = np.concatenate([lr_img, ki_img, gt_img], axis=1)
+            
+            # Convert back to tensor (CHW format for TensorBoard)
+            combined_tensor = torch.from_numpy(combined).permute(2, 0, 1).float() / 255.0
+            labeled_images.append(combined_tensor)
+        
         return {
             'val_loss': avg_loss,
             'lr_quality': lr_quality,
@@ -143,7 +192,5 @@ class VSRValidator:
             'lr_ssim': avg_lr_ssim,
             'ki_psnr': avg_ki_psnr,
             'ki_ssim': avg_ki_ssim,
-            'sample_lr': first_lr,
-            'sample_ki': first_ki,
-            'sample_gt': first_gt
+            'labeled_images': labeled_images  # ALL images with labels
         }
