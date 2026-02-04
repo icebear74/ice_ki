@@ -121,10 +121,6 @@ class VSRValidator:
                     all_ki_qualities.append(ki_qual)
                     
                     num_samples += 1
-                
-                # Limit validation samples
-                if num_samples >= 100:
-                    break
         
         # Clear progress line
         print()  # New line after progress bar
