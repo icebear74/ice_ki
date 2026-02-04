@@ -16,6 +16,9 @@ import sys
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
+import subprocess
+import socket
+import time
 
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -32,6 +35,49 @@ from vsr_plus_plus.systems.adaptive_system import AdaptiveSystem
 
 # Import manual configuration
 import vsr_plus_plus.config as cfg
+
+# ANSI colors
+C_GREEN = "\033[92m"
+C_CYAN = "\033[96m"
+C_RED = "\033[91m"
+C_YELLOW = "\033[93m"
+C_RESET = "\033[0m"
+
+
+def is_tensorboard_running(port=6006):
+    """Check if TensorBoard is already running on the specified port"""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        result = sock.connect_ex(('localhost', port))
+        sock.close()
+        return result == 0
+    except:
+        return False
+
+
+def start_tensorboard(log_dir, port=6006):
+    """Start TensorBoard subprocess"""
+    try:
+        # Kill any existing tensorboard processes
+        subprocess.run(['pkill', '-f', 'tensorboard'], stderr=subprocess.DEVNULL)
+        time.sleep(1)
+        
+        # Start new tensorboard
+        cmd = ['tensorboard', f'--logdir={log_dir}', f'--port={port}', '--bind_all', '--reload_interval=5']
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
+        # Wait for it to start (max 5 seconds)
+        for _ in range(10):
+            time.sleep(0.5)
+            if is_tensorboard_running(port):
+                print(f"{C_GREEN}✓ TensorBoard started on http://localhost:{port}{C_RESET}")
+                return True
+        
+        print(f"{C_YELLOW}⚠ TensorBoard started but not responding yet on port {port}{C_RESET}")
+        return True
+    except Exception as e:
+        print(f"{C_RED}✗ Failed to start TensorBoard: {e}{C_RESET}")
+        return False
 
 
 def main():
@@ -83,6 +129,16 @@ def main():
                 print("Starting fresh (checkpoint will not be loaded)")
         else:
             print("⚠️  No checkpoint found, starting fresh")
+    
+    # Start TensorBoard
+    log_dir = os.path.join(DATA_ROOT, "logs")
+    print(f"\n{C_CYAN}Checking TensorBoard...{C_RESET}")
+    if not is_tensorboard_running():
+        print(f"{C_YELLOW}Starting TensorBoard...{C_RESET}")
+        start_tensorboard(log_dir)
+    else:
+        print(f"{C_GREEN}✓ TensorBoard already running{C_RESET}")
+    print()
     
     # Extract parameters from config
     n_feats = config['N_FEATS']
@@ -215,16 +271,6 @@ def main():
     
     # Set start step
     trainer.set_start_step(start_step)
-    
-    # TensorBoard information
-    print("\n" + "="*80)
-    print("📊 TENSORBOARD LOGGING")
-    print("="*80)
-    print(f"TensorBoard logs: {log_dir}")
-    print("\nTo view training progress in real-time, open a new terminal and run:")
-    print(f"  tensorboard --logdir {log_dir} --bind_all")
-    print("\nThen open your browser to: http://localhost:6006")
-    print("="*80 + "\n")
     
     # Start training
     print("="*80)
