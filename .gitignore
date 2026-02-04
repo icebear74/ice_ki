@@ -54,6 +54,7 @@ runs/
 # Local configuration
 train_config.json
 activate.sh
+vsr_plus_plus/config.py
 
 # Temporary files
 *.tmp
