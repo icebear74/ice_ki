@@ -318,10 +318,6 @@ class VSRTrainer:
                     
                     # Redraw UI after save
                     self._update_gui()
-                        self.train_logger.log_file
-                    )
-                    self.tb_logger.log_checkpoint(self.global_step, 'regular')
-                    self.train_logger.log_event(f"Regular checkpoint saved at step {self.global_step}")
                 
                 # Check if training complete
                 if self.global_step >= self.config.get('MAX_STEPS', 100000):
