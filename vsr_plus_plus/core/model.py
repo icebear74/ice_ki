@@ -36,6 +36,21 @@ class ResidualBlock(nn.Module):
         return out
 
 
+class TrackedConv2d(nn.Module):
+    """Conv2d wrapper with activity tracking (for fusion layers)"""
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+        self.conv = nn.Conv2d(*args, **kwargs)
+        self.last_activity = 0.0
+    
+    def forward(self, x):
+        out = self.conv(x)
+        # Track activity
+        self.last_activity = out.detach().abs().mean().item()
+        return out
+
+
 class VSRBidirectional_3x(nn.Module):
     """
     Bidirectional VSR model with Frame-3 initialization
@@ -58,9 +73,9 @@ class VSRBidirectional_3x(nn.Module):
         # 1. Feature Extraction
         self.feat_extract = nn.Conv2d(3, n_feats, 3, 1, 1)
         
-        # 2. Fusion layers for combining features
-        self.backward_fuse = nn.Conv2d(n_feats * 2, n_feats, 1)
-        self.forward_fuse = nn.Conv2d(n_feats * 2, n_feats, 1)
+        # 2. Fusion layers for combining features (WITH TRACKING)
+        self.backward_fuse = TrackedConv2d(n_feats * 2, n_feats, 1)
+        self.forward_fuse = TrackedConv2d(n_feats * 2, n_feats, 1)
         
         # 3. Propagation Trunks
         self.backward_trunk = nn.ModuleList([
@@ -70,8 +85,8 @@ class VSRBidirectional_3x(nn.Module):
             ResidualBlock(n_feats) for _ in range(half_blocks)
         ])
         
-        # 4. Final Fusion
-        self.fusion = nn.Conv2d(n_feats * 2, n_feats, 1)
+        # 4. Final Fusion (WITH TRACKING)
+        self.fusion = TrackedConv2d(n_feats * 2, n_feats, 1)
         
         # 5. Upsampling (3x with PixelShuffle)
         self.upsample = nn.Sequential(
@@ -130,10 +145,17 @@ class VSRBidirectional_3x(nn.Module):
     
     def get_layer_activity(self):
         """
-        Returns activity levels for all blocks
+        Returns activity levels for all blocks including fusion layers
         
         Returns:
-            Dict with 'backward_trunk' and 'forward_trunk' activity lists
+            Dict with activities:
+            {
+                'backward_trunk': [list of ResidualBlock activities],
+                'backward_fuse': float (fusion layer activity),
+                'forward_trunk': [list of ResidualBlock activities],
+                'forward_fuse': float (fusion layer activity),
+                'fusion': float (final fusion layer activity)
+            }
         """
         backward_activities = []
         for block in self.backward_trunk:
@@ -145,5 +167,8 @@ class VSRBidirectional_3x(nn.Module):
         
         return {
             'backward_trunk': backward_activities,
-            'forward_trunk': forward_activities
+            'backward_fuse': self.backward_fuse.last_activity,
+            'forward_trunk': forward_activities,
+            'forward_fuse': self.forward_fuse.last_activity,
+            'fusion': self.fusion.last_activity
         }

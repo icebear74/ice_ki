@@ -220,6 +220,44 @@ class VSRTrainer:
                         
                         if is_new_best:
                             self.tb_logger.log_checkpoint(self.global_step, 'best')
+                    
+                    # Auto-continue timer for manual validation
+                    if self.do_manual_val:
+                        import select
+                        from vsr_plus_plus.utils.ui_terminal import C_CYAN, C_BOLD, C_GREEN, C_RESET, C_YELLOW
+                        
+                        # Show results
+                        val_duration = time.time() - self.last_val_time if hasattr(self, 'last_val_time') else 0
+                        print(f"\n{C_CYAN}{'='*80}{C_RESET}")
+                        print(f"{C_BOLD}📊 VALIDATION RESULTS{C_RESET}")
+                        print(f"{C_CYAN}{'-'*80}{C_RESET}")
+                        print(f"  Loss:           {C_GREEN}{metrics['val_loss']:.6f}{C_RESET}")
+                        print(f"  Duration:       {val_duration:.2f}s")
+                        print(f"{C_CYAN}{'-'*80}{C_RESET}")
+                        print(f"  {C_BOLD}QUALITY SCORES:{C_RESET}")
+                        print(f"  LR Quality:     {C_YELLOW}{metrics['lr_quality']*100:.1f}%{C_RESET}  (PSNR: {metrics['lr_psnr']:.2f} dB, SSIM: {metrics['lr_ssim']*100:.1f}%)")
+                        print(f"  KI Quality:     {C_GREEN}{metrics['ki_quality']*100:.1f}%{C_RESET}  (PSNR: {metrics['ki_psnr']:.2f} dB, SSIM: {metrics['ki_ssim']*100:.1f}%)")
+                        print(f"  Improvement:    {C_BOLD}{C_GREEN}+{metrics['improvement']*100:.1f}%{C_RESET}")
+                        print(f"{C_CYAN}{'='*80}{C_RESET}\n")
+                        
+                        # Auto-continue timer (10 seconds)
+                        import sys
+                        print(f"{C_YELLOW}Auto-continue in 10s (Press ENTER to skip)...{C_RESET}", end='', flush=True)
+                        start_wait = time.time()
+                        while time.time() - start_wait < 10.0:
+                            if sys.stdin in select.select([sys.stdin], [], [], 0.1)[0]:
+                                sys.stdin.read(1)  # Enter pressed
+                                break
+                            remaining = int(10.0 - (time.time() - start_wait))
+                            if remaining >= 0:
+                                print(f"\r{C_YELLOW}Auto-continue in {remaining}s (Press ENTER to skip)...{C_RESET}", end='', flush=True)
+                        print()  # New line
+                        
+                        # Reset flag
+                        self.do_manual_val = False
+                        
+                        # Redraw UI
+                        self._update_gui(epoch, loss_dict, avg_time, steps_per_epoch, current_epoch_step, self.paused)
                 
                 # Regular checkpoint
                 if self.checkpoint_mgr.should_save_regular(self.global_step):

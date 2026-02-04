@@ -84,36 +84,59 @@ def get_activity_data(model):
         model: VSR model instance
     
     Returns:
-        list: List of tuples (layer_id, activity_percent, trend, raw_value)
+        list: List of tuples (layer_name, activity_percent, trend, raw_value)
     """
     # Unwrap DataParallel if needed
     m = model.module if hasattr(model, 'module') else model
     
     if not hasattr(m, 'get_layer_activity'):
         # Model doesn't have activity tracking
-        return [(i+1, 0, 0, 0.0) for i in range(32)]
+        return [(f"Layer {i+1}", 0, 0, 0.0) for i in range(32)]
     
     activity_dict = m.get_layer_activity()
     
     if not activity_dict:
-        return [(i+1, 0, 0, 0.0) for i in range(32)]
+        return [(f"Layer {i+1}", 0, 0, 0.0) for i in range(32)]
     
-    # Combine backward and forward trunk activities into a single list
+    # Combine backward and forward trunk activities + fusion layers into a single list
     backward = activity_dict.get('backward_trunk', [])
+    backward_fuse = activity_dict.get('backward_fuse', 0.0)
     forward = activity_dict.get('forward_trunk', [])
-    activities_raw = backward + forward
+    forward_fuse = activity_dict.get('forward_fuse', 0.0)
+    fusion = activity_dict.get('fusion', 0.0)
+    
+    # Build combined list with names
+    activities_with_names = []
+    
+    # Backward trunk blocks
+    for i, act in enumerate(backward):
+        activities_with_names.append((f"Backward {i+1}", float(act) if act is not None else 0.0))
+    
+    # Backward fuse layer
+    activities_with_names.append(("Backward Fuse", float(backward_fuse) if backward_fuse is not None else 0.0))
+    
+    # Forward trunk blocks
+    for i, act in enumerate(forward):
+        activities_with_names.append((f"Forward {i+1}", float(act) if act is not None else 0.0))
+    
+    # Forward fuse layer
+    activities_with_names.append(("Forward Fuse", float(forward_fuse) if forward_fuse is not None else 0.0))
+    
+    # Final fusion layer
+    activities_with_names.append(("Final Fusion", float(fusion) if fusion is not None else 0.0))
+    
+    # Extract just the values for trend calculation
+    activities_raw = [val for name, val in activities_with_names]
     
     if not activities_raw:
-        return [(i+1, 0, 0, 0.0) for i in range(32)]
-    
-    # Convert to float if needed (in case they're tensors or strings)
-    activities_raw = [float(v) if v is not None else 0.0 for v in activities_raw]
+        return [(f"Layer {i+1}", 0, 0, 0.0) for i in range(32)]
     
     trends = calculate_trends(activities_raw)
     max_val = max(activities_raw) if max(activities_raw) > 1e-12 else 1e-12
     
-    activities = [(i+1, int((v / max_val) * 100), trends[i], v) 
-                  for i, v in enumerate(activities_raw)]
+    # Build final list with layer names
+    activities = [(name, int((v / max_val) * 100), trends[i], v) 
+                  for i, (name, v) in enumerate(activities_with_names)]
     
     return activities
 
@@ -274,7 +297,11 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
             f"KI:  {C_GREEN}{ki_quality:>5.1f}%{C_RESET}",
             ui_w
         )
-        print_line(f"Improvement: {C_BOLD}{C_GREEN}+{improvement:.1f}%{C_RESET}", ui_w)
+        
+        # Fix: Don't add extra '+' if improvement is negative (already has '-')
+        imp_sign = "+" if improvement >= 0 else ""
+        imp_color = C_GREEN if improvement >= 0 else C_RED
+        print_line(f"Improvement: {C_BOLD}{imp_color}{imp_sign}{improvement:.1f}%{C_RESET}", ui_w)
         
         print_separator(ui_w, 'double')
     
