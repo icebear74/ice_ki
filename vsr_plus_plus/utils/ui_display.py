@@ -206,12 +206,10 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
     bar_width_single = BAR_LENGTH
     bar_width_double = BAR_LENGTH
     
-    # Calculate progress
+    # Calculate progress (total_eta and epoch_eta are passed as parameters from trainer)
     max_steps = config.get("MAX_STEPS", 100000)
     total_prog = (step / max_steps) * 100 if max_steps > 0 else 0
-    total_eta = format_time((max_steps - step) * it_time) if not paused else "PAUSIERT"
     epoch_prog = (current_epoch_step / steps_per_epoch) * 100 if steps_per_epoch > 0 else 0
-    epoch_eta = format_time((steps_per_epoch - current_epoch_step) * it_time) if not paused else "PAUSIERT"
     
     # Extract values
     l1_loss = losses.get('l1', 0.0)
