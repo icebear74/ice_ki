@@ -206,6 +206,10 @@ class VSRTrainer:
                     # Log ALL images (like in original)
                     labeled_images = metrics.get('labeled_images')
                     if labeled_images is not None and len(labeled_images) > 0:
+                        print(f"📊 Logging {len(labeled_images)} validation images to TensorBoard...")
+                        logged_count = 0
+                        failed_count = 0
+                        
                         for idx, img_tensor in enumerate(labeled_images):
                             try:
                                 # Ensure tensor is in correct format for TensorBoard
@@ -219,12 +223,26 @@ class VSRTrainer:
                                     img_tensor, 
                                     self.global_step
                                 )
+                                logged_count += 1
                             except Exception as e:
+                                failed_count += 1
+                                print(f"⚠️  Failed to log validation image {idx}: {e}")
                                 self.train_logger.log_event(
                                     f"Warning: Failed to log validation image {idx}: {e}"
                                 )
                                 # Continue with other images even if one fails
                                 continue
+                        
+                        # Flush to ensure images are written
+                        self.tb_logger.writer.flush()
+                        
+                        # Summary
+                        if failed_count == 0:
+                            print(f"✅ Successfully logged all {logged_count} validation images to TensorBoard")
+                        else:
+                            print(f"⚠️  Logged {logged_count}/{len(labeled_images)} images ({failed_count} failed)")
+                    else:
+                        print("⚠️  No labeled images to log to TensorBoard")
                     
                     self.train_logger.log_event(
                         f"Step {self.global_step} | Validation | "
