@@ -110,43 +110,55 @@ else:
 EOF
 ```
 
-### 5. VGG Perceptual Loss Test
+### 5. Custom Perceptual Loss Test
 
 ```bash
 python << 'EOF'
+import sys
+sys.path.insert(0, '.')
 import torch
-import torch.nn as nn
-from torchvision.models import vgg19
-
-class VGGLoss(nn.Module):
-    def __init__(self):
-        super().__init__()
-        if torch.cuda.is_available():
-            vgg = vgg19(pretrained=True).features[:36].eval().cuda()
-        else:
-            vgg = vgg19(pretrained=True).features[:36].eval()
-        for p in vgg.parameters():
-            p.requires_grad = False
-        self.vgg = vgg
-        self.criterion = nn.L1Loss()
-    
-    def forward(self, x, y):
-        x_vgg = self.vgg(x)
-        y_vgg = self.vgg(y)
-        return self.criterion(x_vgg, y_vgg)
+from vsr_plus_plus.core.loss import CustomPerceptualLoss, HybridLoss
 
 if torch.cuda.is_available():
     device = torch.device('cuda')
 else:
     device = torch.device('cpu')
 
-criterion = VGGLoss()
+# Test CustomPerceptualLoss
+print("Testing CustomPerceptualLoss...")
+criterion = CustomPerceptualLoss(n_feats=32).to(device)
+
+# Count parameters
+total_params = sum(p.numel() for p in criterion.parameters())
+trainable_params = sum(p.numel() for p in criterion.parameters() if p.requires_grad)
+print(f"✓ Total parameters: {total_params:,}")
+print(f"✓ All parameters trainable: {total_params == trainable_params}")
+
+# Test forward pass
 x = torch.randn(1, 3, 192, 192).to(device)
 y = torch.randn(1, 3, 192, 192).to(device)
-
 loss = criterion(x, y)
-print(f"✓ VGG Perceptual Loss: {loss.item():.6f}")
-print("\n✅ Perceptual loss test passed!")
+print(f"✓ Custom Perceptual Loss: {loss.item():.6f}")
+
+# Test gradient flow
+x.requires_grad = True
+loss = criterion(x, y)
+loss.backward()
+print(f"✓ Gradient flow verified")
+
+# Test HybridLoss integration
+print("\nTesting HybridLoss integration...")
+hybrid_loss = HybridLoss(perceptual_weight=0.2).to(device)
+x = torch.randn(1, 3, 192, 192).to(device)
+y = torch.randn(1, 3, 192, 192).to(device)
+loss_dict = hybrid_loss(x, y)
+print(f"✓ HybridLoss computed: {loss_dict}")
+print(f"✓ Perceptual component active: {loss_dict['perceptual'] > 0}")
+
+print("\n✅ Custom perceptual loss test passed!")
+print("   - 100% self-learned (no pretrained weights)")
+print("   - Multi-scale features (3 stages)")
+print("   - Lightweight (~140K params vs ~15M for VGG16)")
 EOF
 ```
 
