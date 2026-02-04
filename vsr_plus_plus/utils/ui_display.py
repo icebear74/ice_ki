@@ -264,10 +264,7 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
     print_line(f"{C_BOLD}📊 PROGRESS{C_RESET}", ui_w)
     print_separator(ui_w, 'single')
     
-    # Calculate progress percentage
-    progress_pct = (step / max_steps) * 100 if max_steps > 0 else 0
-    
-    print_line(f"Step: {C_BOLD}{step:,}{C_RESET} / {max_steps:,} ({progress_pct:.1f}%) | ETA: {total_eta}", ui_w)
+    print_line(f"Step: {C_BOLD}{step:,}{C_RESET} / {max_steps:,} ({total_prog:.1f}%) | ETA: {total_eta}", ui_w)
     print_line(f"Epoch: {C_BOLD}{epoch}{C_RESET} (Step {current_epoch_step}/{steps_per_epoch})", ui_w)
     
     print_line(f"Total:  {make_bar(total_prog, bar_width_single)} {total_prog:>5.1f}% ETA: {total_eta}", ui_w)
