@@ -62,7 +62,7 @@ MIN_LR = 1e-6
 L1_WEIGHT = 0.6      # L1 pixel loss
 MS_WEIGHT = 0.2      # Multi-scale loss
 GRAD_WEIGHT = 0.2    # Gradient loss
-PERCEPTUAL_WEIGHT = 0.0  # VGG perceptual loss (0.1-0.2 recommended, 0 to disable)
+PERCEPTUAL_WEIGHT = 0.0  # Custom self-learned perceptual loss (0.1-0.2 recommended, 0 to disable)
 
 
 # ============================================================================
