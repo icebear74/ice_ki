@@ -73,12 +73,13 @@ class VSRValidator:
         
         with torch.no_grad():
             for batch_idx, (lr_stack, gt) in enumerate(self.val_loader):
-                # Progress Bar (like original)
+                # Progress Bar - show batches AND samples for clarity
                 progress = (batch_idx + 1) / val_total * 100
                 filled = int(50 * (batch_idx + 1) / val_total)
                 bar = f"{C_GREEN}{'█' * filled}{C_GRAY}{'░' * (50 - filled)}{C_RESET}"
                 eta = ((time.time() - val_start) / (batch_idx + 1)) * (val_total - batch_idx - 1) if batch_idx > 0 else 0
-                sys.stdout.write(f"\r{C_CYAN}Progress:{C_RESET} [{bar}] {batch_idx+1}/{val_total} ({progress:.1f}%) | ETA: {eta:.1f}s")
+                # Show "Batch X/Y (N samples)" - clarifies that batches != images
+                sys.stdout.write(f"\r{C_CYAN}Progress:{C_RESET} [{bar}] Batch {batch_idx+1}/{val_total} ({num_samples} samples) | ETA: {eta:.1f}s")
                 sys.stdout.flush()
                 lr_stack = lr_stack.to(self.device)
                 gt = gt.to(self.device)
@@ -147,10 +148,11 @@ class VSRValidator:
             ki_img = all_ki_images[idx].cpu().permute(1, 2, 0).numpy()
             gt_img = all_gt_images[idx].cpu().permute(1, 2, 0).numpy()
             
-            # Clip and convert to 0-255
-            lr_img = np.clip(lr_img * 255, 0, 255).astype(np.uint8)
-            ki_img = np.clip(ki_img * 255, 0, 255).astype(np.uint8)
-            gt_img = np.clip(gt_img * 255, 0, 255).astype(np.uint8)
+            # Clip and convert to 0-255 AND copy (like original train.py)
+            # .copy() is CRITICAL - cv2.putText modifies in-place!
+            lr_img = np.clip(lr_img * 255, 0, 255).astype(np.uint8).copy()
+            ki_img = np.clip(ki_img * 255, 0, 255).astype(np.uint8).copy()
+            gt_img = np.clip(gt_img * 255, 0, 255).astype(np.uint8).copy()
             
             # Add text labels (like original)
             font = cv2.FONT_HERSHEY_SIMPLEX
