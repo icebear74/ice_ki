@@ -317,7 +317,7 @@ def draw_ui(step, epoch, losses, it_time, activities, cfg, num_images, steps_per
         notification = adaptive_status.get('last_notification')
         if notification:
             notif_color = C_YELLOW if notification['type'] in ['plateau', 'divergence'] else C_CYAN
-            step_info = f"@ Step {notification['step']}" if notification['step'] else ""
+            step_info = f"@ Step {notification['step']}" if notification.get('step') else ""
             print_line(f"{notif_color}{notification['message']}{C_RESET} {step_info}")
             if notification.get('details'):
                 print_line(f"  {C_GRAY}{notification['details']}{C_RESET}")
