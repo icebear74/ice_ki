@@ -49,6 +49,7 @@ WINDOW_SIZE = 50
 ema_grads = {}
 alpha = 0.2
 last_term_size = (0, 0)
+last_display_mode = -1
 last_quality_metrics = {
     'lr_quality': 0.0,
     'ki_quality': 0.0,
@@ -278,13 +279,15 @@ def get_adaptive_status_with_notification(adaptive_system):
     return status
 
 def draw_ui(step, epoch, losses, it_time, activities, cfg, num_images, steps_per_epoch, current_epoch_step, adaptive_status=None, paused=False):
-    global last_term_size, last_quality_metrics
+    global last_term_size, last_display_mode, last_quality_metrics
     term_size = shutil.get_terminal_size()
+    display_mode = cfg.get("DISPLAY_MODE", 0)
     
-    # Only clear screen if terminal size changed
-    if term_size != last_term_size:
+    # Clear screen if terminal size changed OR display mode changed
+    if term_size != last_term_size or display_mode != last_display_mode:
         print(ANSI_CLEAR)
         last_term_size = term_size
+        last_display_mode = display_mode
     
     # Move cursor to home and hide cursor (no full clear)
     print(ANSI_HOME + "\033[?25l", end='')
@@ -296,7 +299,39 @@ def draw_ui(step, epoch, losses, it_time, activities, cfg, num_images, steps_per
     epoch_eta = format_time((steps_per_epoch - current_epoch_step) * it_time) if not paused else "PAUSIERT"
 
     def print_line(content):
-        padding = max(0, ui_w - get_visible_len(content) - 4)
+        visible_len = get_visible_len(content)
+        max_content_width = ui_w - 4  # Account for borders " ║ " and " ║"
+        
+        # Truncate content if it exceeds maximum width
+        if visible_len > max_content_width:
+            # Find where to cut (accounting for ANSI codes)
+            truncated = ""
+            current_visible = 0
+            in_ansi = False
+            ansi_buffer = ""
+            
+            for char in content:
+                if char == '\033':
+                    in_ansi = True
+                    ansi_buffer = char
+                elif in_ansi:
+                    ansi_buffer += char
+                    if char in 'mHJKSTfABCDsu':  # ANSI sequence terminators
+                        truncated += ansi_buffer
+                        in_ansi = False
+                        ansi_buffer = ""
+                elif current_visible < max_content_width - 3:  # Reserve 3 chars for "..."
+                    truncated += char
+                    current_visible += 1
+                elif current_visible == max_content_width - 3:
+                    truncated += "..."
+                    current_visible += 3
+                    break
+            
+            content = truncated + C_RESET  # Ensure ANSI reset at end
+            visible_len = get_visible_len(content)
+        
+        padding = max(0, max_content_width - visible_len)
         sys.stdout.write(f" ║ {content}{' ' * padding} ║\n")
 
     # Header
@@ -317,7 +352,7 @@ def draw_ui(step, epoch, losses, it_time, activities, cfg, num_images, steps_per
         notification = adaptive_status.get('last_notification')
         if notification:
             notif_color = C_YELLOW if notification['type'] in ['plateau', 'divergence'] else C_CYAN
-            step_info = f"@ Step {notification['step']}" if notification['step'] else ""
+            step_info = f"@ Step {notification['step']}" if notification.get('step') else ""
             print_line(f"{notif_color}{notification['message']}{C_RESET} {step_info}")
             if notification.get('details'):
                 print_line(f"  {C_GRAY}{notification['details']}{C_RESET}")
