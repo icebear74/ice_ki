@@ -374,16 +374,25 @@ def draw_ui(step, epoch, losses, it_time, activities, cfg, num_images, steps_per
     print_line(f"TOTAL: {overall_bar} {total_prog:>4.1f}% ETA:{total_eta} │ EPOCH {epoch}: {epoch_bar} {epoch_prog:>4.1f}% ETA:{epoch_eta}")
     print_separator('double')
     
-    # Adaptive Change Notification (if any)
+    # Adaptive Change Notification (ALWAYS visible - prevents UI jumping)
     if adaptive_status:
         notification = adaptive_status.get('last_notification')
         if notification:
+            # Active notification
             notif_color = C_YELLOW if notification['type'] in ['plateau', 'divergence'] else C_CYAN
             step_info = f"@ Step {notification['step']}" if notification.get('step') else ""
             print_line(f"{notif_color}{notification['message']}{C_RESET} {step_info}")
             if notification.get('details'):
                 print_line(f"  {C_GRAY}{notification['details']}{C_RESET}")
-            print_separator('single')
+        else:
+            # Placeholder when no notification (prevents flickering)
+            print_line(f"{C_GRAY}📡 System Status: Monitoring... (No recent changes){C_RESET}")
+            print_line(f"  {C_GRAY}All parameters stable{C_RESET}")
+    else:
+        # No adaptive system - show placeholder
+        print_line(f"{C_GRAY}📡 System Status: Standard mode (no adaptive system){C_RESET}")
+        print_line(f"  {C_GRAY}Fixed parameters{C_RESET}")
+    print_separator('single')
     
     # Adaptive Parameters Section
     if adaptive_status:
