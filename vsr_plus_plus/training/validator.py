@@ -78,8 +78,8 @@ class VSRValidator:
                 
                 # Progress Bar - show batches AND cumulative samples for clarity
                 progress = (batch_idx + 1) / val_total * 100
-                filled = int(50 * (batch_idx + 1) / val_total)
-                bar = f"{C_GREEN}{'█' * filled}{C_GRAY}{'░' * (50 - filled)}{C_RESET}"
+                filled = int(30 * (batch_idx + 1) / val_total)
+                bar = f"{C_GREEN}{'█' * filled}{C_GRAY}{'░' * (30 - filled)}{C_RESET}"
                 
                 # Calculate ETA more robustly
                 if batch_idx > 0:

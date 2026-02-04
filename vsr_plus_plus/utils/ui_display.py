@@ -201,15 +201,15 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
     # Calculate UI width
     ui_w = max(90, term_size.columns - 4)
     col_width = (ui_w - 7) // 2
-    bar_width_single = ui_w - 25
-    bar_width_double = (ui_w - 30) // 2
+    # Standardize all progress bars to 30 characters
+    BAR_LENGTH = 30
+    bar_width_single = BAR_LENGTH
+    bar_width_double = BAR_LENGTH
     
-    # Calculate progress
+    # Calculate progress percentages (ETAs already calculated and passed from trainer)
     max_steps = config.get("MAX_STEPS", 100000)
     total_prog = (step / max_steps) * 100 if max_steps > 0 else 0
-    total_eta = format_time((max_steps - step) * it_time) if not paused else "PAUSIERT"
     epoch_prog = (current_epoch_step / steps_per_epoch) * 100 if steps_per_epoch > 0 else 0
-    epoch_eta = format_time((steps_per_epoch - current_epoch_step) * it_time) if not paused else "PAUSIERT"
     
     # Extract values
     l1_loss = losses.get('l1', 0.0)
@@ -264,11 +264,8 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
     print_line(f"{C_BOLD}📊 PROGRESS{C_RESET}", ui_w)
     print_separator(ui_w, 'single')
     
-    print_two_columns(
-        f"Step: {C_BOLD}{step:,}{C_RESET} / {max_steps:,}",
-        f"Epoch: {C_BOLD}{epoch}{C_RESET} (Step {current_epoch_step}/{steps_per_epoch})",
-        ui_w
-    )
+    print_line(f"Step: {C_BOLD}{step:,}{C_RESET} / {max_steps:,} ({total_prog:.1f}%) | ETA: {total_eta}", ui_w)
+    print_line(f"Epoch: {C_BOLD}{epoch}{C_RESET} (Step {current_epoch_step}/{steps_per_epoch})", ui_w)
     
     print_line(f"Total:  {make_bar(total_prog, bar_width_single)} {total_prog:>5.1f}% ETA: {total_eta}", ui_w)
     print_line(f"Epoch:  {make_bar(epoch_prog, bar_width_single)} {epoch_prog:>5.1f}% ETA: {epoch_eta}", ui_w)
@@ -414,7 +411,7 @@ def _draw_activity_display(activities, display_mode, available_lines, ui_w,
         backward_overall = int(np.mean([act for _, act, _, _ in backward])) if backward else 0
         forward_overall = int(np.mean([act for _, act, _, _ in forward])) if forward else 0
         
-        print_line(f"{C_BOLD}🔥 BACKWARD TRUNK{C_RESET} - Overall: {make_bar(backward_overall, 20)} {backward_overall}%", ui_w)
+        print_line(f"{C_BOLD}🔥 BACKWARD TRUNK{C_RESET} - Overall: {make_bar(backward_overall, BAR_LENGTH)} {backward_overall}%", ui_w)
         print_separator(ui_w, 'single')
         
         if available_lines >= num_activities:
@@ -430,7 +427,7 @@ def _draw_activity_display(activities, display_mode, available_lines, ui_w,
                 print_two_columns(left_str, right_str, ui_w)
         
         print_separator(ui_w, 'double')
-        print_line(f"{C_BOLD}⚡ FORWARD TRUNK{C_RESET} - Overall: {make_bar(forward_overall, 20)} {forward_overall}%", ui_w)
+        print_line(f"{C_BOLD}⚡ FORWARD TRUNK{C_RESET} - Overall: {make_bar(forward_overall, BAR_LENGTH)} {forward_overall}%", ui_w)
         print_separator(ui_w, 'single')
         
         if available_lines >= num_activities:
@@ -454,7 +451,7 @@ def _draw_activity_display(activities, display_mode, available_lines, ui_w,
         backward_overall = int(np.mean([act for _, act, _, _ in backward])) if backward else 0
         forward_overall = int(np.mean([act for _, act, _, _ in forward])) if forward else 0
         
-        print_line(f"{C_BOLD}🔥 BACKWARD TRUNK (sorted){C_RESET} - Overall: {make_bar(backward_overall, 20)} {backward_overall}%", ui_w)
+        print_line(f"{C_BOLD}🔥 BACKWARD TRUNK (sorted){C_RESET} - Overall: {make_bar(backward_overall, BAR_LENGTH)} {backward_overall}%", ui_w)
         print_separator(ui_w, 'single')
         
         if available_lines >= num_activities:
@@ -469,7 +466,7 @@ def _draw_activity_display(activities, display_mode, available_lines, ui_w,
                 print_two_columns(left_str, right_str, ui_w)
         
         print_separator(ui_w, 'double')
-        print_line(f"{C_BOLD}⚡ FORWARD TRUNK (sorted){C_RESET} - Overall: {make_bar(forward_overall, 20)} {forward_overall}%", ui_w)
+        print_line(f"{C_BOLD}⚡ FORWARD TRUNK (sorted){C_RESET} - Overall: {make_bar(forward_overall, BAR_LENGTH)} {forward_overall}%", ui_w)
         print_separator(ui_w, 'single')
         
         if available_lines >= num_activities:
