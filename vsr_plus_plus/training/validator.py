@@ -4,9 +4,12 @@ VSRValidator - Validation logic for VSR training
 Validates model on validation set and computes quality metrics
 """
 
+import sys
+import time
 import torch
 import torch.nn.functional as F
 from vsr_plus_plus.utils.metrics import calculate_psnr, calculate_ssim, quality_to_percent
+from vsr_plus_plus.utils.ui_terminal import C_GREEN, C_GRAY, C_CYAN, C_RESET
 
 
 class VSRValidator:
@@ -61,8 +64,18 @@ class VSRValidator:
         first_ki = None
         first_gt = None
         
+        val_total = len(self.val_loader)
+        val_start = time.time()
+        
         with torch.no_grad():
             for batch_idx, (lr_stack, gt) in enumerate(self.val_loader):
+                # Progress Bar (like original)
+                progress = (batch_idx + 1) / val_total * 100
+                filled = int(50 * (batch_idx + 1) / val_total)
+                bar = f"{C_GREEN}{'█' * filled}{C_GRAY}{'░' * (50 - filled)}{C_RESET}"
+                eta = ((time.time() - val_start) / (batch_idx + 1)) * (val_total - batch_idx - 1) if batch_idx > 0 else 0
+                sys.stdout.write(f"\r{C_CYAN}Progress:{C_RESET} [{bar}] {batch_idx+1}/{val_total} ({progress:.1f}%) | ETA: {eta:.1f}s")
+                sys.stdout.flush()
                 lr_stack = lr_stack.to(self.device)
                 gt = gt.to(self.device)
                 
@@ -103,6 +116,9 @@ class VSRValidator:
                 # Limit validation samples
                 if num_samples >= 100:
                     break
+        
+        # Clear progress line
+        print()  # New line after progress bar
         
         self.model.train()
         
