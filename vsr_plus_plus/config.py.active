@@ -151,6 +151,7 @@ def get_config():
         'L1_WEIGHT': L1_WEIGHT,
         'MS_WEIGHT': MS_WEIGHT,
         'GRAD_WEIGHT': GRAD_WEIGHT,
+        'PERCEPTUAL_WEIGHT': PERCEPTUAL_WEIGHT,  # FIXED: Added missing key!
         
         # Training schedule
         'MAX_STEPS': MAX_STEPS,
@@ -200,7 +201,8 @@ def print_config():
     print(f"  L1 Weight:              {L1_WEIGHT}")
     print(f"  MS Weight:              {MS_WEIGHT}")
     print(f"  Grad Weight:            {GRAD_WEIGHT}")
-    print(f"  Total:                  {L1_WEIGHT + MS_WEIGHT + GRAD_WEIGHT}")
+    print(f"  Perceptual Weight:      {PERCEPTUAL_WEIGHT}")
+    print(f"  Total:                  {L1_WEIGHT + MS_WEIGHT + GRAD_WEIGHT + PERCEPTUAL_WEIGHT}")
     
     print("\nTRAINING SCHEDULE:")
     print(f"  Max Steps:              {MAX_STEPS:,}")
