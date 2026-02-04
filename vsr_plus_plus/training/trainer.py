@@ -7,16 +7,14 @@ Coordinates all training components:
 - Checkpointing
 - Logging
 - Adaptive systems
+- Interactive GUI
 """
 
 import time
 import torch
-
-# ANSI colors
-C_GREEN = "\033[92m"
-C_CYAN = "\033[96m"
-C_YELLOW = "\033[93m"
-C_RESET = "\033[0m"
+from ..utils.ui_display import draw_ui, get_activity_data
+from ..utils.keyboard_handler import KeyboardHandler
+from ..utils.ui_terminal import C_GREEN, C_CYAN, C_YELLOW, C_RESET, show_cursor
 
 
 class VSRTrainer:
@@ -62,9 +60,17 @@ class VSRTrainer:
         # Metrics tracking
         self.last_metrics = None
         self.last_activities = None
+        self.loss_history = []
         
         # Performance tracking
         self.step_times = []
+        
+        # UI state
+        self.paused = False
+        self.do_manual_val = False
+        
+        # Keyboard handler
+        self.keyboard = KeyboardHandler()
     
     def set_start_step(self, step):
         """Set starting step (for resume)"""
@@ -81,8 +87,24 @@ class VSRTrainer:
         self.model.train()
         
         accumulation_steps = self.config.get('ACCUMULATION_STEPS', 1)
+        steps_per_epoch = len(self.train_loader) // accumulation_steps
+        current_epoch_step = 0
         
         for batch_idx, (lr_stack, gt) in enumerate(self.train_loader):
+            # Handle pause state
+            while self.paused:
+                self._update_gui(epoch, {}, 0.1, steps_per_epoch, current_epoch_step, paused=True)
+                time.sleep(0.5)
+                self._check_keyboard_input(epoch, steps_per_epoch, current_epoch_step)
+            
+            # Check keyboard input
+            self._check_keyboard_input(epoch, steps_per_epoch, current_epoch_step)
+            
+            # Manual validation trigger
+            if self.do_manual_val:
+                self._run_validation()
+                self.do_manual_val = False
+            
             step_start_time = time.time()
             
             # Move to device
@@ -134,8 +156,17 @@ class VSRTrainer:
                 avg_time = sum(self.step_times) / len(self.step_times)
                 vram = torch.cuda.max_memory_allocated() / (1024**3)
                 
-                # Logging
+                # Track loss history
+                self.loss_history.append(loss_dict['total'].item() if torch.is_tensor(loss_dict['total']) else loss_dict['total'])
+                if len(self.loss_history) > 1000:
+                    self.loss_history.pop(0)
+                
+                # Increment step
                 self.global_step += 1
+                current_epoch_step += 1
+                
+                # Update GUI
+                self._update_gui(epoch, loss_dict, avg_time, steps_per_epoch, current_epoch_step)
                 
                 # TensorBoard logging
                 if self.global_step % self.config.get('LOG_TBOARD_EVERY', 100) == 0:
@@ -204,11 +235,119 @@ class VSRTrainer:
                 if self.global_step >= self.config.get('MAX_STEPS', 100000):
                     return
     
+    def _update_gui(self, epoch, loss_dict, avg_time, steps_per_epoch, current_epoch_step, paused=False):
+        """Update the GUI display"""
+        # Get activities
+        activities = get_activity_data(self.model)
+        
+        # Prepare loss dict
+        losses = {
+            'l1': loss_dict.get('l1', 0.0) if loss_dict else 0.0,
+            'ms': loss_dict.get('ms', 0.0) if loss_dict else 0.0,
+            'grad': loss_dict.get('grad', 0.0) if loss_dict else 0.0,
+            'total': loss_dict.get('total', 0.0) if loss_dict else 0.0,
+        }
+        
+        # Convert tensor to float if needed
+        for k, v in losses.items():
+            if torch.is_tensor(v):
+                losses[k] = v.item()
+        
+        # Get LR info
+        current_lr = self.optimizer.param_groups[0]['lr']
+        lr_phase = getattr(self.lr_scheduler, 'current_phase', 'unknown')
+        lr_info = {'lr': current_lr, 'phase': lr_phase}
+        
+        # Quality metrics
+        quality_metrics = None
+        if self.last_metrics:
+            quality_metrics = {
+                'lr_quality': self.last_metrics.get('lr_quality', 0.0) * 100,  # Convert to %
+                'ki_quality': self.last_metrics.get('ki_quality', 0.0) * 100,
+                'improvement': self.last_metrics.get('improvement', 0.0) * 100,
+            }
+        
+        # Adaptive status
+        adaptive_status = self.adaptive_system.get_status()
+        
+        # Number of training images
+        num_images = len(self.train_loader.dataset)
+        
+        # Draw UI
+        draw_ui(
+            step=self.global_step,
+            epoch=epoch,
+            losses=losses,
+            it_time=avg_time,
+            activities=activities,
+            config=self.config,
+            num_images=num_images,
+            steps_per_epoch=steps_per_epoch,
+            current_epoch_step=current_epoch_step,
+            adaptive_status=adaptive_status,
+            paused=paused,
+            quality_metrics=quality_metrics,
+            lr_info=lr_info
+        )
+    
+    def _check_keyboard_input(self, epoch, steps_per_epoch, current_epoch_step):
+        """Check for keyboard input and handle commands"""
+        key = self.keyboard.check_key_pressed(timeout=0)
+        
+        if key:
+            key_lower = key.lower()
+            
+            if key_lower == '\r' or key_lower == '\n':  # ENTER
+                # Show live config menu
+                self.config = self.keyboard.show_live_menu(self.config, self.optimizer, self)
+            
+            elif key_lower == 's':  # Switch display mode
+                current_mode = self.config.get('DISPLAY_MODE', 0)
+                self.config['DISPLAY_MODE'] = (current_mode + 1) % 4
+            
+            elif key_lower == 'p':  # Pause/Resume
+                self.paused = not self.paused
+                if not self.paused:
+                    # Reset step timer when resuming
+                    self.step_times = []
+            
+            elif key_lower == 'v':  # Manual validation
+                self.do_manual_val = True
+    
+    def _run_validation(self):
+        """Run validation immediately"""
+        self.train_logger.log_event(f"Manual validation triggered at step {self.global_step}")
+        
+        metrics = self.validator.validate(self.global_step)
+        self.last_metrics = metrics
+        
+        # Log to TensorBoard
+        self.tb_logger.log_quality(self.global_step, metrics)
+        self.tb_logger.log_metrics(self.global_step, metrics)
+        
+        # Log images
+        if metrics.get('sample_lr') is not None:
+            self.tb_logger.log_images(
+                self.global_step,
+                metrics['sample_lr'],
+                metrics['sample_ki'],
+                metrics['sample_gt']
+            )
+        
+        self.train_logger.log_event(
+            f"Manual Validation | KI Quality: {metrics['ki_quality']*100:.1f}%"
+        )
+        
+        self.model.train()  # Back to training mode
+    
     def run(self):
         """
         Main training loop
         """
         self.train_logger.log_event("🚀 TRAINING STARTED")
+        
+        # Setup keyboard handler
+        self.keyboard.setup_raw_mode()
         
         try:
             for epoch in range(1, 100000):
@@ -221,6 +360,9 @@ class VSRTrainer:
         except KeyboardInterrupt:
             print("\n")  # New line after ^C
             self.train_logger.log_event("⚠️  Training interrupted by user")
+            
+            # Restore terminal
+            self.keyboard.restore_normal_mode()
             
             # Ask user if they want to save checkpoint
             save_choice = input(f"{C_YELLOW}Checkpoint speichern? (y/n): {C_RESET}").lower()
@@ -248,4 +390,7 @@ class VSRTrainer:
             raise
         
         finally:
+            # Restore terminal mode
+            self.keyboard.restore_normal_mode()
             self.tb_logger.close()
+
