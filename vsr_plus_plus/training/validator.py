@@ -147,9 +147,9 @@ class VSRValidator:
         labeled_images = []
         for idx in range(len(all_lr_images)):
             # Convert to numpy for cv2
-            lr_img = all_lr_images[idx].permute(1, 2, 0).numpy()
-            ki_img = all_ki_images[idx].permute(1, 2, 0).numpy()
-            gt_img = all_gt_images[idx].permute(1, 2, 0).numpy()
+            lr_img = all_lr_images[idx].cpu().permute(1, 2, 0).numpy()
+            ki_img = all_ki_images[idx].cpu().permute(1, 2, 0).numpy()
+            gt_img = all_gt_images[idx].cpu().permute(1, 2, 0).numpy()
             
             # Clip and convert to 0-255
             lr_img = np.clip(lr_img * 255, 0, 255).astype(np.uint8)
