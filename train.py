@@ -294,9 +294,10 @@ def draw_ui(step, epoch, losses, it_time, activities, cfg, num_images, steps_per
     
     # === ABSOLUTE WIDTH CALCULATIONS (once at start) ===
     ui_w = max(90, term_size.columns - 4)
-    col_width = (ui_w - 7) // 2  # For two-column layout: -7 for " ║ ", " │ ", " ║"
-    bar_width_single = ui_w - 25  # For single-column bars
-    bar_width_double = (ui_w - 30) // 2  # For two-column bars
+    # Column width: Total width minus borders and separator: " ║ " (3) + " │ " (3) + " ║" (1) = 7 chars
+    col_width = (ui_w - 7) // 2  # For two-column layout
+    bar_width_single = ui_w - 25  # For single-column bars (label + padding)
+    bar_width_double = (ui_w - 30) // 2  # For two-column bars (labels + padding)
     
     total_prog = (step / cfg["MAX_STEPS"]) * 100 if cfg["MAX_STEPS"] > 0 else 0
     total_eta = format_time((cfg["MAX_STEPS"] - step) * it_time) if not paused else "PAUSIERT"
