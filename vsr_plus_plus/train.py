@@ -3,7 +3,7 @@
 VSR++ Training Entry Point
 
 Orchestrates the complete training system:
-- Auto-tuning (optional)
+- Manual configuration (edit config.py)
 - Model creation
 - Data loading
 - Training loop
@@ -26,64 +26,48 @@ from vsr_plus_plus.core.dataset import VSRDataset
 from vsr_plus_plus.training.trainer import VSRTrainer
 from vsr_plus_plus.training.validator import VSRValidator
 from vsr_plus_plus.training.lr_scheduler import AdaptiveLRScheduler
-from vsr_plus_plus.systems.auto_tune import auto_tune_config
 from vsr_plus_plus.systems.checkpoint_manager import CheckpointManager
 from vsr_plus_plus.systems.logger import TrainingLogger, TensorBoardLogger
 from vsr_plus_plus.systems.adaptive_system import AdaptiveSystem
-from vsr_plus_plus.utils.config import load_config, save_config, get_default_config
+
+# Import manual configuration
+import vsr_plus_plus.config as cfg
 
 
 def main():
     """Main training entry point"""
     
-    # Paths
-    DATA_ROOT = "/mnt/data/training/Universal/Mastermodell/Learn"
-    DATASET_ROOT = "/mnt/data/training/Dataset/Universal/Mastermodell"
-    CONFIG_FILE = os.path.join(DATA_ROOT, "train_config.json")
+    # Load configuration from config.py
+    config = cfg.get_config()
+    
+    # Override paths from config if they exist
+    DATA_ROOT = config.get('DATA_ROOT', "/mnt/data/training/Universal/Mastermodell/Learn")
+    DATASET_ROOT = config.get('DATASET_ROOT', "/mnt/data/training/Dataset/Universal/Mastermodell")
     
     print("\n" + "="*80)
-    print("VSR++ Training System")
+    print("VSR++ Training System - Manual Configuration")
     print("="*80 + "\n")
+    
+    # Print current configuration
+    cfg.print_config()
     
     # User choice: DELETE or RESUME
     choice = input("⚠️  [L]öschen oder [F]ortsetzen? (L/F): ").lower()
     
-    config = None
     start_step = 0
+    checkpoint_mgr = CheckpointManager(DATA_ROOT)
     
     if choice == 'l':
-        print("\n🔧 Starting fresh training with auto-tuning...\n")
-        
-        # Run auto-tune
-        print("Running auto-tune to find optimal configuration...")
-        model_config = auto_tune_config(
-            target_speed=4.0,
-            max_vram_gb=6.0,
-            min_effective_batch=4
-        )
-        
-        # Create config
-        config = get_default_config()
-        config['AUTO_TUNED'] = True
-        config['MODEL_CONFIG'] = model_config
-        config['ACCUMULATION_STEPS'] = model_config['accumulation_steps']
-        
-        # Save config
-        save_config(config, CONFIG_FILE)
-        print(f"\n✅ Configuration saved to {CONFIG_FILE}\n")
+        print("\n🗑️  Starting fresh training...\n")
         
         # Cleanup old checkpoints
-        checkpoint_mgr = CheckpointManager(DATA_ROOT)
         checkpoint_mgr.cleanup_old_checkpoints()
+        print("✅ Old checkpoints cleaned up\n")
         
     else:
         print("\n📂 Resuming training...\n")
         
-        # Load config
-        config = load_config(CONFIG_FILE)
-        
         # Show checkpoint info
-        checkpoint_mgr = CheckpointManager(DATA_ROOT)
         checkpoint_mgr.show_checkpoint_info()
         
         # Get latest checkpoint
@@ -100,22 +84,11 @@ def main():
         else:
             print("⚠️  No checkpoint found, starting fresh")
     
-    # Extract model config
-    model_config = config.get('MODEL_CONFIG', {})
-    n_feats = model_config.get('n_feats', 128)
-    n_blocks = model_config.get('n_blocks', 32)
-    batch_size = model_config.get('batch_size', 4)
-    accumulation_steps = config.get('ACCUMULATION_STEPS', 1)
-    
-    print("\n" + "="*80)
-    print("Model Configuration:")
-    print("="*80)
-    print(f"  Features: {n_feats}")
-    print(f"  Blocks: {n_blocks}")
-    print(f"  Batch Size: {batch_size}")
-    print(f"  Accumulation Steps: {accumulation_steps}")
-    print(f"  Effective Batch: {batch_size * accumulation_steps}")
-    print("="*80 + "\n")
+    # Extract parameters from config
+    n_feats = config['N_FEATS']
+    n_blocks = config['N_BLOCKS']
+    batch_size = config['BATCH_SIZE']
+    accumulation_steps = config['ACCUMULATION_STEPS']
     
     # Create model
     print("Creating model...")
@@ -126,32 +99,44 @@ def main():
     total_params = sum(p.numel() for p in model.parameters())
     print(f"✅ Model created with {total_params/1e6:.2f}M parameters\n")
     
-    # Create loss function
-    loss_fn = HybridLoss(l1_weight=0.6, ms_weight=0.2, grad_weight=0.2)
+    # Create loss function with configured weights
+    loss_fn = HybridLoss(
+        l1_weight=config['L1_WEIGHT'],
+        ms_weight=config['MS_WEIGHT'],
+        grad_weight=config['GRAD_WEIGHT']
+    )
     
     # Create optimizer
-    lr = 10 ** config.get('LR_EXPONENT', -5)  # 1e-5 default
+    lr = 10 ** config['LR_EXPONENT']
     optimizer = optim.AdamW(
         model.parameters(),
         lr=lr,
-        weight_decay=config.get('WEIGHT_DECAY', 0.001)
+        weight_decay=config['WEIGHT_DECAY']
     )
     
     # Create LR scheduler
     lr_scheduler = AdaptiveLRScheduler(
         optimizer,
-        warmup_steps=config.get('WARMUP_STEPS', 1000),
-        max_steps=config.get('MAX_STEPS', 100000),
-        max_lr=1e-4,
-        min_lr=1e-6
+        warmup_steps=config['WARMUP_STEPS'],
+        max_steps=config['MAX_STEPS'],
+        max_lr=config['MAX_LR'],
+        min_lr=config['MIN_LR']
     )
     
     # Create adaptive system
-    adaptive_system = AdaptiveSystem(
-        initial_l1=0.6,
-        initial_ms=0.2,
-        initial_grad=0.2
-    )
+    if config['ADAPTIVE_LOSS_WEIGHTS'] or config['ADAPTIVE_GRAD_CLIP']:
+        adaptive_system = AdaptiveSystem(
+            initial_l1=config['L1_WEIGHT'],
+            initial_ms=config['MS_WEIGHT'],
+            initial_grad=config['GRAD_WEIGHT']
+        )
+    else:
+        # Use fixed weights if adaptive is disabled
+        adaptive_system = AdaptiveSystem(
+            initial_l1=config['L1_WEIGHT'],
+            initial_ms=config['MS_WEIGHT'],
+            initial_grad=config['GRAD_WEIGHT']
+        )
     
     # Create datasets
     print("Loading datasets...")
@@ -171,8 +156,8 @@ def main():
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=4,
-        pin_memory=True
+        num_workers=config['NUM_WORKERS'],
+        pin_memory=config['PIN_MEMORY']
     )
     
     val_loader = DataLoader(
@@ -180,7 +165,7 @@ def main():
         batch_size=4,
         shuffle=False,
         num_workers=2,
-        pin_memory=True
+        pin_memory=config['PIN_MEMORY']
     )
     
     # Create checkpoint manager

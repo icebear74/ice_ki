@@ -1,11 +1,11 @@
 # VSR++ - Next Generation Video Super-Resolution Training System
 
-A modular, high-performance VSR training system with automatic configuration tuning, smart checkpoint management, and comprehensive logging.
+A modular, high-performance VSR training system with **manual configuration**, smart checkpoint management, and comprehensive logging.
 
 ## Features
 
 - **Bidirectional Propagation**: Frame-3 initialization for optimal temporal information usage
-- **Auto-Tuning**: Automatically finds optimal configuration for your hardware
+- **Manual Configuration**: Full control over all training parameters via `config.py`
 - **Smart Checkpointing**: Regular + best checkpoints with symlink management
 - **Adaptive Training**: Dynamic loss weights, gradient clipping, and LR scheduling
 - **Comprehensive Logging**: File logs + TensorBoard with 17+ graphs
@@ -15,6 +15,7 @@ A modular, high-performance VSR training system with automatic configuration tun
 
 ```
 vsr_plus_plus/
+├── config.py           # ⭐ Manual configuration - EDIT THIS!
 ├── core/               # Core ML components
 │   ├── model.py        # VSRBidirectional_3x model
 │   ├── loss.py         # HybridLoss (L1 + MS + Grad)
@@ -24,14 +25,13 @@ vsr_plus_plus/
 │   ├── validator.py    # Validation logic
 │   └── lr_scheduler.py # LR scheduling with warmup
 ├── systems/            # Support systems
-│   ├── auto_tune.py    # Auto-configuration tuning
 │   ├── checkpoint_manager.py  # Checkpoint management
 │   ├── adaptive_system.py     # Adaptive weights/clipping
 │   └── logger.py       # File + TensorBoard logging
 └── utils/              # Utilities
     ├── metrics.py      # PSNR, SSIM, quality
     ├── ui.py           # GUI functions
-    └── config.py       # Config management
+    └── config.py       # Legacy config utilities
 ```
 
 ## Installation
@@ -40,31 +40,58 @@ vsr_plus_plus/
 # Install dependencies
 pip install torch torchvision opencv-python tensorboard numpy
 
-# No additional setup needed - just run train.py!
+# No additional setup needed - just edit config.py and run!
 ```
 
-## Usage
+## Quick Start
 
-### Start New Training (with Auto-Tune)
+### 1. Configure Training Parameters
+
+Edit `vsr_plus_plus/config.py` to set your parameters:
+
+```python
+# Model Architecture
+N_FEATS = 128      # Feature channels (64-256)
+N_BLOCKS = 32      # Residual blocks (20-32)
+
+# Batch Settings
+BATCH_SIZE = 4
+ACCUMULATION_STEPS = 1
+
+# Learning Rate
+LR_EXPONENT = -5   # 10^-5 = 0.00001
+MAX_LR = 1e-4
+MIN_LR = 1e-6
+
+# Loss Weights
+L1_WEIGHT = 0.6
+MS_WEIGHT = 0.2
+GRAD_WEIGHT = 0.2
+
+# Training Duration
+MAX_STEPS = 100000
+```
+
+**See `CONFIG_GUIDE.md` for detailed parameter explanations and recommendations.**
+
+### 2. View Current Configuration
+
+```bash
+python vsr_plus_plus/config.py
+```
+
+This will print all your settings in a readable format.
+
+### 3. Start Training
 
 ```bash
 python vsr_plus_plus/train.py
 > L  # Choose "Löschen" to start fresh
-
-# Auto-tune will test configurations and find the best one
-# Press ENTER when prompted to continue
-```
-
-### Resume Training
-
-```bash
-python vsr_plus_plus/train.py
+# or
 > F  # Choose "Fortsetzen" to resume
-
-# Select checkpoint to resume from
 ```
 
-### View Training Progress
+### 4. Monitor Progress
 
 ```bash
 # Start TensorBoard
@@ -73,55 +100,52 @@ tensorboard --logdir /mnt/data/training/Universal/Mastermodell/Learn/logs --bind
 # Open browser to http://localhost:6006
 ```
 
-## Configuration
+## Configuration Guide
 
-Configuration is stored in `train_config.json`:
+### Model Size Presets
 
-```json
-{
-  "LR_EXPONENT": -5,           // Learning rate: 10^-5 = 1e-5
-  "WEIGHT_DECAY": 0.001,       // AdamW weight decay
-  "MAX_STEPS": 100000,         // Total training steps
-  "VAL_STEP_EVERY": 500,       // Validation frequency
-  "SAVE_STEP_EVERY": 10000,    // Regular checkpoint frequency
-  "LOG_TBOARD_EVERY": 100,     // TensorBoard log frequency
-  "WARMUP_STEPS": 1000,        // LR warmup steps
-  "AUTO_TUNED": true,          // Whether auto-tuned
-  "MODEL_CONFIG": {
-    "n_feats": 160,
-    "n_blocks": 32,
-    "batch_size": 4,
-    "accumulation_steps": 1
-  }
-}
+**Small/Fast** (6GB VRAM, 2-3s/iter):
+```python
+N_FEATS = 96
+N_BLOCKS = 24
+BATCH_SIZE = 4
 ```
 
-## Auto-Tuning System
+**Medium** (8GB VRAM, 3-4s/iter) - **Recommended Start**:
+```python
+N_FEATS = 128
+N_BLOCKS = 32
+BATCH_SIZE = 4
+```
 
-The auto-tuner tests configurations in order of priority to find the best balance of:
+**Large** (10GB VRAM, 4-5s/iter):
+```python
+N_FEATS = 160
+N_BLOCKS = 32
+BATCH_SIZE = 3
+```
 
-- **VRAM usage**: Must fit within 80% of max VRAM (safety margin)
-- **Training speed**: Must be ≤ target speed (default 4.0s/iter)
-- **Model capacity**: Prefers larger models when possible
+**Extra Large** (12GB VRAM, 5-6s/iter):
+```python
+N_FEATS = 192
+N_BLOCKS = 32
+BATCH_SIZE = 2
+```
 
-Test configurations (in order):
+### Out of Memory?
 
-1. `n_feats=192, batch=3, n_blocks=32` (largest)
-2. `n_feats=160, batch=4, n_blocks=32`
-3. `n_feats=128, batch=4, n_blocks=32`
-4. `n_feats=192, batch=2, n_blocks=32`
-5. `n_feats=160, batch=3, n_blocks=24`
-6. `n_feats=128, batch=3, n_blocks=24`
-7. `n_feats=96, batch=4, n_blocks=24`
-8. `n_feats=64, batch=4, n_blocks=20` (smallest)
+Reduce `N_FEATS` or `BATCH_SIZE`, or use gradient accumulation:
 
-The system automatically adjusts `accumulation_steps` to maintain an effective batch size ≥ 4.
+```python
+BATCH_SIZE = 2
+ACCUMULATION_STEPS = 2  # Effective batch = 4
+```
 
 ## Checkpoint Strategy
 
 ### Regular Checkpoints
 
-- Saved every 10,000 steps
+- Saved every 10,000 steps (configurable via `SAVE_STEP_EVERY`)
 - Filename: `checkpoint_step_10000.pth`, `checkpoint_step_20000.pth`, etc.
 - **Never deleted** (kept permanently)
 
@@ -290,33 +314,37 @@ Three-phase learning rate schedule:
 
 ### Out of Memory (OOM) Errors
 
-If you get OOM errors during auto-tune:
+Edit `config.py` to reduce model size or batch size:
 
-```bash
-# Reduce max VRAM in train.py:
-model_config = auto_tune_config(
-    target_speed=4.0,
-    max_vram_gb=4.0,  # Reduce this
-    min_effective_batch=4
-)
+```python
+# Reduce model size
+N_FEATS = 96  # or 64
+N_BLOCKS = 24  # or 20
+
+# Or reduce batch size
+BATCH_SIZE = 2  # or 1
+
+# Or use gradient accumulation
+BATCH_SIZE = 2
+ACCUMULATION_STEPS = 2  # Effective batch = 4
 ```
 
 ### Training Too Slow
 
-If training is slower than expected:
+Edit `config.py` to reduce model size:
 
-```bash
-# Increase target speed in train.py:
-model_config = auto_tune_config(
-    target_speed=6.0,  # Increase this
-    max_vram_gb=6.0,
-    min_effective_batch=4
-)
+```python
+# Smaller, faster model
+N_FEATS = 96
+N_BLOCKS = 24
+
+# Or reduce validation frequency
+VAL_STEP_EVERY = 1000  # instead of 500
 ```
 
 ### Dataset Not Found
 
-Ensure paths are correct in `train.py`:
+Ensure paths are correct in `config.py`:
 
 ```python
 DATA_ROOT = "/mnt/data/training/Universal/Mastermodell/Learn"
@@ -349,16 +377,16 @@ The system will automatically recreate them on next best checkpoint.
 ## Performance Tips
 
 1. **Use SSD storage** for datasets - HDD will bottleneck training
-2. **Adjust num_workers** in DataLoader based on CPU cores
-3. **Monitor VRAM** - if consistently under 80%, try higher n_feats
-4. **Validation frequency** - Reduce VAL_STEP_EVERY if validation is slow
+2. **Adjust NUM_WORKERS** in config.py based on CPU cores
+3. **Monitor VRAM** - if consistently low, try higher N_FEATS
+4. **Validation frequency** - Adjust VAL_STEP_EVERY in config.py if validation is slow
 
 ## Comparison with Original train.py
 
 | Feature | Original | VSR++ |
 |---------|----------|-------|
 | Model | VSRTriplePlus_3x | VSRBidirectional_3x |
-| Auto-tune | No | Yes |
+| Configuration | Auto-tune | Manual (config.py) |
 | Checkpoint management | Basic | Smart with symlinks |
 | Logging | Single file | File + TensorBoard |
 | Adaptive system | External | Integrated |
