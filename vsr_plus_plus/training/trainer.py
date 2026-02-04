@@ -201,15 +201,16 @@ class VSRTrainer:
                     # Log to TensorBoard
                     self.tb_logger.log_quality(self.global_step, metrics)
                     self.tb_logger.log_metrics(self.global_step, metrics)
+                    self.tb_logger.log_validation_loss(self.global_step, metrics.get('val_loss', 0.0))
                     
-                    # Log images
-                    if metrics.get('sample_lr') is not None:
-                        self.tb_logger.log_images(
-                            self.global_step,
-                            metrics['sample_lr'],
-                            metrics['sample_ki'],
-                            metrics['sample_gt']
-                        )
+                    # Log ALL images (like in original)
+                    if metrics.get('labeled_images') is not None:
+                        for idx, img_tensor in enumerate(metrics['labeled_images']):
+                            self.tb_logger.writer.add_image(
+                                f"Val/sample_{idx:04d}", 
+                                img_tensor, 
+                                self.global_step
+                            )
                     
                     self.train_logger.log_event(
                         f"Step {self.global_step} | Validation | "
@@ -317,6 +318,21 @@ class VSRTrainer:
         # Number of training images
         num_images = len(self.train_loader.dataset)
         
+        # Calculate ETAs
+        from ..utils.ui_terminal import format_time
+        
+        if paused:
+            total_eta = "PAUSED"
+            epoch_eta = "PAUSED"
+        else:
+            # Total ETA
+            remaining_steps = self.config['MAX_STEPS'] - self.global_step
+            total_eta = format_time(remaining_steps * avg_time)
+            
+            # Epoch ETA
+            remaining_epoch_steps = steps_per_epoch - current_epoch_step
+            epoch_eta = format_time(remaining_epoch_steps * avg_time)
+        
         # Draw UI
         draw_ui(
             step=self.global_step,
@@ -331,7 +347,9 @@ class VSRTrainer:
             adaptive_status=adaptive_status,
             paused=paused,
             quality_metrics=quality_metrics,
-            lr_info=lr_info
+            lr_info=lr_info,
+            total_eta=total_eta,
+            epoch_eta=epoch_eta
         )
     
     def _check_keyboard_input(self, epoch, steps_per_epoch, current_epoch_step):
@@ -368,15 +386,16 @@ class VSRTrainer:
         # Log to TensorBoard
         self.tb_logger.log_quality(self.global_step, metrics)
         self.tb_logger.log_metrics(self.global_step, metrics)
+        self.tb_logger.log_validation_loss(self.global_step, metrics.get('val_loss', 0.0))
         
-        # Log images
-        if metrics.get('sample_lr') is not None:
-            self.tb_logger.log_images(
-                self.global_step,
-                metrics['sample_lr'],
-                metrics['sample_ki'],
-                metrics['sample_gt']
-            )
+        # Log ALL images (like in original)
+        if metrics.get('labeled_images') is not None:
+            for idx, img_tensor in enumerate(metrics['labeled_images']):
+                self.tb_logger.writer.add_image(
+                    f"Val/sample_{idx:04d}", 
+                    img_tensor, 
+                    self.global_step
+                )
         
         self.train_logger.log_event(
             f"Manual Validation | KI Quality: {metrics['ki_quality']*100:.1f}%"

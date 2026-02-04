@@ -143,7 +143,8 @@ def get_activity_data(model):
 
 def draw_ui(step, epoch, losses, it_time, activities, config, num_images, 
             steps_per_epoch, current_epoch_step, adaptive_status=None, 
-            paused=False, quality_metrics=None, lr_info=None):
+            paused=False, quality_metrics=None, lr_info=None, 
+            total_eta="Calculating...", epoch_eta="Calculating..."):
     """
     Draw the complete training UI
     

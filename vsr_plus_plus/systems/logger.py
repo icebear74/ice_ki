@@ -134,6 +134,12 @@ class TensorBoardLogger:
         self.writer.add_scalar('Adaptive/Grad_Weight', grad_w, step)
         self.writer.add_scalar('Adaptive/GradientClip', adaptive_info.get('grad_clip', 1.5), step)
         self.writer.add_scalar('Adaptive/AggressiveMode', 1 if adaptive_info.get('aggressive_mode') else 0, step)
+        
+        # Add BestLoss and PlateauCounter (like in original)
+        if 'best_loss' in adaptive_info:
+            self.writer.add_scalar('Adaptive/BestLoss', adaptive_info['best_loss'], step)
+        if 'plateau_counter' in adaptive_info:
+            self.writer.add_scalar('Adaptive/PlateauCounter', adaptive_info['plateau_counter'], step)
     
     def log_quality(self, step, metrics):
         """Log quality metrics"""
@@ -167,6 +173,24 @@ class TensorBoardLogger:
             back_acts = activities.get('backward_trunk', [])
             forw_acts = activities.get('forward_trunk', [])
             
+            # Log individual layer activities (like in original)
+            for idx, act in enumerate(back_acts):
+                self.writer.add_scalar(f'Layers/Backward_Block_{idx+1:02d}', float(act), step)
+            
+            # Log fusion layers
+            if 'backward_fuse' in activities:
+                self.writer.add_scalar('Layers/Backward_Fuse', float(activities['backward_fuse']), step)
+            
+            for idx, act in enumerate(forw_acts):
+                self.writer.add_scalar(f'Layers/Forward_Block_{idx+1:02d}', float(act), step)
+            
+            if 'forward_fuse' in activities:
+                self.writer.add_scalar('Layers/Forward_Fuse', float(activities['forward_fuse']), step)
+            
+            if 'fusion' in activities:
+                self.writer.add_scalar('Layers/Final_Fusion', float(activities['fusion']), step)
+            
+            # Log averages
             if back_acts:
                 avg_back = sum(back_acts) / len(back_acts)
                 self.writer.add_scalar('Activity/Backward_Trunk_Avg', avg_back, step)
@@ -192,6 +216,10 @@ class TensorBoardLogger:
         # Concatenate images horizontally [LR | KI | GT]
         combined = torch.cat([lr_img, ki_img, gt_img], dim=2)  # Concatenate along width
         self.writer.add_image('Validation/Comparison', combined, step)
+    
+    def log_validation_loss(self, step, val_loss):
+        """Log validation loss (like in original)"""
+        self.writer.add_scalar('Validation/Loss_Total', val_loss, step)
     
     def close(self):
         """Close writer"""
