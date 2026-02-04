@@ -15,7 +15,7 @@ N_FEATS = 128
 
 # Total number of residual blocks (20, 24, 28, 32)
 # Higher = more capacity but slower
-N_BLOCKS = 32
+N_BLOCKS = 28
 
 
 # ============================================================================
@@ -24,12 +24,12 @@ N_BLOCKS = 32
 
 # Batch size per iteration (1, 2, 3, 4, 6, 8)
 # Higher = faster training but more VRAM
-BATCH_SIZE = 4
+BATCH_SIZE = 2
 
 # Gradient accumulation steps (1, 2, 3, 4)
 # Effective batch = BATCH_SIZE * ACCUMULATION_STEPS
 # Use accumulation if you need larger effective batch but have limited VRAM
-ACCUMULATION_STEPS = 1
+ACCUMULATION_STEPS = 2
 
 
 # ============================================================================
