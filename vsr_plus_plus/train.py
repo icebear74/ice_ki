@@ -171,12 +171,16 @@ def main():
     )
     
     # Create LR scheduler
+    # Initial LR for warmup start (from config)
+    initial_lr = 10 ** config['LR_EXPONENT']
+    
     lr_scheduler = AdaptiveLRScheduler(
         optimizer,
         warmup_steps=config['WARMUP_STEPS'],
         max_steps=config['MAX_STEPS'],
         max_lr=config['MAX_LR'],
-        min_lr=config['MIN_LR']
+        min_lr=config['MIN_LR'],
+        initial_lr=initial_lr
     )
     
     # Initialize LR for step 0 (warmup start)

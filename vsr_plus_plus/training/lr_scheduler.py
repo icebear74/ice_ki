@@ -20,15 +20,22 @@ class AdaptiveLRScheduler:
         max_steps: Maximum training steps
         max_lr: Maximum learning rate after warmup (default: 1e-4)
         min_lr: Minimum learning rate at end (default: 1e-6)
+        initial_lr: Initial learning rate for warmup start (default: None, uses optimizer's lr)
     """
     
     def __init__(self, optimizer, warmup_steps=1000, max_steps=100000, 
-                 max_lr=1e-4, min_lr=1e-6):
+                 max_lr=1e-4, min_lr=1e-6, initial_lr=None):
         self.optimizer = optimizer
         self.warmup_steps = warmup_steps
         self.max_steps = max_steps
         self.max_lr = max_lr
         self.min_lr = min_lr
+        
+        # Get initial LR from optimizer if not specified
+        if initial_lr is None:
+            self.initial_lr = optimizer.param_groups[0]['lr']
+        else:
+            self.initial_lr = initial_lr
         
         self.current_phase = 'warmup'
         self.plateau_reductions = 0
@@ -57,8 +64,9 @@ class AdaptiveLRScheduler:
         
         # Phase 1: Warmup
         if global_step < self.warmup_steps:
-            # Linear warmup from 0 to max_lr
-            lr = self.max_lr * (global_step / self.warmup_steps)
+            # Linear warmup from initial_lr to max_lr
+            progress = global_step / self.warmup_steps
+            lr = self.initial_lr + (self.max_lr - self.initial_lr) * progress
             self.current_phase = 'warmup'
         
         # Phase 2: Cosine Annealing
