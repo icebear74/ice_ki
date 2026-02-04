@@ -53,6 +53,11 @@ MAX_LR = 1e-4
 # Minimum learning rate at end of training
 MIN_LR = 1e-6
 
+# Learning rate update frequency (update LR every N steps)
+# Set to 1 to update every step (original behavior)
+# Set to 10 for smoother, less aggressive LR changes
+LR_UPDATE_EVERY = 10
+
 
 # ============================================================================
 # LOSS FUNCTION WEIGHTS
@@ -146,6 +151,7 @@ def get_config():
         'WARMUP_STEPS': WARMUP_STEPS,
         'MAX_LR': MAX_LR,
         'MIN_LR': MIN_LR,
+        'LR_UPDATE_EVERY': LR_UPDATE_EVERY,
         
         # Loss weights
         'L1_WEIGHT': L1_WEIGHT,

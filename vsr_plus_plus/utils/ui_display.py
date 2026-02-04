@@ -321,7 +321,13 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
     # === LAYER ACTIVITY ===
     available_lines = term_size.lines - 30  # Lines available for layer display
     
+    # Calculate layer counts for display
+    n_blocks = config.get('N_BLOCKS', 32)
+    total_layers = len(activities) if activities else 0
+    fusion_layers = total_layers - n_blocks if total_layers > n_blocks else 0
+    
     print_line(f"{C_BOLD}⚡ LAYER ACTIVITY{C_RESET} - Mode: {DISPLAY_MODE_NAMES[display_mode]}", ui_w)
+    print_line(f"ResidualBlocks: {C_CYAN}{n_blocks}{C_RESET} | Total Layers: {C_CYAN}{total_layers}{C_RESET} (incl. {fusion_layers} fusion)", ui_w)
     print_separator(ui_w, 'single')
     
     # Display based on mode
@@ -378,14 +384,15 @@ def _draw_activity_display(activities, display_mode, available_lines, ui_w,
         print_separator(ui_w, 'single')
         
         if available_lines >= num_activities:
-            for idx, act, trend, raw in backward:
-                print_line(f"LAYER {idx:>2}: {make_bar(act, bar_width_single)} {act:>3}%", ui_w)
+            for name, act, trend, raw in backward:
+                # Fixed width for name to align bars
+                print_line(f"{name:<15}: {make_bar(act, bar_width_single)} {act:>3}%", ui_w)
         else:
             for row in range(0, len(backward), 2):
                 left = backward[row]
                 right = backward[row+1] if row+1 < len(backward) else None
-                left_str = f"L{left[0]:02d}:{make_bar(left[1], bar_width_double)}{left[1]:3}%"
-                right_str = f"L{right[0]:02d}:{make_bar(right[1], bar_width_double)}{right[1]:3}%" if right else ""
+                left_str = f"{left[0]:<13}:{make_bar(left[1], bar_width_double)}{left[1]:3}%"
+                right_str = f"{right[0]:<13}:{make_bar(right[1], bar_width_double)}{right[1]:3}%" if right else ""
                 print_two_columns(left_str, right_str, ui_w)
         
         print_separator(ui_w, 'double')
@@ -393,14 +400,15 @@ def _draw_activity_display(activities, display_mode, available_lines, ui_w,
         print_separator(ui_w, 'single')
         
         if available_lines >= num_activities:
-            for idx, act, trend, raw in forward:
-                print_line(f"LAYER {idx:>2}: {make_bar(act, bar_width_single)} {act:>3}%", ui_w)
+            for name, act, trend, raw in forward:
+                # Fixed width for name to align bars
+                print_line(f"{name:<15}: {make_bar(act, bar_width_single)} {act:>3}%", ui_w)
         else:
             for row in range(0, len(forward), 2):
                 left = forward[row]
                 right = forward[row+1] if row+1 < len(forward) else None
-                left_str = f"L{left[0]:02d}:{make_bar(left[1], bar_width_double)}{left[1]:3}%"
-                right_str = f"L{right[0]:02d}:{make_bar(right[1], bar_width_double)}{right[1]:3}%" if right else ""
+                left_str = f"{left[0]:<13}:{make_bar(left[1], bar_width_double)}{left[1]:3}%"
+                right_str = f"{right[0]:<13}:{make_bar(right[1], bar_width_double)}{right[1]:3}%" if right else ""
                 print_two_columns(left_str, right_str, ui_w)
     
     elif display_mode == 1:
@@ -416,14 +424,14 @@ def _draw_activity_display(activities, display_mode, available_lines, ui_w,
         print_separator(ui_w, 'single')
         
         if available_lines >= num_activities:
-            for idx, act, trend, raw in backward:
-                print_line(f"LAYER {idx:>2}: {make_bar(act, bar_width_single)} {act:>3}%", ui_w)
+            for name, act, trend, raw in backward:
+                print_line(f"{name:<15}: {make_bar(act, bar_width_single)} {act:>3}%", ui_w)
         else:
             for row in range(0, len(backward), 2):
                 left = backward[row]
                 right = backward[row+1] if row+1 < len(backward) else None
-                left_str = f"L{left[0]:02d}:{make_bar(left[1], bar_width_double)}{left[1]:3}%"
-                right_str = f"L{right[0]:02d}:{make_bar(right[1], bar_width_double)}{right[1]:3}%" if right else ""
+                left_str = f"{left[0]:<13}:{make_bar(left[1], bar_width_double)}{left[1]:3}%"
+                right_str = f"{right[0]:<13}:{make_bar(right[1], bar_width_double)}{right[1]:3}%" if right else ""
                 print_two_columns(left_str, right_str, ui_w)
         
         print_separator(ui_w, 'double')
@@ -431,27 +439,27 @@ def _draw_activity_display(activities, display_mode, available_lines, ui_w,
         print_separator(ui_w, 'single')
         
         if available_lines >= num_activities:
-            for idx, act, trend, raw in forward:
-                print_line(f"LAYER {idx:>2}: {make_bar(act, bar_width_single)} {act:>3}%", ui_w)
+            for name, act, trend, raw in forward:
+                print_line(f"{name:<15}: {make_bar(act, bar_width_single)} {act:>3}%", ui_w)
         else:
             for row in range(0, len(forward), 2):
                 left = forward[row]
                 right = forward[row+1] if row+1 < len(forward) else None
-                left_str = f"L{left[0]:02d}:{make_bar(left[1], bar_width_double)}{left[1]:3}%"
-                right_str = f"L{right[0]:02d}:{make_bar(right[1], bar_width_double)}{right[1]:3}%" if right else ""
+                left_str = f"{left[0]:<13}:{make_bar(left[1], bar_width_double)}{left[1]:3}%"
+                right_str = f"{right[0]:<13}:{make_bar(right[1], bar_width_double)}{right[1]:3}%" if right else ""
                 print_two_columns(left_str, right_str, ui_w)
     
     elif display_mode == 2:
         # MODE 2: Flat List → Sorted by Position
         if available_lines >= num_activities:
-            for idx, act, trend, raw in activities:
-                print_line(f"LAYER {idx:>2}: {make_bar(act, bar_width_single)} {act:>3}%", ui_w)
+            for name, act, trend, raw in activities:
+                print_line(f"{name:<15}: {make_bar(act, bar_width_single)} {act:>3}%", ui_w)
         else:
             for row in range(0, num_activities, 2):
                 left = activities[row]
                 right = activities[row+1] if row+1 < num_activities else None
-                left_str = f"L{left[0]:02d}:{make_bar(left[1], bar_width_double)}{left[1]:3}%"
-                right_str = f"L{right[0]:02d}:{make_bar(right[1], bar_width_double)}{right[1]:3}%" if right else ""
+                left_str = f"{left[0]:<13}:{make_bar(left[1], bar_width_double)}{left[1]:3}%"
+                right_str = f"{right[0]:<13}:{make_bar(right[1], bar_width_double)}{right[1]:3}%" if right else ""
                 print_two_columns(left_str, right_str, ui_w)
     
     else:  # display_mode == 3
@@ -459,12 +467,12 @@ def _draw_activity_display(activities, display_mode, available_lines, ui_w,
         sorted_acts = sorted(activities, key=lambda x: x[1], reverse=True)
         
         if available_lines >= num_activities:
-            for idx, act, trend, raw in sorted_acts:
-                print_line(f"LAYER {idx:>2}: {make_bar(act, bar_width_single)} {act:>3}%", ui_w)
+            for name, act, trend, raw in sorted_acts:
+                print_line(f"{name:<15}: {make_bar(act, bar_width_single)} {act:>3}%", ui_w)
         else:
             for row in range(0, num_activities, 2):
                 left = sorted_acts[row]
                 right = sorted_acts[row+1] if row+1 < num_activities else None
-                left_str = f"L{left[0]:02d}:{make_bar(left[1], bar_width_double)}{left[1]:3}%"
-                right_str = f"L{right[0]:02d}:{make_bar(right[1], bar_width_double)}{right[1]:3}%" if right else ""
+                left_str = f"{left[0]:<13}:{make_bar(left[1], bar_width_double)}{left[1]:3}%"
+                right_str = f"{right[0]:<13}:{make_bar(right[1], bar_width_double)}{right[1]:3}%" if right else ""
                 print_two_columns(left_str, right_str, ui_w)

@@ -133,13 +133,19 @@ class VSRTrainer:
                 # Clip gradients
                 grad_norm, clip_val = self.adaptive_system.clip_gradients(self.model)
                 
-                # Optimizer step
+                # Update optimizer (every accumulation_steps)
                 self.optimizer.step()
                 self.optimizer.zero_grad()
                 
-                # Update LR scheduler
-                plateau_detected = self.adaptive_system.is_plateau()
-                current_lr, lr_phase = self.lr_scheduler.step(self.global_step, plateau_detected)
+                # Update LR scheduler (every LR_UPDATE_EVERY steps)
+                lr_update_every = self.config.get('LR_UPDATE_EVERY', 10)
+                if self.global_step % lr_update_every == 0:
+                    plateau_detected = self.adaptive_system.is_plateau()
+                    current_lr, lr_phase = self.lr_scheduler.step(self.global_step, plateau_detected)
+                else:
+                    # Keep current LR
+                    current_lr = self.lr_scheduler.get_current_lr()
+                    lr_phase = self.lr_scheduler.get_current_phase()
                 
                 # Update plateau tracker
                 self.adaptive_system.update_plateau_tracker(loss_dict['total'].item() if torch.is_tensor(loss_dict['total']) else loss_dict['total'])

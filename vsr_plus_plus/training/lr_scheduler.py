@@ -75,3 +75,11 @@ class AdaptiveLRScheduler:
             param_group['lr'] = lr
         
         return lr, self.current_phase
+    
+    def get_current_lr(self):
+        """Get current learning rate without updating"""
+        return self.optimizer.param_groups[0]['lr']
+    
+    def get_current_phase(self):
+        """Get current phase without updating"""
+        return self.current_phase
