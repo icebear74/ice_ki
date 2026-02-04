@@ -93,10 +93,21 @@ def get_activity_data(model):
         # Model doesn't have activity tracking
         return [(i+1, 0, 0, 0.0) for i in range(32)]
     
-    activities_raw = m.get_layer_activity()
+    activity_dict = m.get_layer_activity()
+    
+    if not activity_dict:
+        return [(i+1, 0, 0, 0.0) for i in range(32)]
+    
+    # Combine backward and forward trunk activities into a single list
+    backward = activity_dict.get('backward_trunk', [])
+    forward = activity_dict.get('forward_trunk', [])
+    activities_raw = backward + forward
     
     if not activities_raw:
         return [(i+1, 0, 0, 0.0) for i in range(32)]
+    
+    # Convert to float if needed (in case they're tensors or strings)
+    activities_raw = [float(v) if v is not None else 0.0 for v in activities_raw]
     
     trends = calculate_trends(activities_raw)
     max_val = max(activities_raw) if max(activities_raw) > 1e-12 else 1e-12
