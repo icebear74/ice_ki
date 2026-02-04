@@ -19,6 +19,26 @@ last_term_size = (0, 0)
 last_display_mode = -1
 
 
+def is_fusion_layer(layer_name):
+    """Check if a layer is a fusion layer based on its name"""
+    return "Fuse" in layer_name or "Fusion" in layer_name
+
+
+def is_final_fusion(layer_name):
+    """Check if a layer is the final fusion layer"""
+    return "Final Fusion" in layer_name
+
+
+def get_bar_for_layer(layer_name, percent, width):
+    """Get appropriate bar style based on layer type"""
+    if is_final_fusion(layer_name):
+        return make_bar_final_fusion(percent, width)
+    elif is_fusion_layer(layer_name):
+        return make_bar_fusion(percent, width)
+    else:
+        return make_bar(percent, width)
+
+
 def calculate_trends(activities):
     """
     Calculate activity trends for each layer
@@ -387,13 +407,13 @@ def _draw_activity_display(activities, display_mode, available_lines, ui_w,
         if available_lines >= num_activities:
             for name, act, trend, raw in backward:
                 # Fixed width for name to align bars
-                print_line(f"{name:<15}: {make_bar(act, bar_width_single)} {act:>3}%", ui_w)
+                print_line(f"{name:<15}: {get_bar_for_layer(name, act, bar_width_single)} {act:>3}%", ui_w)
         else:
             for row in range(0, len(backward), 2):
                 left = backward[row]
                 right = backward[row+1] if row+1 < len(backward) else None
-                left_str = f"{left[0]:<13}:{make_bar(left[1], bar_width_double)}{left[1]:3}%"
-                right_str = f"{right[0]:<13}:{make_bar(right[1], bar_width_double)}{right[1]:3}%" if right else ""
+                left_str = f"{left[0]:<13}:{get_bar_for_layer(left[0], left[1], bar_width_double)}{left[1]:3}%"
+                right_str = f"{right[0]:<13}:{get_bar_for_layer(right[0], right[1], bar_width_double)}{right[1]:3}%" if right else ""
                 print_two_columns(left_str, right_str, ui_w)
         
         print_separator(ui_w, 'double')
@@ -403,13 +423,13 @@ def _draw_activity_display(activities, display_mode, available_lines, ui_w,
         if available_lines >= num_activities:
             for name, act, trend, raw in forward:
                 # Fixed width for name to align bars
-                print_line(f"{name:<15}: {make_bar(act, bar_width_single)} {act:>3}%", ui_w)
+                print_line(f"{name:<15}: {get_bar_for_layer(name, act, bar_width_single)} {act:>3}%", ui_w)
         else:
             for row in range(0, len(forward), 2):
                 left = forward[row]
                 right = forward[row+1] if row+1 < len(forward) else None
-                left_str = f"{left[0]:<13}:{make_bar(left[1], bar_width_double)}{left[1]:3}%"
-                right_str = f"{right[0]:<13}:{make_bar(right[1], bar_width_double)}{right[1]:3}%" if right else ""
+                left_str = f"{left[0]:<13}:{get_bar_for_layer(left[0], left[1], bar_width_double)}{left[1]:3}%"
+                right_str = f"{right[0]:<13}:{get_bar_for_layer(right[0], right[1], bar_width_double)}{right[1]:3}%" if right else ""
                 print_two_columns(left_str, right_str, ui_w)
     
     elif display_mode == 1:
@@ -426,13 +446,13 @@ def _draw_activity_display(activities, display_mode, available_lines, ui_w,
         
         if available_lines >= num_activities:
             for name, act, trend, raw in backward:
-                print_line(f"{name:<15}: {make_bar(act, bar_width_single)} {act:>3}%", ui_w)
+                print_line(f"{name:<15}: {get_bar_for_layer(name, act, bar_width_single)} {act:>3}%", ui_w)
         else:
             for row in range(0, len(backward), 2):
                 left = backward[row]
                 right = backward[row+1] if row+1 < len(backward) else None
-                left_str = f"{left[0]:<13}:{make_bar(left[1], bar_width_double)}{left[1]:3}%"
-                right_str = f"{right[0]:<13}:{make_bar(right[1], bar_width_double)}{right[1]:3}%" if right else ""
+                left_str = f"{left[0]:<13}:{get_bar_for_layer(left[0], left[1], bar_width_double)}{left[1]:3}%"
+                right_str = f"{right[0]:<13}:{get_bar_for_layer(right[0], right[1], bar_width_double)}{right[1]:3}%" if right else ""
                 print_two_columns(left_str, right_str, ui_w)
         
         print_separator(ui_w, 'double')
@@ -441,26 +461,26 @@ def _draw_activity_display(activities, display_mode, available_lines, ui_w,
         
         if available_lines >= num_activities:
             for name, act, trend, raw in forward:
-                print_line(f"{name:<15}: {make_bar(act, bar_width_single)} {act:>3}%", ui_w)
+                print_line(f"{name:<15}: {get_bar_for_layer(name, act, bar_width_single)} {act:>3}%", ui_w)
         else:
             for row in range(0, len(forward), 2):
                 left = forward[row]
                 right = forward[row+1] if row+1 < len(forward) else None
-                left_str = f"{left[0]:<13}:{make_bar(left[1], bar_width_double)}{left[1]:3}%"
-                right_str = f"{right[0]:<13}:{make_bar(right[1], bar_width_double)}{right[1]:3}%" if right else ""
+                left_str = f"{left[0]:<13}:{get_bar_for_layer(left[0], left[1], bar_width_double)}{left[1]:3}%"
+                right_str = f"{right[0]:<13}:{get_bar_for_layer(right[0], right[1], bar_width_double)}{right[1]:3}%" if right else ""
                 print_two_columns(left_str, right_str, ui_w)
     
     elif display_mode == 2:
         # MODE 2: Flat List → Sorted by Position
         if available_lines >= num_activities:
             for name, act, trend, raw in activities:
-                print_line(f"{name:<15}: {make_bar(act, bar_width_single)} {act:>3}%", ui_w)
+                print_line(f"{name:<15}: {get_bar_for_layer(name, act, bar_width_single)} {act:>3}%", ui_w)
         else:
             for row in range(0, num_activities, 2):
                 left = activities[row]
                 right = activities[row+1] if row+1 < num_activities else None
-                left_str = f"{left[0]:<13}:{make_bar(left[1], bar_width_double)}{left[1]:3}%"
-                right_str = f"{right[0]:<13}:{make_bar(right[1], bar_width_double)}{right[1]:3}%" if right else ""
+                left_str = f"{left[0]:<13}:{get_bar_for_layer(left[0], left[1], bar_width_double)}{left[1]:3}%"
+                right_str = f"{right[0]:<13}:{get_bar_for_layer(right[0], right[1], bar_width_double)}{right[1]:3}%" if right else ""
                 print_two_columns(left_str, right_str, ui_w)
     
     else:  # display_mode == 3
@@ -469,11 +489,11 @@ def _draw_activity_display(activities, display_mode, available_lines, ui_w,
         
         if available_lines >= num_activities:
             for name, act, trend, raw in sorted_acts:
-                print_line(f"{name:<15}: {make_bar(act, bar_width_single)} {act:>3}%", ui_w)
+                print_line(f"{name:<15}: {get_bar_for_layer(name, act, bar_width_single)} {act:>3}%", ui_w)
         else:
             for row in range(0, num_activities, 2):
                 left = sorted_acts[row]
                 right = sorted_acts[row+1] if row+1 < num_activities else None
-                left_str = f"{left[0]:<13}:{make_bar(left[1], bar_width_double)}{left[1]:3}%"
-                right_str = f"{right[0]:<13}:{make_bar(right[1], bar_width_double)}{right[1]:3}%" if right else ""
+                left_str = f"{left[0]:<13}:{get_bar_for_layer(left[0], left[1], bar_width_double)}{left[1]:3}%"
+                right_str = f"{right[0]:<13}:{get_bar_for_layer(right[0], right[1], bar_width_double)}{right[1]:3}%" if right else ""
                 print_two_columns(left_str, right_str, ui_w)

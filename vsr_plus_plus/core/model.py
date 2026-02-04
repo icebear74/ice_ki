@@ -11,19 +11,22 @@ Key features:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 
 class ResidualBlock(nn.Module):
-    """Residual block with activity monitoring"""
+    """Residual block with activity monitoring and gradient checkpointing support"""
     
-    def __init__(self, n_feats):
+    def __init__(self, n_feats, use_checkpointing=False):
         super().__init__()
+        self.use_checkpointing = use_checkpointing
         self.conv1 = nn.Conv2d(n_feats, n_feats, 3, 1, 1)
         self.relu = nn.LeakyReLU(0.2, inplace=True)
         self.conv2 = nn.Conv2d(n_feats, n_feats, 3, 1, 1)
         self.last_activity = 0.0
     
-    def forward(self, x):
+    def _forward_impl(self, x):
+        """Actual forward pass implementation"""
         residual = x
         out = self.conv1(x)
         out = self.relu(out)
@@ -34,6 +37,15 @@ class ResidualBlock(nn.Module):
         self.last_activity = out.detach().abs().mean().item()
         
         return out
+    
+    def forward(self, x):
+        """Forward with optional gradient checkpointing"""
+        if self.use_checkpointing and self.training:
+            # Use gradient checkpointing during training
+            return checkpoint(self._forward_impl, x, use_reentrant=False)
+        else:
+            # Normal forward pass during validation/inference
+            return self._forward_impl(x)
 
 
 class TrackedConv2d(nn.Module):
@@ -61,12 +73,14 @@ class VSRBidirectional_3x(nn.Module):
     Args:
         n_feats: Number of feature channels (64-256, auto-tuned)
         n_blocks: Total number of ResBlocks (split between trunks)
+        use_checkpointing: Enable gradient checkpointing to save VRAM
     """
     
-    def __init__(self, n_feats=128, n_blocks=32):
+    def __init__(self, n_feats=128, n_blocks=32, use_checkpointing=False):
         super().__init__()
         self.n_feats = n_feats
         self.n_blocks = n_blocks
+        self.use_checkpointing = use_checkpointing
         
         half_blocks = max(1, n_blocks // 2)
         
@@ -79,10 +93,10 @@ class VSRBidirectional_3x(nn.Module):
         
         # 3. Propagation Trunks
         self.backward_trunk = nn.ModuleList([
-            ResidualBlock(n_feats) for _ in range(half_blocks)
+            ResidualBlock(n_feats, use_checkpointing=use_checkpointing) for _ in range(half_blocks)
         ])
         self.forward_trunk = nn.ModuleList([
-            ResidualBlock(n_feats) for _ in range(half_blocks)
+            ResidualBlock(n_feats, use_checkpointing=use_checkpointing) for _ in range(half_blocks)
         ])
         
         # 4. Final Fusion (WITH TRACKING)

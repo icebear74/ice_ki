@@ -61,12 +61,9 @@ class VSRValidator:
         
         num_samples = 0
         
-        # For image logging (save ALL samples like in original)
-        all_lr_images = []
-        all_ki_images = []
-        all_gt_images = []
-        all_lr_qualities = []
-        all_ki_qualities = []
+        # For image logging - process images immediately to save memory
+        # Only store final labeled images, not intermediate lr/ki/gt separately
+        labeled_images = []
         
         val_total = len(self.val_loader)
         val_start = time.time()
@@ -90,21 +87,23 @@ class VSRValidator:
                 # Forward pass
                 ki_output = self.model(lr_stack)
                 
-                # Compute loss
+                # Compute loss and immediately extract scalar (don't keep GPU tensor)
                 loss_dict = self.loss_fn(ki_output, gt)
                 total_loss += loss_dict['total'].item() if torch.is_tensor(loss_dict['total']) else loss_dict['total']
+                del loss_dict  # Free loss tensors immediately
                 
                 # Get LR center frame (upscaled for comparison)
                 lr_center = lr_stack[:, 2]  # Center frame
                 lr_upscaled = F.interpolate(lr_center, scale_factor=3, mode='bilinear', align_corners=False)
+                del lr_center  # Free immediately after use
                 
                 # Compute metrics for each sample in batch
                 for i in range(lr_stack.size(0)):
-                    # LR metrics
+                    # LR metrics - compute on GPU, extract scalar immediately
                     lr_psnr = calculate_psnr(lr_upscaled[i], gt[i])
                     lr_ssim = calculate_ssim(lr_upscaled[i], gt[i])
                     
-                    # KI metrics
+                    # KI metrics - compute on GPU, extract scalar immediately
                     ki_psnr = calculate_psnr(ki_output[i], gt[i])
                     ki_ssim = calculate_ssim(ki_output[i], gt[i])
                     
@@ -117,17 +116,60 @@ class VSRValidator:
                     lr_qual = quality_to_percent(lr_psnr, lr_ssim)
                     ki_qual = quality_to_percent(ki_psnr, ki_ssim)
                     
-                    # Store images for ALL samples (like in original)
-                    all_lr_images.append(lr_upscaled[i].cpu())
-                    all_ki_images.append(ki_output[i].cpu())
-                    all_gt_images.append(gt[i].cpu())
-                    all_lr_qualities.append(lr_qual)
-                    all_ki_qualities.append(ki_qual)
+                    # GPU MEMORY OPTIMIZATION: Move to CPU IMMEDIATELY after metrics computed
+                    # Don't keep GPU tensors around - they take up valuable VRAM
+                    lr_img = lr_upscaled[i].cpu().permute(1, 2, 0).numpy()
+                    ki_img = ki_output[i].cpu().permute(1, 2, 0).numpy()
+                    gt_img = gt[i].cpu().permute(1, 2, 0).numpy()
                     
-                    # Note: num_samples is now updated BEFORE the loop for correct display
+                    # Clip and convert to 0-255 AND copy
+                    # .copy() is CRITICAL - cv2.putText modifies in-place!
+                    lr_img = np.clip(lr_img * 255, 0, 255).astype(np.uint8).copy()
+                    ki_img = np.clip(ki_img * 255, 0, 255).astype(np.uint8).copy()
+                    gt_img = np.clip(gt_img * 255, 0, 255).astype(np.uint8).copy()
+                    
+                    # Add text labels
+                    font = cv2.FONT_HERSHEY_SIMPLEX
+                    font_scale = 1.5
+                    thickness = 3
+                    
+                    # LR label
+                    text = f"LR {lr_qual*100:.1f}%"
+                    cv2.putText(lr_img, text, (10, 40), font, font_scale, (255, 255, 255), thickness)
+                    cv2.putText(lr_img, text, (10, 40), font, font_scale, (0, 255, 0), thickness-1)
+                    
+                    # KI label
+                    text = f"KI {ki_qual*100:.1f}%"
+                    cv2.putText(ki_img, text, (10, 40), font, font_scale, (255, 255, 255), thickness)
+                    cv2.putText(ki_img, text, (10, 40), font, font_scale, (0, 255, 255), thickness-1)
+                    
+                    # GT label
+                    text = "GT 100.0%"
+                    cv2.putText(gt_img, text, (10, 40), font, font_scale, (255, 255, 255), thickness)
+                    cv2.putText(gt_img, text, (10, 40), font, font_scale, (255, 0, 0), thickness-1)
+                    
+                    # Concatenate side by side: LR | KI | GT
+                    combined = np.concatenate([lr_img, ki_img, gt_img], axis=1)
+                    
+                    # Convert back to tensor (CHW format for TensorBoard)
+                    combined_tensor = torch.from_numpy(combined).permute(2, 0, 1)
+                    combined_tensor = combined_tensor.float() / 255.0
+                    combined_tensor = combined_tensor.contiguous()
+                    
+                    # Store only the final labeled image
+                    labeled_images.append(combined_tensor)
+                
+                # GPU MEMORY CRITICAL: Free GPU tensors IMMEDIATELY after batch processing
+                # This is the key to reducing VRAM usage during validation
+                del lr_stack, gt, ki_output, lr_upscaled
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()  # Force GPU to release memory NOW
         
         # Clear progress line
         print()  # New line after progress bar
+        
+        # CLEANUP - Force release GPU memory
+        torch.cuda.empty_cache()
         
         self.model.train()
         
@@ -143,49 +185,6 @@ class VSRValidator:
         ki_quality = quality_to_percent(avg_ki_psnr, avg_ki_ssim)
         improvement = ki_quality - lr_quality
         
-        # Add labels to images (like in original train.py)
-        labeled_images = []
-        for idx in range(len(all_lr_images)):
-            # Convert to numpy for cv2
-            lr_img = all_lr_images[idx].cpu().permute(1, 2, 0).numpy()
-            ki_img = all_ki_images[idx].cpu().permute(1, 2, 0).numpy()
-            gt_img = all_gt_images[idx].cpu().permute(1, 2, 0).numpy()
-            
-            # Clip and convert to 0-255 AND copy (like original train.py)
-            # .copy() is CRITICAL - cv2.putText modifies in-place!
-            lr_img = np.clip(lr_img * 255, 0, 255).astype(np.uint8).copy()
-            ki_img = np.clip(ki_img * 255, 0, 255).astype(np.uint8).copy()
-            gt_img = np.clip(gt_img * 255, 0, 255).astype(np.uint8).copy()
-            
-            # Add text labels (like original)
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            font_scale = 1.5
-            thickness = 3
-            
-            # LR label
-            text = f"LR {all_lr_qualities[idx]*100:.1f}%"
-            cv2.putText(lr_img, text, (10, 40), font, font_scale, (255, 255, 255), thickness)
-            cv2.putText(lr_img, text, (10, 40), font, font_scale, (0, 255, 0), thickness-1)
-            
-            # KI label
-            text = f"KI {all_ki_qualities[idx]*100:.1f}%"
-            cv2.putText(ki_img, text, (10, 40), font, font_scale, (255, 255, 255), thickness)
-            cv2.putText(ki_img, text, (10, 40), font, font_scale, (0, 255, 255), thickness-1)
-            
-            # GT label
-            text = "GT 100.0%"
-            cv2.putText(gt_img, text, (10, 40), font, font_scale, (255, 255, 255), thickness)
-            cv2.putText(gt_img, text, (10, 40), font, font_scale, (255, 0, 0), thickness-1)
-            
-            # Concatenate side by side: LR | KI | GT
-            combined = np.concatenate([lr_img, ki_img, gt_img], axis=1)
-            
-            # Convert back to tensor (CHW format for TensorBoard)
-            combined_tensor = torch.from_numpy(combined).permute(2, 0, 1)
-            combined_tensor = combined_tensor.float() / 255.0
-            combined_tensor = combined_tensor.contiguous()  # Ensure contiguous memory
-            labeled_images.append(combined_tensor)
-        
         return {
             'val_loss': avg_loss,
             'lr_quality': lr_quality,
@@ -195,5 +194,5 @@ class VSRValidator:
             'lr_ssim': avg_lr_ssim,
             'ki_psnr': avg_ki_psnr,
             'ki_ssim': avg_ki_ssim,
-            'labeled_images': labeled_images  # ALL images with labels
+            'labeled_images': labeled_images  # Already labeled and ready for TensorBoard
         }

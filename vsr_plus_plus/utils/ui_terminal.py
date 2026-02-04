@@ -57,11 +57,43 @@ def make_bar(percent, width):
         width: Width of the bar in characters
     
     Returns:
-        str: Formatted progress bar with ANSI colors
+        str: Formatted progress bar with ANSI colors (green)
     """
     width = max(5, width)
     filled = max(0, min(width, int((percent / 100.0) * width)))
     return f"{C_GREEN}{'█' * filled}{C_GRAY}{'░' * (width - filled)}{C_RESET}"
+
+
+def make_bar_fusion(percent, width):
+    """
+    Create an ASCII progress bar for fusion layers (cyan color)
+    
+    Args:
+        percent: Percentage (0-100)
+        width: Width of the bar in characters
+    
+    Returns:
+        str: Formatted progress bar with ANSI colors (cyan for fusion layers)
+    """
+    width = max(5, width)
+    filled = max(0, min(width, int((percent / 100.0) * width)))
+    return f"{C_CYAN}{'█' * filled}{C_GRAY}{'░' * (width - filled)}{C_RESET}"
+
+
+def make_bar_final_fusion(percent, width):
+    """
+    Create an ASCII progress bar for final fusion layer (yellow color)
+    
+    Args:
+        percent: Percentage (0-100)
+        width: Width of the bar in characters
+    
+    Returns:
+        str: Formatted progress bar with ANSI colors (yellow for final fusion)
+    """
+    width = max(5, width)
+    filled = max(0, min(width, int((percent / 100.0) * width)))
+    return f"{C_YELLOW}{'█' * filled}{C_GRAY}{'░' * (width - filled)}{C_RESET}"
 
 
 def format_time(seconds):

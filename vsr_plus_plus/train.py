@@ -151,7 +151,11 @@ def main():
     # Create model
     print("Creating model...")
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = VSRBidirectional_3x(n_feats=n_feats, n_blocks=n_blocks).to(device)
+    model = VSRBidirectional_3x(
+        n_feats=n_feats, 
+        n_blocks=n_blocks,
+        use_checkpointing=config.get('USE_GRADIENT_CHECKPOINTING', True)
+    ).to(device)
     
     # Count parameters
     total_params = sum(p.numel() for p in model.parameters())
@@ -227,10 +231,10 @@ def main():
     
     val_loader = DataLoader(
         val_dataset,
-        batch_size=4,
+        batch_size=config.get('VAL_BATCH_SIZE', 1),
         shuffle=False,
         num_workers=2,
-        pin_memory=config['PIN_MEMORY']
+        pin_memory=False  # Disable for validation (saves VRAM)
     )
     
     # Create checkpoint manager
