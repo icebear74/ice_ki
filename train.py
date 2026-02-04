@@ -292,11 +292,39 @@ def draw_ui(step, epoch, losses, it_time, activities, cfg, num_images, steps_per
     # Move cursor to home and hide cursor (no full clear)
     print(ANSI_HOME + "\033[?25l", end='')
     
+    # === ABSOLUTE WIDTH CALCULATIONS (once at start) ===
     ui_w = max(90, term_size.columns - 4)
+    # Column width: Total width minus borders and separator: " ║ " (3) + " │ " (3) + " ║" (1) = 7 chars
+    col_width = (ui_w - 7) // 2  # For two-column layout
+    bar_width_single = ui_w - 25  # For single-column bars (label + padding)
+    bar_width_double = (ui_w - 30) // 2  # For two-column bars (labels + padding)
+    
     total_prog = (step / cfg["MAX_STEPS"]) * 100 if cfg["MAX_STEPS"] > 0 else 0
     total_eta = format_time((cfg["MAX_STEPS"] - step) * it_time) if not paused else "PAUSIERT"
     epoch_prog = (current_epoch_step / steps_per_epoch) * 100 if steps_per_epoch > 0 else 0
     epoch_eta = format_time((steps_per_epoch - current_epoch_step) * it_time) if not paused else "PAUSIERT"
+
+    def print_separator(style='single'):
+        """DOS-style separators with proper T-junctions"""
+        if style == 'double':
+            sys.stdout.write(f" {C_GRAY}╠{'═'*(ui_w-2)}╣{C_RESET}\n")
+        else:  # single
+            sys.stdout.write(f" {C_GRAY}╟{'─'*(ui_w-2)}╢{C_RESET}\n")
+    
+    def print_two_columns(left_content, right_content):
+        """Print two columns with proper alignment and full-width formatting"""
+        # Get visible lengths (accounting for ANSI codes)
+        left_vis = get_visible_len(left_content)
+        right_vis = get_visible_len(right_content) if right_content else 0
+        
+        # Pad to exact column width
+        left_pad = max(0, col_width - left_vis)
+        right_pad = max(0, col_width - right_vis)
+        
+        left_str = f"{left_content}{' ' * left_pad}"
+        right_str = f"{right_content}{' ' * right_pad}" if right_content else (' ' * col_width)
+        
+        sys.stdout.write(f" ║ {left_str} │ {right_str} ║\n")
 
     def print_line(content):
         visible_len = get_visible_len(content)
@@ -345,18 +373,27 @@ def draw_ui(step, epoch, losses, it_time, activities, cfg, num_images, steps_per
     overall_bar = make_bar(total_prog, overall_bar_width)
     epoch_bar = make_bar(epoch_prog, epoch_bar_width)
     print_line(f"TOTAL: {overall_bar} {total_prog:>4.1f}% ETA:{total_eta} │ EPOCH {epoch}: {epoch_bar} {epoch_prog:>4.1f}% ETA:{epoch_eta}")
-    sys.stdout.write(f" {C_GRAY}╠{'═'*(ui_w-2)}╣{C_RESET}\n")
+    print_separator('double')
     
-    # Adaptive Change Notification (if any)
+    # Adaptive Change Notification (ALWAYS visible - prevents UI jumping)
     if adaptive_status:
         notification = adaptive_status.get('last_notification')
         if notification:
+            # Active notification
             notif_color = C_YELLOW if notification['type'] in ['plateau', 'divergence'] else C_CYAN
             step_info = f"@ Step {notification['step']}" if notification.get('step') else ""
             print_line(f"{notif_color}{notification['message']}{C_RESET} {step_info}")
             if notification.get('details'):
                 print_line(f"  {C_GRAY}{notification['details']}{C_RESET}")
-            sys.stdout.write(f" {C_GRAY}╠{'─'*(ui_w-2)}╣{C_RESET}\n")
+        else:
+            # Placeholder when no notification (prevents flickering)
+            print_line(f"{C_GRAY}📡 System Status: Monitoring... (No recent changes){C_RESET}")
+            print_line(f"  {C_GRAY}All parameters stable{C_RESET}")
+    else:
+        # No adaptive system - show placeholder
+        print_line(f"{C_GRAY}📡 System Status: Standard mode (no adaptive system){C_RESET}")
+        print_line(f"  {C_GRAY}Fixed parameters{C_RESET}")
+    print_separator('single')
     
     # Adaptive Parameters Section
     if adaptive_status:
@@ -368,7 +405,7 @@ def draw_ui(step, epoch, losses, it_time, activities, cfg, num_images, steps_per
         plateau_max = 300  # from AdaptiveLRScheduler patience
         
         print_line(f"{C_BOLD}🤖 ADAPTIVE PARAMETERS{C_RESET}")
-        sys.stdout.write(f" {C_GRAY}╠{'─'*(ui_w-2)}╣{C_RESET}\n")
+        print_separator('single')
         print_line(f"LR: {C_CYAN}{lr:.2e}{C_RESET} │ Grad Clip: {C_CYAN}{grad_clip:.2f}{C_RESET} │ Best Loss: {C_CYAN}{best_loss:.6f}{C_RESET} │ Plateau: {plateau_count}/{plateau_max}")
         
         # Loss weights line with aggressive mode indicator
@@ -377,14 +414,14 @@ def draw_ui(step, epoch, losses, it_time, activities, cfg, num_images, steps_per
             weights_line += f" │ {C_BOLD}{C_YELLOW}⚡ AGGRESSIVE MODE{C_RESET}"
         print_line(weights_line)
         
-        sys.stdout.write(f" {C_GRAY}╠{'═'*(ui_w-2)}╣{C_RESET}\n")
+        print_separator('double')
     
     # Loss Info
     loss_str = f"L1: {C_CYAN}{losses.get('l1',0):.4f}{C_RESET} │ MS: {C_CYAN}{losses.get('ms',0):.4f}{C_RESET} │ Grad: {C_CYAN}{losses.get('grad',0):.4f}{C_RESET} │ Total: {C_BOLD}{C_GREEN}{losses.get('total',0):.4f}{C_RESET}"
     print_line(f"LOSS → {loss_str}")
     vram = f"{torch.cuda.memory_reserved() / 1024**3:.2f}GB"
     print_line(f"DATASET: {num_images:<7} imgs │ VRAM: {vram} │ SPEED: {it_time:.2f}s/it │ {calculate_convergence_status(loss_history)}")
-    sys.stdout.write(f" {C_GRAY}╠{'═'*(ui_w-2)}╣{C_RESET}\n")
+    print_separator('double')
     
     # QUALITY METRICS (last validation)
     lr_q = last_quality_metrics['lr_quality']
@@ -392,7 +429,7 @@ def draw_ui(step, epoch, losses, it_time, activities, cfg, num_images, steps_per
     imp = last_quality_metrics['improvement']
     
     print_line(f"{C_BOLD}📊 QUALITY METRICS{C_RESET} (last validation)")
-    sys.stdout.write(f" {C_GRAY}╠{'─'*(ui_w-2)}╣{C_RESET}\n")
+    print_separator('single')
     
     # LR Quality (Baseline)
     lr_bar = make_bar(lr_q, ui_w-50)
@@ -410,7 +447,7 @@ def draw_ui(step, epoch, losses, it_time, activities, cfg, num_images, steps_per
     imp_sign = "+" if imp >= 0 else ""
     print_line(f"Improve: {imp_bar} {imp_color}{imp_sign}{imp:>5.1f}%{C_RESET}  (Gain!)")
     
-    sys.stdout.write(f" {C_GRAY}╠{'═'*(ui_w-2)}╣{C_RESET}\n")
+    print_separator('double')
 
     # LAYER DISPLAY - 4 MODI
     display_mode = cfg.get("DISPLAY_MODE", 0)
@@ -418,7 +455,7 @@ def draw_ui(step, epoch, losses, it_time, activities, cfg, num_images, steps_per
     
     mode_name = DISPLAY_MODE_NAMES[display_mode]
     print_line(f"{C_BOLD}📊 VIEW MODE: {mode_name}{C_RESET}")
-    sys.stdout.write(f" {C_GRAY}╠{'─'*(ui_w-2)}╣{C_RESET}\n")
+    print_separator('single')
     
     if display_mode == 0:
         # MODE 0: Grouped by Trunk → Sorted by Position
@@ -430,48 +467,48 @@ def draw_ui(step, epoch, losses, it_time, activities, cfg, num_images, steps_per
         fusion_overall = int(np.mean([act for _, act, _, _ in fusion])) if fusion else 0
         
         print_line(f"{C_BOLD}🔥 BACKWARD TRUNK (L1-L15){C_RESET} - Overall: {make_bar(backward_overall, 20)} {backward_overall}%")
-        sys.stdout.write(f" {C_GRAY}╠{'─'*(ui_w-2)}╣{C_RESET}\n")
+        print_separator('single')
         
         if available_lines >= 32:
             for idx, act, trend, raw in backward:
-                print_line(f"LAYER {idx:>2}: {make_bar(act, ui_w-25)} {act:>3}%")
+                print_line(f"LAYER {idx:>2}: {make_bar(act, bar_width_single)} {act:>3}%")
         else:
             for row in range(0, 15, 2):
                 left = backward[row]
                 right = backward[row+1] if row+1 < 15 else None
-                left_str = f"L{left[0]:02d}:{make_bar(left[1], (ui_w-30)//2)}{left[1]:3}%"
-                right_str = f"L{right[0]:02d}:{make_bar(right[1], (ui_w-30)//2)}{right[1]:3}%" if right else ""
-                print_line(f"{left_str} │ {right_str}")
+                left_str = f"L{left[0]:02d}:{make_bar(left[1], bar_width_double)}{left[1]:3}%"
+                right_str = f"L{right[0]:02d}:{make_bar(right[1], bar_width_double)}{right[1]:3}%" if right else ""
+                print_two_columns(left_str, right_str)
         
-        sys.stdout.write(f" {C_GRAY}╠{'═'*(ui_w-2)}╣{C_RESET}\n")
+        print_separator('double')
         print_line(f"{C_BOLD}⚡ FORWARD TRUNK (L16-L30){C_RESET} - Overall: {make_bar(forward_overall, 20)} {forward_overall}%")
-        sys.stdout.write(f" {C_GRAY}╠{'─'*(ui_w-2)}╣{C_RESET}\n")
+        print_separator('single')
         
         if available_lines >= 32:
             for idx, act, trend, raw in forward:
-                print_line(f"LAYER {idx:>2}: {make_bar(act, ui_w-25)} {act:>3}%")
+                print_line(f"LAYER {idx:>2}: {make_bar(act, bar_width_single)} {act:>3}%")
         else:
             for row in range(0, 15, 2):
                 left = forward[row]
                 right = forward[row+1] if row+1 < 15 else None
-                left_str = f"L{left[0]:02d}:{make_bar(left[1], (ui_w-30)//2)}{left[1]:3}%"
-                right_str = f"L{right[0]:02d}:{make_bar(right[1], (ui_w-30)//2)}{right[1]:3}%" if right else ""
-                print_line(f"{left_str} │ {right_str}")
+                left_str = f"L{left[0]:02d}:{make_bar(left[1], bar_width_double)}{left[1]:3}%"
+                right_str = f"L{right[0]:02d}:{make_bar(right[1], bar_width_double)}{right[1]:3}%" if right else ""
+                print_two_columns(left_str, right_str)
         
         if fusion:
-            sys.stdout.write(f" {C_GRAY}╠{'═'*(ui_w-2)}╣{C_RESET}\n")
+            print_separator('double')
             print_line(f"{C_BOLD}🔗 FUSION (L31-L32){C_RESET} - Overall: {make_bar(fusion_overall, 20)} {fusion_overall}%")
-            sys.stdout.write(f" {C_GRAY}╠{'─'*(ui_w-2)}╣{C_RESET}\n")
+            print_separator('single')
             
             if available_lines >= 32:
                 for idx, act, trend, raw in fusion:
-                    print_line(f"LAYER {idx:>2}: {make_bar(act, ui_w-25)} {act:>3}%")
+                    print_line(f"LAYER {idx:>2}: {make_bar(act, bar_width_single)} {act:>3}%")
             else:
                 left = fusion[0]
                 right = fusion[1] if len(fusion) > 1 else None
-                left_str = f"L{left[0]:02d}:{make_bar(left[1], (ui_w-30)//2)}{left[1]:3}%"
-                right_str = f"L{right[0]:02d}:{make_bar(right[1], (ui_w-30)//2)}{right[1]:3}%" if right else ""
-                print_line(f"{left_str} │ {right_str}")
+                left_str = f"L{left[0]:02d}:{make_bar(left[1], bar_width_double)}{left[1]:3}%"
+                right_str = f"L{right[0]:02d}:{make_bar(right[1], bar_width_double)}{right[1]:3}%" if right else ""
+                print_two_columns(left_str, right_str)
     
     elif display_mode == 1:
         # MODE 1: Grouped by Trunk → Sorted by Activity
@@ -483,62 +520,62 @@ def draw_ui(step, epoch, losses, it_time, activities, cfg, num_images, steps_per
         fusion_overall = int(np.mean([act for _, act, _, _ in fusion])) if fusion else 0
         
         print_line(f"{C_BOLD}🔥 BACKWARD TRUNK (L1-L15 sorted){C_RESET} - Overall: {make_bar(backward_overall, 20)} {backward_overall}%")
-        sys.stdout.write(f" {C_GRAY}╠{'─'*(ui_w-2)}╣{C_RESET}\n")
+        print_separator('single')
         
         if available_lines >= 32:
             for idx, act, trend, raw in backward:
-                print_line(f"LAYER {idx:>2}: {make_bar(act, ui_w-25)} {act:>3}%")
+                print_line(f"LAYER {idx:>2}: {make_bar(act, bar_width_single)} {act:>3}%")
         else:
             for row in range(0, 15, 2):
                 left = backward[row]
                 right = backward[row+1] if row+1 < 15 else None
-                left_str = f"L{left[0]:02d}:{make_bar(left[1], (ui_w-30)//2)}{left[1]:3}%"
-                right_str = f"L{right[0]:02d}:{make_bar(right[1], (ui_w-30)//2)}{right[1]:3}%" if right else ""
-                print_line(f"{left_str} │ {right_str}")
+                left_str = f"L{left[0]:02d}:{make_bar(left[1], bar_width_double)}{left[1]:3}%"
+                right_str = f"L{right[0]:02d}:{make_bar(right[1], bar_width_double)}{right[1]:3}%" if right else ""
+                print_two_columns(left_str, right_str)
         
-        sys.stdout.write(f" {C_GRAY}╠{'═'*(ui_w-2)}╣{C_RESET}\n")
+        print_separator('double')
         print_line(f"{C_BOLD}⚡ FORWARD TRUNK (L16-L30 sorted){C_RESET} - Overall: {make_bar(forward_overall, 20)} {forward_overall}%")
-        sys.stdout.write(f" {C_GRAY}╠{'─'*(ui_w-2)}╣{C_RESET}\n")
+        print_separator('single')
         
         if available_lines >= 32:
             for idx, act, trend, raw in forward:
-                print_line(f"LAYER {idx:>2}: {make_bar(act, ui_w-25)} {act:>3}%")
+                print_line(f"LAYER {idx:>2}: {make_bar(act, bar_width_single)} {act:>3}%")
         else:
             for row in range(0, 15, 2):
                 left = forward[row]
                 right = forward[row+1] if row+1 < 15 else None
-                left_str = f"L{left[0]:02d}:{make_bar(left[1], (ui_w-30)//2)}{left[1]:3}%"
-                right_str = f"L{right[0]:02d}:{make_bar(right[1], (ui_w-30)//2)}{right[1]:3}%" if right else ""
-                print_line(f"{left_str} │ {right_str}")
+                left_str = f"L{left[0]:02d}:{make_bar(left[1], bar_width_double)}{left[1]:3}%"
+                right_str = f"L{right[0]:02d}:{make_bar(right[1], bar_width_double)}{right[1]:3}%" if right else ""
+                print_two_columns(left_str, right_str)
         
         if fusion:
-            sys.stdout.write(f" {C_GRAY}╠{'═'*(ui_w-2)}╣{C_RESET}\n")
+            print_separator('double')
             print_line(f"{C_BOLD}🔗 FUSION (L31-L32 sorted){C_RESET} - Overall: {make_bar(fusion_overall, 20)} {fusion_overall}%")
-            sys.stdout.write(f" {C_GRAY}╠{'─'*(ui_w-2)}╣{C_RESET}\n")
+            print_separator('single')
             
             if available_lines >= 32:
                 for idx, act, trend, raw in fusion:
-                    print_line(f"LAYER {idx:>2}: {make_bar(act, ui_w-25)} {act:>3}%")
+                    print_line(f"LAYER {idx:>2}: {make_bar(act, bar_width_single)} {act:>3}%")
             else:
                 left = fusion[0]
                 right = fusion[1] if len(fusion) > 1 else None
-                left_str = f"L{left[0]:02d}:{make_bar(left[1], (ui_w-30)//2)}{left[1]:3}%"
-                right_str = f"L{right[0]:02d}:{make_bar(right[1], (ui_w-30)//2)}{right[1]:3}%" if right else ""
-                print_line(f"{left_str} │ {right_str}")
+                left_str = f"L{left[0]:02d}:{make_bar(left[1], bar_width_double)}{left[1]:3}%"
+                right_str = f"L{right[0]:02d}:{make_bar(right[1], bar_width_double)}{right[1]:3}%" if right else ""
+                print_two_columns(left_str, right_str)
     
     elif display_mode == 2:
         # MODE 2: Flat List → Sorted by Position
         num_layers = len(activities)
         if available_lines >= num_layers:
             for idx, act, trend, raw in activities:
-                print_line(f"LAYER {idx:>2}: {make_bar(act, ui_w-25)} {act:>3}%")
+                print_line(f"LAYER {idx:>2}: {make_bar(act, bar_width_single)} {act:>3}%")
         else:
             for row in range(0, num_layers, 2):
                 left = activities[row]
                 right = activities[row+1] if row+1 < num_layers else None
-                left_str = f"L{left[0]:02d}:{make_bar(left[1], (ui_w-30)//2)}{left[1]:3}%"
-                right_str = f"L{right[0]:02d}:{make_bar(right[1], (ui_w-30)//2)}{right[1]:3}%" if right else ""
-                print_line(f"{left_str} │ {right_str}")
+                left_str = f"L{left[0]:02d}:{make_bar(left[1], bar_width_double)}{left[1]:3}%"
+                right_str = f"L{right[0]:02d}:{make_bar(right[1], bar_width_double)}{right[1]:3}%" if right else ""
+                print_two_columns(left_str, right_str)
     
     else:  # display_mode == 3
         # MODE 3: Flat List → Sorted by Activity
@@ -547,17 +584,17 @@ def draw_ui(step, epoch, losses, it_time, activities, cfg, num_images, steps_per
         
         if available_lines >= num_layers:
             for idx, act, trend, raw in sorted_acts:
-                print_line(f"LAYER {idx:>2}: {make_bar(act, ui_w-25)} {act:>3}%")
+                print_line(f"LAYER {idx:>2}: {make_bar(act, bar_width_single)} {act:>3}%")
         else:
             for row in range(0, num_layers, 2):
                 left = sorted_acts[row]
                 right = sorted_acts[row+1] if row+1 < num_layers else None
-                left_str = f"L{left[0]:02d}:{make_bar(left[1], (ui_w-30)//2)}{left[1]:3}%"
-                right_str = f"L{right[0]:02d}:{make_bar(right[1], (ui_w-30)//2)}{right[1]:3}%" if right else ""
-                print_line(f"{left_str} │ {right_str}")
+                left_str = f"L{left[0]:02d}:{make_bar(left[1], bar_width_double)}{left[1]:3}%"
+                right_str = f"L{right[0]:02d}:{make_bar(right[1], bar_width_double)}{right[1]:3}%" if right else ""
+                print_two_columns(left_str, right_str)
 
     # Footer
-    sys.stdout.write(f" {C_GRAY}╠{'═'*(ui_w-2)}╣{C_RESET}\n")
+    print_separator('double')
     nv = cfg['VAL_STEP_EVERY']-(step%cfg['VAL_STEP_EVERY'])
     ns = cfg['SAVE_STEP_EVERY']-(step%cfg['SAVE_STEP_EVERY'])
     print_line(f"VAL IN: {nv:<5} │ SAVE IN: {ns:<5} │ BATCH: {BATCH_SIZE}x{cfg['ACCUMULATION_STEPS']}={BATCH_SIZE*cfg['ACCUMULATION_STEPS']} │ GRAD CLIP: {cfg.get('GRAD_CLIP', 1.0)}")
