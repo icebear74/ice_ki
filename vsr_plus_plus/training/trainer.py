@@ -251,6 +251,7 @@ class VSRTrainer:
                     
                     # Check for best checkpoint
                     if self.checkpoint_mgr.should_check_best(self.global_step):
+                        print(f"\n💾 Checking if this is a new best checkpoint...")
                         is_new_best = self.checkpoint_mgr.update_best_checkpoint(
                             self.model, self.optimizer, self.lr_scheduler, 
                             self.global_step, metrics['ki_quality'], metrics,
@@ -258,7 +259,13 @@ class VSRTrainer:
                         )
                         
                         if is_new_best:
+                            print(f"✅ New best checkpoint saved!")
                             self.tb_logger.log_checkpoint(self.global_step, 'best')
+                        else:
+                            print(f"   (Not better than current best)")
+                    
+                    # Redraw UI after validation completes
+                    self._update_gui()
                     
                     # Auto-continue timer for manual validation
                     if self.do_manual_val:
@@ -300,9 +307,17 @@ class VSRTrainer:
                 
                 # Regular checkpoint
                 if self.checkpoint_mgr.should_save_regular(self.global_step):
+                    print(f"\n💾 Saving regular checkpoint at step {self.global_step:,}...")
                     self.checkpoint_mgr.save_checkpoint(
                         self.model, self.optimizer, self.lr_scheduler,
                         self.global_step, self.last_metrics or {},
+                        self.train_logger.log_file
+                    )
+                    print(f"✅ Regular checkpoint saved!")
+                    self.tb_logger.log_checkpoint(self.global_step, 'regular')
+                    
+                    # Redraw UI after save
+                    self._update_gui()
                         self.train_logger.log_file
                     )
                     self.tb_logger.log_checkpoint(self.global_step, 'regular')

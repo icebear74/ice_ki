@@ -73,7 +73,10 @@ class VSRValidator:
         
         with torch.no_grad():
             for batch_idx, (lr_stack, gt) in enumerate(self.val_loader):
-                # Progress Bar - show batches AND samples for clarity
+                # Update sample count BEFORE displaying
+                num_samples += lr_stack.size(0)
+                
+                # Progress Bar - show batches AND cumulative samples for clarity
                 progress = (batch_idx + 1) / val_total * 100
                 filled = int(50 * (batch_idx + 1) / val_total)
                 bar = f"{C_GREEN}{'█' * filled}{C_GRAY}{'░' * (50 - filled)}{C_RESET}"
@@ -121,7 +124,7 @@ class VSRValidator:
                     all_lr_qualities.append(lr_qual)
                     all_ki_qualities.append(ki_qual)
                     
-                    num_samples += 1
+                    # Note: num_samples is now updated BEFORE the loop for correct display
         
         # Clear progress line
         print()  # New line after progress bar

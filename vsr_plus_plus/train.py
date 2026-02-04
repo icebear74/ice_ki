@@ -62,8 +62,9 @@ def start_tensorboard(log_dir, port=6006):
         subprocess.run(['pkill', '-f', 'tensorboard'], stderr=subprocess.DEVNULL)
         time.sleep(1)
         
-        # Start new tensorboard
-        cmd = ['tensorboard', f'--logdir={log_dir}', f'--port={port}', '--bind_all', '--reload_interval=5']
+        # Start new tensorboard - point to active_run subdirectory
+        active_run_dir = os.path.join(log_dir, "active_run")
+        cmd = ['tensorboard', f'--logdir={active_run_dir}', f'--port={port}', '--bind_all', '--reload_interval=5']
         subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         
         # Wait for it to start (max 5 seconds)
@@ -106,9 +107,10 @@ def main():
     if choice == 'l':
         print("\n🗑️  Starting fresh training...\n")
         
-        # Cleanup old checkpoints
-        checkpoint_mgr.cleanup_old_checkpoints()
-        print("✅ Old checkpoints cleaned up\n")
+        # Cleanup everything for fresh start
+        log_dir = os.path.join(DATA_ROOT, "logs")
+        checkpoint_mgr.cleanup_all_for_fresh_start(log_dir)
+        print("✅ All checkpoints, logs, and TensorBoard events cleaned up\n")
         
     else:
         print("\n📂 Resuming training...\n")

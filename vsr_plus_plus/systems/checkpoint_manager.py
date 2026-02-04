@@ -224,6 +224,43 @@ class CheckpointManager:
                 if not os.path.exists(target_path):
                     os.unlink(link_path)
     
+    def cleanup_all_for_fresh_start(self, log_dir):
+        """
+        Clean up everything for fresh start (when user chooses 'L')
+        - All checkpoints
+        - All logs
+        - All TensorBoard events
+        """
+        import shutil
+        
+        # Remove all checkpoint files
+        for f in os.listdir(self.checkpoint_dir):
+            path = os.path.join(self.checkpoint_dir, f)
+            try:
+                if os.path.isfile(path) or os.path.islink(path):
+                    os.unlink(path)
+            except Exception as e:
+                print(f"Warning: Could not remove {path}: {e}")
+        
+        # Remove TensorBoard events in active_run
+        active_run_dir = os.path.join(log_dir, "active_run")
+        if os.path.exists(active_run_dir):
+            try:
+                shutil.rmtree(active_run_dir)
+                os.makedirs(active_run_dir, exist_ok=True)
+            except Exception as e:
+                print(f"Warning: Could not clean TensorBoard logs: {e}")
+        
+        # Remove log files
+        log_files = ['training.log', 'training_status.txt']
+        for log_file in log_files:
+            log_path = os.path.join(self.checkpoint_dir, log_file)
+            if os.path.exists(log_path):
+                try:
+                    os.unlink(log_path)
+                except Exception as e:
+                    print(f"Warning: Could not remove {log_file}: {e}")
+    
     def show_checkpoint_info(self):
         """Display checkpoint table at startup"""
         checkpoints = self.list_checkpoints()
