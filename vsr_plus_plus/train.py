@@ -279,7 +279,18 @@ def main():
             checkpoint = torch.load(latest_path, map_location=device)
             
             model.load_state_dict(checkpoint['model_state_dict'])
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            
+            # Try to load optimizer state, but handle parameter group mismatch
+            try:
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                print(f"✅ Optimizer state loaded")
+            except ValueError as e:
+                if "parameter groups" in str(e):
+                    print(f"{C_YELLOW}⚠ Optimizer state not loaded: parameter group mismatch{C_RESET}")
+                    print(f"{C_YELLOW}  Old checkpoint has different optimizer structure{C_RESET}")
+                    print(f"{C_YELLOW}  Continuing with fresh optimizer state (LR and momentum reset){C_RESET}")
+                else:
+                    raise
             
             # Restore scheduler state if available
             if 'scheduler_state_dict' in checkpoint:
