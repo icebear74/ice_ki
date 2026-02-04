@@ -1,0 +1,235 @@
+"""
+VSRTrainer - Main training loop orchestration
+
+Coordinates all training components:
+- Model training
+- Validation
+- Checkpointing
+- Logging
+- Adaptive systems
+"""
+
+import time
+import torch
+
+
+class VSRTrainer:
+    """
+    Main training orchestrator
+    
+    Args:
+        model: VSR model
+        optimizer: Optimizer
+        lr_scheduler: Learning rate scheduler
+        train_loader: Training data loader
+        val_loader: Validation data loader
+        loss_fn: Loss function
+        validator: Validator instance
+        checkpoint_mgr: Checkpoint manager
+        train_logger: Training logger
+        tb_logger: TensorBoard logger
+        adaptive_system: Adaptive training system
+        config: Training configuration
+        device: Device to use
+    """
+    
+    def __init__(self, model, optimizer, lr_scheduler, train_loader, val_loader, loss_fn,
+                 validator, checkpoint_mgr, train_logger, tb_logger, adaptive_system, 
+                 config, device='cuda'):
+        self.model = model
+        self.optimizer = optimizer
+        self.lr_scheduler = lr_scheduler
+        self.train_loader = train_loader
+        self.val_loader = val_loader
+        self.loss_fn = loss_fn
+        self.validator = validator
+        self.checkpoint_mgr = checkpoint_mgr
+        self.train_logger = train_logger
+        self.tb_logger = tb_logger
+        self.adaptive_system = adaptive_system
+        self.config = config
+        self.device = device
+        
+        self.global_step = 0
+        self.start_step = 0
+        
+        # Metrics tracking
+        self.last_metrics = None
+        self.last_activities = None
+        
+        # Performance tracking
+        self.step_times = []
+    
+    def set_start_step(self, step):
+        """Set starting step (for resume)"""
+        self.start_step = step
+        self.global_step = step
+    
+    def train_epoch(self, epoch):
+        """
+        Train one epoch
+        
+        Args:
+            epoch: Current epoch number
+        """
+        self.model.train()
+        
+        accumulation_steps = self.config.get('ACCUMULATION_STEPS', 1)
+        
+        for batch_idx, (lr_stack, gt) in enumerate(self.train_loader):
+            step_start_time = time.time()
+            
+            # Move to device
+            lr_stack = lr_stack.to(self.device)
+            gt = gt.to(self.device)
+            
+            # Forward pass
+            output = self.model(lr_stack)
+            
+            # Get adaptive weights
+            l1_w, ms_w, grad_w = self.adaptive_system.update_loss_weights(
+                output, gt, self.global_step, 
+                current_grad_loss=None  # Could compute this if needed
+            )
+            
+            # Compute loss
+            loss_dict = self.loss_fn(output, gt, l1_w, ms_w, grad_w)
+            loss = loss_dict['total']
+            
+            # Backward pass (with accumulation)
+            loss = loss / accumulation_steps
+            loss.backward()
+            
+            # Update optimizer (every accumulation_steps)
+            if (batch_idx + 1) % accumulation_steps == 0:
+                # Clip gradients
+                grad_norm, clip_val = self.adaptive_system.clip_gradients(self.model)
+                
+                # Optimizer step
+                self.optimizer.step()
+                self.optimizer.zero_grad()
+                
+                # Update LR scheduler
+                plateau_detected = self.adaptive_system.is_plateau()
+                current_lr, lr_phase = self.lr_scheduler.step(self.global_step, plateau_detected)
+                
+                # Update plateau tracker
+                self.adaptive_system.update_plateau_tracker(loss_dict['total'].item() if torch.is_tensor(loss_dict['total']) else loss_dict['total'])
+                
+                # Get activity
+                self.last_activities = self.model.get_layer_activity()
+                
+                # Measure performance
+                step_time = time.time() - step_start_time
+                self.step_times.append(step_time)
+                if len(self.step_times) > 100:
+                    self.step_times.pop(0)
+                
+                avg_time = sum(self.step_times) / len(self.step_times)
+                vram = torch.cuda.max_memory_allocated() / (1024**3)
+                
+                # Logging
+                self.global_step += 1
+                
+                # TensorBoard logging
+                if self.global_step % self.config.get('LOG_TBOARD_EVERY', 100) == 0:
+                    self.tb_logger.log_losses(self.global_step, loss_dict)
+                    self.tb_logger.log_lr(self.global_step, current_lr)
+                    self.tb_logger.log_adaptive(self.global_step, self.adaptive_system.get_status())
+                    self.tb_logger.log_system(self.global_step, avg_time, vram)
+                    self.tb_logger.log_gradients(self.global_step, grad_norm, self.last_activities)
+                    self.tb_logger.log_lr_phase(self.global_step, lr_phase)
+                
+                # Status file update (every 5 steps)
+                if self.global_step % 5 == 0:
+                    self.train_logger.update_status(
+                        self.global_step, epoch, loss_dict, current_lr, avg_time, vram,
+                        self.config.get('MODEL_CONFIG', {}), self.last_metrics, 
+                        self.adaptive_system.get_status()
+                    )
+                
+                # Validation
+                if self.global_step % self.config.get('VAL_STEP_EVERY', 500) == 0:
+                    self.train_logger.log_event(f"Running validation at step {self.global_step}")
+                    
+                    metrics = self.validator.validate(self.global_step)
+                    self.last_metrics = metrics
+                    
+                    # Log to TensorBoard
+                    self.tb_logger.log_quality(self.global_step, metrics)
+                    self.tb_logger.log_metrics(self.global_step, metrics)
+                    
+                    # Log images
+                    if metrics.get('sample_lr') is not None:
+                        self.tb_logger.log_images(
+                            self.global_step,
+                            metrics['sample_lr'],
+                            metrics['sample_ki'],
+                            metrics['sample_gt']
+                        )
+                    
+                    self.train_logger.log_event(
+                        f"Step {self.global_step} | Validation | "
+                        f"KI Quality: {metrics['ki_quality']*100:.1f}%"
+                    )
+                    
+                    # Check for best checkpoint
+                    if self.checkpoint_mgr.should_check_best(self.global_step):
+                        is_new_best = self.checkpoint_mgr.update_best_checkpoint(
+                            self.model, self.optimizer, self.lr_scheduler, 
+                            self.global_step, metrics['ki_quality'], metrics,
+                            self.train_logger.log_file
+                        )
+                        
+                        if is_new_best:
+                            self.tb_logger.log_checkpoint(self.global_step, 'best')
+                
+                # Regular checkpoint
+                if self.checkpoint_mgr.should_save_regular(self.global_step):
+                    self.checkpoint_mgr.save_checkpoint(
+                        self.model, self.optimizer, self.lr_scheduler,
+                        self.global_step, self.last_metrics or {},
+                        self.train_logger.log_file
+                    )
+                    self.tb_logger.log_checkpoint(self.global_step, 'regular')
+                    self.train_logger.log_event(f"Regular checkpoint saved at step {self.global_step}")
+                
+                # Check if training complete
+                if self.global_step >= self.config.get('MAX_STEPS', 100000):
+                    return
+    
+    def run(self):
+        """
+        Main training loop
+        """
+        self.train_logger.log_event("🚀 TRAINING STARTED")
+        
+        try:
+            for epoch in range(1, 100000):
+                self.train_epoch(epoch)
+                
+                if self.global_step >= self.config.get('MAX_STEPS', 100000):
+                    self.train_logger.log_event("✅ TRAINING COMPLETED")
+                    break
+        
+        except KeyboardInterrupt:
+            self.train_logger.log_event("⚠️  Training interrupted by user")
+            self.checkpoint_mgr.save_emergency_checkpoint(
+                self.model, self.optimizer, self.lr_scheduler,
+                self.global_step, self.last_metrics or {},
+                self.train_logger.log_file
+            )
+            self.tb_logger.log_checkpoint(self.global_step, 'emergency')
+        
+        except Exception as e:
+            self.train_logger.log_event(f"❌ Training crashed: {e}")
+            self.checkpoint_mgr.save_emergency_checkpoint(
+                self.model, self.optimizer, self.lr_scheduler,
+                self.global_step, self.last_metrics or {},
+                self.train_logger.log_file
+            )
+            self.tb_logger.log_checkpoint(self.global_step, 'emergency')
+            raise
+        
+        finally:
+            self.tb_logger.close()
