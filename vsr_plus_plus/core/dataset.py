@@ -32,6 +32,8 @@ class VSRDataset(Dataset):
         # Build paths
         self.gt_dir = os.path.join(dataset_root, mode, 'GT')
         self.lr_dir = os.path.join(dataset_root, mode, 'LR')
+        # For validation, also check Patches/LR as fallback (like original train.py)
+        self.patch_lr_dir = os.path.join(dataset_root, 'Patches', 'LR')
         
         # Get all GT files
         all_gt_files = sorted([f for f in os.listdir(self.gt_dir) if f.endswith('.png')])
@@ -40,13 +42,22 @@ class VSRDataset(Dataset):
             raise ValueError(f"No PNG files found in {self.gt_dir}")
         
         # Filter to only keep GT files that have corresponding LR files
+        # For Val mode, check both Val/LR and Patches/LR (like original)
         self.gt_files = []
+        self.lr_paths = {}  # Map filename to actual LR directory
         skipped_files = []
         
         for gt_file in all_gt_files:
             lr_path = os.path.join(self.lr_dir, gt_file)
+            patch_lr_path = os.path.join(self.patch_lr_dir, gt_file)
+            
             if os.path.exists(lr_path):
                 self.gt_files.append(gt_file)
+                self.lr_paths[gt_file] = self.lr_dir
+            elif mode == 'Val' and os.path.exists(patch_lr_path):
+                # For validation, fallback to Patches/LR
+                self.gt_files.append(gt_file)
+                self.lr_paths[gt_file] = self.patch_lr_dir
             else:
                 skipped_files.append(gt_file)
         
