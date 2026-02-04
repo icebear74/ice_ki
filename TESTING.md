@@ -158,7 +158,7 @@ print(f"✓ Perceptual component active: {loss_dict['perceptual'] > 0}")
 print("\n✅ Custom perceptual loss test passed!")
 print("   - 100% self-learned (no pretrained weights)")
 print("   - Multi-scale features (3 stages)")
-print("   - Lightweight (~140K params vs ~15M for VGG16)")
+print("   - Lightweight (~139K params vs ~15M for VGG16)")
 EOF
 ```
 
