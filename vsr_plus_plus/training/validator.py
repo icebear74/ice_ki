@@ -58,7 +58,9 @@ class VSRValidator:
         total_lr_ssim = 0.0
         total_ki_psnr = 0.0
         total_ki_ssim = 0.0
-        total_improvement = 0.0  # Track per-image improvements
+        total_improvement = 0.0  # Sum of per-image (KI - LR) improvements
+        total_ki_to_gt = 0.0  # Sum of per-image (KI - GT) differences
+        total_lr_to_gt = 0.0  # Sum of per-image (LR - GT) differences
         
         num_samples = 0
         
@@ -125,9 +127,14 @@ class VSRValidator:
                     # Calculate quality percentages
                     lr_qual = quality_to_percent(lr_psnr, lr_ssim)
                     ki_qual = quality_to_percent(ki_psnr, ki_ssim)
+                    gt_qual = 1.0  # GT is always 100% quality
                     
-                    # Add per-image improvement
+                    # Add per-image improvement (KI - LR)
                     total_improvement += (ki_qual - lr_qual)
+                    
+                    # Add per-image differences to GT
+                    total_ki_to_gt += (ki_qual - gt_qual)
+                    total_lr_to_gt += (lr_qual - gt_qual)
                     
                     # GPU MEMORY OPTIMIZATION: Move to CPU IMMEDIATELY after metrics computed
                     # Don't keep GPU tensors around - they take up valuable VRAM
@@ -209,14 +216,19 @@ class VSRValidator:
         lr_quality = quality_to_percent(avg_lr_psnr, avg_lr_ssim)
         ki_quality = quality_to_percent(avg_ki_psnr, avg_ki_ssim)
         
-        # Use per-image improvement average
-        improvement = total_improvement / max(1, num_samples)
+        # Use SUM of per-image improvements (not average)
+        # This shows total improvement across all validation images
+        improvement = total_improvement
+        ki_to_gt = total_ki_to_gt
+        lr_to_gt = total_lr_to_gt
         
         return {
             'val_loss': avg_loss,
             'lr_quality': lr_quality,
             'ki_quality': ki_quality,
             'improvement': improvement,
+            'ki_to_gt': ki_to_gt,  # Total difference KI to GT
+            'lr_to_gt': lr_to_gt,  # Total difference LR to GT
             'lr_psnr': avg_lr_psnr,
             'lr_ssim': avg_lr_ssim,
             'ki_psnr': avg_ki_psnr,

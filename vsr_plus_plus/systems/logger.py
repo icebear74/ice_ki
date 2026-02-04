@@ -89,7 +89,11 @@ class TrainingLogger:
                 f.write(f"VALIDATION METRICS:\n")
                 f.write(f"  LR Quality: {metrics.get('lr_quality', 0)*100:.1f}%\n")
                 f.write(f"  KI Quality: {metrics.get('ki_quality', 0)*100:.1f}%\n")
-                f.write(f"  Improvement: {metrics.get('improvement', 0)*100:.1f}%\n")
+                f.write(f"  Improvement (Sum): {metrics.get('improvement', 0)*100:.1f}%\n")
+                if 'ki_to_gt' in metrics:
+                    f.write(f"  KI to GT (Sum): {metrics.get('ki_to_gt', 0)*100:.1f}%\n")
+                if 'lr_to_gt' in metrics:
+                    f.write(f"  LR to GT (Sum): {metrics.get('lr_to_gt', 0)*100:.1f}%\n")
                 f.write(f"  PSNR: {metrics.get('ki_psnr', 0):.2f}dB\n")
                 f.write(f"  SSIM: {metrics.get('ki_ssim', 0):.4f}\n\n")
             
@@ -157,6 +161,12 @@ class TensorBoardLogger:
         self.writer.add_scalar('Quality/LR_Quality', self._to_float(metrics.get('lr_quality', 0)), step)
         self.writer.add_scalar('Quality/KI_Quality', self._to_float(metrics.get('ki_quality', 0)), step)
         self.writer.add_scalar('Quality/Improvement', self._to_float(metrics.get('improvement', 0)), step)
+        
+        # Log additional GT difference metrics if available
+        if 'ki_to_gt' in metrics:
+            self.writer.add_scalar('Quality/KI_to_GT', self._to_float(metrics.get('ki_to_gt', 0)), step)
+        if 'lr_to_gt' in metrics:
+            self.writer.add_scalar('Quality/LR_to_GT', self._to_float(metrics.get('lr_to_gt', 0)), step)
     
     def log_metrics(self, step, metrics):
         """Log PSNR/SSIM metrics"""
