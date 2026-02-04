@@ -46,6 +46,8 @@ class VSRDataset(Dataset):
         self.gt_files = []
         self.lr_paths = {}  # Map filename to actual LR directory
         skipped_files = []
+        matched_val_lr = 0
+        matched_patches_lr = 0
         
         for gt_file in all_gt_files:
             lr_path = os.path.join(self.lr_dir, gt_file)
@@ -54,20 +56,41 @@ class VSRDataset(Dataset):
             if os.path.exists(lr_path):
                 self.gt_files.append(gt_file)
                 self.lr_paths[gt_file] = self.lr_dir
+                matched_val_lr += 1
             elif mode == 'Val' and os.path.exists(patch_lr_path):
                 # For validation, fallback to Patches/LR
                 self.gt_files.append(gt_file)
                 self.lr_paths[gt_file] = self.patch_lr_dir
+                matched_patches_lr += 1
             else:
                 skipped_files.append(gt_file)
         
-        # Report skipped files
-        if skipped_files:
-            print(f"\n⚠️  Skipped {len(skipped_files)} GT files without matching LR files in {mode}:")
-            for i, f in enumerate(skipped_files[:10]):  # Show first 10
-                print(f"  - {f}")
-            if len(skipped_files) > 10:
-                print(f"  ... and {len(skipped_files) - 10} more")
+        # Show detailed statistics for Val mode
+        if mode == 'Val':
+            print("\n" + "="*60)
+            print(f"📂 VALIDATION DATASET LOADING")
+            print("="*60)
+            print(f"  GT files found:           {len(all_gt_files)}")
+            print(f"  Matched in Val/LR:        {matched_val_lr}")
+            print(f"  Matched in Patches/LR:    {matched_patches_lr}")
+            print(f"  ───────────────────────────────────")
+            print(f"  Skipped (no LR):          {len(skipped_files)}")
+            print(f"  Final samples loaded:     {len(self.gt_files)}")
+            print("="*60)
+            
+            if skipped_files:
+                print(f"\n⚠️  {len(skipped_files)} GT files skipped (no matching LR file):")
+                for i, f in enumerate(skipped_files[:15]):  # Show first 15
+                    print(f"  - {f}")
+                if len(skipped_files) > 15:
+                    print(f"  ... and {len(skipped_files) - 15} more")
+                print("\n💡 To include these files, ensure LR versions exist in:")
+                print(f"     {self.lr_dir}")
+                print(f"  OR {self.patch_lr_dir}")
+                print()
+        elif skipped_files:
+            # For training mode, just show count
+            print(f"\n⚠️  Skipped {len(skipped_files)} GT files without matching LR files in {mode}")
             print()
         
         if not self.gt_files:
