@@ -165,16 +165,39 @@ def main():
     loss_fn = HybridLoss(
         l1_weight=config['L1_WEIGHT'],
         ms_weight=config['MS_WEIGHT'],
-        grad_weight=config['GRAD_WEIGHT']
+        grad_weight=config['GRAD_WEIGHT'],
+        perceptual_weight=config.get('PERCEPTUAL_WEIGHT', 0.0)
     )
     
-    # Create optimizer
+    # Create optimizer with layer-wise learning rates
+    # Give Final Fusion layer 10x higher learning rate to activate it
     lr = 10 ** config['LR_EXPONENT']
-    optimizer = optim.AdamW(
-        model.parameters(),
-        lr=lr,
-        weight_decay=config['WEIGHT_DECAY']
-    )
+    
+    # Separate Final Fusion parameters from other parameters
+    final_fusion_params = []
+    other_params = []
+    
+    for name, param in model.named_parameters():
+        if 'fusion.conv' in name:  # Final fusion layer (TrackedConv2d wraps the conv)
+            final_fusion_params.append(param)
+        else:
+            other_params.append(param)
+    
+    # Create parameter groups with different learning rates
+    param_groups = [
+        {
+            'params': other_params,
+            'lr': lr,
+            'weight_decay': config['WEIGHT_DECAY']
+        },
+        {
+            'params': final_fusion_params,
+            'lr': lr * 10,  # 10x higher for Final Fusion
+            'weight_decay': config['WEIGHT_DECAY'] * 0.5  # Less weight decay for aggressive learning
+        }
+    ]
+    
+    optimizer = optim.AdamW(param_groups)
     
     # Create LR scheduler
     # Initial LR for warmup start (from config)
