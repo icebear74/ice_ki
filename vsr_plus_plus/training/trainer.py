@@ -120,8 +120,11 @@ class VSRTrainer:
                 current_grad_loss=None  # Could compute this if needed
             )
             
+            # Get perceptual weight (fixed, not adaptive)
+            perceptual_w = self.adaptive_system.perceptual_weight
+            
             # Compute loss
-            loss_dict = self.loss_fn(output, gt, l1_w, ms_w, grad_w)
+            loss_dict = self.loss_fn(output, gt, l1_w, ms_w, grad_w, perceptual_w)
             loss = loss_dict['total']
             
             # Backward pass (with accumulation)

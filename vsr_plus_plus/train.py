@@ -221,14 +221,16 @@ def main():
         adaptive_system = AdaptiveSystem(
             initial_l1=config['L1_WEIGHT'],
             initial_ms=config['MS_WEIGHT'],
-            initial_grad=config['GRAD_WEIGHT']
+            initial_grad=config['GRAD_WEIGHT'],
+            initial_perceptual=config.get('PERCEPTUAL_WEIGHT', 0.0)  # NEW: Pass perceptual weight
         )
     else:
         # Use fixed weights if adaptive is disabled
         adaptive_system = AdaptiveSystem(
             initial_l1=config['L1_WEIGHT'],
             initial_ms=config['MS_WEIGHT'],
-            initial_grad=config['GRAD_WEIGHT']
+            initial_grad=config['GRAD_WEIGHT'],
+            initial_perceptual=config.get('PERCEPTUAL_WEIGHT', 0.0)  # NEW: Pass perceptual weight
         )
     
     # Create datasets
