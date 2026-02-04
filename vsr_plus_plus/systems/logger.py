@@ -129,6 +129,7 @@ class TensorBoardLogger:
         self.writer.add_scalar('Loss/L1', self._to_float(losses.get('l1', 0)), step)
         self.writer.add_scalar('Loss/MS', self._to_float(losses.get('ms', 0)), step)
         self.writer.add_scalar('Loss/Grad', self._to_float(losses.get('grad', 0)), step)
+        self.writer.add_scalar('Loss/Perceptual', self._to_float(losses.get('perceptual', 0)), step)
         self.writer.add_scalar('Loss/Total', self._to_float(losses.get('total', 0)), step)
     
     def log_lr(self, step, lr):

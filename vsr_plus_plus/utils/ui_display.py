@@ -215,6 +215,7 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
     l1_loss = losses.get('l1', 0.0)
     ms_loss = losses.get('ms', 0.0)
     grad_loss = losses.get('grad', 0.0)
+    perceptual_loss = losses.get('perceptual', 0.0)
     total_loss = losses.get('total', 0.0)
     
     # LR info
@@ -241,12 +242,14 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
         l1_weight = adaptive_status.get('l1_weight', 0.7)
         ms_weight = adaptive_status.get('ms_weight', 0.2)
         grad_weight = adaptive_status.get('grad_weight', 0.1)
+        perceptual_weight = adaptive_status.get('perceptual_weight', 0.0)
         grad_clip = adaptive_status.get('grad_clip', 1.0)
         aggressive = adaptive_status.get('aggressive_mode', False)
     else:
         l1_weight = 0.7
         ms_weight = 0.2
         grad_weight = 0.1
+        perceptual_weight = config.get('PERCEPTUAL_WEIGHT', 0.0)
         grad_clip = config.get('GRAD_CLIP', 1.0)
         aggressive = False
     
@@ -283,9 +286,30 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
     )
     print_two_columns(
         f"Grad: {C_CYAN}{grad_loss:.6f}{C_RESET} (w:{grad_weight:.2f})",
-        f"Total: {C_BOLD}{C_CYAN}{total_loss:.6f}{C_RESET}",
+        f"Perc: {C_CYAN}{perceptual_loss:.6f}{C_RESET} (w:{perceptual_weight:.2f})",
         ui_w
     )
+    print_line(f"Total: {C_BOLD}{C_CYAN}{total_loss:.6f}{C_RESET}", ui_w)
+    
+    # Perceptual Loss Status - show details if enabled
+    if perceptual_weight > 0:
+        perc_status = f"{C_GREEN}ACTIVE{C_RESET}" if perceptual_loss > 0 else f"{C_YELLOW}ENABLED (0){C_RESET}"
+        perc_params = "139,424"  # CustomFeatureExtractor parameter count
+        print_separator(ui_w, 'thin')
+        print_two_columns(
+            f"Perceptual: {perc_status} (w:{perceptual_weight:.2f})",
+            f"Params: {C_MAGENTA}{perc_params}{C_RESET} trainable",
+            ui_w
+        )
+        # Show if features are learning (non-zero loss = active learning)
+        if perceptual_loss > 0.001:
+            learning_indicator = f"{C_GREEN}●{C_RESET} Features Learning"
+        else:
+            learning_indicator = f"{C_YELLOW}○{C_RESET} Initializing"
+        print_line(f"  {learning_indicator} | Self-learned (NO pretrained)", ui_w)
+    else:
+        print_separator(ui_w, 'thin')
+        print_line(f"Perceptual: {C_GRAY}DISABLED{C_RESET} (w:0.00)", ui_w)
     
     print_separator(ui_w, 'single')
     

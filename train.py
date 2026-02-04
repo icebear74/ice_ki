@@ -810,6 +810,7 @@ def train(old_settings):
                         writer.add_scalar("Training/Loss_L1", loss_dict['l1'], global_step)
                         writer.add_scalar("Training/Loss_MultiScale", loss_dict['ms'], global_step)
                         writer.add_scalar("Training/Loss_Gradient", loss_dict['grad'], global_step)
+                        writer.add_scalar("Training/Loss_Perceptual", loss_dict['perceptual'], global_step)
                         writer.add_scalar("Training/Loss_Total", loss.item(), global_step)
                         writer.add_scalar("Training/LearningRate", scheduler.get_last_lr()[0], global_step)
                         
