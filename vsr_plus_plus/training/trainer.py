@@ -125,14 +125,15 @@ class VSRTrainer:
             # Forward pass
             output = self.model(lr_stack)
             
-            # Get adaptive weights
-            l1_w, ms_w, grad_w = self.adaptive_system.update_loss_weights(
-                output, gt, self.global_step, 
-                current_grad_loss=None  # Could compute this if needed
-            )
+            # Compute L1 loss for adaptive system
+            with torch.no_grad():
+                current_l1 = torch.abs(output - gt).mean().item()
             
-            # Get perceptual weight (fixed, not adaptive)
-            perceptual_w = self.adaptive_system.perceptual_weight
+            # Get adaptive weights (now returns 5 values including status)
+            l1_w, ms_w, grad_w, perceptual_w, adaptive_status = self.adaptive_system.update_loss_weights(
+                output, gt, self.global_step, 
+                current_l1_loss=current_l1
+            )
             
             # Compute loss
             loss_dict = self.loss_fn(output, gt, l1_w, ms_w, grad_w, perceptual_w)
@@ -501,7 +502,12 @@ class VSRTrainer:
             ms_weight_current=adaptive_status.get('ms_weight', 1.0),
             gradient_weight_current=adaptive_status.get('grad_weight', 1.0),
             perceptual_weight_current=adaptive_status.get('perceptual_weight', 0.0),
-            gradient_clip_val=adaptive_status.get('clip_value', 1.0),
+            gradient_clip_val=adaptive_status.get('grad_clip', 1.0),
+            
+            # Adaptive Status (NEW)
+            adaptive_mode=adaptive_status.get('mode', 'Stable'),
+            adaptive_is_cooldown=adaptive_status.get('is_cooldown', False),
+            adaptive_cooldown_remaining=adaptive_status.get('cooldown_remaining', 0),
             
             # Lernrate
             learning_rate_value=current_lr,
