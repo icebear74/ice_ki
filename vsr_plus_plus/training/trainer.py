@@ -478,8 +478,8 @@ class VSRTrainer:
         # Konvertiere Layer-Aktivitäten in Dict-Format
         layer_act_dict = {}
         if activities:
-            for act_entry in activities:
-                layer_act_dict[act_entry['name']] = act_entry['activity']
+            for name, activity_percent, trend, raw_value in activities:
+                layer_act_dict[name] = activity_percent
         
         self.web_monitor.update(
             # Grundlegende Metriken
