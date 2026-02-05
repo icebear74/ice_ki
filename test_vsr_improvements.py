@@ -166,37 +166,40 @@ def test_emergency_checkpoint_naming():
 def test_web_ui_state_holder():
     """Test web UI state holder"""
     print("\n" + "="*70)
-    print("TEST 5: Web UI State Holder")
+    print("TEST 5: Web UI Complete Data Store")
     print("="*70)
     
-    from vsr_plus_plus.systems.web_ui import TrainingStateHolder
+    from vsr_plus_plus.systems.web_ui import CompleteTrainingDataStore
     
-    holder = TrainingStateHolder()
+    store = CompleteTrainingDataStore()
     
-    # Update with sample metrics
-    holder.refresh_metrics(
-        iteration=1000,
-        total_loss=0.0123,
-        learn_rate=0.0001,
-        time_remaining="01:23:45",
-        iter_speed=0.5,
-        gpu_memory=8.5,
-        best_score=0.85
+    # Update with sample metrics - ALLE Daten
+    store.update_all_metrics(
+        step_current=1000,
+        total_loss_value=0.0123,
+        learning_rate_value=0.0001,
+        eta_total_formatted="01:23:45",
+        iteration_duration=0.5,
+        vram_usage_gb=8.5,
+        best_quality_ever=0.85,
+        layer_activity_map={'Layer1': 0.75, 'Layer2': 0.82}
     )
     
     # Fetch snapshot
-    snapshot = holder.fetch_snapshot()
+    snapshot = store.get_complete_snapshot()
     
-    print("\n✓ State holder snapshot:")
-    for key, value in snapshot.items():
-        if key != 'timestamp':
-            print(f"  {key:20s}: {value}")
+    print("\n✓ Complete data store snapshot:")
+    print(f"  step_current: {snapshot['step_current']}")
+    print(f"  total_loss_value: {snapshot['total_loss_value']}")
+    print(f"  best_quality_ever: {snapshot['best_quality_ever']}")
+    print(f"  layer_activity_map: {snapshot['layer_activity_map']}")
     
-    assert snapshot['iteration'] == 1000, "Iteration mismatch"
-    assert snapshot['total_loss'] == 0.0123, "Loss mismatch"
-    assert snapshot['best_score'] == 0.85, "Best score mismatch"
+    assert snapshot['step_current'] == 1000, "Step mismatch"
+    assert snapshot['total_loss_value'] == 0.0123, "Loss mismatch"
+    assert snapshot['best_quality_ever'] == 0.85, "Best score mismatch"
+    assert 'Layer1' in snapshot['layer_activity_map'], "Layer activities missing"
     
-    print("\n✓ Web UI state holder test passed!")
+    print("\n✓ Web UI complete data store test passed!")
 
 
 def run_all_tests():

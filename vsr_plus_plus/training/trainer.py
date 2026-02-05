@@ -76,9 +76,9 @@ class VSRTrainer:
         # Keyboard handler
         self.keyboard = KeyboardHandler()
         
-        # Web interface for remote monitoring
-        from ..systems.web_ui import WebInterface
-        self.web_monitor = WebInterface(port_number=5050)
+        # Web interface for remote monitoring - COMPLETE data
+        from ..systems.web_ui import WebMonitoringInterface
+        self.web_monitor = WebMonitoringInterface(port_num=5050, refresh_seconds=5)
     
     def set_start_step(self, step):
         """Set starting step (for resume)"""
@@ -471,19 +471,67 @@ class VSRTrainer:
             adam_momentum=adam_momentum
         )
         
-        # Update web monitor with current training state
+        # Update web monitor with COMPLETE training state (ALL data)
         best_quality = self.checkpoint_mgr.best_quality if self.checkpoint_mgr.best_quality > 0 else 0.0
         gpu_mem = torch.cuda.max_memory_allocated() / (1024**3) if torch.cuda.is_available() else 0.0
         
+        # Konvertiere Layer-Aktivitäten in Dict-Format
+        layer_act_dict = {}
+        if activities:
+            for act_entry in activities:
+                layer_act_dict[act_entry['name']] = act_entry['activity']
+        
         self.web_monitor.update(
-            iteration=self.global_step,
-            total_loss=losses['total'],
-            learn_rate=current_lr,
-            time_remaining=total_eta,
-            iter_speed=avg_time,
-            gpu_memory=gpu_mem,
-            best_score=best_quality,
-            is_validating=False
+            # Grundlegende Metriken
+            step_current=self.global_step,
+            epoch_num=epoch,
+            step_max=self.config.get('MAX_STEPS', 100000),
+            epoch_step_current=current_epoch_step,
+            epoch_step_total=steps_per_epoch,
+            
+            # Verluste
+            total_loss_value=losses['total'],
+            l1_loss_value=losses['l1'],
+            ms_loss_value=losses['ms'],
+            gradient_loss_value=losses['grad'],
+            perceptual_loss_value=losses['perceptual'],
+            
+            # Adaptive Gewichte
+            l1_weight_current=adaptive_status.get('l1_weight', 1.0),
+            ms_weight_current=adaptive_status.get('ms_weight', 1.0),
+            gradient_weight_current=adaptive_status.get('grad_weight', 1.0),
+            perceptual_weight_current=adaptive_status.get('perceptual_weight', 0.0),
+            gradient_clip_val=adaptive_status.get('clip_value', 1.0),
+            
+            # Lernrate
+            learning_rate_value=current_lr,
+            lr_phase_name=lr_phase,
+            
+            # Performance
+            iteration_duration=avg_time,
+            vram_usage_gb=gpu_mem,
+            adam_momentum_avg=adam_momentum,
+            
+            # Zeitschätzungen
+            eta_total_formatted=total_eta,
+            eta_epoch_formatted=epoch_eta,
+            
+            # Quality-Metriken
+            quality_lr_value=quality_metrics.get('lr_quality', 0.0) / 100.0 if quality_metrics else 0.0,
+            quality_ki_value=quality_metrics.get('ki_quality', 0.0) / 100.0 if quality_metrics else 0.0,
+            quality_improvement_value=quality_metrics.get('improvement', 0.0) / 100.0 if quality_metrics else 0.0,
+            quality_ki_to_gt_value=quality_metrics.get('ki_to_gt', 0.0) / 100.0 if quality_metrics else 0.0,
+            quality_lr_to_gt_value=quality_metrics.get('lr_to_gt', 0.0) / 100.0 if quality_metrics else 0.0,
+            validation_loss_value=self.last_metrics.get('val_loss', 0.0) if self.last_metrics else 0.0,
+            best_quality_ever=best_quality,
+            
+            # Layer-Aktivitäten
+            layer_activity_map=layer_act_dict,
+            
+            # Status
+            training_active=not paused,
+            validation_running=False,
+            training_paused=paused
         )
     
     def _apply_ema_smoothing(self, loss_dict):
@@ -564,8 +612,8 @@ class VSRTrainer:
             elif key_lower == 'v':  # Manual validation
                 self.do_manual_val = True
         
-        # Check for web UI commands
-        web_cmd = self.web_monitor.check_commands()
+        # Check for web UI commands (new method name)
+        web_cmd = self.web_monitor.poll_commands()
         if web_cmd == 'validate':
             self.do_manual_val = True
     
