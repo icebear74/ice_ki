@@ -69,10 +69,8 @@ class CheckpointManager:
         }
         
         # NEW: Use zero-padded naming (7 digits)
-        if step > 0:
-            filename = f"checkpoint_step_{step:07d}.pth"
-        else:
-            filename = "checkpoint_step_0000000_emergency.pth"
+        # Emergency checkpoints should use save_emergency_checkpoint() instead
+        filename = f"checkpoint_step_{step:07d}.pth"
         
         filepath = os.path.join(self.checkpoint_dir, filename)
         
@@ -187,7 +185,7 @@ class CheckpointManager:
                 for part in reversed(parts):
                     if part.isdigit():
                         return int(part)
-            except:
+            except (ValueError, IndexError):
                 pass
         
         # Old emergency format

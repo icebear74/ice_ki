@@ -6,6 +6,7 @@ Uses threading and simple HTTP handlers for minimal overhead
 import threading
 import json
 import time
+import errno
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
 from queue import Queue
@@ -347,7 +348,8 @@ class WebInterface:
             print(f"🌐 Web monitor active: http://localhost:{self.port_num}")
             
         except OSError as e:
-            if e.errno == 48 or e.errno == 98:  # Address already in use
+            # Check for "Address already in use" error (EADDRINUSE)
+            if e.errno == errno.EADDRINUSE:
                 print(f"⚠️  Port {self.port_num} busy, web monitor disabled")
             else:
                 raise
