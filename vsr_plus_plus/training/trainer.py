@@ -375,6 +375,7 @@ class VSRTrainer:
             'l1': loss_dict.get('l1', 0.0) if loss_dict else 0.0,
             'ms': loss_dict.get('ms', 0.0) if loss_dict else 0.0,
             'grad': loss_dict.get('grad', 0.0) if loss_dict else 0.0,
+            'perceptual': loss_dict.get('perceptual', 0.0) if loss_dict else 0.0,
             'total': loss_dict.get('total', 0.0) if loss_dict else 0.0,
         }
         
