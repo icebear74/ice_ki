@@ -251,6 +251,10 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
         perceptual_weight = adaptive_status.get('perceptual_weight', 0.0)
         grad_clip = adaptive_status.get('grad_clip', 1.0)
         aggressive = adaptive_status.get('aggressive_mode', False)
+        # NEW: Get cooldown status
+        is_cooldown = adaptive_status.get('is_cooldown', False)
+        cooldown_remaining = adaptive_status.get('cooldown_remaining', 0)
+        adaptive_mode = adaptive_status.get('mode', 'Stable')
     else:
         l1_weight = 0.7
         ms_weight = 0.2
@@ -258,6 +262,9 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
         perceptual_weight = config.get('PERCEPTUAL_WEIGHT', 0.0)
         grad_clip = config.get('GRAD_CLIP', 1.0)
         aggressive = False
+        is_cooldown = False
+        cooldown_remaining = 0
+        adaptive_mode = 'Stable'
     
     # === HEADER ===
     print_header(ui_w)
@@ -369,6 +376,21 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
     if adaptive_status:
         print_line(f"{C_BOLD}🔧 ADAPTIVE SYSTEM{C_RESET}", ui_w)
         print_separator(ui_w, 'single')
+        
+        # Mode and Cooldown status
+        mode_color = C_RED if adaptive_mode == 'Aggressive' else C_GREEN
+        mode_display = f"{mode_color}{adaptive_mode}{C_RESET}"
+        
+        if is_cooldown:
+            cooldown_display = f"{C_YELLOW}ACTIVE{C_RESET} ({cooldown_remaining} steps)"
+        else:
+            cooldown_display = f"{C_GRAY}Inactive{C_RESET}"
+        
+        print_two_columns(
+            f"Mode: {mode_display}",
+            f"Cooldown: {cooldown_display}",
+            ui_w
+        )
         
         print_two_columns(
             f"Grad Clip: {C_CYAN}{grad_clip:.3f}{C_RESET}",

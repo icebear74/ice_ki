@@ -145,6 +145,19 @@ class AdaptiveSystem:
         # Check extreme conditions
         extreme = False
         
+        # Don't trigger aggressive mode during warmup (first 100 steps)
+        # This prevents premature weight changes when model is still initializing
+        if not hasattr(self, '_warmup_complete'):
+            self._warmup_steps = 0
+            self._warmup_complete = False
+        
+        if not self._warmup_complete:
+            self._warmup_steps += 1
+            if self._warmup_steps >= 100:
+                self._warmup_complete = True
+            # During warmup, don't trigger aggressive mode
+            return sharpness_ratio
+        
         if sharpness_ratio < self.extreme_sharpness_threshold:
             extreme = True
         
@@ -182,11 +195,18 @@ class AdaptiveSystem:
                 'mode': str ('Aggressive' or 'Stable')
             }
         """
-        # Update cooldown counter
-        if self.is_in_cooldown:
+        # Track last step to prevent double decrement when called multiple times per step
+        if not hasattr(self, '_last_step'):
+            self._last_step = -1
+        
+        # Update cooldown counter ONLY ONCE PER STEP (not per batch)
+        if self.is_in_cooldown and step != self._last_step:
             self.cooldown_steps -= 1
             if self.cooldown_steps <= 0:
                 self.is_in_cooldown = False
+        
+        # Remember this step to avoid double decrement
+        self._last_step = step
         
         # Detect extreme conditions (also updates EMA)
         sharpness_ratio = self.detect_extreme_conditions(pred, target, current_l1_loss)
