@@ -715,7 +715,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             if (data.adaptive_is_cooldown) {
                 cooldownStatus.textContent = 'Aktiv';
                 cooldownStatus.style.color = 'var(--accent-orange)';
-                cooldownRemaining.textContent = data.adaptive_cooldown_remaining + ' Steps verbleibend';
+                cooldownRemaining.textContent = data.adaptive_cooldown_remaining + ' Steps verblieben';
             } else {
                 cooldownStatus.textContent = 'Inaktiv';
                 cooldownStatus.style.color = 'var(--accent-green)';
@@ -808,8 +808,12 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                     barWidth = displayValue;
                 }
                 
-                // Ensure bar width doesn't exceed 100%
-                barWidth = Math.min(100, parseFloat(barWidth));
+                // Ensure bar width is valid and doesn't exceed 100%
+                barWidth = parseFloat(barWidth);
+                if (isNaN(barWidth) || barWidth < 0) {
+                    barWidth = 0;
+                }
+                barWidth = Math.min(100, barWidth);
                 
                 let barClass = 'layer-bar-fill';
                 
