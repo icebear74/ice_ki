@@ -234,9 +234,11 @@ class AdaptiveSystem:
         # PHASE 2: History settling period (step >= 1000, but no history yet)
         # When resuming from checkpoint or after warmup, collect history before adapting
         if not self.history_settling_complete:
-            self.history_steps_collected += 1
-            if self.history_steps_collected >= self.history_settling_steps:
-                self.history_settling_complete = True
+            # Only increment once per step, not per batch
+            if step != self._last_step:
+                self.history_steps_collected += 1
+                if self.history_steps_collected >= self.history_settling_steps:
+                    self.history_settling_complete = True
             
             # Return initial weights during settling
             status = {
@@ -350,13 +352,15 @@ class AdaptiveSystem:
         # Ensure L1 doesn't exceed maximum (cap at 0.9)
         if self.l1_weight > 0.9:
             self.l1_weight = 0.9
-            # Rebalance MS and Grad proportionally
+            # Rebalance MS and Grad proportionally to use remaining budget
+            remaining_budget = 1.0 - self.l1_weight  # 0.1 when L1 is at max
             total_other = self.ms_weight + self.grad_weight
             if total_other > 0:
-                scale = 0.1 / total_other
+                scale = remaining_budget / total_other
                 self.ms_weight *= scale
                 self.grad_weight *= scale
             else:
+                # Fallback to minimum values if both were zero
                 self.ms_weight = 0.05
                 self.grad_weight = 0.05
         
