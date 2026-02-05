@@ -224,6 +224,12 @@ class AdaptiveSystem:
         # PHASE 1: Early warmup (step < 1000) - return initial weights unchanged
         # This gives the model time to stabilize before any adaptive changes
         if step < 1000:
+            # Sync internal weights with initial values for consistent GUI display
+            self.l1_weight = self.initial_l1
+            self.ms_weight = self.initial_ms
+            self.grad_weight = self.initial_grad
+            self.perceptual_weight = self.initial_perceptual
+            
             status = {
                 'is_cooldown': False,
                 'cooldown_remaining': 0,
@@ -239,6 +245,12 @@ class AdaptiveSystem:
                 self.history_steps_collected += 1
                 if self.history_steps_collected >= self.history_settling_steps:
                     self.history_settling_complete = True
+            
+            # Sync internal weights with initial values for consistent GUI display
+            self.l1_weight = self.initial_l1
+            self.ms_weight = self.initial_ms
+            self.grad_weight = self.initial_grad
+            self.perceptual_weight = self.initial_perceptual
             
             # Return initial weights during settling
             status = {
