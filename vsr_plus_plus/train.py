@@ -102,6 +102,7 @@ def main():
     choice = input("⚠️  [L]öschen oder [F]ortsetzen? (L/F): ").lower()
     
     start_step = 0
+    selected_checkpoint_path = None
     checkpoint_mgr = CheckpointManager(DATA_ROOT)
     
     if choice == 'l':
@@ -115,22 +116,61 @@ def main():
     else:
         print("\n📂 Resuming training...\n")
         
-        # Show checkpoint info
-        checkpoint_mgr.show_checkpoint_info()
+        # Get all checkpoints
+        all_checkpoints = checkpoint_mgr.list_checkpoints()
         
-        # Get latest checkpoint
-        latest_path, latest_step = checkpoint_mgr.get_latest_checkpoint()
-        
-        if latest_path:
-            print(f"✅ Found checkpoint at step {latest_step:,}")
-            resume = input("Resume from this checkpoint? (Y/n): ").lower()
-            
-            if resume != 'n':
-                start_step = latest_step
-            else:
-                print("Starting fresh (checkpoint will not be loaded)")
-        else:
+        if not all_checkpoints:
             print("⚠️  No checkpoint found, starting fresh")
+        else:
+            # Show detailed checkpoint selection menu
+            print("=" * 100)
+            print("AVAILABLE CHECKPOINTS (Last 10):")
+            print("=" * 100)
+            print(f"{'#':<4} {'Step':<12} {'Type':<12} {'Quality':<12} {'Loss':<10} {'Date':<18}")
+            print("-" * 100)
+            
+            # Show last 10 checkpoints
+            recent_checkpoints = all_checkpoints[-10:]
+            for idx, ckpt in enumerate(recent_checkpoints, 1):
+                step_display = f"{ckpt['step']:,}"
+                type_display = ckpt['type']
+                quality_display = f"{ckpt['quality']*100:.1f}%"
+                loss_display = f"{ckpt['loss']:.4f}"
+                date_display = ckpt['date_str']
+                
+                print(f"{idx:<4} {step_display:<12} {type_display:<12} {quality_display:<12} {loss_display:<10} {date_display:<18}")
+            
+            print("=" * 100)
+            
+            # User selection
+            selection = input(f"\n{C_CYAN}Welchen Checkpoint laden? (Nummer 1-{len(recent_checkpoints)} oder Enter für neuesten): {C_RESET}").strip()
+            
+            if selection == "":
+                # Use latest (last in list)
+                selected_ckpt = all_checkpoints[-1]
+                start_step = selected_ckpt['step']
+                selected_checkpoint_path = selected_ckpt['path']
+                print(f"{C_GREEN}✅ Using latest checkpoint: Step {start_step:,}{C_RESET}")
+            else:
+                try:
+                    choice_idx = int(selection)
+                    if 1 <= choice_idx <= len(recent_checkpoints):
+                        selected_ckpt = recent_checkpoints[choice_idx - 1]
+                        start_step = selected_ckpt['step']
+                        selected_checkpoint_path = selected_ckpt['path']
+                        print(f"{C_GREEN}✅ Selected checkpoint: Step {start_step:,} ({selected_ckpt['type']}){C_RESET}")
+                    else:
+                        print(f"{C_YELLOW}Invalid selection, using latest checkpoint{C_RESET}")
+                        selected_ckpt = all_checkpoints[-1]
+                        start_step = selected_ckpt['step']
+                        selected_checkpoint_path = selected_ckpt['path']
+                except ValueError:
+                    print(f"{C_YELLOW}Invalid input, using latest checkpoint{C_RESET}")
+                    selected_ckpt = all_checkpoints[-1]
+                    start_step = selected_ckpt['step']
+                    selected_checkpoint_path = selected_ckpt['path']
+            
+            print()
     
     # Start TensorBoard
     log_dir = os.path.join(DATA_ROOT, "logs")
@@ -275,32 +315,30 @@ def main():
     validator = VSRValidator(model, val_loader, loss_fn, device=device)
     
     # Load checkpoint if resuming
-    if start_step > 0:
-        latest_path, _ = checkpoint_mgr.get_latest_checkpoint()
-        if latest_path:
-            print(f"Loading checkpoint from {latest_path}...")
-            checkpoint = torch.load(latest_path, map_location=device)
-            
-            model.load_state_dict(checkpoint['model_state_dict'])
-            
-            # Try to load optimizer state, but handle parameter group mismatch
-            try:
-                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-                print(f"✅ Optimizer state loaded")
-            except ValueError as e:
-                if "parameter groups" in str(e):
-                    print(f"{C_YELLOW}⚠ Optimizer state not loaded: parameter group mismatch{C_RESET}")
-                    print(f"{C_YELLOW}  Old checkpoint has different optimizer structure{C_RESET}")
-                    print(f"{C_YELLOW}  Continuing with fresh optimizer state (LR and momentum reset){C_RESET}")
-                else:
-                    raise
-            
-            # Restore scheduler state if available
-            if 'scheduler_state_dict' in checkpoint:
-                # Note: We'd need to implement state_dict for our scheduler
-                pass
-            
-            print(f"✅ Checkpoint loaded (step {start_step:,})\n")
+    if start_step > 0 and selected_checkpoint_path:
+        print(f"Loading checkpoint from {selected_checkpoint_path}...")
+        checkpoint = torch.load(selected_checkpoint_path, map_location=device)
+        
+        model.load_state_dict(checkpoint['model_state_dict'])
+        
+        # Try to load optimizer state, but handle parameter group mismatch
+        try:
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            print(f"✅ Optimizer state loaded")
+        except ValueError as e:
+            if "parameter groups" in str(e):
+                print(f"{C_YELLOW}⚠ Optimizer state not loaded: parameter group mismatch{C_RESET}")
+                print(f"{C_YELLOW}  Old checkpoint has different optimizer structure{C_RESET}")
+                print(f"{C_YELLOW}  Continuing with fresh optimizer state (LR and momentum reset){C_RESET}")
+            else:
+                raise
+        
+        # Restore scheduler state if available
+        if 'scheduler_state_dict' in checkpoint:
+            # Note: We'd need to implement state_dict for our scheduler
+            pass
+        
+        print(f"✅ Checkpoint loaded (step {start_step:,})\n")
     
     # Create trainer
     trainer = VSRTrainer(

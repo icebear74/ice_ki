@@ -75,6 +75,10 @@ class VSRTrainer:
         
         # Keyboard handler
         self.keyboard = KeyboardHandler()
+        
+        # Web interface for remote monitoring
+        from ..systems.web_ui import WebInterface
+        self.web_monitor = WebInterface(port_number=5050)
     
     def set_start_step(self, step):
         """Set starting step (for resume)"""
@@ -466,6 +470,21 @@ class VSRTrainer:
             epoch_eta=epoch_eta,
             adam_momentum=adam_momentum
         )
+        
+        # Update web monitor with current training state
+        best_quality = self.checkpoint_mgr.best_quality if self.checkpoint_mgr.best_quality > 0 else 0.0
+        gpu_mem = torch.cuda.max_memory_allocated() / (1024**3) if torch.cuda.is_available() else 0.0
+        
+        self.web_monitor.update(
+            iteration=self.global_step,
+            total_loss=losses['total'],
+            learn_rate=current_lr,
+            time_remaining=total_eta,
+            iter_speed=avg_time,
+            gpu_memory=gpu_mem,
+            best_score=best_quality,
+            is_validating=False
+        )
     
     def _apply_ema_smoothing(self, loss_dict):
         """
@@ -524,7 +543,7 @@ class VSRTrainer:
         return total_momentum / count if count > 0 else 0.0
     
     def _check_keyboard_input(self, epoch, steps_per_epoch, current_epoch_step):
-        """Check for keyboard input and handle commands"""
+        """Check for keyboard input and web commands"""
         key = self.keyboard.check_key_pressed(timeout=0)
         
         if key:
@@ -544,6 +563,11 @@ class VSRTrainer:
             
             elif key_lower == 'v':  # Manual validation
                 self.do_manual_val = True
+        
+        # Check for web UI commands
+        web_cmd = self.web_monitor.check_commands()
+        if web_cmd == 'validate':
+            self.do_manual_val = True
     
     def _run_validation(self):
         """Run validation immediately"""
