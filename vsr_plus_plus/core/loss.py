@@ -5,99 +5,78 @@ Combines:
 - L1 loss (pixel-wise difference)
 - Multi-scale loss (downsampled comparison)
 - Gradient loss (spatial gradients)
-- Perceptual loss (Custom self-learned feature matching)
+- Perceptual loss (VGG-based feature matching with ImageNet weights)
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torchvision.models import vgg16, VGG16_Weights
 
 
-class CustomFeatureExtractor(nn.Module):
+class PerceptualLoss(nn.Module):
     """
-    Lightweight CNN for extracting multi-scale features
-    NO PRETRAINED WEIGHTS - learns from scratch!
+    VGG-based perceptual loss using ImageNet pretrained weights
     
-    Architecture:
-    - 3 stages with progressive downsampling
-    - Each stage: 2 conv layers + pooling
-    - Feature extraction at multiple scales
-    - Designed to be efficient and lightweight
+    - Uses VGG16 features from multiple layers
+    - Pretrained on ImageNet for robust feature extraction
+    - Frozen weights (no training) for stable gradients
+    - Provides real perceptual feedback for sharpness
     """
     
-    def __init__(self, n_feats=32):
+    def __init__(self):
         super().__init__()
+        # Load VGG16 with ImageNet weights
+        vgg = vgg16(weights=VGG16_Weights.IMAGENET1K_V1)
         
-        # Stage 1: 3 → 32 (full resolution)
-        self.stage1 = nn.Sequential(
-            nn.Conv2d(3, n_feats, 3, 1, 1),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(n_feats, n_feats, 3, 1, 1),
-            nn.LeakyReLU(0.2, inplace=True),
-        )
+        # Extract feature layers (relu1_2, relu2_2, relu3_3, relu4_3)
+        self.features = nn.ModuleList([
+            vgg.features[:4],   # relu1_2
+            vgg.features[:9],   # relu2_2
+            vgg.features[:16],  # relu3_3
+            vgg.features[:23],  # relu4_3
+        ])
         
-        # Stage 2: 32 → 64 (1/2 resolution)
-        self.stage2 = nn.Sequential(
-            nn.MaxPool2d(2),
-            nn.Conv2d(n_feats, n_feats*2, 3, 1, 1),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(n_feats*2, n_feats*2, 3, 1, 1),
-            nn.LeakyReLU(0.2, inplace=True),
-        )
+        # Freeze all VGG parameters
+        for feature_layer in self.features:
+            for param in feature_layer.parameters():
+                param.requires_grad = False
         
-        # Stage 3: 64 → 64 (1/4 resolution)
-        self.stage3 = nn.Sequential(
-            nn.MaxPool2d(2),
-            nn.Conv2d(n_feats*2, n_feats*2, 3, 1, 1),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(n_feats*2, n_feats*2, 3, 1, 1),
-            nn.LeakyReLU(0.2, inplace=True),
-        )
+        # Set to eval mode
+        self.eval()
+        
+        # VGG normalization constants (ImageNet)
+        self.register_buffer('mean', torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
+        self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
     
-    def forward(self, x):
-        """Extract multi-scale features"""
-        feat1 = self.stage1(x)      # Full res
-        feat2 = self.stage2(feat1)  # 1/2 res
-        feat3 = self.stage3(feat2)  # 1/4 res
-        return [feat1, feat2, feat3]
-
-
-class CustomPerceptualLoss(nn.Module):
-    """
-    Self-learned perceptual loss using custom feature extractor
-    
-    - Extracts multi-scale features from pred and target
-    - Computes L1 distance at each scale
-    - Features learn to be discriminative during training
-    - NO pretrained knowledge!
-    """
-    
-    def __init__(self, n_feats=32):
-        super().__init__()
-        self.feature_extractor = CustomFeatureExtractor(n_feats)
+    def normalize(self, x):
+        """Normalize input to VGG's expected range"""
+        return (x - self.mean) / self.std
     
     def forward(self, pred, target):
         """
         Compute perceptual loss
         
         Args:
-            pred: Predicted image [B, 3, H, W]
-            target: Target image [B, 3, H, W]
+            pred: Predicted image [B, 3, H, W] in range [0, 1]
+            target: Target image [B, 3, H, W] in range [0, 1]
             
         Returns:
             Perceptual loss (scalar)
         """
-        # Extract features at multiple scales
-        pred_features = self.feature_extractor(pred)
-        target_features = self.feature_extractor(target)
+        # Normalize inputs
+        pred = self.normalize(pred)
+        target = self.normalize(target)
         
-        # Compute L1 loss at each scale
+        # Compute L1 loss at each feature layer
         loss = 0.0
-        for pred_feat, target_feat in zip(pred_features, target_features):
+        for feature_layer in self.features:
+            pred_feat = feature_layer(pred)
+            target_feat = feature_layer(target)
             loss += F.l1_loss(pred_feat, target_feat)
         
-        # Average over scales
-        return loss / len(pred_features)
+        # Average over layers
+        return loss / len(self.features)
 
 
 class HybridLoss(nn.Module):
@@ -120,7 +99,7 @@ class HybridLoss(nn.Module):
         
         # Create perceptual loss module if weight > 0
         if perceptual_weight > 0:
-            self.perceptual_loss = CustomPerceptualLoss(n_feats=32)
+            self.perceptual_loss = PerceptualLoss()
         else:
             self.perceptual_loss = None
     

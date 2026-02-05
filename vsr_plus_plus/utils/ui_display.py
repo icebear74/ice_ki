@@ -294,19 +294,18 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
     # Perceptual Loss Status - show details if enabled
     if perceptual_weight > 0:
         perc_status = f"{C_GREEN}ACTIVE{C_RESET}" if perceptual_loss > 0 else f"{C_YELLOW}ENABLED (0){C_RESET}"
-        perc_params = "139,424"  # CustomFeatureExtractor parameter count
         print_separator(ui_w, 'thin')
         print_two_columns(
             f"Perceptual: {perc_status} (w:{perceptual_weight:.2f})",
-            f"Params: {C_MAGENTA}{perc_params}{C_RESET} trainable",
+            f"Type: {C_MAGENTA}VGG16{C_RESET} (ImageNet)",
             ui_w
         )
-        # Show if features are learning (non-zero loss = active learning)
+        # Show perceptual loss is active (VGG weights are frozen, not learning)
         if perceptual_loss > 0.001:
-            learning_indicator = f"{C_GREEN}●{C_RESET} Features Learning"
+            learning_indicator = f"{C_GREEN}●{C_RESET} VGG Features Active"
         else:
             learning_indicator = f"{C_YELLOW}○{C_RESET} Initializing"
-        print_line(f"  {learning_indicator} | Self-learned (NO pretrained)", ui_w)
+        print_line(f"  {learning_indicator} | Pretrained frozen weights", ui_w)
     else:
         print_separator(ui_w, 'thin')
         print_line(f"Perceptual: {C_GRAY}DISABLED{C_RESET} (w:0.00)", ui_w)
