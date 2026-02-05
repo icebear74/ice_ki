@@ -167,13 +167,18 @@ class AdaptiveSystem:
             # Start cooldown
             self.is_in_cooldown = True
             self.cooldown_steps = self.cooldown_duration
-            # Smooth boost with momentum
+            # Smooth boost with momentum - but respect minimum guards
             target_grad = 0.30
             target_l1 = 0.55
             target_ms = 0.15
             self.grad_weight = self._apply_momentum(self.grad_weight, target_grad)
             self.l1_weight = self._apply_momentum(self.l1_weight, target_l1)
             self.ms_weight = self._apply_momentum(self.ms_weight, target_ms)
+            
+            # Apply minimum guards even in aggressive mode
+            self.ms_weight = max(0.05, self.ms_weight)
+            self.grad_weight = max(0.05, self.grad_weight)
+            self.l1_weight = 1.0 - self.ms_weight - self.grad_weight
         
         return sharpness_ratio
     
@@ -198,6 +203,16 @@ class AdaptiveSystem:
         # Track last step to prevent double decrement when called multiple times per step
         if not hasattr(self, '_last_step'):
             self._last_step = -1
+        
+        # SANFTER START (WARMUP): First 1000 steps - return initial weights unchanged
+        # This prevents wild jumps before loss stabilizes
+        if step < 1000:
+            status = {
+                'is_cooldown': False,
+                'cooldown_remaining': 0,
+                'mode': 'Warmup'
+            }
+            return self.l1_weight, self.ms_weight, self.grad_weight, self.perceptual_weight, status
         
         # Update cooldown counter ONLY ONCE PER STEP (not per batch)
         if self.is_in_cooldown and step != self._last_step:
@@ -290,6 +305,22 @@ class AdaptiveSystem:
         self.grad_weight = self._apply_momentum(self.grad_weight, target_grad)
         self.ms_weight = self._apply_momentum(self.ms_weight, target_ms)
         self.l1_weight = self._apply_momentum(self.l1_weight, target_l1)
+        
+        # MINIMUM GUARDS: Prevent MS or Grad from dropping too low
+        # This ensures the model always considers structure (MS) and sharpness (Grad)
+        self.ms_weight = max(0.05, self.ms_weight)  # Never below 5%
+        self.grad_weight = max(0.05, self.grad_weight)  # Never below 5%
+        
+        # Recalculate L1 as residual to maintain sum = 1.0
+        self.l1_weight = 1.0 - self.ms_weight - self.grad_weight
+        
+        # Ensure L1 doesn't go below minimum either
+        if self.l1_weight < 0.1:
+            # If L1 would be too low, rebalance all three
+            total = self.ms_weight + self.grad_weight
+            self.ms_weight = 0.45 * (self.ms_weight / total) if total > 0 else 0.15
+            self.grad_weight = 0.45 * (self.grad_weight / total) if total > 0 else 0.30
+            self.l1_weight = 0.1
         
         self.adjustment_step += 1
         
