@@ -65,6 +65,10 @@ class VSRTrainer:
         # Performance tracking
         self.step_times = []
         
+        # EMA for GUI smoothing (factor 0.95)
+        self.ema_loss = None
+        self.ema_factor = 0.95
+        
         # UI state
         self.paused = False
         self.do_manual_val = False
@@ -90,6 +94,9 @@ class VSRTrainer:
         steps_per_epoch = len(self.train_loader) // accumulation_steps
         current_epoch_step = 0
         
+        # Initialize loop timing
+        loop_start_time = time.time()
+        
         for batch_idx, (lr_stack, gt) in enumerate(self.train_loader):
             # Handle pause state
             while self.paused:
@@ -104,8 +111,8 @@ class VSRTrainer:
             if self.do_manual_val:
                 self._run_validation()
                 self.do_manual_val = False
-            
-            step_start_time = time.time()
+                # Reset timing after validation
+                loop_start_time = time.time()
             
             # Move to device
             lr_stack = lr_stack.to(self.device)
@@ -138,6 +145,10 @@ class VSRTrainer:
                 
                 # Update optimizer (every accumulation_steps)
                 self.optimizer.step()
+                
+                # Extract AdamW momentum (exp_avg) for GUI
+                adam_momentum = self._get_adam_momentum()
+                
                 self.optimizer.zero_grad()
                 
                 # Update LR scheduler (every LR_UPDATE_EVERY steps)
@@ -156,28 +167,37 @@ class VSRTrainer:
                 # Get activity
                 self.last_activities = self.model.get_layer_activity()
                 
-                # Measure performance
-                step_time = time.time() - step_start_time
+                # Measure performance (sync GPU first to capture async operations)
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                step_time = time.time() - loop_start_time
                 self.step_times.append(step_time)
                 if len(self.step_times) > 100:
                     self.step_times.pop(0)
                 
                 avg_time = sum(self.step_times) / len(self.step_times)
+                
+                # Reset loop timer for next iteration
+                loop_start_time = time.time()
                 vram = torch.cuda.max_memory_allocated() / (1024**3)
                 
-                # Track loss history
-                self.loss_history.append(loss_dict['total'].item() if torch.is_tensor(loss_dict['total']) else loss_dict['total'])
+                # Track loss history (raw values)
+                raw_total_loss = loss_dict['total'].item() if torch.is_tensor(loss_dict['total']) else loss_dict['total']
+                self.loss_history.append(raw_total_loss)
                 if len(self.loss_history) > 1000:
                     self.loss_history.pop(0)
+                
+                # Apply EMA smoothing for GUI
+                smoothed_loss_dict = self._apply_ema_smoothing(loss_dict)
                 
                 # Increment step
                 self.global_step += 1
                 current_epoch_step += 1
                 
-                # Update GUI
-                self._update_gui(epoch, loss_dict, avg_time, steps_per_epoch, current_epoch_step)
+                # Update GUI with smoothed values
+                self._update_gui(epoch, smoothed_loss_dict, avg_time, steps_per_epoch, current_epoch_step, adam_momentum=adam_momentum)
                 
-                # TensorBoard logging
+                # TensorBoard logging (use RAW values, not smoothed)
                 if self.global_step % self.config.get('LOG_TBOARD_EVERY', 100) == 0:
                     self.tb_logger.log_losses(self.global_step, loss_dict)
                     self.tb_logger.log_lr(self.global_step, current_lr)
@@ -293,6 +313,9 @@ class VSRTrainer:
                         else:
                             print(f"   (Not better than current best)")
                     
+                    # Reset timing after validation
+                    loop_start_time = time.time()
+                    
                     # Redraw UI after validation completes
                     self._update_gui()
                     
@@ -365,7 +388,7 @@ class VSRTrainer:
                 if self.global_step >= self.config.get('MAX_STEPS', 100000):
                     return
     
-    def _update_gui(self, epoch=1, loss_dict=None, avg_time=0.1, steps_per_epoch=1, current_epoch_step=0, paused=False):
+    def _update_gui(self, epoch=1, loss_dict=None, avg_time=0.1, steps_per_epoch=1, current_epoch_step=0, paused=False, adam_momentum=0.0):
         """Update the GUI display"""
         # Get activities
         activities = get_activity_data(self.model)
@@ -440,8 +463,65 @@ class VSRTrainer:
             quality_metrics=quality_metrics,
             lr_info=lr_info,
             total_eta=total_eta,
-            epoch_eta=epoch_eta
+            epoch_eta=epoch_eta,
+            adam_momentum=adam_momentum
         )
+    
+    def _apply_ema_smoothing(self, loss_dict):
+        """
+        Apply exponential moving average smoothing to losses for GUI display
+        
+        Args:
+            loss_dict: Dictionary of current loss values
+        
+        Returns:
+            Dictionary of smoothed loss values
+        """
+        # Initialize EMA on first call
+        if self.ema_loss is None:
+            self.ema_loss = {}
+            for key in loss_dict:
+                val = loss_dict[key]
+                self.ema_loss[key] = val.item() if torch.is_tensor(val) else val
+        
+        # Update EMA
+        smoothed = {}
+        for key in loss_dict:
+            val = loss_dict[key]
+            raw_val = val.item() if torch.is_tensor(val) else val
+            
+            # EMA formula: smoothed = alpha * smoothed_prev + (1 - alpha) * current
+            self.ema_loss[key] = self.ema_factor * self.ema_loss[key] + (1 - self.ema_factor) * raw_val
+            smoothed[key] = self.ema_loss[key]
+        
+        return smoothed
+    
+    def _get_adam_momentum(self):
+        """
+        Extract average momentum (exp_avg) from AdamW optimizer state
+        
+        Returns:
+            float: Average momentum magnitude across all parameters
+        """
+        total_momentum = 0.0
+        count = 0
+        
+        for group in self.optimizer.param_groups:
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+                
+                state = self.optimizer.state[p]
+                if 'exp_avg' in state:
+                    # Get the exponential moving average of gradients (momentum)
+                    exp_avg = state['exp_avg']
+                    # Calculate magnitude (L2 norm)
+                    momentum_mag = exp_avg.norm().item()
+                    total_momentum += momentum_mag
+                    count += 1
+        
+        # Return average momentum
+        return total_momentum / count if count > 0 else 0.0
     
     def _check_keyboard_input(self, epoch, steps_per_epoch, current_epoch_step):
         """Check for keyboard input and handle commands"""
@@ -460,9 +540,7 @@ class VSRTrainer:
             
             elif key_lower == 'p':  # Pause/Resume
                 self.paused = not self.paused
-                if not self.paused:
-                    # Reset step timer when resuming
-                    self.step_times = []
+                # Note: Timing will be reset by loop_start_time assignment at line 95
             
             elif key_lower == 'v':  # Manual validation
                 self.do_manual_val = True

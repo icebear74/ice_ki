@@ -29,7 +29,7 @@ ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 
 # Display Mode Names
 DISPLAY_MODE_NAMES = [
-    "Grouped by Trunk → Sorted by Position",
+    "2-Column Detailed (Backward | Forward)",
     "Grouped by Trunk → Sorted by Activity",
     "Flat List → Sorted by Position",
     "Flat List → Sorted by Activity"
@@ -95,6 +95,74 @@ def make_bar_final_fusion(percent, width):
     width = max(5, width)
     filled = max(0, min(width, int((percent / 100.0) * width)))
     return f"{C_YELLOW}{'█' * filled}{C_GRAY}{'░' * (width - filled)}{C_RESET}"
+
+
+def make_adamw_magic_eye(momentum, width=20):
+    """
+    Create AdamW "Magic Eye" visualization (tube radio style)
+    
+    Shows momentum as a push/brake indicator:
+    - High momentum (>0.5): Push right [       |====>  ]
+    - Low momentum (<0.5): Brake left [  <====|       ]
+    - Medium momentum: Balanced [   <=|=>   ]
+    
+    Args:
+        momentum: Momentum value (typically 0-2, normalized to 0-1 range)
+        width: Width of the bar in characters
+    
+    Returns:
+        str: Formatted magic eye bar with ANSI colors
+    """
+    width = max(10, width)
+    
+    # Normalize momentum to 0-1 range (assume typical range is 0-2)
+    normalized = min(1.0, max(0.0, momentum / 2.0))
+    
+    # Calculate center position
+    center = width // 2
+    
+    # Calculate needle position based on momentum
+    # normalized=0.5 -> center, normalized=1.0 -> right, normalized=0.0 -> left
+    needle_pos = int(normalized * (width - 1))
+    
+    # Build the visualization
+    if normalized > 0.55:  # Push right
+        # More momentum = push to the right
+        fill_start = center
+        fill_end = needle_pos
+        bar = ['·'] * width
+        for i in range(fill_start, min(fill_end, width)):
+            bar[i] = '='
+        bar[center] = '|'
+        if needle_pos < width:
+            bar[needle_pos] = '>'
+        result = ''.join(bar)
+        return f"[{C_GREEN}{result}{C_RESET}]"
+    
+    elif normalized < 0.45:  # Brake left
+        # Less momentum = brake to the left
+        fill_start = needle_pos
+        fill_end = center
+        bar = ['·'] * width
+        for i in range(max(0, fill_start + 1), fill_end + 1):
+            bar[i] = '='
+        bar[center] = '|'
+        if needle_pos >= 0:
+            bar[needle_pos] = '<'
+        result = ''.join(bar)
+        return f"[{C_YELLOW}{result}{C_RESET}]"
+    
+    else:  # Balanced
+        bar = ['·'] * width
+        bar[center - 1] = '='
+        bar[center] = '|'
+        bar[center + 1] = '='
+        if needle_pos < center:
+            bar[needle_pos] = '<'
+        elif needle_pos > center:
+            bar[needle_pos] = '>'
+        result = ''.join(bar)
+        return f"[{C_CYAN}{result}{C_RESET}]"
 
 
 def format_time(seconds):
