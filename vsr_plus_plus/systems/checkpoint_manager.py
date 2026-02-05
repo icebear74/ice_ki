@@ -5,11 +5,14 @@ Checkpoint Strategy:
 1. Regular checkpoints every 10,000 steps (keep all)
 2. Best checkpoints between regulars (2k-8k window)
 3. Emergency checkpoints on crash
+
+NEW: Zero-padded naming (7 digits) with regex parsing for robustness
 """
 
 import os
 import torch
 import glob
+import re
 from datetime import datetime
 
 
@@ -27,6 +30,10 @@ class CheckpointManager:
         
         self.best_quality = -1.0
         self.best_checkpoint_path = None
+        
+        # Regex pattern for extracting step from checkpoint filenames
+        # Matches: checkpoint_step_0001234.pth or checkpoint_step_0001234_emergency.pth
+        self.step_extractor = re.compile(r'checkpoint_step_(\d+)(?:_.*)?\.pth')
     
     def should_save_regular(self, step):
         """Return True if step % 10000 == 0"""
@@ -39,7 +46,7 @@ class CheckpointManager:
     
     def save_checkpoint(self, model, optimizer, scheduler, step, metrics, log_file):
         """
-        Save checkpoint file
+        Save checkpoint file with new zero-padded naming scheme
         
         Args:
             model: Model to save
@@ -61,11 +68,9 @@ class CheckpointManager:
             'timestamp': datetime.now().isoformat()
         }
         
-        # Determine filename
-        if step > 0:
-            filename = f"checkpoint_step_{step}.pth"
-        else:
-            filename = "checkpoint_emergency.pth"
+        # NEW: Use zero-padded naming (7 digits)
+        # Emergency checkpoints should use save_emergency_checkpoint() instead
+        filename = f"checkpoint_step_{step:07d}.pth"
         
         filepath = os.path.join(self.checkpoint_dir, filename)
         
@@ -133,82 +138,149 @@ class CheckpointManager:
         return True
     
     def save_emergency_checkpoint(self, model, optimizer, scheduler, step, metrics, log_file):
-        """Save emergency checkpoint on crash/interrupt"""
-        checkpoint_path = self.save_checkpoint(model, optimizer, scheduler, 0, metrics, log_file)
+        """Save emergency checkpoint with real step number in filename"""
+        # NEW: Emergency checkpoints now include actual step number
+        checkpoint = {
+            'step': step,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler,
+            'metrics': metrics,
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        filename = f"checkpoint_step_{step:07d}_emergency.pth"
+        filepath = os.path.join(self.checkpoint_dir, filename)
+        torch.save(checkpoint, filepath)
         
         if log_file and os.path.exists(log_file):
             with open(log_file, 'a') as f:
                 f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
                        f"⚠️  EMERGENCY CHECKPOINT SAVED (Step {step})\n")
         
-        return checkpoint_path
+        return filepath
+    
+    def _parse_step_from_filename(self, filename):
+        """
+        Extract step number from checkpoint filename using regex
+        Supports both old and new naming conventions
+        
+        Args:
+            filename: Checkpoint filename
+            
+        Returns:
+            Step number or None if not parseable
+        """
+        # Try new format with regex: checkpoint_step_0001234.pth or checkpoint_step_0001234_emergency.pth
+        match = self.step_extractor.match(filename)
+        if match:
+            return int(match.group(1))
+        
+        # Fallback for old format: checkpoint_step_123.pth
+        if filename.startswith('checkpoint_step_') and filename.endswith('.pth'):
+            try:
+                # Extract number between last underscore and .pth
+                parts = filename.replace('.pth', '').split('_')
+                # Last part should be the number (possibly with suffix like "emergency")
+                for part in reversed(parts):
+                    if part.isdigit():
+                        return int(part)
+            except (ValueError, IndexError):
+                pass
+        
+        # Old emergency format
+        if filename == 'checkpoint_emergency.pth':
+            # Return 0 for old emergency checkpoints that don't have step info in filename
+            return 0
+        
+        return None
     
     def get_latest_checkpoint(self):
         """
         Return path and step of latest checkpoint
+        Uses regex parsing to support both old and new formats
         
         Returns:
             Tuple of (path, step) or (None, 0) if no checkpoints
         """
-        # Look for regular checkpoints
-        checkpoint_files = glob.glob(os.path.join(self.checkpoint_dir, "checkpoint_step_*.pth"))
+        # Look for all checkpoint files
+        checkpoint_files = glob.glob(os.path.join(self.checkpoint_dir, "checkpoint_*.pth"))
         
         if not checkpoint_files:
-            # Check for emergency checkpoint
-            emergency = os.path.join(self.checkpoint_dir, "checkpoint_emergency.pth")
-            if os.path.exists(emergency):
-                return emergency, 0
             return None, 0
         
-        # Find latest by step number
-        latest_step = 0
-        latest_path = None
+        # Find latest by step number (using regex parser)
+        max_step = -1
+        selected_path = None
         
-        for path in checkpoint_files:
-            try:
-                # Extract step from filename
-                filename = os.path.basename(path)
-                step = int(filename.split('_')[-1].replace('.pth', ''))
-                
-                if step > latest_step:
-                    latest_step = step
-                    latest_path = path
-            except:
-                continue
+        for ckpt_path in checkpoint_files:
+            filename = os.path.basename(ckpt_path)
+            step_num = self._parse_step_from_filename(filename)
+            
+            if step_num is not None and step_num > max_step:
+                max_step = step_num
+                selected_path = ckpt_path
         
-        return latest_path, latest_step
+        if selected_path is None:
+            return None, 0
+        
+        return selected_path, max_step
     
     def list_checkpoints(self):
         """
-        Return list of checkpoint info dicts
+        Return list of checkpoint info dicts with enhanced metadata
+        Uses regex parser for backward compatibility
         
         Returns:
-            List of dicts with checkpoint information
+            List of dicts with checkpoint information sorted by step
         """
         checkpoints = []
         
-        # Regular checkpoints
-        checkpoint_files = glob.glob(os.path.join(self.checkpoint_dir, "checkpoint_step_*.pth"))
+        # Find all checkpoint files
+        checkpoint_files = glob.glob(os.path.join(self.checkpoint_dir, "checkpoint_*.pth"))
         
-        for path in checkpoint_files:
+        for ckpt_path in checkpoint_files:
             try:
-                # Load checkpoint metadata
-                ckpt = torch.load(path, map_location='cpu')
+                filename = os.path.basename(ckpt_path)
                 
-                info = {
-                    'path': path,
-                    'step': ckpt.get('step', 0),
-                    'type': 'regular' if ckpt.get('step', 0) % 10000 == 0 else 'best',
-                    'quality': ckpt.get('metrics', {}).get('ki_quality', 0),
-                    'loss': ckpt.get('metrics', {}).get('val_loss', 0),
-                    'size_mb': os.path.getsize(path) / (1024 * 1024)
+                # Parse step from filename
+                step_num = self._parse_step_from_filename(filename)
+                if step_num is None:
+                    continue
+                
+                # Load checkpoint metadata
+                ckpt_data = torch.load(ckpt_path, map_location='cpu')
+                
+                # Determine checkpoint type from filename and step
+                if '_emergency' in filename:
+                    ckpt_type = 'emergency'
+                elif step_num % 10000 == 0 and step_num > 0:
+                    ckpt_type = 'regular'
+                else:
+                    ckpt_type = 'best'
+                
+                # Get file modification time
+                file_stat = os.stat(ckpt_path)
+                modification_time = datetime.fromtimestamp(file_stat.st_mtime)
+                
+                info_dict = {
+                    'path': ckpt_path,
+                    'filename': filename,
+                    'step': step_num,
+                    'type': ckpt_type,
+                    'quality': ckpt_data.get('metrics', {}).get('ki_quality', 0),
+                    'loss': ckpt_data.get('metrics', {}).get('val_loss', 0),
+                    'size_mb': os.path.getsize(ckpt_path) / (1024 * 1024),
+                    'timestamp': modification_time,
+                    'date_str': modification_time.strftime('%Y-%m-%d %H:%M')
                 }
                 
-                checkpoints.append(info)
-            except:
+                checkpoints.append(info_dict)
+            except Exception as e:
+                # Skip corrupted checkpoints
                 continue
         
-        # Sort by step
+        # Sort by step number
         checkpoints.sort(key=lambda x: x['step'])
         
         return checkpoints
@@ -262,25 +334,26 @@ class CheckpointManager:
                     print(f"Warning: Could not remove {log_file}: {e}")
     
     def show_checkpoint_info(self):
-        """Display checkpoint table at startup"""
+        """Display enhanced checkpoint table at startup"""
         checkpoints = self.list_checkpoints()
         
         if not checkpoints:
             print("\n⚠️  No checkpoints found - starting fresh\n")
             return
         
-        print("\n" + "="*80)
+        print("\n" + "="*90)
         print("Available Checkpoints:")
-        print("="*80)
-        print(f"{'Step':<12} {'Type':<15} {'Quality':<12} {'Loss':<12}")
-        print("-"*80)
+        print("="*90)
+        print(f"{'Step':<12} {'Type':<12} {'Quality':<10} {'Loss':<10} {'Date':<18}")
+        print("-"*90)
         
         for ckpt in checkpoints[-10:]:  # Show last 10
-            step = f"{ckpt['step']:,}"
-            ckpt_type = ckpt['type']
-            quality = f"{ckpt['quality']*100:.1f}%"
-            loss = f"{ckpt['loss']:.4f}"
+            step_str = f"{ckpt['step']:,}"
+            type_str = ckpt['type']
+            quality_str = f"{ckpt['quality']*100:.1f}%"
+            loss_str = f"{ckpt['loss']:.4f}"
+            date_str = ckpt['date_str']
             
-            print(f"{step:<12} {ckpt_type:<15} {quality:<12} {loss:<12}")
+            print(f"{step_str:<12} {type_str:<12} {quality_str:<10} {loss_str:<10} {date_str:<18}")
         
-        print("="*80 + "\n")
+        print("="*90 + "\n")
