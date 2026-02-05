@@ -22,11 +22,12 @@ class AdaptiveSystem:
     - Aggressive mode for blur correction
     """
     
-    def __init__(self, initial_l1=0.6, initial_ms=0.2, initial_grad=0.2):
+    def __init__(self, initial_l1=0.6, initial_ms=0.2, initial_grad=0.2, initial_perceptual=0.0):
         # Loss weights
         self.l1_weight = initial_l1
         self.ms_weight = initial_ms
         self.grad_weight = initial_grad
+        self.perceptual_weight = initial_perceptual  # NEW: Track perceptual weight
         
         # Gradient clipping
         self.clip_value = 1.5
@@ -222,7 +223,10 @@ class AdaptiveSystem:
             Dict with current state
         """
         return {
-            'loss_weights': (self.l1_weight, self.ms_weight, self.grad_weight),
+            'l1_weight': self.l1_weight,
+            'ms_weight': self.ms_weight,
+            'grad_weight': self.grad_weight,
+            'perceptual_weight': self.perceptual_weight,  # NEW: Include perceptual weight
             'grad_clip': self.clip_value,
             'aggressive_mode': self.aggressive_mode,
             'plateau_counter': self.plateau_counter,

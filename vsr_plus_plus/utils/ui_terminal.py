@@ -16,6 +16,7 @@ C_BOLD = "\033[1m"
 C_CYAN = "\033[96m"
 C_RED = "\033[91m"
 C_YELLOW = "\033[93m"
+C_MAGENTA = "\033[95m"
 
 # ANSI Control Codes
 ANSI_HOME = "\033[H"
@@ -216,10 +217,12 @@ def print_separator(ui_width, style='single'):
     
     Args:
         ui_width: Total UI width
-        style: 'single' or 'double'
+        style: 'single', 'double', or 'thin'
     """
     if style == 'double':
         sys.stdout.write(f" {C_GRAY}╠{'═'*(ui_width-2)}╣{C_RESET}\n")
+    elif style == 'thin':
+        sys.stdout.write(f" {C_GRAY}╟{'·'*(ui_width-2)}╢{C_RESET}\n")
     else:  # single
         sys.stdout.write(f" {C_GRAY}╟{'─'*(ui_width-2)}╢{C_RESET}\n")
 

@@ -15,7 +15,7 @@ N_FEATS = 128
 
 # Total number of residual blocks (20, 24, 28, 32)
 # Higher = more capacity but slower
-N_BLOCKS = 32
+N_BLOCKS = 36
 
 
 # ============================================================================
@@ -24,12 +24,12 @@ N_BLOCKS = 32
 
 # Batch size per iteration (1, 2, 3, 4, 6, 8)
 # Higher = faster training but more VRAM
-BATCH_SIZE = 4
+BATCH_SIZE = 2
 
 # Gradient accumulation steps (1, 2, 3, 4)
 # Effective batch = BATCH_SIZE * ACCUMULATION_STEPS
 # Use accumulation if you need larger effective batch but have limited VRAM
-ACCUMULATION_STEPS = 1
+ACCUMULATION_STEPS = 3
 
 
 # ============================================================================
@@ -38,20 +38,20 @@ ACCUMULATION_STEPS = 1
 
 # Initial learning rate as exponent (e.g., -5 means 1e-5 = 0.00001)
 # Typical range: -6 to -4
-LR_EXPONENT = -5
+LR_EXPONENT = -4
 
 # Weight decay for AdamW optimizer (regularization)
 # Typical range: 0.0001 to 0.01
-WEIGHT_DECAY = 0.001
+WEIGHT_DECAY = 0.003
 
 # Warmup steps (linear increase from 0 to max LR)
-WARMUP_STEPS = 1000
+WARMUP_STEPS = 500
 
 # Maximum learning rate after warmup
-MAX_LR = 1e-4
+MAX_LR = 1.5e-4
 
 # Minimum learning rate at end of training
-MIN_LR = 1e-6
+MIN_LR = 2e-5
 
 
 # ============================================================================
@@ -59,11 +59,10 @@ MIN_LR = 1e-6
 # ============================================================================
 
 # Initial loss component weights (should sum to ~1.0)
-L1_WEIGHT = 0.6      # L1 pixel loss
-MS_WEIGHT = 0.2      # Multi-scale loss
-GRAD_WEIGHT = 0.2    # Gradient loss
-PERCEPTUAL_WEIGHT = 0.0  # Custom self-learned perceptual loss (0.1-0.2 recommended, 0 to disable)
-
+L1_WEIGHT = 0.7      # L1 pixel loss
+MS_WEIGHT = 0.15      # Multi-scale loss
+GRAD_WEIGHT = 0.05    # Gradient loss
+PERCEPTUAL_WEIGHT = 0.1
 
 # ============================================================================
 # TRAINING SCHEDULE
@@ -152,7 +151,7 @@ def get_config():
         'L1_WEIGHT': L1_WEIGHT,
         'MS_WEIGHT': MS_WEIGHT,
         'GRAD_WEIGHT': GRAD_WEIGHT,
-        'PERCEPTUAL_WEIGHT': PERCEPTUAL_WEIGHT,
+        'PERCEPTUAL_WEIGHT': PERCEPTUAL_WEIGHT,  # FIXED: Added missing key!
         
         # Training schedule
         'MAX_STEPS': MAX_STEPS,
