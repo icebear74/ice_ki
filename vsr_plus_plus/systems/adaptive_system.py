@@ -1,8 +1,12 @@
 """
-Adaptive Training System
+Adaptive Training System - "Smooth Operator"
 
-Based on the existing adaptive_system.py but adapted for VSR++
-- Adaptive loss weights (L1, MS, Grad)
+Enhanced adaptive system with:
+- EMA smoothing for stable decisions
+- Momentum-based weight updates (max 1% change per step)
+- Intelligent perceptual loss coupling to L1 loss
+- Cooldown mechanism to prevent oscillations
+- Adaptive loss weights (L1, MS, Grad, Perceptual)
 - Adaptive gradient clipping
 - Aggressive mode detection
 - Plateau detection
@@ -14,12 +18,13 @@ import numpy as np
 
 class AdaptiveSystem:
     """
-    Complete adaptive training system
+    Complete adaptive training system with smooth, stable control
     
-    Combines:
-    - Dynamic loss weights
-    - Adaptive gradient clipping
-    - Aggressive mode for blur correction
+    Features:
+    - EMA smoothing over loss values
+    - Momentum-limited weight adjustments
+    - Intelligent perceptual weight control
+    - Cooldown periods after adjustments
     """
     
     def __init__(self, initial_l1=0.6, initial_ms=0.2, initial_grad=0.2, initial_perceptual=0.0):
@@ -27,7 +32,20 @@ class AdaptiveSystem:
         self.l1_weight = initial_l1
         self.ms_weight = initial_ms
         self.grad_weight = initial_grad
-        self.perceptual_weight = initial_perceptual  # NEW: Track perceptual weight
+        self.perceptual_weight = initial_perceptual
+        
+        # EMA for smooth loss tracking (50-step window, alpha = 2/(N+1))
+        self.ema_l1_loss = None
+        self.ema_window = 50
+        self.ema_alpha = 2.0 / (self.ema_window + 1)
+        
+        # Momentum: maximum change per step (1% = 0.01)
+        self.max_weight_change = 0.01
+        
+        # Cooldown mechanism
+        self.cooldown_steps = 0
+        self.cooldown_duration = 100  # Wait 100 steps after adjustment
+        self.is_in_cooldown = False
         
         # Gradient clipping
         self.clip_value = 1.5
@@ -49,6 +67,10 @@ class AdaptiveSystem:
         self.aggressive_stabilization_threshold = 0.75
         self.normal_blur_threshold = 0.75
         
+        # L1 loss thresholds for perceptual weight control
+        self.l1_stable_threshold = 0.010  # L1 below this is "stable and good"
+        self.l1_unstable_threshold = 0.020  # L1 above this is "unstable"
+        
         # Update frequencies
         self.aggressive_update_frequency = 10
         self.normal_update_frequency = 50
@@ -58,7 +80,48 @@ class AdaptiveSystem:
         self.plateau_counter = 0
         self.plateau_patience = 300
     
-    def detect_extreme_conditions(self, pred, target, current_grad_loss=None):
+    def _update_ema_loss(self, l1_loss_value):
+        """Update EMA of L1 loss for smooth tracking"""
+        if self.ema_l1_loss is None:
+            self.ema_l1_loss = l1_loss_value
+        else:
+            self.ema_l1_loss = self.ema_alpha * l1_loss_value + (1 - self.ema_alpha) * self.ema_l1_loss
+    
+    def _apply_momentum(self, current_value, target_value):
+        """Apply momentum constraint: limit change to max_weight_change"""
+        delta = target_value - current_value
+        # Clip delta to maximum allowed change
+        delta = np.clip(delta, -self.max_weight_change, self.max_weight_change)
+        return current_value + delta
+    
+    def _update_perceptual_weight(self):
+        """
+        Intelligently adjust perceptual weight based on L1 loss stability
+        
+        Logic:
+        - If L1 is stable and low -> allow perceptual weight to increase (more details)
+        - If L1 is unstable/high -> decrease perceptual weight (focus on structure)
+        """
+        if self.ema_l1_loss is None:
+            return
+        
+        # Skip during cooldown
+        if self.is_in_cooldown:
+            return
+        
+        target_perc = self.perceptual_weight
+        
+        if self.ema_l1_loss < self.l1_stable_threshold:
+            # L1 is stable and good -> slowly increase perceptual
+            target_perc = min(0.15, self.perceptual_weight + 0.001)
+        elif self.ema_l1_loss > self.l1_unstable_threshold:
+            # L1 is unstable -> decrease perceptual
+            target_perc = max(0.0, self.perceptual_weight - 0.002)
+        
+        # Apply momentum
+        self.perceptual_weight = self._apply_momentum(self.perceptual_weight, target_perc)
+    
+    def detect_extreme_conditions(self, pred, target, current_l1_loss=None):
         """Check if immediate intervention needed"""
         with torch.no_grad():
             # Compute sharpness
@@ -75,40 +138,96 @@ class AdaptiveSystem:
             else:
                 sharpness_ratio = 1.0
         
+        # Update EMA with L1 loss if provided
+        if current_l1_loss is not None:
+            self._update_ema_loss(current_l1_loss)
+        
         # Check extreme conditions
         extreme = False
         
+        # Don't trigger aggressive mode during warmup (first 100 steps)
+        # This prevents premature weight changes when model is still initializing
+        if not hasattr(self, '_warmup_complete'):
+            self._warmup_steps = 0
+            self._warmup_complete = False
+        
+        if not self._warmup_complete:
+            self._warmup_steps += 1
+            if self._warmup_steps >= 100:
+                self._warmup_complete = True
+            # During warmup, don't trigger aggressive mode
+            return sharpness_ratio
+        
         if sharpness_ratio < self.extreme_sharpness_threshold:
-            extreme = True
-            
-        if current_grad_loss and current_grad_loss > self.extreme_grad_threshold:
             extreme = True
         
         if extreme and not self.aggressive_mode:
             self.aggressive_mode = True
             self.aggressive_counter = 0
-            # Immediate boost
-            self.grad_weight = 0.30
-            self.l1_weight = 0.55
-            self.ms_weight = 0.15
+            # Start cooldown
+            self.is_in_cooldown = True
+            self.cooldown_steps = self.cooldown_duration
+            # Smooth boost with momentum - but respect minimum guards
+            target_grad = 0.30
+            target_l1 = 0.55
+            target_ms = 0.15
+            self.grad_weight = self._apply_momentum(self.grad_weight, target_grad)
+            self.l1_weight = self._apply_momentum(self.l1_weight, target_l1)
+            self.ms_weight = self._apply_momentum(self.ms_weight, target_ms)
+            
+            # Apply minimum guards even in aggressive mode
+            self.ms_weight = max(0.05, self.ms_weight)
+            self.grad_weight = max(0.05, self.grad_weight)
+            self.l1_weight = 1.0 - self.ms_weight - self.grad_weight
         
         return sharpness_ratio
     
-    def update_loss_weights(self, pred, target, step, current_grad_loss=None):
+    def update_loss_weights(self, pred, target, step, current_l1_loss=None):
         """
-        Update loss weights based on image quality
+        Update loss weights based on image quality with smooth control
         
         Args:
             pred: Predicted image
             target: Target image
             step: Current training step
-            current_grad_loss: Current gradient loss value
+            current_l1_loss: Current L1 loss value for EMA tracking
             
         Returns:
-            Tuple of (l1_weight, ms_weight, grad_weight)
+            Tuple of (l1_weight, ms_weight, grad_weight, perceptual_weight, status_dict)
+            status_dict contains: {
+                'is_cooldown': bool,
+                'cooldown_remaining': int,
+                'mode': str ('Aggressive' or 'Stable')
+            }
         """
-        # Detect extreme conditions
-        sharpness_ratio = self.detect_extreme_conditions(pred, target, current_grad_loss)
+        # Track last step to prevent double decrement when called multiple times per step
+        if not hasattr(self, '_last_step'):
+            self._last_step = -1
+        
+        # SANFTER START (WARMUP): First 1000 steps - return initial weights unchanged
+        # This prevents wild jumps before loss stabilizes
+        if step < 1000:
+            status = {
+                'is_cooldown': False,
+                'cooldown_remaining': 0,
+                'mode': 'Warmup'
+            }
+            return self.l1_weight, self.ms_weight, self.grad_weight, self.perceptual_weight, status
+        
+        # Update cooldown counter ONLY ONCE PER STEP (not per batch)
+        if self.is_in_cooldown and step != self._last_step:
+            self.cooldown_steps -= 1
+            if self.cooldown_steps <= 0:
+                self.is_in_cooldown = False
+        
+        # Remember this step to avoid double decrement
+        self._last_step = step
+        
+        # Detect extreme conditions (also updates EMA)
+        sharpness_ratio = self.detect_extreme_conditions(pred, target, current_l1_loss)
+        
+        # Update perceptual weight based on L1 stability
+        self._update_perceptual_weight()
         
         # Update frequency based on mode
         if self.aggressive_mode:
@@ -132,9 +251,14 @@ class AdaptiveSystem:
             adjustment_factor = 1.05
             blur_threshold = self.normal_blur_threshold
         
-        # Update check
-        if step % update_freq != 0:
-            return self.l1_weight, self.ms_weight, self.grad_weight
+        # Check if we should update (skip if in cooldown or not update time)
+        if self.is_in_cooldown or step % update_freq != 0:
+            status = {
+                'is_cooldown': self.is_in_cooldown,
+                'cooldown_remaining': self.cooldown_steps if self.is_in_cooldown else 0,
+                'mode': 'Aggressive' if self.aggressive_mode else 'Stable'
+            }
+            return self.l1_weight, self.ms_weight, self.grad_weight, self.perceptual_weight, status
         
         # Add to history
         self.sharpness_history.append(sharpness_ratio)
@@ -143,24 +267,70 @@ class AdaptiveSystem:
         
         # Warmup
         if len(self.sharpness_history) < min_measurements:
-            return self.l1_weight, self.ms_weight, self.grad_weight
+            status = {
+                'is_cooldown': False,
+                'cooldown_remaining': 0,
+                'mode': 'Aggressive' if self.aggressive_mode else 'Stable'
+            }
+            return self.l1_weight, self.ms_weight, self.grad_weight, self.perceptual_weight, status
         
-        # Compute average
+        # Compute average using EMA concept
         window = min(20, len(self.sharpness_history))
         avg_sharpness = np.mean(self.sharpness_history[-window:])
         
-        # Adjust weights
+        # Calculate target weights
+        target_grad = self.grad_weight
+        target_ms = self.ms_weight
+        target_l1 = self.l1_weight
+        
+        # Adjust weights based on sharpness
         if avg_sharpness < blur_threshold:
-            self.grad_weight = min(0.5, self.grad_weight * adjustment_factor)
-            self.ms_weight = min(0.2, self.ms_weight)
-            self.l1_weight = max(0.3, 1.0 - self.grad_weight - self.ms_weight)
+            # Image is blurry, boost gradient
+            target_grad = min(0.5, self.grad_weight * adjustment_factor)
+            target_ms = min(0.2, self.ms_weight)
+            target_l1 = max(0.3, 1.0 - target_grad - target_ms)
+            # Start cooldown after adjustment
+            self.is_in_cooldown = True
+            self.cooldown_steps = self.cooldown_duration
         elif avg_sharpness > 0.92:
-            self.grad_weight = max(0.15, self.grad_weight * 0.95)
-            self.ms_weight = min(0.2, self.ms_weight)
-            self.l1_weight = 1.0 - self.grad_weight - self.ms_weight
+            # Image is sharp enough, reduce gradient
+            target_grad = max(0.15, self.grad_weight * 0.95)
+            target_ms = min(0.2, self.ms_weight)
+            target_l1 = 1.0 - target_grad - target_ms
+            # Start cooldown after adjustment
+            self.is_in_cooldown = True
+            self.cooldown_steps = self.cooldown_duration
+        
+        # Apply momentum (smooth transitions)
+        self.grad_weight = self._apply_momentum(self.grad_weight, target_grad)
+        self.ms_weight = self._apply_momentum(self.ms_weight, target_ms)
+        self.l1_weight = self._apply_momentum(self.l1_weight, target_l1)
+        
+        # MINIMUM GUARDS: Prevent MS or Grad from dropping too low
+        # This ensures the model always considers structure (MS) and sharpness (Grad)
+        self.ms_weight = max(0.05, self.ms_weight)  # Never below 5%
+        self.grad_weight = max(0.05, self.grad_weight)  # Never below 5%
+        
+        # Recalculate L1 as residual to maintain sum = 1.0
+        self.l1_weight = 1.0 - self.ms_weight - self.grad_weight
+        
+        # Ensure L1 doesn't go below minimum either
+        if self.l1_weight < 0.1:
+            # If L1 would be too low, rebalance all three
+            total = self.ms_weight + self.grad_weight
+            self.ms_weight = 0.45 * (self.ms_weight / total) if total > 0 else 0.15
+            self.grad_weight = 0.45 * (self.grad_weight / total) if total > 0 else 0.30
+            self.l1_weight = 0.1
         
         self.adjustment_step += 1
-        return self.l1_weight, self.ms_weight, self.grad_weight
+        
+        status = {
+            'is_cooldown': self.is_in_cooldown,
+            'cooldown_remaining': self.cooldown_steps if self.is_in_cooldown else 0,
+            'mode': 'Aggressive' if self.aggressive_mode else 'Stable'
+        }
+        
+        return self.l1_weight, self.ms_weight, self.grad_weight, self.perceptual_weight, status
     
     def clip_gradients(self, model):
         """
@@ -220,15 +390,19 @@ class AdaptiveSystem:
         Get current adaptive system status
         
         Returns:
-            Dict with current state
+            Dict with current state including cooldown and mode info
         """
         return {
             'l1_weight': self.l1_weight,
             'ms_weight': self.ms_weight,
             'grad_weight': self.grad_weight,
-            'perceptual_weight': self.perceptual_weight,  # NEW: Include perceptual weight
+            'perceptual_weight': self.perceptual_weight,
             'grad_clip': self.clip_value,
             'aggressive_mode': self.aggressive_mode,
+            'is_cooldown': self.is_in_cooldown,
+            'cooldown_remaining': self.cooldown_steps if self.is_in_cooldown else 0,
+            'mode': 'Aggressive' if self.aggressive_mode else 'Stable',
             'plateau_counter': self.plateau_counter,
-            'best_loss': self.best_loss
+            'best_loss': self.best_loss,
+            'ema_l1_loss': self.ema_l1_loss if self.ema_l1_loss is not None else 0.0
         }

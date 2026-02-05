@@ -55,6 +55,11 @@ class CompleteTrainingDataStore:
             'perceptual_weight_current': 0.0,
             'gradient_clip_val': 1.0,
             
+            # Adaptive Status (NEW)
+            'adaptive_mode': 'Stable',
+            'adaptive_is_cooldown': False,
+            'adaptive_cooldown_remaining': 0,
+            
             # Lernrate
             'learning_rate_value': 0.0,
             'lr_phase_name': 'warmup',
@@ -481,32 +486,85 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         </div>
         
         <div class="progress-bar-wrapper">
-            <div class="card-title">Trainingsfortschritt</div>
+            <div class="card-title">Gesamt-Fortschritt</div>
             <div class="progress-bar">
                 <div id="progressFill" class="progress-fill" style="width: 0%"></div>
                 <div id="progressText" class="progress-text">0 / 100,000</div>
             </div>
             <div class="card-subtitle" style="margin-top: 10px;">
-                Epoche: <span id="epochInfo">1</span> | 
-                Epoch-Step: <span id="epochStepInfo">0 / 1000</span>
+                Epoche: <span id="epochInfo">1</span>
             </div>
         </div>
+        
+        <div class="progress-bar-wrapper">
+            <div class="card-title">Epochen-Fortschritt</div>
+            <div class="progress-bar">
+                <div id="epochProgressFill" class="progress-fill" style="width: 0%; background: linear-gradient(90deg, var(--accent-green), var(--accent-blue));"></div>
+                <div id="epochProgressText" class="progress-text">0 / 1000</div>
+            </div>
+        </div>
+        
+        <div class="section-header">📉 Loss-Werte & Gewichte</div>
+        
+        <div class="grid-container">
+            <div class="info-card">
+                <div class="card-title">L1 Loss</div>
+                <div class="card-value" id="l1Loss">0.0000</div>
+                <div class="card-subtitle">w: <span id="l1Weight">0.60</span></div>
+            </div>
+            
+            <div class="info-card">
+                <div class="card-title">MS Loss</div>
+                <div class="card-value" id="msLoss">0.0000</div>
+                <div class="card-subtitle">w: <span id="msWeight">0.20</span></div>
+            </div>
+            
+            <div class="info-card">
+                <div class="card-title">Gradient Loss</div>
+                <div class="card-value" id="gradLoss">0.0000</div>
+                <div class="card-subtitle">w: <span id="gradWeight">0.20</span></div>
+            </div>
+            
+            <div class="info-card">
+                <div class="card-title">Perceptual Loss</div>
+                <div class="card-value" id="percLoss">0.0000</div>
+                <div class="card-subtitle">w: <span id="percWeight">0.00</span></div>
+            </div>
+            
+            <div class="info-card">
+                <div class="card-title">Total Loss</div>
+                <div class="card-value" id="totalLoss">0.0000</div>
+                <div class="card-subtitle">Summe aller Komponenten</div>
+            </div>
+        </div>
+        
+        <div class="section-header">🎚️ Adaptive System Status</div>
+        
+        <div class="grid-container">
+            <div class="info-card">
+                <div class="card-title">Modus</div>
+                <div class="card-value" id="adaptiveMode" style="font-size: 1.5em;">Stable</div>
+            </div>
+            
+            <div class="info-card">
+                <div class="card-title">Cooldown</div>
+                <div class="card-value" id="cooldownStatus">Inaktiv</div>
+                <div class="card-subtitle" id="cooldownRemaining"></div>
+            </div>
+            
+            <div class="info-card">
+                <div class="card-title">Gradient Clip</div>
+                <div class="card-value" id="gradClip">1.00</div>
+            </div>
+        </div>
+        
+        <div class="section-header">📊 Basis-Metriken</div>
         
         <div class="grid-container">
             <div class="info-card">
                 <div class="card-title">Iteration</div>
                 <div class="card-value" id="stepValue">0</div>
                 <div class="card-subtitle">von <span id="maxSteps">100,000</span></div>
-            </div>
-            
-            <div class="info-card">
-                <div class="card-title">Total Loss</div>
-                <div class="card-value" id="totalLoss">0.0000</div>
-                <div class="card-subtitle">
-                    L1: <span id="l1Loss">0.00</span> | 
-                    MS: <span id="msLoss">0.00</span> | 
-                    Grad: <span id="gradLoss">0.00</span>
-                </div>
             </div>
             
             <div class="info-card">
@@ -549,8 +607,13 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             </div>
             
             <div class="info-card">
-                <div class="card-title">Improvement</div>
+                <div class="card-title">Improvement (KI vs LR)</div>
                 <div class="card-value" id="improvement">0.0%</div>
+            </div>
+            
+            <div class="info-card">
+                <div class="card-title">KI to GT (PSNR/SSIM)</div>
+                <div class="card-value" id="kiToGt">0.0%</div>
             </div>
             
             <div class="info-card">
@@ -559,34 +622,25 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             </div>
         </div>
         
-        <div class="section-header">⚙️ Adaptive Weights</div>
+        <div class="section-header">📊 Layer-Aktivitäten</div>
         
-        <div class="grid-container">
-            <div class="info-card">
-                <div class="card-title">L1 Weight</div>
-                <div class="card-value" id="l1Weight">1.00</div>
-            </div>
-            
-            <div class="info-card">
-                <div class="card-title">MS Weight</div>
-                <div class="card-value" id="msWeight">1.00</div>
-            </div>
-            
-            <div class="info-card">
-                <div class="card-title">Gradient Weight</div>
-                <div class="card-value" id="gradWeight">1.00</div>
-            </div>
-            
-            <div class="info-card">
-                <div class="card-title">Gradient Clip</div>
-                <div class="card-value" id="gradClip">1.00</div>
+        <div id="layerActivitiesBackward" class="layer-activity-container">
+            <h3 style="color: var(--accent-blue); margin-bottom: 15px; font-size: 1.1em;">⬅️ Backward Stream</h3>
+            <div id="backwardLayers" style="color: var(--text-secondary); text-align: center;">
+                Warte auf Daten...
             </div>
         </div>
         
-        <div class="section-header">📊 Layer-Aktivitäten</div>
+        <div id="layerActivitiesForward" class="layer-activity-container">
+            <h3 style="color: var(--accent-green); margin-bottom: 15px; font-size: 1.1em;">➡️ Forward Stream</h3>
+            <div id="forwardLayers" style="color: var(--text-secondary); text-align: center;">
+                Warte auf Daten...
+            </div>
+        </div>
         
-        <div class="layer-activity-container" id="layerActivities">
-            <div style="color: var(--text-secondary); text-align: center;">
+        <div id="layerActivitiesFusion" class="layer-activity-container">
+            <h3 style="color: var(--accent-orange); margin-bottom: 15px; font-size: 1.1em;">🔗 Fusion</h3>
+            <div id="fusionLayers" style="color: var(--text-secondary); text-align: center;">
                 Warte auf Daten...
             </div>
         </div>
@@ -644,33 +698,52 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             document.getElementById('iterSpeed').textContent = iterSpeed.toFixed(2);
             document.getElementById('vramUsage').textContent = data.vram_usage_gb.toFixed(1);
             
-            // Loss components
+            // Loss components with weights
             document.getElementById('l1Loss').textContent = data.l1_loss_value.toFixed(4);
+            document.getElementById('l1Weight').textContent = data.l1_weight_current.toFixed(2);
             document.getElementById('msLoss').textContent = data.ms_loss_value.toFixed(4);
+            document.getElementById('msWeight').textContent = data.ms_weight_current.toFixed(2);
             document.getElementById('gradLoss').textContent = data.gradient_loss_value.toFixed(4);
+            document.getElementById('gradWeight').textContent = data.gradient_weight_current.toFixed(2);
+            document.getElementById('percLoss').textContent = data.perceptual_loss_value.toFixed(4);
+            document.getElementById('percWeight').textContent = data.perceptual_weight_current.toFixed(2);
             
-            // Quality metrics
+            // Adaptive system status
+            document.getElementById('adaptiveMode').textContent = data.adaptive_mode || 'Stable';
+            const cooldownStatus = document.getElementById('cooldownStatus');
+            const cooldownRemaining = document.getElementById('cooldownRemaining');
+            if (data.adaptive_is_cooldown) {
+                cooldownStatus.textContent = 'Aktiv';
+                cooldownStatus.style.color = 'var(--accent-orange)';
+                cooldownRemaining.textContent = data.adaptive_cooldown_remaining + ' Steps verblieben';
+            } else {
+                cooldownStatus.textContent = 'Inaktiv';
+                cooldownStatus.style.color = 'var(--accent-green)';
+                cooldownRemaining.textContent = '';
+            }
+            document.getElementById('gradClip').textContent = data.gradient_clip_val.toFixed(2);
+            
+            // Quality metrics with fixed labels
             document.getElementById('lrQuality').textContent = (data.quality_lr_value * 100).toFixed(1) + '%';
             document.getElementById('kiQuality').textContent = (data.quality_ki_value * 100).toFixed(1) + '%';
             document.getElementById('bestQuality').textContent = (data.best_quality_ever * 100).toFixed(1) + '%';
             document.getElementById('improvement').textContent = (data.quality_improvement_value * 100).toFixed(1) + '%';
+            document.getElementById('kiToGt').textContent = (data.quality_ki_to_gt_value * 100).toFixed(1) + '%';
             document.getElementById('valLoss').textContent = data.validation_loss_value.toFixed(4);
             
-            // Adaptive weights
-            document.getElementById('l1Weight').textContent = data.l1_weight_current.toFixed(2);
-            document.getElementById('msWeight').textContent = data.ms_weight_current.toFixed(2);
-            document.getElementById('gradWeight').textContent = data.gradient_weight_current.toFixed(2);
-            document.getElementById('gradClip').textContent = data.gradient_clip_val.toFixed(2);
-            
-            // Progress
+            // Progress - Overall
             document.getElementById('epochInfo').textContent = data.epoch_num;
-            document.getElementById('epochStepInfo').textContent = 
-                data.epoch_step_current + ' / ' + data.epoch_step_total;
-            
             const progress = (data.step_current / data.step_max) * 100;
             document.getElementById('progressFill').style.width = progress.toFixed(1) + '%';
             document.getElementById('progressText').textContent = 
                 data.step_current.toLocaleString('de-DE') + ' / ' + data.step_max.toLocaleString('de-DE');
+            
+            // Progress - Epoch
+            const epochProgress = data.epoch_step_total > 0 ? 
+                (data.epoch_step_current / data.epoch_step_total) * 100 : 0;
+            document.getElementById('epochProgressFill').style.width = epochProgress.toFixed(1) + '%';
+            document.getElementById('epochProgressText').textContent = 
+                data.epoch_step_current + ' / ' + data.epoch_step_total;
             
             // Status badge
             const badge = document.getElementById('statusBadge');
@@ -685,7 +758,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 badge.className = 'status-indicator status-training';
             }
             
-            // Layer activities
+            // Layer activities with grouping
             updateLayerActivities(data.layer_activity_map);
             
             // TensorBoard link
@@ -698,36 +771,135 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         }
         
         function updateLayerActivities(activityMap) {
-            const container = document.getElementById('layerActivities');
-            
             if (Object.keys(activityMap).length === 0) {
-                container.innerHTML = '<div style="color: var(--text-secondary); text-align: center;">Keine Layer-Daten verfügbar</div>';
+                document.getElementById('backwardLayers').innerHTML = 
+                    '<div style="color: var(--text-secondary); text-align: center;">Keine Daten</div>';
+                document.getElementById('forwardLayers').innerHTML = 
+                    '<div style="color: var(--text-secondary); text-align: center;">Keine Daten</div>';
+                document.getElementById('fusionLayers').innerHTML = 
+                    '<div style="color: var(--text-secondary); text-align: center;">Keine Daten</div>';
                 return;
             }
             
-            let html = '';
+            // Group layers into categories
+            const backwardLayers = [];
+            const forwardLayers = [];
+            const fusionLayers = [];
+            
+            // Find max value for normalization (if values are > 1.0)
+            let maxValue = 0;
             for (const [layerName, activityValue] of Object.entries(activityMap)) {
-                const percentage = (activityValue * 100).toFixed(1);
-                let barClass = 'layer-bar-fill';
-                
-                if (layerName.includes('Final Fusion')) {
-                    barClass += ' final-fusion';
-                } else if (layerName.includes('Fus')) {
-                    barClass += ' fusion';
-                }
-                
-                html += `
-                    <div class="layer-row">
-                        <div class="layer-name">${layerName}</div>
-                        <div class="layer-bar-container">
-                            <div class="${barClass}" style="width: ${percentage}%"></div>
-                        </div>
-                        <div class="layer-value">${percentage}%</div>
-                    </div>
-                `;
+                maxValue = Math.max(maxValue, activityValue);
             }
             
-            container.innerHTML = html;
+            // If max > 1.0, we need to normalize
+            const needsNormalization = maxValue > 1.0;
+            
+            for (const [layerName, activityValue] of Object.entries(activityMap)) {
+                // Normalize if needed: convert to 0-100 range
+                let displayValue, barWidth;
+                if (needsNormalization) {
+                    // Show as percentage of max
+                    displayValue = ((activityValue / maxValue) * 100).toFixed(1);
+                    barWidth = displayValue;
+                } else {
+                    // Already in 0-1 range, convert to percentage
+                    displayValue = (activityValue * 100).toFixed(1);
+                    barWidth = displayValue;
+                }
+                
+                // Ensure bar width is valid and doesn't exceed 100%
+                barWidth = parseFloat(barWidth);
+                if (isNaN(barWidth) || barWidth < 0) {
+                    barWidth = 0;
+                }
+                barWidth = Math.min(100, barWidth);
+                
+                let barClass = 'layer-bar-fill';
+                
+                // Categorize layer
+                if (layerName.toLowerCase().includes('backward')) {
+                    if (layerName.includes('Final Fusion')) {
+                        barClass += ' final-fusion';
+                    } else if (layerName.includes('Fus')) {
+                        barClass += ' fusion';
+                    }
+                    backwardLayers.push({name: layerName, value: displayValue, width: barWidth, barClass});
+                } else if (layerName.toLowerCase().includes('forward')) {
+                    if (layerName.includes('Final Fusion')) {
+                        barClass += ' final-fusion';
+                    } else if (layerName.includes('Fus')) {
+                        barClass += ' fusion';
+                    }
+                    forwardLayers.push({name: layerName, value: displayValue, width: barWidth, barClass});
+                } else if (layerName.toLowerCase().includes('fus')) {
+                    barClass += ' fusion';
+                    fusionLayers.push({name: layerName, value: displayValue, width: barWidth, barClass});
+                } else {
+                    // Default to fusion if unclear
+                    fusionLayers.push({name: layerName, value: displayValue, width: barWidth, barClass});
+                }
+            }
+            
+            // Render backward layers
+            let backwardHtml = '';
+            if (backwardLayers.length > 0) {
+                for (const layer of backwardLayers) {
+                    backwardHtml += `
+                        <div class="layer-row">
+                            <div class="layer-name">${layer.name}</div>
+                            <div class="layer-bar-container">
+                                <div class="${layer.barClass}" style="width: ${layer.width}%"></div>
+                            </div>
+                            <div class="layer-value">${layer.value}%</div>
+                        </div>
+                    `;
+                }
+                document.getElementById('backwardLayers').innerHTML = backwardHtml;
+            } else {
+                document.getElementById('backwardLayers').innerHTML = 
+                    '<div style="color: var(--text-secondary); text-align: center;">Keine Layer</div>';
+            }
+            
+            // Render forward layers
+            let forwardHtml = '';
+            if (forwardLayers.length > 0) {
+                for (const layer of forwardLayers) {
+                    forwardHtml += `
+                        <div class="layer-row">
+                            <div class="layer-name">${layer.name}</div>
+                            <div class="layer-bar-container">
+                                <div class="${layer.barClass}" style="width: ${layer.width}%"></div>
+                            </div>
+                            <div class="layer-value">${layer.value}%</div>
+                        </div>
+                    `;
+                }
+                document.getElementById('forwardLayers').innerHTML = forwardHtml;
+            } else {
+                document.getElementById('forwardLayers').innerHTML = 
+                    '<div style="color: var(--text-secondary); text-align: center;">Keine Layer</div>';
+            }
+            
+            // Render fusion layers
+            let fusionHtml = '';
+            if (fusionLayers.length > 0) {
+                for (const layer of fusionLayers) {
+                    fusionHtml += `
+                        <div class="layer-row">
+                            <div class="layer-name">${layer.name}</div>
+                            <div class="layer-bar-container">
+                                <div class="${layer.barClass}" style="width: ${layer.width}%"></div>
+                            </div>
+                            <div class="layer-value">${layer.value}%</div>
+                        </div>
+                    `;
+                }
+                document.getElementById('fusionLayers').innerHTML = fusionHtml;
+            } else {
+                document.getElementById('fusionLayers').innerHTML = 
+                    '<div style="color: var(--text-secondary); text-align: center;">Keine Layer</div>';
+            }
         }
         
         function triggerValidation() {
