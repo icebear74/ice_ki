@@ -540,9 +540,7 @@ class VSRTrainer:
             
             elif key_lower == 'p':  # Pause/Resume
                 self.paused = not self.paused
-                if not self.paused:
-                    # Reset step timer when resuming - will be set at start of next iteration
-                    pass
+                # Note: Timing will be reset by loop_start_time assignment at line 95
             
             elif key_lower == 'v':  # Manual validation
                 self.do_manual_val = True

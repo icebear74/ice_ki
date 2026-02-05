@@ -205,9 +205,12 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
     
     # Use dynamic widths for progress bars based on terminal size
     # Allocate space for labels and percentage, use remaining for bar
+    LABEL_AND_PERCENTAGE_SPACE = 50  # Space for labels, numbers, borders
+    DOUBLE_COLUMN_OVERHEAD = 60  # Additional space for 2-column layouts
+    
     total_available = ui_w - 4  # Account for borders
-    bar_width_single = min(50, max(20, total_available - 50))  # Dynamic, but capped
-    bar_width_double = min(30, max(15, (total_available - 60) // 2))  # For 2-column layouts
+    bar_width_single = min(50, max(20, total_available - LABEL_AND_PERCENTAGE_SPACE))
+    bar_width_double = min(30, max(15, (total_available - DOUBLE_COLUMN_OVERHEAD) // 2))
     
     # Calculate progress percentages (ETAs already calculated and passed from trainer)
     max_steps = config.get("MAX_STEPS", 100000)
@@ -477,14 +480,20 @@ def _draw_activity_display(activities, display_mode, available_lines, ui_w,
             
             if i < len(backward_layers):
                 name, act, trend, raw = backward_layers[i]
-                # Extract just the number from "Backward 1" -> "B1"
-                short_name = name.replace("Backward ", "B")
+                # Extract number from "Backward N" format (e.g., "Backward 1" -> "B1")
+                if name.startswith("Backward ") and name.split()[-1].isdigit():
+                    short_name = f"B{name.split()[-1]}"
+                else:
+                    short_name = name[:4]  # Fallback: first 4 chars
                 left_str = f"{short_name:>4}: {get_bar_for_layer(name, act, bar_width_double)} {act:>3}%"
             
             if i < len(forward_layers):
                 name, act, trend, raw = forward_layers[i]
-                # Extract just the number from "Forward 1" -> "F1"
-                short_name = name.replace("Forward ", "F")
+                # Extract number from "Forward N" format (e.g., "Forward 1" -> "F1")
+                if name.startswith("Forward ") and name.split()[-1].isdigit():
+                    short_name = f"F{name.split()[-1]}"
+                else:
+                    short_name = name[:4]  # Fallback: first 4 chars
                 right_str = f"{short_name:>4}: {get_bar_for_layer(name, act, bar_width_double)} {act:>3}%"
             
             print_two_columns(left_str, right_str, ui_w)
