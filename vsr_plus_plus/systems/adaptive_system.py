@@ -272,6 +272,22 @@ class AdaptiveSystem:
             }
             return self.initial_l1, self.initial_ms, self.initial_grad, self.initial_perceptual, status
         
+        # SAFETY VALVE: Force reset if plateau counter exceeds 3000
+        if self.plateau_counter > 3000:
+            print(f"[AdaptiveSystem] SAFETY RESET: plateau_counter={self.plateau_counter} exceeded 3000 steps")
+            print(f"[AdaptiveSystem] Resetting to Stable mode with initial weights")
+            # Reset to stable mode
+            self.aggressive_mode = False
+            self.plateau_counter = 0
+            # Reset weights to initial values
+            self.l1_weight = self.initial_l1
+            self.ms_weight = self.initial_ms
+            self.grad_weight = self.initial_grad
+            self.perceptual_weight = self.initial_perceptual
+            # Activate cooldown
+            self.is_in_cooldown = True
+            self.cooldown_steps = self.cooldown_duration
+        
         # Update cooldown counter ONLY ONCE PER STEP (not per batch)
         if self.is_in_cooldown and step != self._last_step:
             self.cooldown_steps -= 1
