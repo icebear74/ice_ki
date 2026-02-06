@@ -350,6 +350,8 @@ class CheckpointManager:
                     os.unlink(log_path)
                 except Exception as e:
                     print(f"Warning: Could not remove {log_file}: {e}")
+        
+        return backed_up
     
     def show_checkpoint_info(self):
         """Display enhanced checkpoint table at startup"""
