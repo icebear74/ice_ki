@@ -108,30 +108,38 @@ class AdaptiveSystem:
     
     def _update_perceptual_weight(self):
         """
-        Intelligently adjust perceptual weight based on L1 loss stability
+        Update perceptual weight based on L1 stability
         
-        Logic:
-        - If L1 is stable and low -> allow perceptual weight to increase (more details)
-        - If L1 is unstable/high -> decrease perceptual weight (focus on structure)
+        Perceptual runs INDEPENDENTLY of cooldown (separate, slow process)
         """
         if self.ema_l1_loss is None:
             return
         
-        # Skip during cooldown
-        if self.is_in_cooldown:
-            return
+        # FIX 3: REMOVED cooldown check - Perceptual runs independently
+        # Perceptual is a slow, independent process that should NOT be blocked
+        
+        # Dynamic maximum based on L1 quality (universal for all image types)
+        if self.ema_l1_loss < 0.008:
+            max_perc = 0.20  # L1 very stable -> allow details
+        elif self.ema_l1_loss < 0.012:
+            max_perc = 0.15  # L1 stable -> moderate details
+        else:
+            max_perc = 0.10  # L1 unstable -> structure first
+        
+        min_perc = 0.05  # Never turn off completely
         
         target_perc = self.perceptual_weight
         
-        if self.ema_l1_loss < self.l1_stable_threshold:
-            # L1 is stable and good -> slowly increase perceptual
-            target_perc = min(0.15, self.perceptual_weight + 0.001)
-        elif self.ema_l1_loss > self.l1_unstable_threshold:
-            # L1 is unstable -> decrease perceptual
-            target_perc = max(0.0, self.perceptual_weight - 0.002)
+        if self.ema_l1_loss < 0.010:  # L1 stable -> increase perceptual
+            target_perc = min(max_perc, self.perceptual_weight + 0.0015)  # 0.15% per update
+        elif self.ema_l1_loss > 0.018:  # L1 unstable -> decrease perceptual
+            target_perc = max(min_perc, self.perceptual_weight - 0.002)   # 0.2% per update
         
-        # Apply momentum
+        # Apply momentum (smooth change)
         self.perceptual_weight = self._apply_momentum(self.perceptual_weight, target_perc)
+        
+        # Hard limits (safety net)
+        self.perceptual_weight = max(min_perc, min(0.25, self.perceptual_weight))
     
     def detect_extreme_conditions(self, pred, target, current_l1_loss=None):
         """Check if immediate intervention needed"""
@@ -175,7 +183,10 @@ class AdaptiveSystem:
         if not self.history_settling_complete:
             return sharpness_ratio
         
-        if sharpness_ratio < self.extreme_sharpness_threshold:
+        # FIX 1: Only trigger aggressive mode if BOTH conditions are true:
+        # 1. Sharpness is poor (< 0.70)
+        # 2. Training is stuck (plateau > 300 steps)
+        if sharpness_ratio < self.extreme_sharpness_threshold and self.plateau_counter > 300:
             extreme = True
         
         if extreme and not self.aggressive_mode:
@@ -336,17 +347,19 @@ class AdaptiveSystem:
             target_grad = min(0.5, self.grad_weight * adjustment_factor)
             target_ms = min(0.2, self.ms_weight)
             target_l1 = max(0.3, 1.0 - target_grad - target_ms)
-            # Start cooldown after adjustment
-            self.is_in_cooldown = True
-            self.cooldown_steps = self.cooldown_duration
+            # FIX 2: Start cooldown ONLY if not already in cooldown
+            if not self.is_in_cooldown:
+                self.is_in_cooldown = True
+                self.cooldown_steps = self.cooldown_duration
         elif avg_sharpness > 0.92:
             # Image is sharp enough, reduce gradient
             target_grad = max(0.15, self.grad_weight * 0.95)
             target_ms = min(0.2, self.ms_weight)
             target_l1 = 1.0 - target_grad - target_ms
-            # Start cooldown after adjustment
-            self.is_in_cooldown = True
-            self.cooldown_steps = self.cooldown_duration
+            # FIX 2: Start cooldown ONLY if not already in cooldown
+            if not self.is_in_cooldown:
+                self.is_in_cooldown = True
+                self.cooldown_steps = self.cooldown_duration
         
         # Apply momentum (smooth transitions)
         self.grad_weight = self._apply_momentum(self.grad_weight, target_grad)

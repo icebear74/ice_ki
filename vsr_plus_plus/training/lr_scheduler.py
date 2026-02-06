@@ -39,6 +39,11 @@ class AdaptiveLRScheduler:
         
         self.current_phase = 'warmup'
         self.plateau_reductions = 0
+        
+        # FIX 4: Plateau recovery mechanism
+        self.plateau_boost_available = True
+        self.last_boost_step = 0
+        self.boost_cooldown = 1000  # Wait 1000 steps between boosts
     
     def step(self, global_step, plateau_detected=False):
         """
@@ -51,16 +56,31 @@ class AdaptiveLRScheduler:
         Returns:
             Tuple of (current_lr, phase_name)
         """
-        # Handle plateau emergency
-        if plateau_detected:
-            current_lr = self.optimizer.param_groups[0]['lr']
-            new_lr = max(current_lr * 0.5, self.min_lr)
+        # FIX 4: PLATEAU RECOVERY - If stuck for 300+ steps, boost LR
+        if plateau_detected and self.plateau_boost_available:
+            old_lr = self.optimizer.param_groups[0]['lr']
+            # Triple LR (but cap at MAX_LR)
+            new_lr = min(old_lr * 3.0, self.max_lr)
             
+            # Apply to optimizer
             for param_group in self.optimizer.param_groups:
                 param_group['lr'] = new_lr
             
-            self.plateau_reductions += 1
-            return new_lr, 'plateau_reduced'
+            current_lr = new_lr
+            
+            # Disable boost for next 1000 steps (prevent spam)
+            self.plateau_boost_available = False
+            self.last_boost_step = global_step
+            
+            # Log event
+            print(f"\n⚡ LR BOOST TRIGGERED at step {global_step}")
+            print(f"   {old_lr:.2e} -> {new_lr:.2e} (×{new_lr/old_lr:.1f})")
+            
+            return current_lr, 'plateau_boost'
+        
+        # Re-enable boost after cooldown
+        if global_step - self.last_boost_step > self.boost_cooldown:
+            self.plateau_boost_available = True
         
         # Phase 1: Warmup
         if global_step < self.warmup_steps:
@@ -91,3 +111,10 @@ class AdaptiveLRScheduler:
     def get_current_phase(self):
         """Get current phase without updating"""
         return self.current_phase
+    
+    def get_status(self):
+        """Return scheduler status for GUI/logging"""
+        return {
+            'plateau_boost_available': self.plateau_boost_available,
+            'steps_since_boost': self.last_boost_step,
+        }
