@@ -529,6 +529,9 @@ class VSRTrainer:
             adaptive_mode=adaptive_status.get('mode', 'Stable'),
             adaptive_is_cooldown=adaptive_status.get('is_cooldown', False),
             adaptive_cooldown_remaining=adaptive_status.get('cooldown_remaining', 0),
+            adaptive_plateau_counter=adaptive_status.get('plateau_counter', 0),
+            adaptive_lr_boost_available=adaptive_status.get('lr_boost_available', False),
+            adaptive_perceptual_trend=0,  # TODO: calculate trend
             
             # Lernrate
             learning_rate_value=current_lr,

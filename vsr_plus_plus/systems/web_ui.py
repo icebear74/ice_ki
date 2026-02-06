@@ -59,6 +59,9 @@ class CompleteTrainingDataStore:
             'adaptive_mode': 'Stable',
             'adaptive_is_cooldown': False,
             'adaptive_cooldown_remaining': 0,
+            'adaptive_plateau_counter': 0,
+            'adaptive_lr_boost_available': False,
+            'adaptive_perceptual_trend': 0,  # Change since last update
             
             # Lernrate
             'learning_rate_value': 0.0,

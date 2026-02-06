@@ -377,21 +377,46 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
         print_line(f"{C_BOLD}🔧 ADAPTIVE SYSTEM{C_RESET}", ui_w)
         print_separator(ui_w, 'single')
         
-        # Mode and Cooldown status
+        # Mode
         mode_color = C_RED if adaptive_mode == 'Aggressive' else C_GREEN
-        mode_display = f"{mode_color}{adaptive_mode}{C_RESET}"
+        mode_icon = '🔴' if adaptive_mode == 'Aggressive' else '🟢'
+        mode_display = f"{mode_icon} {mode_color}{adaptive_mode}{C_RESET}"
+        print_line(f"Mode: {mode_display}", ui_w)
         
+        # Cooldown status
         if is_cooldown:
-            cooldown_display = f"{C_YELLOW}ACTIVE{C_RESET} ({cooldown_remaining} steps)"
+            cooldown_display = f"⏸️  {C_YELLOW}ACTIVE{C_RESET} ({cooldown_remaining} steps remaining)"
         else:
-            cooldown_display = f"{C_GRAY}Inactive{C_RESET}"
+            cooldown_display = f"✅ {C_GREEN}Inactive{C_RESET}"
+        print_line(f"Cooldown: {cooldown_display}", ui_w)
         
-        print_two_columns(
-            f"Mode: {mode_display}",
-            f"Cooldown: {cooldown_display}",
-            ui_w
-        )
+        # Plateau counter
+        plateau = adaptive_status.get('plateau_counter', 0)
+        if plateau > 300:
+            plateau_color = C_RED
+            plateau_icon = '🚨'
+            plateau_text = f"{plateau} steps (WARNING)"
+        elif plateau > 150:
+            plateau_color = C_YELLOW
+            plateau_icon = '🟡'
+            plateau_text = f"{plateau} steps"
+        else:
+            plateau_color = C_GREEN
+            plateau_icon = '🟢'
+            plateau_text = f"{plateau} steps"
+        print_line(f"Plateau: {plateau_icon} {plateau_color}{plateau_text}{C_RESET}", ui_w)
         
+        # LR Boost status
+        lr_boost_available = adaptive_status.get('lr_boost_available', False)
+        if lr_boost_available:
+            boost_display = f"⚡ {C_GREEN}Ready{C_RESET}"
+        else:
+            boost_display = f"⏳ {C_YELLOW}Cooldown{C_RESET}"
+        print_line(f"LR Boost: {boost_display}", ui_w)
+        
+        print_separator(ui_w, 'thin')
+        
+        # Weight bars with current values
         print_two_columns(
             f"Grad Clip: {C_CYAN}{grad_clip:.3f}{C_RESET}",
             f"Aggressive: {C_RED if aggressive else C_GRAY}{'YES' if aggressive else 'NO'}{C_RESET}",
