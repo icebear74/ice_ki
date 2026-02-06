@@ -477,6 +477,47 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             color: var(--text-primary);
             text-shadow: 1px 1px 2px rgba(0,0,0,0.8);
         }
+        
+        .control-buttons {
+            margin-top: 15px;
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+        
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            font-size: 0.95em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .btn-primary {
+            background: var(--accent-blue);
+            color: #000;
+        }
+        
+        .btn-primary:hover {
+            background: #79c0ff;
+            transform: translateY(-2px);
+        }
+        
+        .btn-success {
+            background: var(--accent-green);
+            color: #000;
+        }
+        
+        .btn-success:hover {
+            background: #56d364;
+            transform: translateY(-2px);
+        }
     </style>
 </head>
 <body>
@@ -485,6 +526,14 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             <h1>🚀 VSR++ Training Monitor</h1>
             <div>
                 <span id="statusBadge" class="status-indicator status-training">Training</span>
+            </div>
+            <div class="control-buttons">
+                <button class="btn btn-primary" onclick="downloadDataAsJSON()">
+                    📥 Download Data (JSON)
+                </button>
+                <button class="btn btn-success" onclick="requestValidation()">
+                    🔍 Run Validation
+                </button>
             </div>
         </div>
         
@@ -553,6 +602,23 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 <div class="card-title">Cooldown</div>
                 <div class="card-value" id="cooldownStatus">Inaktiv</div>
                 <div class="card-subtitle" id="cooldownRemaining"></div>
+            </div>
+            
+            <div class="info-card">
+                <div class="card-title">Plateau Counter</div>
+                <div class="card-value" id="plateauCounter">0</div>
+                <div class="card-subtitle" id="plateauWarning"></div>
+            </div>
+            
+            <div class="info-card">
+                <div class="card-title">LR Boost</div>
+                <div class="card-value" id="lrBoostStatus">Bereit</div>
+            </div>
+            
+            <div class="info-card">
+                <div class="card-title">Perceptual Weight</div>
+                <div class="card-value" id="perceptualWeightDisplay">5.0%</div>
+                <div class="card-subtitle" id="perceptualTrend"></div>
             </div>
             
             <div class="info-card">
@@ -724,6 +790,54 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 cooldownStatus.style.color = 'var(--accent-green)';
                 cooldownRemaining.textContent = '';
             }
+            
+            // Plateau counter with color coding
+            const plateauCounter = data.adaptive_plateau_counter || 0;
+            const plateauEl = document.getElementById('plateauCounter');
+            const plateauWarning = document.getElementById('plateauWarning');
+            plateauEl.textContent = plateauCounter;
+            if (plateauCounter > 300) {
+                plateauEl.style.color = 'var(--accent-red)';
+                plateauWarning.textContent = '🚨 WARNUNG';
+                plateauWarning.style.color = 'var(--accent-red)';
+            } else if (plateauCounter > 150) {
+                plateauEl.style.color = 'var(--accent-orange)';
+                plateauWarning.textContent = '🟡 Erhöht';
+                plateauWarning.style.color = 'var(--accent-orange)';
+            } else {
+                plateauEl.style.color = 'var(--accent-green)';
+                plateauWarning.textContent = '🟢 Normal';
+                plateauWarning.style.color = 'var(--accent-green)';
+            }
+            
+            // LR Boost status
+            const lrBoostStatus = document.getElementById('lrBoostStatus');
+            if (data.adaptive_lr_boost_available) {
+                lrBoostStatus.textContent = '⚡ Bereit';
+                lrBoostStatus.style.color = 'var(--accent-green)';
+            } else {
+                lrBoostStatus.textContent = '⏳ Cooldown';
+                lrBoostStatus.style.color = 'var(--accent-orange)';
+            }
+            
+            // Perceptual weight with trend
+            const percWeight = (data.perceptual_weight_current * 100).toFixed(1);
+            const percWeightDisplay = document.getElementById('perceptualWeightDisplay');
+            const percTrend = document.getElementById('perceptualTrend');
+            percWeightDisplay.textContent = percWeight + '%';
+            
+            const trend = data.adaptive_perceptual_trend || 0;
+            if (trend > 0.001) {
+                percTrend.textContent = '⬆️ Steigend';
+                percTrend.style.color = 'var(--accent-green)';
+            } else if (trend < -0.001) {
+                percTrend.textContent = '⬇️ Fallend';
+                percTrend.style.color = 'var(--accent-orange)';
+            } else {
+                percTrend.textContent = '➡️ Stabil';
+                percTrend.style.color = 'var(--text-secondary)';
+            }
+            
             document.getElementById('gradClip').textContent = data.gradient_clip_val.toFixed(2);
             
             // Quality metrics with fixed labels
@@ -922,6 +1036,46 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             .catch(error => {
                 alert('❌ Verbindungsfehler: ' + error);
             });
+        }
+        
+        function downloadDataAsJSON() {
+            // Fetch current data and trigger download
+            fetch('/monitoring/data')
+                .then(response => response.json())
+                .then(data => {
+                    // Create filename with timestamp
+                    const now = new Date();
+                    const timestamp = now.toISOString().replace(/[:.]/g, '-').slice(0, -5);
+                    const filename = `vsr_training_data_${timestamp}.json`;
+                    
+                    // Convert data to JSON string with pretty formatting
+                    const jsonStr = JSON.stringify(data, null, 2);
+                    
+                    // Create blob and download link
+                    const blob = new Blob([jsonStr], { type: 'application/json' });
+                    const url = URL.createObjectURL(blob);
+                    
+                    // Create temporary link and trigger download
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = filename;
+                    document.body.appendChild(a);
+                    a.click();
+                    
+                    // Cleanup
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                    
+                    console.log(`✅ Downloaded: ${filename}`);
+                })
+                .catch(error => {
+                    alert('❌ Download-Fehler: ' + error);
+                    console.error('Download error:', error);
+                });
+        }
+        
+        function requestValidation() {
+            triggerValidation();
         }
         
         function updateRefreshRate() {
