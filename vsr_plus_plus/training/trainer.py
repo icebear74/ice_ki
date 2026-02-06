@@ -161,6 +161,16 @@ class VSRTrainer:
                 if self.global_step % lr_update_every == 0:
                     plateau_detected = self.adaptive_system.is_plateau()
                     current_lr, lr_phase = self.lr_scheduler.step(self.global_step, plateau_detected)
+                    
+                    # Log LR Boost events
+                    lr_status = self.lr_scheduler.get_status()
+                    if lr_phase == 'plateau_boost':
+                        self.tb_logger.log_event(
+                            self.global_step, 
+                            'LR_Boost', 
+                            f"LR boosted at step {self.global_step}"
+                        )
+                        self.train_logger.log_event(f"⚡ LR BOOST triggered at step {self.global_step}")
                 else:
                     # Keep current LR
                     current_lr = self.lr_scheduler.get_current_lr()
@@ -206,7 +216,13 @@ class VSRTrainer:
                 if self.global_step % self.config.get('LOG_TBOARD_EVERY', 100) == 0:
                     self.tb_logger.log_losses(self.global_step, loss_dict)
                     self.tb_logger.log_lr(self.global_step, current_lr)
-                    self.tb_logger.log_adaptive(self.global_step, self.adaptive_system.get_status())
+                    
+                    # Get adaptive status and add LR boost availability
+                    adaptive_status = self.adaptive_system.get_status()
+                    lr_status = self.lr_scheduler.get_status()
+                    adaptive_status['lr_boost_available'] = lr_status['plateau_boost_available']
+                    
+                    self.tb_logger.log_adaptive(self.global_step, adaptive_status)
                     self.tb_logger.log_system(self.global_step, avg_time, vram)
                     self.tb_logger.log_gradients(self.global_step, grad_norm, self.last_activities)
                     self.tb_logger.log_lr_phase(self.global_step, lr_phase)
@@ -241,10 +257,15 @@ class VSRTrainer:
                     metrics = self.validator.validate(self.global_step)
                     self.last_metrics = metrics
                     
-                    # Log to TensorBoard
+                    # Pass improvement to adaptive system for logging
+                    adaptive_status = self.adaptive_system.get_status()
+                    adaptive_status['ki_improvement'] = metrics.get('improvement', 0)
+                    
+                    # Log to TensorBoard with dashboards
                     self.tb_logger.log_quality(self.global_step, metrics)
                     self.tb_logger.log_metrics(self.global_step, metrics)
                     self.tb_logger.log_validation_loss(self.global_step, metrics.get('val_loss', 0.0))
+                    self.tb_logger.log_adaptive(self.global_step, adaptive_status)
                     
                     # Log ALL images (like in original)
                     labeled_images = metrics.get('labeled_images')
