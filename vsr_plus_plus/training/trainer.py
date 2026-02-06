@@ -269,9 +269,6 @@ class VSRTrainer:
                     self.tb_logger.log_validation_loss(self.global_step, metrics.get('val_loss', 0.0))
                     self.tb_logger.log_adaptive(self.global_step, adaptive_status)
                     
-                    # Auto-save statistics JSON after validation (with improvement metrics)
-                    self._save_statistics_json(self.global_step)
-                    
                     # Log ALL images (like in original)
                     labeled_images = metrics.get('labeled_images')
                     if labeled_images is not None and len(labeled_images) > 0:
@@ -349,6 +346,9 @@ class VSRTrainer:
                     
                     # Redraw UI after validation completes
                     self._update_gui()
+                    
+                    # Auto-save statistics JSON after validation (AFTER GUI update so web_monitor has current data)
+                    self._save_statistics_json(self.global_step)
                     
                     # Auto-continue timer for manual validation
                     if self.do_manual_val:
@@ -686,7 +686,19 @@ class VSRTrainer:
         # Store metrics WITHOUT labeled_images
         self.last_metrics = metrics
         
-        # Auto-save statistics JSON after manual validation
+        # Update web_monitor with validation metrics before saving JSON
+        # This ensures the saved JSON includes the fresh validation data
+        if self.last_metrics:
+            self.web_monitor.update(
+                quality_lr_value=self.last_metrics.get('lr_quality', 0.0),
+                quality_ki_value=self.last_metrics.get('ki_quality', 0.0),
+                quality_improvement_value=self.last_metrics.get('improvement', 0.0),
+                quality_ki_to_gt_value=self.last_metrics.get('ki_to_gt', 0.0),
+                quality_lr_to_gt_value=self.last_metrics.get('lr_to_gt', 0.0),
+                validation_loss_value=self.last_metrics.get('val_loss', 0.0),
+            )
+        
+        # Auto-save statistics JSON after manual validation (AFTER web_monitor update)
         self._save_statistics_json(self.global_step)
         
         self.train_logger.log_event(
