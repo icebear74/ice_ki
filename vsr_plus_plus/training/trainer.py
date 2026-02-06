@@ -11,6 +11,8 @@ Coordinates all training components:
 """
 
 import time
+import os
+import json
 import torch
 from ..utils.ui_display import draw_ui, get_activity_data
 from ..utils.keyboard_handler import KeyboardHandler
@@ -266,6 +268,9 @@ class VSRTrainer:
                     self.tb_logger.log_metrics(self.global_step, metrics)
                     self.tb_logger.log_validation_loss(self.global_step, metrics.get('val_loss', 0.0))
                     self.tb_logger.log_adaptive(self.global_step, adaptive_status)
+                    
+                    # Auto-save statistics JSON after validation (with improvement metrics)
+                    self._save_statistics_json(self.global_step)
                     
                     # Log ALL images (like in original)
                     labeled_images = metrics.get('labeled_images')
@@ -681,11 +686,48 @@ class VSRTrainer:
         # Store metrics WITHOUT labeled_images
         self.last_metrics = metrics
         
+        # Auto-save statistics JSON after manual validation
+        self._save_statistics_json(self.global_step)
+        
         self.train_logger.log_event(
             f"Manual Validation | KI Quality: {metrics['ki_quality']*100:.1f}%"
         )
         
         self.model.train()  # Back to training mode
+    
+    def _save_statistics_json(self, step):
+        """
+        Save complete training statistics as JSON file
+        
+        Saves to DATA_ROOT/Statistik_STEP.json with all data from web monitor
+        
+        Args:
+            step: Current training step
+        """
+        try:
+            # Get complete data snapshot from web monitor (same as web UI download)
+            data_snapshot = self.web_monitor.data_store.get_complete_snapshot()
+            
+            # Get DATA_ROOT from config (Learning directory)
+            data_root = self.config.get('DATA_ROOT', './Learn')
+            
+            # Ensure directory exists
+            os.makedirs(data_root, exist_ok=True)
+            
+            # Create filename: Statistik_STEP.json
+            filename = f"Statistik_{step}.json"
+            filepath = os.path.join(data_root, filename)
+            
+            # Save JSON with pretty formatting (same as web download)
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(data_snapshot, f, indent=2, ensure_ascii=False)
+            
+            print(f"  📊 Statistics saved: {filename}")
+            self.train_logger.log_event(f"Statistics JSON saved: {filename}")
+            
+        except Exception as e:
+            print(f"  ⚠️  Failed to save statistics JSON: {e}")
+            self.train_logger.log_event(f"Warning: Failed to save statistics JSON: {e}")
     
     def run(self):
         """
