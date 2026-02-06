@@ -75,6 +75,9 @@ class VSRTrainer:
         self.paused = False
         self.do_manual_val = False
         
+        # Pending JSON save tracking (save after validation + N steps)
+        self.pending_json_save_step = None
+        
         # Keyboard handler
         self.keyboard = KeyboardHandler()
         
@@ -214,6 +217,11 @@ class VSRTrainer:
                 # Update GUI with smoothed values
                 self._update_gui(epoch, smoothed_loss_dict, avg_time, steps_per_epoch, current_epoch_step, adam_momentum=adam_momentum)
                 
+                # Check if we need to save JSON (delayed save after validation)
+                if self.pending_json_save_step is not None and self.global_step >= self.pending_json_save_step:
+                    self._save_statistics_json(self.pending_json_save_step - 2)  # Save with original validation step
+                    self.pending_json_save_step = None  # Clear pending save
+                
                 # TensorBoard logging (use RAW values, not smoothed)
                 if self.global_step % self.config.get('LOG_TBOARD_EVERY', 100) == 0:
                     self.tb_logger.log_losses(self.global_step, loss_dict)
@@ -347,8 +355,8 @@ class VSRTrainer:
                     # Redraw UI after validation completes
                     self._update_gui()
                     
-                    # Auto-save statistics JSON after validation (AFTER GUI update so web_monitor has current data)
-                    self._save_statistics_json(self.global_step)
+                    # Schedule JSON save for 2 steps later (so web_monitor gets updated with fresh loss data)
+                    self.pending_json_save_step = self.global_step + 2
                     
                     # Auto-continue timer for manual validation
                     if self.do_manual_val:
@@ -686,7 +694,7 @@ class VSRTrainer:
         # Store metrics WITHOUT labeled_images
         self.last_metrics = metrics
         
-        # Update web_monitor with validation metrics before saving JSON
+        # Update web_monitor with validation metrics before scheduling JSON save
         # This ensures the saved JSON includes the fresh validation data
         if self.last_metrics:
             self.web_monitor.update(
@@ -698,8 +706,8 @@ class VSRTrainer:
                 validation_loss_value=self.last_metrics.get('val_loss', 0.0),
             )
         
-        # Auto-save statistics JSON after manual validation (AFTER web_monitor update)
-        self._save_statistics_json(self.global_step)
+        # Schedule JSON save for 2 steps later (so web_monitor gets updated with fresh loss data)
+        self.pending_json_save_step = self.global_step + 2
         
         self.train_logger.log_event(
             f"Manual Validation | KI Quality: {metrics['ki_quality']*100:.1f}%"
