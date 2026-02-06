@@ -21,7 +21,7 @@ class ResidualBlock(nn.Module):
         super().__init__()
         self.use_checkpointing = use_checkpointing
         self.conv1 = nn.Conv2d(n_feats, n_feats, 3, 1, 1)
-        self.relu = nn.LeakyReLU(0.2, inplace=True)
+        self.relu = nn.LeakyReLU(0.1, inplace=False)
         self.conv2 = nn.Conv2d(n_feats, n_feats, 3, 1, 1)
         self.last_activity = 0.0
     
@@ -31,7 +31,7 @@ class ResidualBlock(nn.Module):
         out = self.conv1(x)
         out = self.relu(out)
         out = self.conv2(out)
-        out = residual + out * 0.1
+        out = residual + out
         
         # Track activity
         self.last_activity = out.detach().abs().mean().item()
