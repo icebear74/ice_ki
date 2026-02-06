@@ -11,6 +11,8 @@ Coordinates all training components:
 """
 
 import time
+import os
+import json
 import torch
 from ..utils.ui_display import draw_ui, get_activity_data
 from ..utils.keyboard_handler import KeyboardHandler
@@ -72,6 +74,9 @@ class VSRTrainer:
         # UI state
         self.paused = False
         self.do_manual_val = False
+        
+        # Pending JSON save tracking (save after validation + N steps)
+        self.pending_json_save_step = None
         
         # Keyboard handler
         self.keyboard = KeyboardHandler()
@@ -161,6 +166,16 @@ class VSRTrainer:
                 if self.global_step % lr_update_every == 0:
                     plateau_detected = self.adaptive_system.is_plateau()
                     current_lr, lr_phase = self.lr_scheduler.step(self.global_step, plateau_detected)
+                    
+                    # Log LR Boost events
+                    lr_status = self.lr_scheduler.get_status()
+                    if lr_phase == 'plateau_boost':
+                        self.tb_logger.log_event(
+                            self.global_step, 
+                            'LR_Boost', 
+                            f"LR boosted at step {self.global_step}"
+                        )
+                        self.train_logger.log_event(f"⚡ LR BOOST triggered at step {self.global_step}")
                 else:
                     # Keep current LR
                     current_lr = self.lr_scheduler.get_current_lr()
@@ -202,11 +217,22 @@ class VSRTrainer:
                 # Update GUI with smoothed values
                 self._update_gui(epoch, smoothed_loss_dict, avg_time, steps_per_epoch, current_epoch_step, adam_momentum=adam_momentum)
                 
+                # Check if we need to save JSON (delayed save after validation)
+                if self.pending_json_save_step is not None and self.global_step >= self.pending_json_save_step:
+                    self._save_statistics_json(self.pending_json_save_step - 2)  # Save with original validation step
+                    self.pending_json_save_step = None  # Clear pending save
+                
                 # TensorBoard logging (use RAW values, not smoothed)
                 if self.global_step % self.config.get('LOG_TBOARD_EVERY', 100) == 0:
                     self.tb_logger.log_losses(self.global_step, loss_dict)
                     self.tb_logger.log_lr(self.global_step, current_lr)
-                    self.tb_logger.log_adaptive(self.global_step, self.adaptive_system.get_status())
+                    
+                    # Get adaptive status and add LR boost availability
+                    adaptive_status = self.adaptive_system.get_status()
+                    lr_status = self.lr_scheduler.get_status()
+                    adaptive_status['lr_boost_available'] = lr_status['plateau_boost_available']
+                    
+                    self.tb_logger.log_adaptive(self.global_step, adaptive_status)
                     self.tb_logger.log_system(self.global_step, avg_time, vram)
                     self.tb_logger.log_gradients(self.global_step, grad_norm, self.last_activities)
                     self.tb_logger.log_lr_phase(self.global_step, lr_phase)
@@ -241,10 +267,15 @@ class VSRTrainer:
                     metrics = self.validator.validate(self.global_step)
                     self.last_metrics = metrics
                     
-                    # Log to TensorBoard
+                    # Pass improvement to adaptive system for logging
+                    adaptive_status = self.adaptive_system.get_status()
+                    adaptive_status['ki_improvement'] = metrics.get('improvement', 0)
+                    
+                    # Log to TensorBoard with dashboards
                     self.tb_logger.log_quality(self.global_step, metrics)
                     self.tb_logger.log_metrics(self.global_step, metrics)
                     self.tb_logger.log_validation_loss(self.global_step, metrics.get('val_loss', 0.0))
+                    self.tb_logger.log_adaptive(self.global_step, adaptive_status)
                     
                     # Log ALL images (like in original)
                     labeled_images = metrics.get('labeled_images')
@@ -323,6 +354,9 @@ class VSRTrainer:
                     
                     # Redraw UI after validation completes
                     self._update_gui()
+                    
+                    # Schedule JSON save for 2 steps later (so web_monitor gets updated with fresh loss data)
+                    self.pending_json_save_step = self.global_step + 2
                     
                     # Auto-continue timer for manual validation
                     if self.do_manual_val:
@@ -508,6 +542,9 @@ class VSRTrainer:
             adaptive_mode=adaptive_status.get('mode', 'Stable'),
             adaptive_is_cooldown=adaptive_status.get('is_cooldown', False),
             adaptive_cooldown_remaining=adaptive_status.get('cooldown_remaining', 0),
+            adaptive_plateau_counter=adaptive_status.get('plateau_counter', 0),
+            adaptive_lr_boost_available=adaptive_status.get('lr_boost_available', False),
+            adaptive_perceptual_trend=0,  # TODO: calculate trend
             
             # Lernrate
             learning_rate_value=current_lr,
@@ -657,11 +694,60 @@ class VSRTrainer:
         # Store metrics WITHOUT labeled_images
         self.last_metrics = metrics
         
+        # Update web_monitor with validation metrics before scheduling JSON save
+        # This ensures the saved JSON includes the fresh validation data
+        if self.last_metrics:
+            self.web_monitor.update(
+                quality_lr_value=self.last_metrics.get('lr_quality', 0.0),
+                quality_ki_value=self.last_metrics.get('ki_quality', 0.0),
+                quality_improvement_value=self.last_metrics.get('improvement', 0.0),
+                quality_ki_to_gt_value=self.last_metrics.get('ki_to_gt', 0.0),
+                quality_lr_to_gt_value=self.last_metrics.get('lr_to_gt', 0.0),
+                validation_loss_value=self.last_metrics.get('val_loss', 0.0),
+            )
+        
+        # Schedule JSON save for 2 steps later (so web_monitor gets updated with fresh loss data)
+        self.pending_json_save_step = self.global_step + 2
+        
         self.train_logger.log_event(
             f"Manual Validation | KI Quality: {metrics['ki_quality']*100:.1f}%"
         )
         
         self.model.train()  # Back to training mode
+    
+    def _save_statistics_json(self, step):
+        """
+        Save complete training statistics as JSON file
+        
+        Saves to DATA_ROOT/Statistik_STEP.json with all data from web monitor
+        
+        Args:
+            step: Current training step
+        """
+        try:
+            # Get complete data snapshot from web monitor (same as web UI download)
+            data_snapshot = self.web_monitor.data_store.get_complete_snapshot()
+            
+            # Get DATA_ROOT from config (Learning directory)
+            data_root = self.config.get('DATA_ROOT', './Learn')
+            
+            # Ensure directory exists
+            os.makedirs(data_root, exist_ok=True)
+            
+            # Create filename: Statistik_STEP.json
+            filename = f"Statistik_{step}.json"
+            filepath = os.path.join(data_root, filename)
+            
+            # Save JSON with pretty formatting (same as web download)
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(data_snapshot, f, indent=2, ensure_ascii=False)
+            
+            print(f"  📊 Statistics saved: {filename}")
+            self.train_logger.log_event(f"Statistics JSON saved: {filename}")
+            
+        except Exception as e:
+            print(f"  ⚠️  Failed to save statistics JSON: {e}")
+            self.train_logger.log_event(f"Warning: Failed to save statistics JSON: {e}")
     
     def run(self):
         """

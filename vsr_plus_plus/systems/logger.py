@@ -125,19 +125,30 @@ class TensorBoardLogger:
         return float(value) if value is not None else 0.0
     
     def log_losses(self, step, losses):
-        """Log loss components"""
+        """Log loss components with scaling"""
         self.writer.add_scalar('Loss/L1', self._to_float(losses.get('l1', 0)), step)
         self.writer.add_scalar('Loss/MS', self._to_float(losses.get('ms', 0)), step)
         self.writer.add_scalar('Loss/Grad', self._to_float(losses.get('grad', 0)), step)
         self.writer.add_scalar('Loss/Perceptual', self._to_float(losses.get('perceptual', 0)), step)
         self.writer.add_scalar('Loss/Total', self._to_float(losses.get('total', 0)), step)
+        
+        # Add total loss to CoreMetrics
+        total = self._to_float(losses.get('total', 0))
+        self.writer.add_scalar('Training/CoreMetrics/Total_Loss', total * 100, step)
+        
+        # Add EMA L1 loss if available
+        if 'ema_l1_loss' in losses:
+            self.writer.add_scalar('Training/CoreMetrics/EMA_L1_Loss', self._to_float(losses['ema_l1_loss']) * 1000, step)
     
     def log_lr(self, step, lr):
-        """Log learning rate"""
+        """Log learning rate with scaling for visualization"""
         self.writer.add_scalar('Training/LearningRate', self._to_float(lr), step)
+        
+        # Add to CoreMetrics dashboard (scaled for visibility)
+        self.writer.add_scalar('Training/CoreMetrics/Learning_Rate', self._to_float(lr) * 1e6, step)
     
     def log_adaptive(self, step, adaptive_info):
-        """Log adaptive system info"""
+        """Log adaptive system info with correlation dashboards"""
         if not adaptive_info:
             return
         
@@ -153,15 +164,43 @@ class TensorBoardLogger:
             self.writer.add_scalar('Adaptive/BestLoss', self._to_float(adaptive_info['best_loss']), step)
         if 'plateau_counter' in adaptive_info:
             self.writer.add_scalar('Adaptive/PlateauCounter', self._to_float(adaptive_info['plateau_counter']), step)
+        
+        # Add Perceptual Weight tracking
+        perc_w = adaptive_info.get('perceptual_weight', 0.0)
+        self.writer.add_scalar('Adaptive/Perceptual_Weight', self._to_float(perc_w), step)
+        
+        # DASHBOARD 1: System Health + Performance
+        self.writer.add_scalars('Adaptive/SystemHealth', {
+            'L1_Weight': self._to_float(l1_w) * 100,
+            'MS_Weight': self._to_float(ms_w) * 100,
+            'Grad_Weight': self._to_float(grad_w) * 100,
+            'Perceptual_Weight': self._to_float(perc_w) * 100,
+            'KI_Improvement': self._to_float(adaptive_info.get('ki_improvement', 0)) * 100,  # 0-1 -> 0-100%
+        }, step)
+        
+        # DASHBOARD 2: Interventions + Impact
+        self.writer.add_scalars('Adaptive/Interventions', {
+            'Plateau_Counter': self._to_float(adaptive_info.get('plateau_counter', 0)) / 10,  # Scale for visibility
+            'Cooldown_Active': 50 if adaptive_info.get('is_cooldown') else 0,
+            'Aggressive_Mode': 50 if adaptive_info.get('aggressive_mode') else 0,
+            'LR_Boost_Available': 50 if adaptive_info.get('lr_boost_available', False) else 0,
+            'KI_Improvement': self._to_float(adaptive_info.get('ki_improvement', 0)) * 100,
+        }, step)
     
     def log_quality(self, step, metrics):
-        """Log quality metrics"""
+        """Log quality metrics with correlation to LR/Loss"""
         if not metrics:
             return
         
         self.writer.add_scalar('Quality/LR_Quality', self._to_float(metrics.get('lr_quality', 0)), step)
         self.writer.add_scalar('Quality/KI_Quality', self._to_float(metrics.get('ki_quality', 0)), step)
         self.writer.add_scalar('Quality/Improvement', self._to_float(metrics.get('improvement', 0)), step)
+        
+        # Add to CoreMetrics dashboard
+        self.writer.add_scalars('Training/CoreMetrics', {
+            'KI_Quality': self._to_float(metrics.get('ki_quality', 0)) * 100,       # 0-1 -> 0-100%
+            'KI_Improvement': self._to_float(metrics.get('improvement', 0)) * 100,   # 0-1 -> 0-100%
+        }, step)
         
         # Log additional GT difference metrics if available
         if 'ki_to_gt' in metrics:
@@ -239,6 +278,14 @@ class TensorBoardLogger:
     def log_validation_loss(self, step, val_loss):
         """Log validation loss (like in original)"""
         self.writer.add_scalar('Validation/Loss_Total', self._to_float(val_loss), step)
+    
+    def log_event(self, step, event_type, message):
+        """Log important events to timeline"""
+        self.writer.add_text('Events/Timeline', f'{event_type}: {message}', step)
+        
+        # Add event marker (spike for visibility)
+        if event_type in ['LR_Boost', 'Aggressive_Mode', 'Cooldown_Start']:
+            self.writer.add_scalar(f'Events/{event_type}', 100, step)
     
     def close(self):
         """Close writer"""
