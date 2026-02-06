@@ -28,7 +28,13 @@ class AdaptiveSystem:
     """
     
     def __init__(self, initial_l1=0.6, initial_ms=0.2, initial_grad=0.2, initial_perceptual=0.0):
-        # Loss weights
+        # Store initial weights to always respect config values
+        self.initial_l1 = initial_l1
+        self.initial_ms = initial_ms
+        self.initial_grad = initial_grad
+        self.initial_perceptual = initial_perceptual
+        
+        # Loss weights - start with config values
         self.l1_weight = initial_l1
         self.ms_weight = initial_ms
         self.grad_weight = initial_grad
@@ -79,6 +85,12 @@ class AdaptiveSystem:
         self.best_loss = float('inf')
         self.plateau_counter = 0
         self.plateau_patience = 300
+        
+        # History settling period: when resuming training at step >= 1000,
+        # wait to collect history before making changes
+        self.history_settling_steps = 100
+        self.history_steps_collected = 0
+        self.history_settling_complete = False
     
     def _update_ema_loss(self, l1_loss_value):
         """Update EMA of L1 loss for smooth tracking"""
@@ -158,6 +170,11 @@ class AdaptiveSystem:
             # During warmup, don't trigger aggressive mode
             return sharpness_ratio
         
+        # SAFETY: Don't trigger aggressive mode if we don't have enough history yet
+        # This prevents extreme weight changes when resuming from checkpoint
+        if not self.history_settling_complete:
+            return sharpness_ratio
+        
         if sharpness_ratio < self.extreme_sharpness_threshold:
             extreme = True
         
@@ -178,7 +195,7 @@ class AdaptiveSystem:
             # Apply minimum guards even in aggressive mode
             self.ms_weight = max(0.05, self.ms_weight)
             self.grad_weight = max(0.05, self.grad_weight)
-            self.l1_weight = 1.0 - self.ms_weight - self.grad_weight
+            self.l1_weight = min(0.9, 1.0 - self.ms_weight - self.grad_weight)
         
         return sharpness_ratio
     
@@ -197,22 +214,52 @@ class AdaptiveSystem:
             status_dict contains: {
                 'is_cooldown': bool,
                 'cooldown_remaining': int,
-                'mode': str ('Aggressive' or 'Stable')
+                'mode': str ('Warmup', 'Settling', 'Aggressive' or 'Stable')
             }
         """
         # Track last step to prevent double decrement when called multiple times per step
         if not hasattr(self, '_last_step'):
             self._last_step = -1
         
-        # SANFTER START (WARMUP): First 1000 steps - return initial weights unchanged
-        # This prevents wild jumps before loss stabilizes
+        # PHASE 1: Early warmup (step < 1000) - return initial weights unchanged
+        # This gives the model time to stabilize before any adaptive changes
         if step < 1000:
+            # Sync internal weights with initial values for consistent GUI display
+            self.l1_weight = self.initial_l1
+            self.ms_weight = self.initial_ms
+            self.grad_weight = self.initial_grad
+            self.perceptual_weight = self.initial_perceptual
+            
             status = {
                 'is_cooldown': False,
                 'cooldown_remaining': 0,
                 'mode': 'Warmup'
             }
-            return self.l1_weight, self.ms_weight, self.grad_weight, self.perceptual_weight, status
+            return self.initial_l1, self.initial_ms, self.initial_grad, self.initial_perceptual, status
+        
+        # PHASE 2: History settling period (step >= 1000, but no history yet)
+        # When resuming from checkpoint or after warmup, collect history before adapting
+        if not self.history_settling_complete:
+            # Only increment once per step, not per batch
+            if step != self._last_step:
+                self.history_steps_collected += 1
+                if self.history_steps_collected >= self.history_settling_steps:
+                    self.history_settling_complete = True
+            
+            # Sync internal weights with initial values for consistent GUI display
+            self.l1_weight = self.initial_l1
+            self.ms_weight = self.initial_ms
+            self.grad_weight = self.initial_grad
+            self.perceptual_weight = self.initial_perceptual
+            
+            # Return initial weights during settling
+            status = {
+                'is_cooldown': False,
+                'cooldown_remaining': 0,
+                'mode': 'Settling',
+                'settling_progress': f"{self.history_steps_collected}/{self.history_settling_steps}"
+            }
+            return self.initial_l1, self.initial_ms, self.initial_grad, self.initial_perceptual, status
         
         # Update cooldown counter ONLY ONCE PER STEP (not per batch)
         if self.is_in_cooldown and step != self._last_step:
@@ -306,13 +353,28 @@ class AdaptiveSystem:
         self.ms_weight = self._apply_momentum(self.ms_weight, target_ms)
         self.l1_weight = self._apply_momentum(self.l1_weight, target_l1)
         
-        # MINIMUM GUARDS: Prevent MS or Grad from dropping too low
+        # HARD SAFETY GUARDS: Prevent MS or Grad from dropping too low
         # This ensures the model always considers structure (MS) and sharpness (Grad)
         self.ms_weight = max(0.05, self.ms_weight)  # Never below 5%
         self.grad_weight = max(0.05, self.grad_weight)  # Never below 5%
         
         # Recalculate L1 as residual to maintain sum = 1.0
         self.l1_weight = 1.0 - self.ms_weight - self.grad_weight
+        
+        # Ensure L1 doesn't exceed maximum (cap at 0.9)
+        if self.l1_weight > 0.9:
+            self.l1_weight = 0.9
+            # Rebalance MS and Grad proportionally to use remaining budget
+            remaining_budget = 1.0 - self.l1_weight  # 0.1 when L1 is at max
+            total_other = self.ms_weight + self.grad_weight
+            if total_other > 0:
+                scale = remaining_budget / total_other
+                self.ms_weight *= scale
+                self.grad_weight *= scale
+            else:
+                # Fallback to minimum values if both were zero
+                self.ms_weight = 0.05
+                self.grad_weight = 0.05
         
         # Ensure L1 doesn't go below minimum either
         if self.l1_weight < 0.1:
