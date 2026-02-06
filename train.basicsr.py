@@ -203,10 +203,50 @@ def train(old_settings):
     termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
     os.system('clear')
     choice = input("⚠️  [L]öschen oder [F]ortsetzen? (L/F): ").lower()
+    
     if choice == 'l':
-        if os.path.exists(LOG_BASE): shutil.rmtree(LOG_BASE)
-        if os.path.exists(CHECKPOINT_DIR): shutil.rmtree(CHECKPOINT_DIR)
-        os.makedirs(CHECKPOINT_DIR, exist_ok=True); save_config(defaults); cfg = defaults.copy()
+        # Safety confirmation to prevent accidental data loss
+        print(f"\n{C_RED}{C_BOLD}⚠️  WARNUNG: Alle Trainingsdaten werden gelöscht!{C_RESET}")
+        print(f"{C_YELLOW}Checkpoints (.pth) werden als .BAK gesichert.{C_RESET}")
+        confirm = input(f"\n{C_RED}Sind Sie sicher? (ja/nein): {C_RESET}").lower()
+        
+        if confirm != 'ja':
+            # User canceled - offer to resume instead
+            print(f"\n{C_GREEN}✓ Abbruch - Training wird fortgesetzt{C_RESET}")
+            choice = 'f'  # Switch to resume mode
+        else:
+            # Proceed with deletion, but backup .pth files first
+            print(f"\n{C_CYAN}Sichere .pth Dateien...{C_RESET}")
+            
+            # Backup all .pth files in checkpoint directory
+            if os.path.exists(CHECKPOINT_DIR):
+                pth_files = glob.glob(os.path.join(CHECKPOINT_DIR, "*.pth"))
+                backed_up = 0
+                for pth_file in pth_files:
+                    backup_path = pth_file + ".BAK"
+                    try:
+                        shutil.copy2(pth_file, backup_path)
+                        backed_up += 1
+                    except Exception as e:
+                        print(f"{C_YELLOW}⚠️  Fehler beim Sichern von {os.path.basename(pth_file)}: {e}{C_RESET}")
+                
+                if backed_up > 0:
+                    print(f"{C_GREEN}✓ {backed_up} .pth Dateien als .BAK gesichert{C_RESET}")
+            
+            # Now delete everything
+            print(f"{C_CYAN}Lösche Trainingsdaten...{C_RESET}")
+            if os.path.exists(LOG_BASE): 
+                shutil.rmtree(LOG_BASE)
+                print(f"{C_GREEN}✓ Logs gelöscht{C_RESET}")
+            
+            if os.path.exists(CHECKPOINT_DIR): 
+                shutil.rmtree(CHECKPOINT_DIR)
+                print(f"{C_GREEN}✓ Checkpoints gelöscht{C_RESET}")
+            
+            os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+            save_config(defaults)
+            cfg = defaults.copy()
+            print(f"\n{C_GREEN}✓ Neustart abgeschlossen{C_RESET}\n")
 
     cleanup_logs(LOG_BASE)
     tty.setcbreak(sys.stdin.fileno())

@@ -41,6 +41,7 @@ C_GREEN = "\033[92m"
 C_CYAN = "\033[96m"
 C_RED = "\033[91m"
 C_YELLOW = "\033[93m"
+C_BOLD = "\033[1m"
 C_RESET = "\033[0m"
 
 
@@ -106,14 +107,31 @@ def main():
     checkpoint_mgr = CheckpointManager(DATA_ROOT)
     
     if choice == 'l':
-        print("\n🗑️  Starting fresh training...\n")
+        # Safety confirmation to prevent accidental data loss
+        print(f"\n{C_RED}{C_BOLD}⚠️  WARNUNG: Alle Trainingsdaten werden gelöscht!{C_RESET}")
+        print(f"{C_YELLOW}Checkpoints (.pth) werden als .BAK gesichert.{C_RESET}")
+        confirm = input(f"\n{C_RED}Sind Sie sicher? (ja/nein): {C_RESET}").lower()
         
-        # Cleanup everything for fresh start
-        log_dir = os.path.join(DATA_ROOT, "logs")
-        checkpoint_mgr.cleanup_all_for_fresh_start(log_dir)
-        print("✅ All checkpoints, logs, and TensorBoard events cleaned up\n")
-        
-    else:
+        if confirm != 'ja':
+            # User canceled - offer to resume instead
+            print(f"\n{C_GREEN}✓ Abbruch - Training wird fortgesetzt{C_RESET}\n")
+            choice = 'f'  # Switch to resume mode
+        else:
+            # Proceed with deletion
+            print(f"\n{C_CYAN}🗑️  Starting fresh training...{C_RESET}")
+            print(f"{C_CYAN}Sichere .pth Dateien...{C_RESET}")
+            
+            # Cleanup everything for fresh start (now includes backup)
+            log_dir = os.path.join(DATA_ROOT, "logs")
+            backed_up = checkpoint_mgr.cleanup_all_for_fresh_start(log_dir)
+            
+            if backed_up > 0:
+                print(f"{C_GREEN}✓ {backed_up} .pth Dateien als .BAK gesichert{C_RESET}")
+            
+            print(f"{C_GREEN}✅ All checkpoints, logs, and TensorBoard events cleaned up{C_RESET}\n")
+    
+    if choice != 'l' or choice == 'f':
+        # Resume mode (either selected 'f' or canceled 'l')
         print("\n📂 Resuming training...\n")
         
         # Get all checkpoints
