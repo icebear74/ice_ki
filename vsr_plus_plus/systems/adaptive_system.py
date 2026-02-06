@@ -85,6 +85,7 @@ class AdaptiveSystem:
         self.best_loss = float('inf')
         self.plateau_counter = 0
         self.plateau_patience = 300
+        self.plateau_safety_threshold = 3000  # Force reset if plateau counter exceeds this
         
         # History settling period: when resuming training at step >= 1000,
         # wait to collect history before making changes
@@ -272,9 +273,9 @@ class AdaptiveSystem:
             }
             return self.initial_l1, self.initial_ms, self.initial_grad, self.initial_perceptual, status
         
-        # SAFETY VALVE: Force reset if plateau counter exceeds 3000
-        if self.plateau_counter > 3000:
-            print(f"[AdaptiveSystem] SAFETY RESET: plateau_counter={self.plateau_counter} exceeded 3000 steps")
+        # SAFETY VALVE: Force reset if plateau counter exceeds threshold
+        if self.plateau_counter > self.plateau_safety_threshold:
+            print(f"[AdaptiveSystem] SAFETY RESET: plateau_counter={self.plateau_counter} exceeded {self.plateau_safety_threshold} steps")
             print(f"[AdaptiveSystem] Resetting to Stable mode with initial weights")
             # Reset to stable mode
             self.aggressive_mode = False

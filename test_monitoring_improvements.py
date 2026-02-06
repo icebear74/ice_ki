@@ -37,7 +37,8 @@ def test_safety_reset():
     )
     
     # Simulate the system getting into aggressive mode and high plateau counter
-    system.plateau_counter = 3500  # Exceeds 3000 threshold
+    # Use the system's own threshold value for the test
+    system.plateau_counter = system.plateau_safety_threshold + 500  # Exceeds threshold
     system.aggressive_mode = True
     system.aggressive_counter = 100
     
@@ -65,7 +66,7 @@ def test_safety_reset():
     system.history_settling_complete = True
     
     # Call update_loss_weights - should trigger safety reset
-    print("\n>>> Calling update_loss_weights (step 1500, plateau_counter=3500)...")
+    print(f"\n>>> Calling update_loss_weights (step 1500, plateau_counter={system.plateau_counter})...")
     l1_w, ms_w, grad_w, perc_w, status = system.update_loss_weights(
         pred, target, step=1500, current_l1_loss=0.015
     )
