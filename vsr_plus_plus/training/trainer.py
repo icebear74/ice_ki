@@ -512,9 +512,12 @@ class VSRTrainer:
         
         # Konvertiere Layer-Aktivitäten in Dict-Format
         layer_act_dict = {}
+        peak_activity_value = 0.0
         if activities:
             for name, activity_percent, trend, raw_value in activities:
                 layer_act_dict[name] = activity_percent
+                # Track maximum raw value across all layers
+                peak_activity_value = max(peak_activity_value, raw_value)
         
         self.web_monitor.update(
             # Grundlegende Metriken
@@ -570,6 +573,7 @@ class VSRTrainer:
             
             # Layer-Aktivitäten
             layer_activity_map=layer_act_dict,
+            layer_activity_peak_value=peak_activity_value,
             
             # Status
             training_active=not paused,

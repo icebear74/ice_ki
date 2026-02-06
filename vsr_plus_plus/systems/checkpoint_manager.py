@@ -299,20 +299,38 @@ class CheckpointManager:
     def cleanup_all_for_fresh_start(self, log_dir):
         """
         Clean up everything for fresh start (when user chooses 'L')
+        - Backup .pth files to .BAK
         - All checkpoints
         - All logs
         - All TensorBoard events
+        
+        Returns:
+            int: Number of .pth files backed up
         """
         import shutil
         
-        # Remove all checkpoint files
+        # First, backup all .pth files before deletion
+        backed_up = 0
         for f in os.listdir(self.checkpoint_dir):
-            path = os.path.join(self.checkpoint_dir, f)
-            try:
-                if os.path.isfile(path) or os.path.islink(path):
-                    os.unlink(path)
-            except Exception as e:
-                print(f"Warning: Could not remove {path}: {e}")
+            if f.endswith('.pth'):
+                path = os.path.join(self.checkpoint_dir, f)
+                backup_path = path + ".BAK"
+                try:
+                    if os.path.isfile(path):
+                        shutil.copy2(path, backup_path)
+                        backed_up += 1
+                except Exception as e:
+                    print(f"Warning: Could not backup {f}: {e}")
+        
+        # Remove all checkpoint files (but .BAK files remain)
+        for f in os.listdir(self.checkpoint_dir):
+            if not f.endswith('.BAK'):  # Don't delete backup files
+                path = os.path.join(self.checkpoint_dir, f)
+                try:
+                    if os.path.isfile(path) or os.path.islink(path):
+                        os.unlink(path)
+                except Exception as e:
+                    print(f"Warning: Could not remove {path}: {e}")
         
         # Remove TensorBoard events in active_run
         active_run_dir = os.path.join(log_dir, "active_run")
