@@ -202,6 +202,45 @@ def test_web_ui_state_holder():
     print("\n✓ Web UI complete data store test passed!")
 
 
+def test_cleanup_all_for_fresh_start_return_value():
+    """Test that cleanup_all_for_fresh_start returns the number of backed up files"""
+    print("\n" + "="*70)
+    print("TEST 6: cleanup_all_for_fresh_start Return Value")
+    print("="*70)
+    
+    with tempfile.TemporaryDirectory() as tmpdir:
+        mgr = CheckpointManager(tmpdir)
+        log_dir = os.path.join(tmpdir, "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        
+        # Create some dummy checkpoint files
+        dummy_model = torch.nn.Linear(10, 10)
+        dummy_optimizer = torch.optim.Adam(dummy_model.parameters())
+        
+        # Save 3 checkpoints
+        mgr.save_checkpoint(dummy_model, dummy_optimizer, None, 1000, {}, None)
+        mgr.save_checkpoint(dummy_model, dummy_optimizer, None, 2000, {}, None)
+        mgr.save_checkpoint(dummy_model, dummy_optimizer, None, 3000, {}, None)
+        
+        print("\n✓ Created 3 checkpoint files")
+        
+        # Call cleanup_all_for_fresh_start and verify it returns the count
+        backed_up_count = mgr.cleanup_all_for_fresh_start(log_dir)
+        
+        print(f"✓ cleanup_all_for_fresh_start returned: {backed_up_count}")
+        
+        # Verify the return value is correct
+        assert backed_up_count is not None, "Should return a value, not None"
+        assert backed_up_count == 3, f"Should backup 3 files, got {backed_up_count}"
+        
+        # Verify .BAK files exist
+        bak_files = [f for f in os.listdir(tmpdir) if f.endswith('.BAK')]
+        print(f"✓ Found {len(bak_files)} .BAK backup files")
+        assert len(bak_files) == 3, f"Should have 3 .BAK files, got {len(bak_files)}"
+        
+        print("\n✓ cleanup_all_for_fresh_start return value test passed!")
+
+
 def run_all_tests():
     """Run all tests"""
     print("\n" + "="*70)
@@ -214,6 +253,7 @@ def run_all_tests():
         test_backward_compatibility()
         test_emergency_checkpoint_naming()
         test_web_ui_state_holder()
+        test_cleanup_all_for_fresh_start_return_value()
         
         print("\n" + "="*70)
         print("ALL TESTS PASSED! ✓")
