@@ -27,38 +27,53 @@ dataset_generator_v2/
 
 ## 📦 Output Structure
 
-All output goes to `/mnt/data/training/dataset/` with the following structure:
+All output goes to `/mnt/data/training/dataset/` with **VSR++ compatible** structure:
 
 ```
 /mnt/data/training/dataset/
 │
 ├── Universal/Mastermodell/Learn/     # GENERAL category
-│   ├── Patches/                      # 540×540
-│   │   ├── GT/                       # Ground truth (middle frame)
-│   │   ├── LR_5frames/              # 5-frame LR stack (180×900)
-│   │   └── LR_7frames/              # 7-frame LR stack (180×1260)
+│   ├── Patches/                      # 540×540 (VSR++ Training)
+│   │   ├── GT/                       # Ground truth frames
+│   │   ├── LR/                       # 5-frame LR stack (180×900) ← VSR++ uses this!
+│   │   └── LR_7frames/              # 7-frame LR stack (optional extended)
 │   │
 │   ├── Patches_Medium169/            # 720×405 (16:9)
 │   │   ├── GT/
-│   │   ├── LR_5frames/
-│   │   └── LR_7frames/
+│   │   ├── LR/                       # 5-frame (240×675)
+│   │   └── LR_7frames/              # 7-frame (240×945)
 │   │
 │   ├── Patches_Large/                # 720×720
 │   ├── Patches_XLarge169/            # 1440×810 (16:9)
 │   ├── Patches_FullHD/               # 1920×1080
-│   └── Val/GT/                       # Manual validation (user-selected)
+│   │
+│   └── Val/                          # Validation (manual selection)
+│       ├── GT/                       # Ground truth only
+│       └── LR/                       # Optional (falls back to Patches/LR)
 │
 ├── Space/SpaceModel/Learn/           # SPACE category
 │   ├── Patches/
+│   │   ├── GT/
+│   │   ├── LR/                       # ← VSR++ compatible
+│   │   └── LR_7frames/
 │   ├── Patches_XLarge169/
 │   ├── Patches_FullHD/
 │   └── Val/GT/
 │
 └── Toon/ToonModel/Learn/             # TOON category
     ├── Patches/
+    │   ├── GT/
+    │   ├── LR/                       # ← VSR++ compatible
+    │   └── LR_7frames/
     ├── Patches_Medium169/
     └── Val/GT/
 ```
+
+**VSR++ Compatibility:**
+- Training expects: `Patches/GT/` and `Patches/LR/` (5-frame stack)
+- LR format: 5 frames stacked vertically (frames -2, -1, 0, +1, +2)
+- GT: Middle frame (frame 0) aligns with center of LR stack
+- Extended 7-frame stacks available in `LR_7frames/` for future use
 
 ## 🎬 Video Categories
 
@@ -114,6 +129,48 @@ Each category uses different format distributions optimized for the content type
 **TOON** (smaller sufficient):
 - small_540: 65%
 - medium_169: 35%
+
+## 🎯 VSR++ Training Integration
+
+This generator is **fully compatible** with VSR++ model training:
+
+### Directory Structure
+VSR++ expects:
+```
+dataset_root/
+├── Patches/
+│   ├── GT/         # Ground truth frames
+│   └── LR/         # 5-frame LR stacks (VSR++ uses this!)
+└── Val/
+    ├── GT/         # Validation ground truth
+    └── LR/         # Optional (falls back to Patches/LR)
+```
+
+### LR Stack Format
+- **5 frames** stacked vertically (e.g., 180×900 for 540×540 GT)
+- Frame order: [-2, -1, 0, +1, +2] relative to GT
+- Middle frame (0) temporally aligned with GT
+- Each frame: 1/3 size of GT (180×180 for 540×540)
+
+### Training Usage
+```python
+# VSR++ dataset.py automatically finds:
+dataset = VSRDataset(
+    dataset_root="/mnt/data/training/dataset/Universal/Mastermodell/Learn",
+    mode='Patches'  # Uses Patches/GT and Patches/LR
+)
+
+# For validation:
+val_dataset = VSRDataset(
+    dataset_root="/mnt/data/training/dataset/Universal/Mastermodell/Learn",
+    mode='Val'      # Uses Val/GT, falls back to Patches/LR
+)
+```
+
+### Extended 7-Frame Support
+- Optional `LR_7frames/` directories also created
+- Contains 7-frame stacks for future extended models
+- Not used by current VSR++ training (uses 5-frame)
 
 ## 🚀 Installation
 

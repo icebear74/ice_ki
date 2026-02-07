@@ -79,15 +79,37 @@ def select_random_format(category):
     weights = list(distribution.values())
     return random.choices(formats, weights=weights, k=1)[0]
 
-def get_output_dirs_for_format(base_path, category, format_name):
-    """Get output directory paths for a specific format."""
+def get_output_dirs_for_format(base_path, category, format_name, lr_frames=5):
+    """
+    Get output directory paths for a specific format.
+    
+    Args:
+        base_path: Base dataset directory
+        category: Category (general/space/toon)
+        format_name: Format name (small_540, etc.)
+        lr_frames: Number of LR frames to use (5 or 7)
+                  5 = VSR++ compatible (default)
+                  7 = Extended version
+    
+    Returns:
+        Dictionary with 'gt', 'lr', 'val_gt' paths
+    
+    VSR++ Training expects:
+        - dataset_root/Patches/GT/
+        - dataset_root/Patches/LR/  (5-frame stack: 180×900)
+        - dataset_root/Val/GT/
+        - dataset_root/Val/LR/ (optional, falls back to Patches/LR)
+    """
     category_path = CATEGORY_PATHS[category]
     format_spec = FORMATS[format_name]
     base_format_dir = format_spec['output_dir']
     
+    # VSR++ compatible: Use 'LR' for 5-frame, 'LR_7frames' for extended
+    lr_dir_name = 'LR' if lr_frames == 5 else 'LR_7frames'
+    
     return {
         'gt': f"{base_path}/{category_path}/{base_format_dir}/GT",
-        'lr_5frames': f"{base_path}/{category_path}/{base_format_dir}/LR_5frames",
-        'lr_7frames': f"{base_path}/{category_path}/{base_format_dir}/LR_7frames",
-        'val_gt': f"{base_path}/{category_path}/Val/GT"
+        'lr': f"{base_path}/{category_path}/{base_format_dir}/{lr_dir_name}",
+        'val_gt': f"{base_path}/{category_path}/Val/GT",
+        'val_lr': f"{base_path}/{category_path}/Val/LR"  # Optional for validation
     }

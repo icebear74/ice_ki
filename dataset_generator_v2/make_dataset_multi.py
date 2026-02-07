@@ -110,11 +110,24 @@ class DatasetGeneratorV2:
             return 23.976, 3600.0
     
     def create_output_directories(self):
-        """Create all necessary output directories."""
+        """
+        Create all necessary output directories.
+        
+        For VSR++ compatibility:
+            - Patches/GT/ and Patches/LR/ (5-frame, for training)
+            - Patches/LR_7frames/ (7-frame, optional extended)
+            - Val/GT/ and Val/LR/ (validation)
+        """
         for category in CATEGORY_PATHS.keys():
             for format_name in CATEGORY_FORMAT_DISTRIBUTION[category].keys():
-                dirs = get_output_dirs_for_format(self.base_dir, category, format_name)
-                for dir_path in dirs.values():
+                # Create directories for 5-frame LR (VSR++ compatible)
+                dirs_5 = get_output_dirs_for_format(self.base_dir, category, format_name, lr_frames=5)
+                for dir_path in dirs_5.values():
+                    os.makedirs(dir_path, exist_ok=True)
+                
+                # Create directories for 7-frame LR (optional extended)
+                dirs_7 = get_output_dirs_for_format(self.base_dir, category, format_name, lr_frames=7)
+                for dir_path in dirs_7.values():
                     os.makedirs(dir_path, exist_ok=True)
         
         # Create temp directory
@@ -186,7 +199,17 @@ class DatasetGeneratorV2:
     
     def save_patches(self, frames: List, category: str, format_name: str, 
                      video_name: str, frame_idx: int) -> bool:
-        """Save GT and LR patches for a specific category and format."""
+        """
+        Save GT and LR patches for a specific category and format.
+        
+        VSR++ Training expects:
+            - GT: Single ground truth frame (e.g., 540×540)
+            - LR: 5-frame stack vertically (e.g., 180×900)
+            - Optional: 7-frame stack in separate directory
+        
+        Returns:
+            True if successful, False otherwise
+        """
         try:
             # Get format specifications
             format_spec = FORMATS[format_name]
@@ -194,8 +217,9 @@ class DatasetGeneratorV2:
             lr_h, lr_w = format_spec['lr_size']
             suffix = format_spec['suffix']
             
-            # Get output directories
-            dirs = get_output_dirs_for_format(self.base_dir, category, format_name)
+            # Get output directories (5-frame LR for VSR++ compatibility)
+            dirs_5 = get_output_dirs_for_format(self.base_dir, category, format_name, lr_frames=5)
+            dirs_7 = get_output_dirs_for_format(self.base_dir, category, format_name, lr_frames=7)
             
             # Generate random crop position
             max_y = 1080 - gt_h
@@ -209,17 +233,19 @@ class DatasetGeneratorV2:
             
             # Save GT (middle frame = frames[3])
             gt_frame = frames[3][crop_y:crop_y+gt_h, crop_x:crop_x+gt_w]
-            gt_path = os.path.join(dirs['gt'], filename)
+            gt_path = os.path.join(dirs_5['gt'], filename)
             cv2.imwrite(gt_path, gt_frame, [cv2.IMWRITE_PNG_COMPRESSION, 3])
             
-            # Save 5-frame LR (frames 1-5, indices 1:6)
+            # Save 5-frame LR (VSR++ compatible: frames 1-5, indices 1:6)
+            # This goes into 'LR' directory for VSR++ training
             lr_5 = self.create_lr_stack(frames[1:6], (lr_w, lr_h), crop_y, crop_x, gt_h, gt_w)
-            lr5_path = os.path.join(dirs['lr_5frames'], filename)
+            lr5_path = os.path.join(dirs_5['lr'], filename)
             cv2.imwrite(lr5_path, lr_5, [cv2.IMWRITE_PNG_COMPRESSION, 3])
             
-            # Save 7-frame LR (all frames)
+            # Save 7-frame LR (optional extended version)
+            # This goes into 'LR_7frames' directory for future use
             lr_7 = self.create_lr_stack(frames[0:7], (lr_w, lr_h), crop_y, crop_x, gt_h, gt_w)
-            lr7_path = os.path.join(dirs['lr_7frames'], filename)
+            lr7_path = os.path.join(dirs_7['lr'], filename)
             cv2.imwrite(lr7_path, lr_7, [cv2.IMWRITE_PNG_COMPRESSION, 3])
             
             # Verify files were created

@@ -49,16 +49,25 @@ def test_output_dirs():
     print("Testing output directory generation...")
     
     base = "/test/path"
-    dirs = get_output_dirs_for_format(base, 'general', 'small_540')
     
-    assert 'gt' in dirs
-    assert 'lr_5frames' in dirs
-    assert 'lr_7frames' in dirs
-    assert 'val_gt' in dirs
+    # Test 5-frame LR (VSR++ compatible)
+    dirs_5 = get_output_dirs_for_format(base, 'general', 'small_540', lr_frames=5)
     
-    assert dirs['gt'].endswith('/GT')
-    assert dirs['lr_5frames'].endswith('/LR_5frames')
-    assert dirs['lr_7frames'].endswith('/LR_7frames')
+    assert 'gt' in dirs_5
+    assert 'lr' in dirs_5
+    assert 'val_gt' in dirs_5
+    assert 'val_lr' in dirs_5
+    
+    assert dirs_5['gt'].endswith('/GT')
+    assert dirs_5['lr'].endswith('/LR')  # VSR++ compatible
+    assert dirs_5['val_gt'].endswith('/Val/GT')
+    
+    # Test 7-frame LR (extended version)
+    dirs_7 = get_output_dirs_for_format(base, 'general', 'small_540', lr_frames=7)
+    
+    assert 'gt' in dirs_7
+    assert 'lr' in dirs_7
+    assert dirs_7['lr'].endswith('/LR_7frames')  # Extended version
     
     print("✓ Output directory tests passed")
 
