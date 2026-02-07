@@ -1301,28 +1301,29 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 }
             }
             
-            // Update peak activity visualization
+            // Update peak activity visualization (uses absolute 0-2.0 scale)
             updatePeakActivity(maxValue, peakLayerName);
             
-            // Process all layers using ABSOLUTE 0-2.0 scale
-            // 2.0 = 100%, 1.0 = 50%, etc.
+            // Process all layers - bars are RELATIVE to peak (100% = peak value)
             for (const [layerName, activityValue] of Object.entries(activityMap)) {
                 // Store the actual value
                 const actualValue = activityValue.toFixed(3);
                 
-                // Calculate bar width based on absolute 0-2.0 scale
-                // 2.0 = 100%, anything over 2.0 is capped at 100%
-                let barWidth = Math.min((activityValue / 2.0) * 100, 100);
+                // Calculate bar width RELATIVE to peak
+                // The layer with maxValue gets 100%, others are proportional
+                let barWidth = maxValue > 0 ? (activityValue / maxValue) * 100 : 0;
                 
-                // Also show percentage for display
+                // Display value is the percentage relative to peak
                 const displayValue = barWidth.toFixed(1);
                 
                 // Ensure bar width is valid
                 if (isNaN(barWidth) || barWidth < 0) {
                     barWidth = 0;
                 }
+                barWidth = Math.min(100, barWidth);
                 
                 // Determine bar color based on ABSOLUTE value (0-2.0 scale)
+                // This gives visual indication of absolute activity level
                 let barClass = 'layer-bar-fill';
                 
                 // Add color class based on absolute activity value
