@@ -869,6 +869,12 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 <div class="card-value" id="vramUsage">0.0</div>
                 <div class="card-subtitle">GB</div>
             </div>
+            
+            <div class="info-card">
+                <div class="card-title">👁️ AdamW Momentum</div>
+                <div class="card-value" id="adamMomentum">0.000</div>
+                <div class="card-subtitle">Optimizer</div>
+            </div>
         </div>
         
         <div class="section-header">🎯 Quality Metriken</div>
@@ -1029,6 +1035,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             const iterSpeed = data.iteration_duration > 0 ? (1.0 / data.iteration_duration) : 0;
             document.getElementById('iterSpeed').textContent = iterSpeed.toFixed(2);
             document.getElementById('vramUsage').textContent = data.vram_usage_gb.toFixed(1);
+            document.getElementById('adamMomentum').textContent = data.adam_momentum_avg.toFixed(3);
             
             // Loss components with weights
             document.getElementById('l1Loss').textContent = data.l1_loss_value.toFixed(4);
