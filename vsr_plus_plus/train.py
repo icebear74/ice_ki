@@ -32,6 +32,7 @@ from vsr_plus_plus.training.lr_scheduler import AdaptiveLRScheduler
 from vsr_plus_plus.systems.checkpoint_manager import CheckpointManager
 from vsr_plus_plus.systems.logger import TrainingLogger, TensorBoardLogger
 from vsr_plus_plus.systems.adaptive_system import AdaptiveSystem
+from vsr_plus_plus.systems.runtime_config import RuntimeConfigManager
 
 # Import manual configuration
 import vsr_plus_plus.config as cfg
@@ -324,6 +325,13 @@ def main():
     # Create checkpoint manager
     checkpoint_mgr = CheckpointManager(DATA_ROOT)
     
+    # Create runtime config manager
+    runtime_config_path = os.path.join(DATA_ROOT, "runtime_config.json")
+    runtime_config = RuntimeConfigManager(
+        config_path=runtime_config_path,
+        base_config=config
+    )
+    
     # Create loggers
     log_dir = os.path.join(DATA_ROOT, "logs")
     train_logger = TrainingLogger(DATA_ROOT)
@@ -372,7 +380,8 @@ def main():
         tb_logger=tb_logger,
         adaptive_system=adaptive_system,
         config=config,
-        device=device
+        device=device,
+        runtime_config=runtime_config
     )
     
     # Set start step

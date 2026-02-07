@@ -87,6 +87,23 @@ class AdaptiveSystem:
         self.plateau_patience = 250
         self.plateau_safety_threshold = 800  # Force reset if plateau counter exceeds this
         
+        # Enhanced plateau detection
+        self.best_quality = 0.0
+        self.ema_loss = None
+        self.ema_quality = None
+        self.ema_alpha = 0.1
+        
+        # Adaptive thresholds based on loss level
+        self.plateau_threshold_map = {
+            0.015: 0.999,  # 0.1% when loss very good
+            0.020: 0.998,  # 0.2% when loss good
+            0.030: 0.997,  # 0.3% when loss ok
+            0.050: 0.995,  # 0.5% when loss early
+        }
+        
+        # Grace period
+        self.grace_enabled = True
+        
         # History settling period: when resuming training at step >= 1000,
         # wait to collect history before making changes
         self.history_settling_steps = 100
@@ -186,8 +203,8 @@ class AdaptiveSystem:
         
         # FIX 1: Only trigger aggressive mode if BOTH conditions are true:
         # 1. Sharpness is poor (< 0.70)
-        # 2. Training is stuck (plateau > 300 steps)
-        if sharpness_ratio < self.extreme_sharpness_threshold and self.plateau_counter > 300:
+        # 2. Training is stuck (plateau > plateau_patience)
+        if sharpness_ratio < self.extreme_sharpness_threshold and self.plateau_counter > self.plateau_patience:
             extreme = True
         
         if extreme and not self.aggressive_mode:
@@ -459,23 +476,101 @@ class AdaptiveSystem:
         
         return total_norm, self.clip_value
     
-    def update_plateau_tracker(self, loss):
+    def update_plateau_tracker(self, loss, quality=None):
         """
-        Update plateau tracking
+        ADVANCED plateau detection with multiple signals:
+        - Loss improvement (adaptive threshold based on loss level)
+        - Quality improvement (if available)
+        - EMA trend analysis
+        - Grace period for noisy improvements
         
         Args:
-            loss: Current loss value
+            loss: Current total loss value
+            quality: Optional quality metric (KI quality %)
         """
-        # Check for improvement
-        if loss < self.best_loss * 0.997:
+        # Initialize EMA on first call
+        if self.ema_loss is None:
+            self.ema_loss = loss
             self.best_loss = loss
+            if quality is not None:
+                self.ema_quality = quality
+                self.best_quality = quality
+            self.plateau_counter = 0
+            return
+        
+        # Update EMAs (alpha = 0.1 for slow adaptation)
+        self.ema_loss = self.ema_alpha * loss + (1 - self.ema_alpha) * self.ema_loss
+        if quality is not None:
+            if self.ema_quality is None:
+                self.ema_quality = quality
+            else:
+                self.ema_quality = self.ema_alpha * quality + (1 - self.ema_alpha) * self.ema_quality
+        
+        # Determine adaptive threshold based on loss level
+        threshold = 0.997  # Default 0.3%
+        for loss_level, thresh in sorted(self.plateau_threshold_map.items()):
+            if loss < loss_level:
+                threshold = thresh
+                break
+        
+        # CHECK 1: Loss improvement
+        loss_improved = loss < self.best_loss * threshold
+        
+        # CHECK 2: EMA trend
+        ema_trend_good = self.ema_loss < self.best_loss * (threshold + 0.001)
+        
+        # CHECK 3: Quality improvement
+        quality_improved = False
+        ema_quality_trend_good = False
+        if quality is not None:
+            quality_improved = quality > self.best_quality * 1.001  # 0.1% improvement
+            if self.ema_quality is not None:
+                ema_quality_trend_good = self.ema_quality > self.best_quality * 0.9995
+        
+        # DECISION: Reset if any significant signal
+        should_reset = (
+            loss_improved or
+            quality_improved or
+            (ema_trend_good and ema_quality_trend_good)
+        )
+        
+        if should_reset:
+            if loss < self.best_loss:
+                self.best_loss = loss
+            if quality is not None and quality > self.best_quality:
+                self.best_quality = quality
             self.plateau_counter = 0
         else:
-            self.plateau_counter += 1
+            # Grace period: slower counter increase if slight improvement
+            if self.grace_enabled:
+                slight_improvement = (
+                    loss < self.best_loss * 1.002 or
+                    (quality is not None and quality > self.best_quality * 0.999)
+                )
+                if slight_improvement and self.plateau_counter > 0:
+                    self.plateau_counter = max(0, self.plateau_counter - 0.5)
+                else:
+                    self.plateau_counter += 1
+            else:
+                self.plateau_counter += 1
     
     def is_plateau(self):
         """Return True if training has plateaued"""
         return self.plateau_counter >= self.plateau_patience
+    
+    def get_plateau_info(self):
+        """Get detailed plateau status for logging/UI"""
+        return {
+            'plateau_counter': int(self.plateau_counter),
+            'plateau_patience': self.plateau_patience,
+            'plateau_threshold': self.plateau_safety_threshold,
+            'best_loss': self.best_loss,
+            'best_quality': getattr(self, 'best_quality', 0.0),
+            'ema_loss': self.ema_loss,
+            'ema_quality': getattr(self, 'ema_quality', None),
+            'is_plateau': self.is_plateau(),
+            'steps_until_reset': max(0, self.plateau_safety_threshold - int(self.plateau_counter))
+        }
     
     def get_status(self):
         """

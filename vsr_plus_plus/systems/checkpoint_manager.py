@@ -13,6 +13,8 @@ import os
 import torch
 import glob
 import re
+import json
+import time
 from datetime import datetime
 
 
@@ -44,7 +46,7 @@ class CheckpointManager:
         step_in_cycle = step % 10000
         return 2000 <= step_in_cycle <= 8000
     
-    def save_checkpoint(self, model, optimizer, scheduler, step, metrics, log_file):
+    def save_checkpoint(self, model, optimizer, scheduler, step, metrics, log_file, runtime_config=None):
         """
         Save checkpoint file with new zero-padded naming scheme
         
@@ -55,6 +57,7 @@ class CheckpointManager:
             step: Current step
             metrics: Validation metrics dict
             log_file: Path to log file
+            runtime_config: Optional RuntimeConfigManager instance
             
         Returns:
             Path to saved checkpoint
@@ -77,6 +80,10 @@ class CheckpointManager:
         # Save checkpoint
         torch.save(checkpoint, filepath)
         
+        # Save config snapshot if provided
+        if runtime_config is not None:
+            self._save_config_snapshot(step, runtime_config)
+        
         # Log to file
         if log_file and os.path.exists(log_file):
             with open(log_file, 'a') as f:
@@ -85,7 +92,67 @@ class CheckpointManager:
         
         return filepath
     
-    def update_best_checkpoint(self, model, optimizer, scheduler, step, quality, metrics, log_file):
+    def _save_config_snapshot(self, step, runtime_config):
+        """
+        Save config snapshot and create config_ref.json
+        
+        Args:
+            step: Training step
+            runtime_config: RuntimeConfigManager instance
+        """
+        try:
+            # Save config snapshot via RuntimeConfigManager
+            snapshot_path = runtime_config.save_snapshot(step)
+            
+            # Create config_ref.json in checkpoint directory
+            config_ref = {
+                'snapshot_file': f"runtime_config_step_{step:07d}.json",
+                'step': step,
+                'timestamp': time.time()
+            }
+            
+            config_ref_path = os.path.join(self.checkpoint_dir, f"checkpoint_step_{step:07d}_config_ref.json")
+            with open(config_ref_path, 'w') as f:
+                json.dump(config_ref, f, indent=2)
+            
+        except Exception as e:
+            print(f"⚠️  Error saving config snapshot: {e}")
+    
+    def _load_config_snapshot(self, step, runtime_config):
+        """
+        Load config snapshot from checkpoint
+        
+        Args:
+            step: Training step
+            runtime_config: RuntimeConfigManager instance
+            
+        Returns:
+            True if loaded successfully
+        """
+        try:
+            # Read config_ref.json
+            config_ref_path = os.path.join(self.checkpoint_dir, f"checkpoint_step_{step:07d}_config_ref.json")
+            
+            if not os.path.exists(config_ref_path):
+                print(f"⚠️  No config snapshot found for step {step}")
+                return False
+            
+            with open(config_ref_path, 'r') as f:
+                config_ref = json.load(f)
+            
+            # Load config snapshot via RuntimeConfigManager
+            snapshot_step = config_ref['step']
+            success = runtime_config.load_snapshot(snapshot_step)
+            
+            if success:
+                print(f"✅ Config restored from checkpoint step {step}")
+            
+            return success
+        except Exception as e:
+            print(f"⚠️  Error loading config snapshot: {e}")
+            return False
+    
+    def update_best_checkpoint(self, model, optimizer, scheduler, step, quality, metrics, log_file, runtime_config=None):
         """
         Check if best, save if needed, update symlinks
         
@@ -97,6 +164,7 @@ class CheckpointManager:
             quality: Current quality score (0-1)
             metrics: Validation metrics dict
             log_file: Path to log file
+            runtime_config: Optional RuntimeConfigManager instance
             
         Returns:
             True if new best, False otherwise
@@ -106,7 +174,7 @@ class CheckpointManager:
             return False
         
         # Save new best checkpoint
-        checkpoint_path = self.save_checkpoint(model, optimizer, scheduler, step, metrics, log_file)
+        checkpoint_path = self.save_checkpoint(model, optimizer, scheduler, step, metrics, log_file, runtime_config)
         
         # Update best symlinks
         best_link = os.path.join(self.checkpoint_dir, "checkpoint_best.pth")
@@ -137,7 +205,7 @@ class CheckpointManager:
         
         return True
     
-    def save_emergency_checkpoint(self, model, optimizer, scheduler, step, metrics, log_file):
+    def save_emergency_checkpoint(self, model, optimizer, scheduler, step, metrics, log_file, runtime_config=None):
         """Save emergency checkpoint with real step number in filename"""
         # NEW: Emergency checkpoints now include actual step number
         checkpoint = {
@@ -152,6 +220,10 @@ class CheckpointManager:
         filename = f"checkpoint_step_{step:07d}_emergency.pth"
         filepath = os.path.join(self.checkpoint_dir, filename)
         torch.save(checkpoint, filepath)
+        
+        # Save config snapshot if provided
+        if runtime_config is not None:
+            self._save_config_snapshot(step, runtime_config)
         
         if log_file and os.path.exists(log_file):
             with open(log_file, 'a') as f:
@@ -263,6 +335,30 @@ class CheckpointManager:
                 file_stat = os.stat(ckpt_path)
                 modification_time = datetime.fromtimestamp(file_stat.st_mtime)
                 
+                # Check for config snapshot
+                config_ref_path = os.path.join(self.checkpoint_dir, f"checkpoint_step_{step_num:07d}_config_ref.json")
+                has_config_snapshot = os.path.exists(config_ref_path)
+                config_preview = {}
+                
+                if has_config_snapshot:
+                    try:
+                        with open(config_ref_path, 'r') as f:
+                            config_ref = json.load(f)
+                        
+                        # Load preview from snapshot
+                        snapshot_path = os.path.join(os.path.dirname(self.checkpoint_dir), config_ref['snapshot_file'])
+                        if os.path.exists(snapshot_path):
+                            with open(snapshot_path, 'r') as f:
+                                snapshot_data = json.load(f)
+                                config = snapshot_data.get('config', {})
+                                config_preview = {
+                                    'plateau_safety_threshold': config.get('plateau_safety_threshold'),
+                                    'max_lr': config.get('max_lr'),
+                                    'l1_weight_target': config.get('l1_weight_target'),
+                                }
+                    except:
+                        pass
+                
                 info_dict = {
                     'path': ckpt_path,
                     'filename': filename,
@@ -272,7 +368,9 @@ class CheckpointManager:
                     'loss': ckpt_data.get('metrics', {}).get('val_loss', 0),
                     'size_mb': os.path.getsize(ckpt_path) / (1024 * 1024),
                     'timestamp': modification_time,
-                    'date_str': modification_time.strftime('%Y-%m-%d %H:%M')
+                    'date_str': modification_time.strftime('%Y-%m-%d %H:%M'),
+                    'has_config_snapshot': has_config_snapshot,
+                    'config_preview': config_preview
                 }
                 
                 checkpoints.append(info_dict)

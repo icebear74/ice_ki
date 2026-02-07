@@ -287,6 +287,215 @@ class TensorBoardLogger:
         if event_type in ['LR_Boost', 'Aggressive_Mode', 'Cooldown_Start']:
             self.writer.add_scalar(f'Events/{event_type}', 100, step)
     
+    def log_config_change(self, step, param_name, old_value, new_value):
+        """
+        Log runtime configuration changes
+        
+        Args:
+            step: Current training step
+            param_name: Parameter that changed
+            old_value: Previous value
+            new_value: New value
+        """
+        # Log as text event
+        self.writer.add_text(
+            'Config/Changes', 
+            f'**{param_name}**: {old_value} → {new_value}',
+            step
+        )
+        
+        # Log the new value as scalar for tracking
+        self.writer.add_scalar(f'Config/Parameters/{param_name}', self._to_float(new_value), step)
+        
+        # Add event marker
+        self.writer.add_scalar('Events/Config_Change', 100, step)
+    
+    def log_config_snapshot(self, config):
+        """
+        Log initial training configuration as text
+        
+        Args:
+            config: Configuration dictionary
+        """
+        # Format configuration as markdown table
+        config_text = "# Training Configuration\n\n"
+        config_text += "## Model Architecture\n"
+        config_text += f"- **Features (n_feats)**: {config.get('n_feats', 'N/A')}\n"
+        config_text += f"- **Blocks (n_blocks)**: {config.get('n_blocks', 'N/A')}\n"
+        config_text += f"- **Batch Size**: {config.get('batch_size', 'N/A')}\n"
+        config_text += f"- **Accumulation Steps**: {config.get('ACCUMULATION_STEPS', 'N/A')}\n\n"
+        
+        config_text += "## Training Parameters\n"
+        config_text += f"- **Max Steps**: {config.get('MAX_STEPS', 'N/A')}\n"
+        config_text += f"- **Max LR**: {config.get('max_lr', 'N/A')}\n"
+        config_text += f"- **Min LR**: {config.get('min_lr', 'N/A')}\n"
+        config_text += f"- **Warmup Steps**: {config.get('WARMUP_STEPS', 'N/A')}\n"
+        config_text += f"- **Validation Every**: {config.get('VAL_STEP_EVERY', 'N/A')} steps\n"
+        config_text += f"- **Save Every**: {config.get('SAVE_STEP_EVERY', 'N/A')} steps\n\n"
+        
+        config_text += "## Adaptive System\n"
+        config_text += f"- **Plateau Patience**: {config.get('plateau_patience', 'N/A')}\n"
+        config_text += f"- **Plateau Safety Threshold**: {config.get('plateau_safety_threshold', 'N/A')}\n"
+        config_text += f"- **Cooldown Duration**: {config.get('cooldown_duration', 'N/A')}\n"
+        config_text += f"- **Initial Grad Clip**: {config.get('initial_grad_clip', 'N/A')}\n\n"
+        
+        config_text += "## Loss Weights (Target)\n"
+        config_text += f"- **L1 Weight**: {config.get('l1_weight_target', 'N/A')}\n"
+        config_text += f"- **MS Weight**: {config.get('ms_weight_target', 'N/A')}\n"
+        config_text += f"- **Gradient Weight**: {config.get('grad_weight_target', 'N/A')}\n"
+        config_text += f"- **Perceptual Weight**: {config.get('perceptual_weight_target', 'N/A')}\n\n"
+        
+        config_text += "## Data\n"
+        config_text += f"- **Data Root**: {config.get('DATA_ROOT', 'N/A')}\n"
+        config_text += f"- **Num Workers**: {config.get('num_workers', 'N/A')}\n"
+        
+        self.writer.add_text('Config/Initial_Configuration', config_text, 0)
+        
+        # Also log as scalars for initial values
+        if 'plateau_patience' in config:
+            self.writer.add_scalar('Config/Parameters/plateau_patience', config['plateau_patience'], 0)
+        if 'plateau_safety_threshold' in config:
+            self.writer.add_scalar('Config/Parameters/plateau_safety_threshold', config['plateau_safety_threshold'], 0)
+        if 'max_lr' in config:
+            self.writer.add_scalar('Config/Parameters/max_lr', config['max_lr'], 0)
+        if 'min_lr' in config:
+            self.writer.add_scalar('Config/Parameters/min_lr', config['min_lr'], 0)
+    
+    def log_plateau_state(self, step, plateau_info):
+        """
+        Log detailed plateau detection state
+        
+        Args:
+            step: Current training step
+            plateau_info: Dictionary with plateau detection details
+        """
+        if not plateau_info:
+            return
+        
+        # Log plateau counter and threshold
+        counter = plateau_info.get('plateau_counter', 0)
+        patience = plateau_info.get('plateau_patience', 0)
+        
+        self.writer.add_scalar('Plateau/Counter', self._to_float(counter), step)
+        self.writer.add_scalar('Plateau/Patience', self._to_float(patience), step)
+        self.writer.add_scalar('Plateau/Progress_Percent', 
+                              (self._to_float(counter) / max(1, self._to_float(patience))) * 100, step)
+        
+        # Log best loss and EMA if available
+        if 'best_loss' in plateau_info:
+            self.writer.add_scalar('Plateau/Best_Loss', self._to_float(plateau_info['best_loss']), step)
+        if 'ema_loss' in plateau_info:
+            self.writer.add_scalar('Plateau/EMA_Loss', self._to_float(plateau_info['ema_loss']), step)
+        
+        # Log quality tracking
+        if 'best_quality' in plateau_info:
+            self.writer.add_scalar('Plateau/Best_Quality', self._to_float(plateau_info['best_quality']), step)
+        if 'ema_quality' in plateau_info:
+            self.writer.add_scalar('Plateau/EMA_Quality', self._to_float(plateau_info['ema_quality']), step)
+        
+        # Log plateau state
+        is_plateau = plateau_info.get('is_plateau', False)
+        self.writer.add_scalar('Plateau/Is_Plateau', 1 if is_plateau else 0, step)
+        
+        # Steps until potential reset
+        if 'steps_until_reset' in plateau_info:
+            self.writer.add_scalar('Plateau/Steps_Until_Reset', 
+                                  self._to_float(plateau_info['steps_until_reset']), step)
+    
+    def log_weight_statistics(self, step, weights):
+        """
+        Log loss weight statistics and distributions
+        
+        Args:
+            step: Current training step
+            weights: Dictionary with weight values
+        """
+        import torch
+        
+        l1_w = self._to_float(weights.get('l1', 0))
+        ms_w = self._to_float(weights.get('ms', 0))
+        grad_w = self._to_float(weights.get('grad', 0))
+        perc_w = self._to_float(weights.get('perceptual', 0))
+        
+        total = l1_w + ms_w + grad_w + perc_w
+        
+        # Log weight distribution as percentages
+        if total > 0:
+            self.writer.add_scalars('Weights/Distribution', {
+                'L1_Percent': (l1_w / total) * 100,
+                'MS_Percent': (ms_w / total) * 100,
+                'Grad_Percent': (grad_w / total) * 100,
+                'Perceptual_Percent': (perc_w / total) * 100,
+            }, step)
+        
+        # Log sum for validation
+        self.writer.add_scalar('Weights/Sum', total, step)
+        
+        # Create histogram of weight distribution
+        weight_tensor = torch.tensor([l1_w, ms_w, grad_w, perc_w])
+        self.writer.add_histogram('Weights/Distribution_Histogram', weight_tensor, step)
+    
+    def log_validation_event(self, step, metrics):
+        """
+        Log validation event with comprehensive metrics
+        
+        Args:
+            step: Current training step
+            metrics: Validation metrics dictionary
+        """
+        # Log as text event
+        ki_quality = self._to_float(metrics.get('ki_quality', 0))
+        improvement = self._to_float(metrics.get('improvement', 0))
+        
+        event_text = f"**Validation Run**\n"
+        event_text += f"- KI Quality: {ki_quality*100:.2f}%\n"
+        event_text += f"- Improvement: {improvement*100:.2f}%\n"
+        event_text += f"- PSNR: {self._to_float(metrics.get('ki_psnr', 0)):.2f}dB\n"
+        event_text += f"- SSIM: {self._to_float(metrics.get('ki_ssim', 0)):.4f}\n"
+        
+        self.writer.add_text('Events/Validation', event_text, step)
+        
+        # Add event marker
+        self.writer.add_scalar('Events/Validation_Run', 50, step)
+    
+    def log_training_phase(self, step, phase_info):
+        """
+        Log training phase information (aggressive, stable, cooldown)
+        
+        Args:
+            step: Current training step
+            phase_info: Dictionary with phase information
+        """
+        # Encode phases as numbers
+        phase_map = {
+            'stable': 0,
+            'aggressive': 1,
+            'cooldown': 2,
+            'plateau_reducing': 3
+        }
+        
+        current_phase = phase_info.get('phase', 'stable')
+        self.writer.add_scalar('Training/Phase', phase_map.get(current_phase, 0), step)
+        
+        # Log phase transitions as text
+        if phase_info.get('phase_changed', False):
+            self.writer.add_text(
+                'Events/Phase_Transitions',
+                f"Phase changed to: **{current_phase}**",
+                step
+            )
+            self.writer.add_scalar('Events/Phase_Change', 75, step)
+    
+    def log_hyperparameters(self, hparam_dict, metric_dict):
+        """
+        Log hyperparameters for comparison in TensorBoard
+        
+        Args:
+            hparam_dict: Dictionary of hyperparameters
+            metric_dict: Dictionary of metrics to track
+        """
+        self.writer.add_hparams(hparam_dict, metric_dict)
+    
     def close(self):
         """Close writer"""
         self.writer.close()

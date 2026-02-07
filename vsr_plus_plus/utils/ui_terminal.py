@@ -165,6 +165,65 @@ def make_adamw_magic_eye(momentum, width=20):
         return f"[{C_CYAN}{result}{C_RESET}]"
 
 
+def make_peak_activity_bar(peak_value, width=60):
+    """
+    Create peak layer activity gradient bar (0.0 - 2.0 scale)
+    
+    Shows activity level with color-coded gradient:
+    - Green (0.0-0.5): Normal
+    - Yellow (0.5-1.0): Moderate
+    - Orange (1.0-1.5): High
+    - Red (1.5-2.0+): Extreme
+    
+    Args:
+        peak_value: Peak activity value
+        width: Width of the bar in characters
+    
+    Returns:
+        str: Formatted gradient bar with position indicator
+    """
+    width = max(20, width)
+    
+    # Calculate position on 0.0-2.0 scale
+    position = min(peak_value / 2.0, 1.0)
+    bar_pos = int(position * width)
+    
+    # Determine color based on value
+    if peak_value < 0.5:
+        color = C_GREEN
+        label = "Normal"
+    elif peak_value < 1.0:
+        color = C_CYAN
+        label = "Moderate"
+    elif peak_value < 1.5:
+        color = C_YELLOW
+        label = "High"
+    elif peak_value < 2.0:
+        color = "\033[38;5;208m"  # Orange
+        label = "Very High"
+    else:
+        color = C_RED
+        label = "EXTREME"
+    
+    # Build the bar with gradient zones
+    bar = ""
+    for i in range(width):
+        if i < width * 0.25:  # 0.0-0.5 zone
+            bar += C_GREEN + "█" + C_RESET
+        elif i < width * 0.5:  # 0.5-1.0 zone
+            bar += C_CYAN + "█" + C_RESET
+        elif i < width * 0.75:  # 1.0-1.5 zone
+            bar += C_YELLOW + "█" + C_RESET
+        else:  # 1.5-2.0+ zone
+            bar += C_RED + "█" + C_RESET
+    
+    # Add position indicator
+    indicator_line = " " * bar_pos + f"{color}▼{C_RESET}"
+    scale_line = f"0.0{' ' * (width // 4 - 3)}0.5{' ' * (width // 4 - 3)}1.0{' ' * (width // 4 - 3)}1.5{' ' * (width // 4 - 5)}2.0+"
+    
+    return f"{bar}\n{indicator_line}\n{scale_line} ({color}{label}{C_RESET})"
+
+
 def format_time(seconds):
     """
     Format seconds into human-readable time string
