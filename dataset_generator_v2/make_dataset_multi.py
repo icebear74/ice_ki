@@ -307,6 +307,13 @@ class DatasetGeneratorV2:
         
         # Check if video exists
         if not os.path.exists(video_path):
+            if RICH_AVAILABLE:
+                self.console.print(f"[red]⚠️  Skipping '{video_name}': File not found[/red]")
+                self.console.print(f"[dim]    Path: {video_path}[/dim]")
+            else:
+                print(f"⚠️  Skipping '{video_name}': File not found")
+                print(f"    Path: {video_path}")
+            
             return {
                 'success': False,
                 'video_name': video_name,
@@ -503,6 +510,87 @@ Total Images: {self.tracker.get_total_images()}
             self.console.print("[bold green]🚀 Initializing Dataset Generator v2.0...[/bold green]")
         else:
             print("🚀 Initializing Dataset Generator v2.0...")
+        
+        # Validate video files before starting
+        if RICH_AVAILABLE:
+            self.console.print("[yellow]🔍 Validating video files...[/yellow]")
+        else:
+            print("🔍 Validating video files...")
+        
+        missing_videos = []
+        existing_videos = []
+        
+        for idx, video_info in enumerate(self.videos):
+            if os.path.exists(video_info['path']):
+                existing_videos.append(idx)
+            else:
+                missing_videos.append((idx, video_info['name'], video_info['path']))
+        
+        # Show validation results
+        if RICH_AVAILABLE:
+            self.console.print(f"[green]✓ Found: {len(existing_videos)} videos[/green]")
+            self.console.print(f"[red]✗ Missing: {len(missing_videos)} videos[/red]")
+        else:
+            print(f"✓ Found: {len(existing_videos)} videos")
+            print(f"✗ Missing: {len(missing_videos)} videos")
+        
+        # If too many videos are missing, show error and guide
+        if len(existing_videos) == 0:
+            error_msg = """
+[bold red]❌ ERROR: No video files found![/bold red]
+
+The configuration contains {total} videos, but none exist at the specified paths.
+
+[bold yellow]📝 Solutions:[/bold yellow]
+
+1. [cyan]Use the video scanner to generate config from your actual videos:[/cyan]
+   cd dataset_generator_v2
+   python scan_videos.py /path/to/your/videos
+   mv generator_config_REAL.json generator_config.json
+
+2. [cyan]Or manually edit generator_config.json with correct paths[/cyan]
+
+[bold]Example config entry:[/bold]
+{{
+  "name": "My Video",
+  "path": "/actual/path/to/video.mkv",
+  "categories": {{"general": 1.0}}
+}}
+
+[dim]First missing video path:[/dim]
+{first_path}
+""".format(
+                total=len(self.videos),
+                first_path=missing_videos[0][2] if missing_videos else "N/A"
+            )
+            
+            if RICH_AVAILABLE:
+                self.console.print(error_msg)
+            else:
+                print(error_msg.replace('[bold red]', '').replace('[/bold red]', '')
+                           .replace('[bold yellow]', '').replace('[/bold yellow]', '')
+                           .replace('[cyan]', '').replace('[/cyan]', '')
+                           .replace('[bold]', '').replace('[/bold]', '')
+                           .replace('[dim]', '').replace('[/dim]', ''))
+            
+            return
+        
+        # If more than 50% are missing, show warning but continue
+        if len(missing_videos) > len(self.videos) * 0.5:
+            warning = f"""
+[bold yellow]⚠️  WARNING: {len(missing_videos)} of {len(self.videos)} videos not found![/bold yellow]
+
+Only {len(existing_videos)} videos will be processed.
+Consider using scan_videos.py to generate a config from your actual video files.
+
+Continue? Processing will start in 5 seconds... (Ctrl+C to cancel)
+"""
+            if RICH_AVAILABLE:
+                self.console.print(warning)
+            else:
+                print(warning)
+            
+            time.sleep(5)
         
         # Create directories
         self.create_output_directories()
