@@ -1,0 +1,340 @@
+{
+  "base_settings": {
+    "base_frame_limit": 3000,
+    "max_workers": 12,
+    "val_percent": 0.0,
+    "output_base_dir": "/mnt/data/training/dataset",
+    "temp_dir": "/mnt/data/training/dataset/temp",
+    "status_file": "/mnt/data/training/dataset/.generator_status.json",
+    "min_file_size": 10000,
+    "scene_diff_threshold": 45,
+    "max_retry_attempts": 10,
+    "retry_skip_seconds": 60
+  },
+  
+  "videos": [
+    {
+      "name": "Ready Player One",
+      "path": "/mnt/data/video/FilmeUHD/Ready Player One (2018)/Ready Player One (2018).mkv",
+      "categories": {
+        "general": 0.4,
+        "space": 0.3,
+        "toon": 0.3
+      },
+      "skip_test_editions": true
+    },
+    {
+      "name": "Avatar (2009)",
+      "path": "/mnt/data/video/FilmeUHD/Avatar (2009)/Avatar (2009).mkv",
+      "categories": {
+        "general": 0.3,
+        "space": 0.4,
+        "toon": 0.3
+      }
+    },
+    {
+      "name": "Avatar 2",
+      "path": "/mnt/data/video/FilmeUHD/Avatar The Way of Water (2022)/Avatar The Way of Water (2022).mkv",
+      "categories": {
+        "general": 0.3,
+        "space": 0.4,
+        "toon": 0.3
+      }
+    },
+    {
+      "name": "Dune (2021)",
+      "path": "/mnt/data/video/FilmeUHD/Dune (2021)/Dune (2021).mkv",
+      "categories": {
+        "general": 0.5,
+        "space": 0.5
+      }
+    },
+    {
+      "name": "Dune Part Two",
+      "path": "/mnt/data/video/FilmeUHD/Dune Part Two (2024)/Dune Part Two (2024).mkv",
+      "categories": {
+        "general": 0.5,
+        "space": 0.5
+      }
+    },
+    {
+      "name": "Interstellar",
+      "path": "/mnt/data/video/FilmeUHD/Interstellar (2014)/Interstellar (2014).mkv",
+      "categories": {
+        "general": 0.3,
+        "space": 0.7
+      }
+    },
+    {
+      "name": "Passengers",
+      "path": "/mnt/data/video/FilmeUHD/Passengers (2016)/Passengers (2016).mkv",
+      "categories": {
+        "general": 0.3,
+        "space": 0.7
+      }
+    },
+    
+    {
+      "name": "Planet Earth 2 - S01E01 - Islands",
+      "path": "/mnt/data/video/SerieUHD/Planet Earth 2/S01E01.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Planet Earth 2 - S01E02 - Mountains",
+      "path": "/mnt/data/video/SerieUHD/Planet Earth 2/S01E02.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Planet Earth 2 - S01E03 - Jungles",
+      "path": "/mnt/data/video/SerieUHD/Planet Earth 2/S01E03.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Planet Earth 2 - S01E04 - Deserts",
+      "path": "/mnt/data/video/SerieUHD/Planet Earth 2/S01E04.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Planet Earth 2 - S01E05 - Grasslands",
+      "path": "/mnt/data/video/SerieUHD/Planet Earth 2/S01E05.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Planet Earth 2 - S01E06 - Cities",
+      "path": "/mnt/data/video/SerieUHD/Planet Earth 2/S01E06.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Oppenheimer",
+      "path": "/mnt/data/video/FilmeUHD/Oppenheimer (2023)/Oppenheimer (2023).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Top Gun Maverick",
+      "path": "/mnt/data/video/FilmeUHD/Top Gun Maverick (2022)/Top Gun Maverick (2022).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Gladiator II",
+      "path": "/mnt/data/video/FilmeUHD/Gladiator II (2024)/Gladiator II (2024).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Dark Knight",
+      "path": "/mnt/data/video/FilmeUHD/The Dark Knight (2008)/The Dark Knight (2008).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Dark Knight Rises",
+      "path": "/mnt/data/video/FilmeUHD/The Dark Knight Rises (2012)/The Dark Knight Rises (2012).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Batman Begins",
+      "path": "/mnt/data/video/FilmeUHD/Batman Begins (2005)/Batman Begins (2005).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Forrest Gump",
+      "path": "/mnt/data/video/FilmeUHD/Forrest Gump (1994)/Forrest Gump (1994).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    
+    {
+      "name": "Star Trek (2009)",
+      "path": "/mnt/data/video/FilmeUHD/Star Trek (2009)/Star Trek (2009).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Into Darkness",
+      "path": "/mnt/data/video/FilmeUHD/Star Trek Into Darkness (2013)/Star Trek Into Darkness (2013).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Beyond",
+      "path": "/mnt/data/video/FilmeUHD/Star Trek Beyond (2016)/Star Trek Beyond (2016).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Strange New Worlds - S01E01",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Strange New Worlds/S01E01.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Strange New Worlds - S01E02",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Strange New Worlds/S01E02.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Episode IV - A New Hope",
+      "path": "/mnt/data/video/FilmeUHD/Star Wars Episode IV (1977)/Star Wars Episode IV (1977).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Episode V - The Empire Strikes Back",
+      "path": "/mnt/data/video/FilmeUHD/Star Wars Episode V (1980)/Star Wars Episode V (1980).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Episode VI - Return of the Jedi",
+      "path": "/mnt/data/video/FilmeUHD/Star Wars Episode VI (1983)/Star Wars Episode VI (1983).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Episode VII - The Force Awakens",
+      "path": "/mnt/data/video/FilmeUHD/Star Wars Episode VII (2015)/Star Wars Episode VII (2015).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Episode VIII - The Last Jedi",
+      "path": "/mnt/data/video/FilmeUHD/Star Wars Episode VIII (2017)/Star Wars Episode VIII (2017).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Episode IX - The Rise of Skywalker",
+      "path": "/mnt/data/video/FilmeUHD/Star Wars Episode IX (2019)/Star Wars Episode IX (2019).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Obi-Wan Kenobi - S01E01",
+      "path": "/mnt/data/video/SerieUHD/Star Wars Obi-Wan Kenobi/S01E01.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Ahsoka - S01E01",
+      "path": "/mnt/data/video/SerieUHD/Star Wars Ahsoka/S01E01.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "2001 A Space Odyssey",
+      "path": "/mnt/data/video/FilmeUHD/2001 A Space Odyssey (1968)/2001 A Space Odyssey (1968).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Arrival",
+      "path": "/mnt/data/video/FilmeUHD/Arrival (2016)/Arrival (2016).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Event Horizon",
+      "path": "/mnt/data/video/FilmeUHD/Event Horizon (1997)/Event Horizon (1997).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    
+    {
+      "name": "Shrek",
+      "path": "/mnt/data/video/FilmeUHD/Shrek (2001)/Shrek (2001).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Shrek 2",
+      "path": "/mnt/data/video/FilmeUHD/Shrek 2 (2004)/Shrek 2 (2004).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "How to Train Your Dragon",
+      "path": "/mnt/data/video/FilmeUHD/How to Train Your Dragon (2010)/How to Train Your Dragon (2010).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "How to Train Your Dragon 2",
+      "path": "/mnt/data/video/FilmeUHD/How to Train Your Dragon 2 (2014)/How to Train Your Dragon 2 (2014).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Despicable Me",
+      "path": "/mnt/data/video/FilmeUHD/Despicable Me (2010)/Despicable Me (2010).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Despicable Me 2",
+      "path": "/mnt/data/video/FilmeUHD/Despicable Me 2 (2013)/Despicable Me 2 (2013).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "The Super Mario Bros Movie",
+      "path": "/mnt/data/video/FilmeUHD/The Super Mario Bros Movie (2023)/The Super Mario Bros Movie (2023).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Barbie",
+      "path": "/mnt/data/video/FilmeUHD/Barbie (2023)/Barbie (2023).mkv",
+      "categories": {
+        "toon": 0.7,
+        "general": 0.3
+      }
+    }
+  ]
+}
