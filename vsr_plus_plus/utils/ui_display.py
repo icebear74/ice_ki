@@ -431,6 +431,70 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
         
         print_separator(ui_w, 'double')
     
+    # === PEAK LAYER ACTIVITY ===
+    if activities and len(activities) > 0:
+        # Find peak activity
+        peak_value = max(activities.values()) if isinstance(activities, dict) else max(activities)
+        peak_layer_name = ""
+        
+        if isinstance(activities, dict):
+            for layer_name, value in activities.items():
+                if value == peak_value:
+                    peak_layer_name = layer_name
+                    break
+        else:
+            peak_layer_name = f"Layer {activities.index(peak_value) + 1}"
+        
+        # Create peak activity bar (0.0 - 2.0 scale)
+        from .ui_terminal import make_peak_activity_bar
+        peak_bar = make_peak_activity_bar(peak_value, width=ui_w - 40)
+        
+        print_line(f"{C_BOLD}🔥 PEAK LAYER ACTIVITY{C_RESET}", ui_w)
+        print_line(f"Layer: {C_CYAN}{peak_layer_name}{C_RESET} | Value: {C_BOLD}{peak_value:.3f}{C_RESET}", ui_w)
+        print_line(peak_bar, ui_w)
+        
+        # Warning if extreme
+        if peak_value > 2.0:
+            print_line(f"{C_RED}🔴 EXTREME! Check training stability!{C_RESET}", ui_w)
+        elif peak_value > 1.5:
+            print_line(f"{C_YELLOW}⚠️  Unusually high activity!{C_RESET}", ui_w)
+        
+        print_separator(ui_w, 'thin')
+        
+        # === STREAM OVERVIEW ===
+        # Calculate averages for each stream
+        if isinstance(activities, dict):
+            backward_vals = []
+            forward_vals = []
+            fusion_vals = []
+            
+            for layer_name, value in activities.items():
+                if 'backward' in layer_name.lower():
+                    backward_vals.append(value)
+                elif 'forward' in layer_name.lower():
+                    forward_vals.append(value)
+                elif 'fus' in layer_name.lower() or 'fusion' in layer_name.lower():
+                    fusion_vals.append(value)
+            
+            print_line(f"{C_BOLD}📊 STREAM-ÜBERSICHT (Durchschnitt){C_RESET}", ui_w)
+            
+            if backward_vals:
+                backward_avg = sum(backward_vals) / len(backward_vals)
+                backward_bar = make_bar(min(backward_avg * 50, 100), width=20)  # Scale for visibility
+                print_line(f"⬅️  Backward: {backward_bar} {C_CYAN}{backward_avg:.3f}{C_RESET} ({len(backward_vals)} layers)", ui_w)
+            
+            if forward_vals:
+                forward_avg = sum(forward_vals) / len(forward_vals)
+                forward_bar = make_bar(min(forward_avg * 50, 100), width=20)
+                print_line(f"➡️  Forward:  {forward_bar} {C_GREEN}{forward_avg:.3f}{C_RESET} ({len(forward_vals)} layers)", ui_w)
+            
+            if fusion_vals:
+                fusion_avg = sum(fusion_vals) / len(fusion_vals)
+                fusion_bar = make_bar_fusion(min(fusion_avg * 50, 100), width=20)
+                print_line(f"🔗 Fusion:   {fusion_bar} {C_MAGENTA}{fusion_avg:.3f}{C_RESET} ({len(fusion_vals)} layers)", ui_w)
+        
+        print_separator(ui_w, 'double')
+    
     # === LAYER ACTIVITY ===
     available_lines = term_size.lines - 30  # Lines available for layer display
     
