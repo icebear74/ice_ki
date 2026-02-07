@@ -49,7 +49,7 @@ class CharbonnierLoss(nn.Module):
         return torch.mean(loss)
 
 
-def get_cosine_scheduler(optimizer, total_steps, warmup_steps, min_lr):
+def get_cosine_scheduler(optimizer, total_steps, warmup_steps, min_lr, base_lr):
     """
     Create cosine annealing scheduler with warmup
     
@@ -57,11 +57,15 @@ def get_cosine_scheduler(optimizer, total_steps, warmup_steps, min_lr):
         optimizer: PyTorch optimizer
         total_steps: Total training steps
         warmup_steps: Warmup steps
-        min_lr: Minimum learning rate
+        min_lr: Minimum learning rate (absolute value)
+        base_lr: Base learning rate (absolute value)
     
     Returns:
         Scheduler function
     """
+    # Convert to fraction for lambda scheduler
+    min_lr_fraction = min_lr / base_lr
+    
     def lr_lambda(step):
         if step < warmup_steps:
             # Linear warmup
@@ -70,8 +74,8 @@ def get_cosine_scheduler(optimizer, total_steps, warmup_steps, min_lr):
             # Cosine annealing
             progress = float(step - warmup_steps) / float(max(1, total_steps - warmup_steps))
             cosine_decay = 0.5 * (1.0 + np.cos(np.pi * progress))
-            # Scale to min_lr
-            return min_lr + (1.0 - min_lr) * cosine_decay
+            # Scale from 1.0 to min_lr_fraction
+            return min_lr_fraction + (1.0 - min_lr_fraction) * cosine_decay
     
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
@@ -244,7 +248,8 @@ def train(config_path):
         optimizer,
         config.TRAINING.total_steps,
         config.TRAINING.warmup_steps,
-        config.TRAINING.min_lr
+        config.TRAINING.min_lr,
+        config.TRAINING.learning_rate
     )
     
     # Create loss function

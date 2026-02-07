@@ -193,8 +193,13 @@ def main():
     
     if all_passed:
         print(f"\n{C_GREEN}✅ All tests passed!{C_RESET}")
-        print(f"\nYou can now use the unified training system:")
-        print(f"  python vsr_plus_plus/train_unified.py --config configs/train_general_7frames.yaml")
+        print(f"\n{C_CYAN}Next Steps:{C_RESET}")
+        print(f"  1. Prepare your dataset following the structure in UNIFIED_TRAINING_GUIDE.md")
+        print(f"  2. Choose or customize a config from configs/")
+        print(f"  3. Start training with:")
+        print(f"     python vsr_plus_plus/train_unified.py --config configs/train_general_7frames.yaml")
+        print(f"\n{C_CYAN}Note:{C_RESET} The config files expect data at /mnt/data/training/dataset/")
+        print(f"      Update 'data_root' in your config to match your actual dataset location.")
         return 0
     else:
         print(f"\n{C_RED}❌ Some tests failed{C_RESET}")

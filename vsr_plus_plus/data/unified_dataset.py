@@ -78,8 +78,7 @@ class MultiFormatMultiCategoryDataset(Dataset):
             dir_name = format_dir_map.get(format_name)
             
             if dir_name is None:
-                print(f"⚠️  Warning: Unknown format {format_name}, skipping")
-                continue
+                raise ValueError(f"Unknown format: {format_name}. Valid formats: {list(format_dir_map.keys())}")
             
             gt_dir = os.path.join(self.base_path, dir_name, "GT")
             lr_dir = os.path.join(self.base_path, dir_name, f"LR_{self.lr_version}")
@@ -114,6 +113,17 @@ class MultiFormatMultiCategoryDataset(Dataset):
             
             if matched_count < len(gt_files):
                 print(f"⚠️  Warning: Only {matched_count}/{len(gt_files)} GT files have matching LR for {format_name}")
+        
+        # Validate that at least one format was loaded
+        if not self.image_pairs:
+            raise ValueError(
+                f"No training samples found!\n"
+                f"  Category: {self.category}\n"
+                f"  LR Version: {self.lr_version}\n"
+                f"  Base Path: {self.base_path}\n"
+                f"  Formats: {self.formats}\n"
+                f"Please verify your dataset structure and paths."
+            )
     
     def __len__(self):
         return len(self.image_pairs)
