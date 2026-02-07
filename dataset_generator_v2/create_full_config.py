@@ -57,7 +57,7 @@ def extract_name_from_path(path):
         series_name = parts[-3]
         episode_file = parts[-1].replace('.mkv', '')
         episode_clean = re.sub(r'_t\d+$', '', episode_file)
-        return f"{series_name} - {episode_file}"
+        return f"{series_name} - {episode_clean}"
     else:
         movie_dir = parts[-2]
         clean = re.sub(r'\s*\(\d{4}\)\s*', '', movie_dir)
@@ -73,23 +73,22 @@ def main():
         for line in f:
             line = line.strip()
             
+            # Skip empty lines
             if not line:
                 continue
             
-            if '|' in line:
-                parts = line.split('|', 1)
-                if len(parts) == 2:
-                    path = parts[1].strip()
-                    
-                    if path:
-                        name = extract_name_from_path(path)
-                        categories = categorize_video(name, path)
-                        
-                        videos.append({
-                            'name': name,
-                            'path': path,
-                            'categories': categories
-                        })
+            # FIXED: The file format is just "/path/to/video.mkv" (no "N| " prefix!)
+            path = line
+            
+            if path.endswith('.mkv'):
+                name = extract_name_from_path(path)
+                categories = categorize_video(name, path)
+                
+                videos.append({
+                    'name': name,
+                    'path': path,
+                    'categories': categories
+                })
     
     print(f"✅ Found {len(videos)} videos\n")
     
