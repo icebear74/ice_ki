@@ -675,6 +675,20 @@ Continue? Processing will start in 5 seconds... (Ctrl+C to cancel)
                 print(warning)
             
             time.sleep(5)
+        else:
+            # All or most videos found - show success message
+            if len(missing_videos) == 0:
+                success_msg = "\n[bold green]✅ All videos found! Starting dataset generation...[/bold green]\n"
+            else:
+                success_msg = f"\n[bold green]✅ Ready to process {len(existing_videos)} videos. Starting dataset generation...[/bold green]\n"
+            
+            if RICH_AVAILABLE:
+                self.console.print(success_msg)
+            else:
+                # Strip rich formatting for plain text
+                plain_msg = success_msg.replace('[bold green]', '').replace('[/bold green]', '').replace('[bold]', '').replace('[/bold]', '')
+                print(plain_msg)
+
         
         # Create directories
         self.create_output_directories()
