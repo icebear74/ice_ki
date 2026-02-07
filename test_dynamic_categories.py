@@ -11,7 +11,7 @@ import tempfile
 import shutil
 
 # Add parent directory to path
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+sys.path.insert(0, os.path.dirname(__file__))
 
 def test_config_with_custom_categories():
     """Test that generator config can be loaded with custom categories."""
@@ -192,13 +192,13 @@ def test_gui_layout_with_different_category_counts():
                 disk_lines = ["[bold]💾 DISK USAGE[/bold]"]
                 categories = list(generator.config.get('category_targets', {}).keys())
                 for i, cat_name in enumerate(categories):
-                    prefix = "└─" if i == len(categories) - 1 else "├─"
+                    prefix = "├─"
                     disk_lines.append(f"{prefix} {cat_name.upper()}: 0.0 GB")
                 disk_lines.append(f"└─ Total: 0.0 GB")
                 disk_usage = "\n".join(disk_lines)
                 
-                # Verify the last category has the right prefix
-                assert "└─" in disk_lines[-2], "Last category should have └─ prefix"
+                # Verify the Total line has the right prefix
+                assert "└─ Total:" in disk_lines[-1], "Total should have └─ prefix"
                 
                 print(f"  ✓ GUI layout works with {num_cats} categories")
                 

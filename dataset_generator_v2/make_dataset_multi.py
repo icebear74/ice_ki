@@ -475,7 +475,7 @@ class DatasetGeneratorV2:
         categories = list(self.config.get('category_targets', {}).keys())
         for i, cat_name in enumerate(categories):
             usage = self.tracker.status['category_stats'][cat_name]['disk_usage_gb']
-            prefix = "└─" if i == len(categories) - 1 else "├─"
+            prefix = "├─"
             disk_lines.append(f"{prefix} {cat_name.upper()}: {usage:.1f} GB")
         disk_lines.append(f"└─ Total: {total_disk:.1f} GB")
         disk_usage = "\n".join(disk_lines)
