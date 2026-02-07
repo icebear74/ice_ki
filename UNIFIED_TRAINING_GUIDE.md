@@ -239,21 +239,31 @@ Example for 180×180 LR:
 
 ## Testing
 
-Quick test with mock data:
+### Quick Validation Test
+
+Run the automated test script to verify your installation:
 
 ```bash
-# Run minimal training test (included in repo)
-python vsr_plus_plus/train_unified.py --config configs/train_general_7frames.yaml
+# Run quick validation test (creates mock data automatically)
+python test_unified_training.py
 ```
 
 This will verify:
 - ✅ Config loading
 - ✅ Dataset loading
-- ✅ Model creation
-- ✅ Training loop
-- ✅ Gradient accumulation
-- ✅ Validation
-- ✅ Checkpointing
+- ✅ Model creation (5 and 7 frames)
+- ✅ All components working
+
+### Full Training Test
+
+Once you have prepared your dataset, test with a real config:
+
+```bash
+# Full training (requires prepared dataset at /mnt/data/training/dataset/)
+python vsr_plus_plus/train_unified.py --config configs/train_general_7frames.yaml
+```
+
+**Note**: Update `data_root` in the config file to match your actual dataset location if different from `/mnt/data/training/dataset/`.
 
 ## Migration from Old System
 

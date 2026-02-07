@@ -244,6 +244,8 @@ def train(config_path):
     )
     
     # Create scheduler
+    # Note: min_lr and learning_rate are absolute values (e.g., 0.0001)
+    # The scheduler internally converts them to fractions for LambdaLR
     scheduler = get_cosine_scheduler(
         optimizer,
         config.TRAINING.total_steps,
