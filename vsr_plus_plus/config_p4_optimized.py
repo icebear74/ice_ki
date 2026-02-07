@@ -30,12 +30,12 @@ N_BLOCKS = 24
 
 # Batch size per iteration
 # Keep at 4 to fit in VRAM
-BATCH_SIZE = 4
+BATCH_SIZE = 2
 
 # Gradient accumulation steps
 # Effective batch = BATCH_SIZE * ACCUMULATION_STEPS = 4 * 4 = 16
 # This provides stable gradients without excessive VRAM usage
-ACCUMULATION_STEPS = 4
+ACCUMULATION_STEPS = 8
 
 
 # ============================================================================
@@ -52,10 +52,10 @@ WEIGHT_DECAY = 0.001
 WARMUP_STEPS = 1000
 
 # Maximum learning rate after warmup
-MAX_LR = 1e-4
+MAX_LR = 1.5e-4
 
 # Minimum learning rate at end of training
-MIN_LR = 1e-6
+MIN_LR = 1e-7
 
 
 # ============================================================================
@@ -63,18 +63,18 @@ MIN_LR = 1e-6
 # ============================================================================
 
 # L1 pixel loss - PRIMARY loss component
-L1_WEIGHT = 1.0
+L1_WEIGHT = 0.55
 
 # Multi-scale loss - DISABLED (redundant with perceptual)
-MS_WEIGHT = 0.0
+MS_WEIGHT = 0.20
 
 # Gradient loss - DISABLED (redundant with perceptual)
-GRAD_WEIGHT = 0.0
+GRAD_WEIGHT = 0.20
 
 # VGG-based perceptual loss - ENABLED for sharpness feedback
 # This uses pretrained VGG16 weights, providing REAL perceptual guidance
 # (unlike the previous untrained custom loss that caused stagnation)
-PERCEPTUAL_WEIGHT = 0.1
+PERCEPTUAL_WEIGHT = 0.05
 
 
 # ============================================================================

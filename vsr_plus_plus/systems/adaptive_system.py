@@ -50,7 +50,7 @@ class AdaptiveSystem:
         
         # Cooldown mechanism
         self.cooldown_steps = 0
-        self.cooldown_duration = 100  # Wait 100 steps after adjustment
+        self.cooldown_duration = 80  # Wait 100 steps after adjustment
         self.is_in_cooldown = False
         
         # Gradient clipping
@@ -84,8 +84,8 @@ class AdaptiveSystem:
         # Plateau detection
         self.best_loss = float('inf')
         self.plateau_counter = 0
-        self.plateau_patience = 300
-        self.plateau_safety_threshold = 3000  # Force reset if plateau counter exceeds this
+        self.plateau_patience = 250
+        self.plateau_safety_threshold = 800  # Force reset if plateau counter exceeds this
         
         # History settling period: when resuming training at step >= 1000,
         # wait to collect history before making changes
