@@ -41,7 +41,7 @@ class VSRTrainer:
     
     def __init__(self, model, optimizer, lr_scheduler, train_loader, val_loader, loss_fn,
                  validator, checkpoint_mgr, train_logger, tb_logger, adaptive_system, 
-                 config, device='cuda'):
+                 config, device='cuda', runtime_config=None):
         self.model = model
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
@@ -55,6 +55,7 @@ class VSRTrainer:
         self.adaptive_system = adaptive_system
         self.config = config
         self.device = device
+        self.runtime_config = runtime_config
         
         self.global_step = 0
         self.start_step = 0
@@ -63,6 +64,11 @@ class VSRTrainer:
         self.last_metrics = None
         self.last_activities = None
         self.loss_history = []
+        
+        # For validation snapshots
+        self.last_total_loss = None
+        self.last_l1_loss = None
+        self.last_validation_quality = None
         
         # Performance tracking
         self.step_times = []
@@ -213,6 +219,11 @@ class VSRTrainer:
                 # Increment step
                 self.global_step += 1
                 current_epoch_step += 1
+                
+                # Check for runtime config updates every 10 steps
+                if self.runtime_config is not None and self.global_step % 10 == 0:
+                    if self.runtime_config.check_for_updates():
+                        self._apply_config_changes()
                 
                 # Update GUI with smoothed values
                 self._update_gui(epoch, smoothed_loss_dict, avg_time, steps_per_epoch, current_epoch_step, adam_momentum=adam_momentum)
@@ -752,6 +763,96 @@ class VSRTrainer:
         except Exception as e:
             print(f"  ⚠️  Failed to save statistics JSON: {e}")
             self.train_logger.log_event(f"Warning: Failed to save statistics JSON: {e}")
+    
+    def get_current_state(self):
+        """Capture current training state for comparison"""
+        return {
+            'step': self.global_step,
+            'total_loss': getattr(self, 'last_total_loss', None),
+            'l1_loss': getattr(self, 'last_l1_loss', None),
+            'quality_ki': getattr(self, 'last_validation_quality', None),
+            'learning_rate': self.lr_scheduler.optimizer.param_groups[0]['lr'] if hasattr(self.lr_scheduler, 'optimizer') else 0.0,
+            'plateau_counter': self.adaptive_system.plateau_counter,
+            'timestamp': time.time()
+        }
+    
+    def run_validation_snapshot(self, snapshot_name=None):
+        """
+        Run validation and save snapshot
+        Used BEFORE config changes to capture baseline
+        
+        Args:
+            snapshot_name: Optional name suffix (e.g., 'before_change')
+        
+        Returns:
+            Validation results dict
+        """
+        # Run validation
+        val_results = self.validator.validate(self.model, self.val_loader)
+        
+        # Capture current state
+        state = self.get_current_state()
+        state.update(val_results)
+        
+        # Save snapshot
+        data_root = self.config.get('DATA_ROOT', './Learn')
+        if snapshot_name:
+            filename = f"Statistik_{self.global_step}_{snapshot_name}.json"
+        else:
+            filename = f"Statistik_{self.global_step}.json"
+        
+        filepath = os.path.join(data_root, filename)
+        with open(filepath, 'w') as f:
+            json.dump(state, f, indent=2)
+        
+        print(f"📸 Validation snapshot saved: {filename}")
+        return state
+    
+    def _apply_config_changes(self):
+        """Apply runtime config changes to live systems"""
+        if self.runtime_config is None:
+            return
+        
+        # Update Adaptive System
+        new_threshold = self.runtime_config.get('plateau_safety_threshold')
+        if new_threshold is not None and new_threshold != self.adaptive_system.plateau_safety_threshold:
+            old = self.adaptive_system.plateau_safety_threshold
+            self.adaptive_system.plateau_safety_threshold = new_threshold
+            print(f"⚙️  Config Update: plateau_safety_threshold {old} → {new_threshold}")
+        
+        new_patience = self.runtime_config.get('plateau_patience')
+        if new_patience is not None and new_patience != self.adaptive_system.plateau_patience:
+            old = self.adaptive_system.plateau_patience
+            self.adaptive_system.plateau_patience = new_patience
+            print(f"⚙️  Config Update: plateau_patience {old} → {new_patience}")
+        
+        new_cooldown = self.runtime_config.get('cooldown_duration')
+        if new_cooldown is not None and new_cooldown != self.adaptive_system.cooldown_duration:
+            old = self.adaptive_system.cooldown_duration
+            self.adaptive_system.cooldown_duration = new_cooldown
+            print(f"⚙️  Config Update: cooldown_duration {old} → {new_cooldown}")
+        
+        # Update LR Scheduler
+        new_max_lr = self.runtime_config.get('max_lr')
+        if new_max_lr is not None and hasattr(self.lr_scheduler, 'max_lr'):
+            if new_max_lr != self.lr_scheduler.max_lr:
+                old = self.lr_scheduler.max_lr
+                self.lr_scheduler.max_lr = new_max_lr
+                print(f"⚙️  Config Update: max_lr {old:.2e} → {new_max_lr:.2e}")
+        
+        new_min_lr = self.runtime_config.get('min_lr')
+        if new_min_lr is not None and hasattr(self.lr_scheduler, 'min_lr'):
+            if new_min_lr != self.lr_scheduler.min_lr:
+                old = self.lr_scheduler.min_lr
+                self.lr_scheduler.min_lr = new_min_lr
+                print(f"⚙️  Config Update: min_lr {old:.2e} → {new_min_lr:.2e}")
+        
+        # Update gradient clipping
+        new_grad_clip = self.runtime_config.get('initial_grad_clip')
+        if new_grad_clip is not None and new_grad_clip != self.adaptive_system.clip_value:
+            old = self.adaptive_system.clip_value
+            self.adaptive_system.clip_value = new_grad_clip
+            print(f"⚙️  Config Update: initial_grad_clip {old:.2f} → {new_grad_clip:.2f}")
     
     def run(self):
         """
