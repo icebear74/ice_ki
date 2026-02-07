@@ -205,6 +205,12 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 new_interval = command_data.get('interval', 5)
                 self.__class__.refresh_interval_sec = max(1, min(60, new_interval))
                 response = {'success': True, 'interval': self.__class__.refresh_interval_sec}
+            elif action_type == 'save_checkpoint':
+                self.action_queue.put('save_checkpoint')
+                response = {'success': True, 'message': 'Checkpoint save queued'}
+            elif action_type == 'toggle_pause':
+                self.action_queue.put('toggle_pause')
+                response = {'success': True, 'message': 'Pause toggle queued', 'paused': True}
             else:
                 response = {'success': False, 'message': f'Unknown action: {action_type}'}
             
@@ -784,7 +790,16 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                     🔍 Run Validation
                 </button>
                 <button class="btn btn-primary" onclick="openConfigPage()">
-                    ⚙️ Konfiguration
+                    ⚙️ Configuration
+                </button>
+                <button class="btn btn-success" id="checkpointBtn" onclick="triggerCheckpoint()">
+                    💾 Save Checkpoint
+                </button>
+                <button class="btn btn-primary" id="pauseBtn" onclick="togglePause()">
+                    ⏸️ Pause Training
+                </button>
+                <button class="btn btn-primary" onclick="exportLogs()">
+                    📊 Export Logs
                 </button>
             </div>
         </div>
@@ -1729,6 +1744,122 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         function openConfigPage() {
             // Check if config API is available
             window.open('/config', '_blank');
+        }
+        
+        function triggerCheckpoint() {
+            // Send command to save checkpoint
+            fetch('/monitoring/command', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    action: 'save_checkpoint'
+                })
+            })
+            .then(response => response.json())
+            .then(result => {
+                if (result.success) {
+                    alert('✅ Checkpoint saved successfully!');
+                } else {
+                    alert('❌ Failed to save checkpoint: ' + (result.message || 'Unknown error'));
+                }
+            })
+            .catch(error => {
+                console.error('Error saving checkpoint:', error);
+                alert('❌ Error saving checkpoint');
+            });
+        }
+        
+        function togglePause() {
+            // Send command to pause/resume training
+            fetch('/monitoring/command', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    action: 'toggle_pause'
+                })
+            })
+            .then(response => response.json())
+            .then(result => {
+                if (result.success) {
+                    const pauseBtn = document.getElementById('pauseBtn');
+                    if (result.paused) {
+                        pauseBtn.textContent = '▶️ Resume Training';
+                        pauseBtn.className = 'btn btn-success';
+                    } else {
+                        pauseBtn.textContent = '⏸️ Pause Training';
+                        pauseBtn.className = 'btn btn-primary';
+                    }
+                } else {
+                    alert('❌ Failed to toggle pause: ' + (result.message || 'Unknown error'));
+                }
+            })
+            .catch(error => {
+                console.error('Error toggling pause:', error);
+                alert('❌ Error toggling pause');
+            });
+        }
+        
+        function exportLogs() {
+            // Download training logs as JSON with comprehensive metrics
+            fetch('/monitoring/data')
+                .then(response => response.json())
+                .then(data => {
+                    // Create comprehensive log export
+                    const logData = {
+                        timestamp: new Date().toISOString(),
+                        step: data.step_current,
+                        epoch: data.epoch_num,
+                        losses: {
+                            total: data.total_loss_value,
+                            l1: data.l1_loss_value,
+                            ms: data.ms_loss_value,
+                            gradient: data.gradient_loss_value,
+                            perceptual: data.perceptual_loss_value
+                        },
+                        weights: {
+                            l1: data.l1_weight_current,
+                            ms: data.ms_weight_current,
+                            gradient: data.gradient_weight_current,
+                            perceptual: data.perceptual_weight_current
+                        },
+                        learning_rate: data.learning_rate_value,
+                        quality: {
+                            lr: data.quality_lr_value,
+                            ki: data.quality_ki_value,
+                            improvement: data.quality_improvement_value,
+                            best_ever: data.best_quality_ever
+                        },
+                        adaptive: {
+                            mode: data.adaptive_mode,
+                            cooldown: data.adaptive_is_cooldown,
+                            plateau_counter: data.adaptive_plateau_counter,
+                            gradient_clip: data.gradient_clip_val
+                        },
+                        performance: {
+                            iteration_duration: data.iteration_duration,
+                            vram_usage_gb: data.vram_usage_gb,
+                            adam_momentum: data.adam_momentum_avg
+                        }
+                    };
+                    
+                    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+                    const filename = `vsr_training_log_${timestamp}.json`;
+                    const blob = new Blob([JSON.stringify(logData, null, 2)], { type: 'application/json' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = filename;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                })
+                .catch(error => {
+                    console.error('Error exporting logs:', error);
+                    alert('❌ Error exporting logs');
+                });
         }
         
         function updateRefreshRate() {

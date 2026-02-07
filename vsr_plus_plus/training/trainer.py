@@ -687,11 +687,39 @@ class VSRTrainer:
             
             elif key_lower == 'v':  # Manual validation
                 self.do_manual_val = True
+            
+            elif key_lower == 'c':  # Manual checkpoint save
+                self._save_checkpoint()
         
         # Check for web UI commands (new method name)
         web_cmd = self.web_monitor.poll_commands()
         if web_cmd == 'validate':
             self.do_manual_val = True
+        elif web_cmd == 'save_checkpoint':
+            # Trigger immediate checkpoint save
+            self._save_checkpoint()
+        elif web_cmd == 'toggle_pause':
+            # Toggle pause state
+            self.paused = not self.paused
+            status = "paused" if self.paused else "resumed"
+            self.train_logger.log_event(f"Training {status} at step {self.global_step}")
+    
+    def _save_checkpoint(self):
+        """Save checkpoint immediately"""
+        try:
+            metrics = self.last_metrics or {}
+            self.checkpoint_mgr.save_checkpoint(
+                self.model,
+                self.optimizer,
+                self.lr_scheduler,
+                self.global_step,
+                metrics,
+                self.train_logger.log_file,
+                self.runtime_config
+            )
+            self.train_logger.log_event(f"Manual checkpoint saved at step {self.global_step}")
+        except Exception as e:
+            self.train_logger.log_event(f"Failed to save checkpoint: {str(e)}")
     
     def _run_validation(self):
         """Run validation immediately"""

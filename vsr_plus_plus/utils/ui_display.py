@@ -521,6 +521,42 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
         
         print_separator(ui_w, 'double')
     
+    # === RUNTIME CONFIGURATION (New config parameters) ===
+    # Display key runtime config parameters accessible via ENTER menu
+    print_line(f"{C_BOLD}⚙️ RUNTIME CONFIG{C_RESET} (Press ENTER to edit)", ui_w)
+    print_separator(ui_w, 'single')
+    
+    # Display key parameters
+    plateau_threshold = config.get('plateau_safety_threshold', 500)
+    plateau_patience = config.get('plateau_patience', 200)
+    cooldown_dur = config.get('cooldown_duration', 50)
+    
+    print_two_columns(
+        f"Plateau Threshold: {C_CYAN}{plateau_threshold}{C_RESET} steps",
+        f"Plateau Patience: {C_CYAN}{plateau_patience}{C_RESET} steps",
+        ui_w
+    )
+    print_two_columns(
+        f"Cooldown Duration: {C_CYAN}{cooldown_dur}{C_RESET} steps",
+        f"LR Range: {C_GREEN}{config.get('min_lr', 1e-6):.2e}{C_RESET} - {C_GREEN}{config.get('max_lr', 1e-4):.2e}{C_RESET}",
+        ui_w
+    )
+    
+    # TensorBoard settings
+    tb_interval = config.get('log_tboard_every', 50)
+    val_interval = config.get('val_step_every', 500)
+    save_interval = config.get('save_step_every', 10000)
+    
+    print_separator(ui_w, 'thin')
+    print_two_columns(
+        f"TensorBoard Log: Every {C_CYAN}{tb_interval}{C_RESET} steps",
+        f"Validation: Every {C_CYAN}{val_interval}{C_RESET} steps",
+        ui_w
+    )
+    print_line(f"Checkpoint Save: Every {C_CYAN}{save_interval}{C_RESET} steps", ui_w)
+    
+    print_separator(ui_w, 'double')
+    
     # === PEAK LAYER ACTIVITY (Enhanced visibility) ===
     if activities and len(activities) > 0:
         # Find peak activity
@@ -622,8 +658,20 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
     
     print_footer(ui_w)
     
-    # Control hints
-    sys.stdout.write(f"{' ' * ((ui_w - 55) // 2)}{C_BOLD}( ENTER: Config | S: Next View | P: Pause | V: Val ){C_RESET}\n")
+    # Control hints - Enhanced with all action buttons
+    print_line(f"{C_BOLD}⌨️  KEYBOARD SHORTCUTS{C_RESET}", ui_w)
+    print_separator(ui_w, 'thin')
+    print_two_columns(
+        f"{C_CYAN}P{C_RESET} Pause/Resume  │  {C_CYAN}V{C_RESET} Validation",
+        f"{C_CYAN}S{C_RESET} Change View  │  {C_CYAN}ENTER{C_RESET} Config",
+        ui_w
+    )
+    print_two_columns(
+        f"{C_CYAN}C{C_RESET} Save Checkpoint  │  {C_CYAN}Q{C_RESET} Quit",
+        f"{C_CYAN}ESC{C_RESET} Emergency Stop",
+        ui_w
+    )
+    sys.stdout.write("\n")
     sys.stdout.flush()
 
 
