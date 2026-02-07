@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Multi-Category Dataset Generator v2.0
-Generates training patches for GENERAL, SPACE, and TOON models.
+Generates training patches for multiple model categories (dynamically configured).
 """
 
 import os
@@ -118,7 +118,7 @@ class DatasetGeneratorV2:
             - Patches/LR_7frames/ (7-frame, optional extended)
             - Val/GT/ and Val/LR/ (validation)
         """
-        for category in CATEGORY_PATHS.keys():
+        for category in self.config.get('category_targets', {}).keys():
             for format_name in CATEGORY_FORMAT_DISTRIBUTION[category].keys():
                 # Create directories for 5-frame LR (VSR++ compatible)
                 dirs_5 = get_output_dirs_for_format(self.base_dir, category, format_name, lr_frames=5)
@@ -450,7 +450,7 @@ class DatasetGeneratorV2:
         table.add_column("Target", justify="right")
         table.add_column("Progress", width=12)
         
-        for cat_name in ['general', 'space', 'toon']:
+        for cat_name in self.config.get('category_targets', {}).keys():
             stats = self.tracker.status['category_stats'][cat_name]
             videos = stats['videos_processed']
             images = stats['images_created']
@@ -471,12 +471,14 @@ class DatasetGeneratorV2:
         
         # Disk usage
         total_disk = sum(s['disk_usage_gb'] for s in self.tracker.status['category_stats'].values())
-        disk_usage = f"""[bold]💾 DISK USAGE[/bold]
-├─ GENERAL: {self.tracker.status['category_stats']['general']['disk_usage_gb']:.1f} GB
-├─ SPACE: {self.tracker.status['category_stats']['space']['disk_usage_gb']:.1f} GB
-├─ TOON: {self.tracker.status['category_stats']['toon']['disk_usage_gb']:.1f} GB
-└─ Total: {total_disk:.1f} GB
-"""
+        disk_lines = ["[bold]💾 DISK USAGE[/bold]"]
+        categories = list(self.config.get('category_targets', {}).keys())
+        for i, cat_name in enumerate(categories):
+            usage = self.tracker.status['category_stats'][cat_name]['disk_usage_gb']
+            prefix = "└─" if i == len(categories) - 1 else "├─"
+            disk_lines.append(f"{prefix} {cat_name.upper()}: {usage:.1f} GB")
+        disk_lines.append(f"└─ Total: {total_disk:.1f} GB")
+        disk_usage = "\n".join(disk_lines)
         
         # Controls
         controls = """[bold]⚙️  CONTROLS[/bold]
