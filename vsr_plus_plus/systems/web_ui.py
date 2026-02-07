@@ -518,6 +518,146 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             background: #56d364;
             transform: translateY(-2px);
         }
+        
+        /* Stacked Bar Chart Styles */
+        .stacked-bars-container {
+            display: flex;
+            gap: 30px;
+            margin: 20px 0;
+            flex-wrap: wrap;
+        }
+        
+        .bar-section {
+            flex: 1;
+            min-width: 300px;
+        }
+        
+        .bar-label {
+            font-size: 0.9em;
+            margin-bottom: 10px;
+            color: var(--text-secondary);
+            font-weight: 600;
+        }
+        
+        .stacked-bar {
+            height: 60px;
+            border-radius: 8px;
+            overflow: hidden;
+            display: flex;
+            position: relative;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid var(--border-color);
+        }
+        
+        .bar-segment {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.85em;
+            font-weight: bold;
+            transition: all 0.3s ease;
+            position: relative;
+            min-width: 3%;
+            color: white;
+            text-shadow: 0 1px 2px rgba(0,0,0,0.5);
+        }
+        
+        .bar-segment:hover {
+            filter: brightness(1.2);
+            transform: scaleY(1.05);
+            z-index: 10;
+        }
+        
+        .segment-l1 { 
+            background: linear-gradient(135deg, #ef4444, #dc2626);
+        }
+        .segment-ms { 
+            background: linear-gradient(135deg, #f59e0b, #d97706);
+        }
+        .segment-grad { 
+            background: linear-gradient(135deg, #8b5cf6, #7c3aed);
+        }
+        .segment-perceptual { 
+            background: linear-gradient(135deg, #06b6d4, #0891b2);
+        }
+        
+        .legend {
+            display: flex;
+            gap: 15px;
+            margin-top: 15px;
+            flex-wrap: wrap;
+            font-size: 0.9em;
+        }
+        
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .legend-color {
+            width: 20px;
+            height: 20px;
+            border-radius: 4px;
+        }
+        
+        .legend-value {
+            color: var(--text-secondary);
+            margin-left: 5px;
+        }
+        
+        /* Peak Activity Bar */
+        .peak-bar-container {
+            margin: 20px 0;
+        }
+        
+        .peak-bar {
+            height: 50px;
+            background: linear-gradient(
+                to right,
+                #4ade80 0%,
+                #4ade80 25%,
+                #fbbf24 50%,
+                #fb923c 75%,
+                #ef4444 100%
+            );
+            border-radius: 8px;
+            position: relative;
+            margin-bottom: 10px;
+            border: 2px solid var(--border-color);
+        }
+        
+        .peak-indicator {
+            position: absolute;
+            top: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-weight: bold;
+            font-size: 18px;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.8);
+            transition: left 0.5s ease;
+        }
+        
+        .peak-scale {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.85em;
+            color: var(--text-secondary);
+            margin-bottom: 10px;
+        }
+        
+        .peak-info {
+            display: flex;
+            gap: 30px;
+            margin-top: 15px;
+            flex-wrap: wrap;
+        }
+        
+        .peak-warning {
+            color: var(--accent-red);
+            font-weight: bold;
+            margin-top: 10px;
+        }
     </style>
 </head>
 <body>
@@ -557,6 +697,73 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         </div>
         
         <div class="section-header">📉 Loss-Werte & Gewichte</div>
+        
+        <!-- NEW: Stacked Bar Chart Visualization -->
+        <div class="layer-activity-container">
+            <div class="card-title" style="font-size: 1.2em; margin-bottom: 20px;">📊 Loss & Weight Distribution</div>
+            
+            <div class="stacked-bars-container">
+                <!-- Weight Distribution -->
+                <div class="bar-section">
+                    <div class="bar-label">Weight Distribution (%)</div>
+                    <div class="stacked-bar" id="weightBar">
+                        <div class="bar-segment segment-l1" id="weightL1">
+                            <span>L1: 0%</span>
+                        </div>
+                        <div class="bar-segment segment-ms" id="weightMS">
+                            <span>MS: 0%</span>
+                        </div>
+                        <div class="bar-segment segment-grad" id="weightGrad">
+                            <span>Grad: 0%</span>
+                        </div>
+                        <div class="bar-segment segment-perceptual" id="weightPerc">
+                            <span>Perc: 0%</span>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Loss Value Distribution -->
+                <div class="bar-section">
+                    <div class="bar-label">Loss Value Distribution (relative)</div>
+                    <div class="stacked-bar" id="lossBar">
+                        <div class="bar-segment segment-l1" id="lossL1">
+                            <span>L1: 0.000</span>
+                        </div>
+                        <div class="bar-segment segment-ms" id="lossMS">
+                            <span>MS: 0.000</span>
+                        </div>
+                        <div class="bar-segment segment-grad" id="lossGrad">
+                            <span>Grad: 0.000</span>
+                        </div>
+                        <div class="bar-segment segment-perceptual" id="lossPerc">
+                            <span>Perc: 0.000</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="legend">
+                <div class="legend-item">
+                    <div class="legend-color segment-l1"></div>
+                    <span>L1 Loss <span class="legend-value" id="legendL1">0.0000</span></span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color segment-ms"></div>
+                    <span>MS Loss <span class="legend-value" id="legendMS">0.0000</span></span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color segment-grad"></div>
+                    <span>Gradient Loss <span class="legend-value" id="legendGrad">0.0000</span></span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color segment-perceptual"></div>
+                    <span>Perceptual Loss <span class="legend-value" id="legendPerc">0.0000</span></span>
+                </div>
+                <div class="legend-item">
+                    <strong>Total Loss: <span class="legend-value" id="legendTotal">0.0000</span></strong>
+                </div>
+            </div>
+        </div>
         
         <div class="grid-container">
             <div class="info-card">
@@ -691,6 +898,29 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             </div>
         </div>
         
+        <div class="section-header">🔥 Peak Layer Activity</div>
+        
+        <div class="layer-activity-container">
+            <div class="peak-bar-container">
+                <div class="peak-scale">
+                    <span>0.0</span>
+                    <span>0.5</span>
+                    <span>1.0</span>
+                    <span style="color: var(--accent-orange)">1.5</span>
+                    <span style="color: var(--accent-red)">2.0+</span>
+                </div>
+                <div class="peak-bar">
+                    <div class="peak-indicator" id="peakIndicator">0.00</div>
+                </div>
+            </div>
+            
+            <div class="peak-info">
+                <span>Peak Layer: <strong id="peakLayer">-</strong></span>
+                <span>Value: <strong id="peakValue">-</strong></span>
+            </div>
+            <div class="peak-warning" id="peakWarning" style="display: none;"></div>
+        </div>
+        
         <div class="section-header">📊 Layer-Aktivitäten</div>
         
         <div id="layerActivitiesBackward" class="layer-activity-container">
@@ -776,6 +1006,9 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             document.getElementById('gradWeight').textContent = data.gradient_weight_current.toFixed(2);
             document.getElementById('percLoss').textContent = data.perceptual_loss_value.toFixed(4);
             document.getElementById('percWeight').textContent = data.perceptual_weight_current.toFixed(2);
+            
+            // Update stacked bar charts
+            updateStackedBars(data);
             
             // Adaptive system status
             document.getElementById('adaptiveMode').textContent = data.adaptive_mode || 'Stable';
@@ -887,6 +1120,99 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             document.getElementById('lastUpdate').textContent = updateTime.toLocaleTimeString('de-DE');
         }
         
+        function updateStackedBars(data) {
+            // Get loss values
+            const l1Loss = data.l1_loss_value || 0;
+            const msLoss = data.ms_loss_value || 0;
+            const gradLoss = data.gradient_loss_value || 0;
+            const percLoss = data.perceptual_loss_value || 0;
+            const totalLoss = l1Loss + msLoss + gradLoss + percLoss;
+            
+            // Get weights
+            const l1Weight = data.l1_weight_current || 0;
+            const msWeight = data.ms_weight_current || 0;
+            const gradWeight = data.gradient_weight_current || 0;
+            const percWeight = data.perceptual_weight_current || 0;
+            const totalWeight = l1Weight + msWeight + gradWeight + percWeight;
+            
+            // Update weight bar (percentages)
+            if (totalWeight > 0) {
+                const l1Pct = (l1Weight / totalWeight * 100);
+                const msPct = (msWeight / totalWeight * 100);
+                const gradPct = (gradWeight / totalWeight * 100);
+                const percPct = (percWeight / totalWeight * 100);
+                
+                const weightL1 = document.getElementById('weightL1');
+                const weightMS = document.getElementById('weightMS');
+                const weightGrad = document.getElementById('weightGrad');
+                const weightPerc = document.getElementById('weightPerc');
+                
+                weightL1.style.width = l1Pct + '%';
+                weightMS.style.width = msPct + '%';
+                weightGrad.style.width = gradPct + '%';
+                weightPerc.style.width = percPct + '%';
+                
+                weightL1.innerHTML = `<span>L1: ${l1Pct.toFixed(1)}%</span>`;
+                weightMS.innerHTML = `<span>MS: ${msPct.toFixed(1)}%</span>`;
+                weightGrad.innerHTML = `<span>Grad: ${gradPct.toFixed(1)}%</span>`;
+                weightPerc.innerHTML = `<span>Perc: ${percPct.toFixed(1)}%</span>`;
+            }
+            
+            // Update loss bar (relative contributions)
+            if (totalLoss > 0) {
+                const l1LossPct = (l1Loss / totalLoss * 100);
+                const msLossPct = (msLoss / totalLoss * 100);
+                const gradLossPct = (gradLoss / totalLoss * 100);
+                const percLossPct = (percLoss / totalLoss * 100);
+                
+                const lossL1 = document.getElementById('lossL1');
+                const lossMS = document.getElementById('lossMS');
+                const lossGrad = document.getElementById('lossGrad');
+                const lossPerc = document.getElementById('lossPerc');
+                
+                lossL1.style.width = l1LossPct + '%';
+                lossMS.style.width = msLossPct + '%';
+                lossGrad.style.width = gradLossPct + '%';
+                lossPerc.style.width = percLossPct + '%';
+                
+                lossL1.innerHTML = `<span>L1: ${l1Loss.toFixed(4)}</span>`;
+                lossMS.innerHTML = `<span>MS: ${msLoss.toFixed(4)}</span>`;
+                lossGrad.innerHTML = `<span>Grad: ${gradLoss.toFixed(4)}</span>`;
+                lossPerc.innerHTML = `<span>Perc: ${percLoss.toFixed(4)}</span>`;
+            }
+            
+            // Update legend
+            document.getElementById('legendL1').textContent = l1Loss.toFixed(4);
+            document.getElementById('legendMS').textContent = msLoss.toFixed(4);
+            document.getElementById('legendGrad').textContent = gradLoss.toFixed(4);
+            document.getElementById('legendPerc').textContent = percLoss.toFixed(4);
+            document.getElementById('legendTotal').textContent = totalLoss.toFixed(4);
+        }
+        
+        function updatePeakActivity(peakValue, peakLayer) {
+            // Update indicator position (0-2.0 scale)
+            const percentage = Math.min((peakValue / 2.0) * 100, 100);
+            const indicator = document.getElementById('peakIndicator');
+            indicator.style.left = percentage + '%';
+            indicator.textContent = peakValue.toFixed(2);
+            
+            // Update info
+            document.getElementById('peakLayer').textContent = peakLayer;
+            document.getElementById('peakValue').textContent = peakValue.toFixed(3);
+            
+            // Update warning
+            const warningEl = document.getElementById('peakWarning');
+            if (peakValue > 2.0) {
+                warningEl.textContent = '🔴 EXTREME! Check training stability!';
+                warningEl.style.display = 'block';
+            } else if (peakValue > 1.5) {
+                warningEl.textContent = '⚠️ Unusually high activity!';
+                warningEl.style.display = 'block';
+            } else {
+                warningEl.style.display = 'none';
+            }
+        }
+        
         function updateLayerActivities(activityMap) {
             if (Object.keys(activityMap).length === 0) {
                 document.getElementById('backwardLayers').innerHTML = 
@@ -905,9 +1231,16 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             
             // Find max value for normalization (if values are > 1.0)
             let maxValue = 0;
+            let peakLayerName = '-';
             for (const [layerName, activityValue] of Object.entries(activityMap)) {
-                maxValue = Math.max(maxValue, activityValue);
+                if (activityValue > maxValue) {
+                    maxValue = activityValue;
+                    peakLayerName = layerName;
+                }
             }
+            
+            // Update peak activity visualization
+            updatePeakActivity(maxValue, peakLayerName);
             
             // If max > 1.0, we need to normalize
             const needsNormalization = maxValue > 1.0;
