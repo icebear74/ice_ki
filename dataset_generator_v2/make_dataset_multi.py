@@ -52,6 +52,7 @@ class DatasetGeneratorV2:
         
         self.settings = self.config['base_settings']
         self.videos = self.config['videos']
+        self.format_config = self.config.get('format_config', {})
         
         # Initialize paths
         self.base_dir = self.settings['output_base_dir']
@@ -93,6 +94,73 @@ class DatasetGeneratorV2:
         self.tracker.save()
         sys.exit(0)
     
+    def get_category_path(self, category: str) -> str:
+        """
+        Get the base path for a category.
+        Falls back to hard-coded paths for known categories,
+        or generates a default path for custom categories.
+        """
+        # Check if there's a category_paths config (future enhancement)
+        if 'category_paths' in self.config:
+            if category in self.config['category_paths']:
+                return self.config['category_paths'][category]
+        
+        # Fall back to hard-coded paths for backward compatibility
+        if category in CATEGORY_PATHS:
+            return CATEGORY_PATHS[category]
+        
+        # Generate default path for custom categories
+        # Format: CategoryName/CategoryNameModel/Learn
+        category_title = category.capitalize()
+        return f"{category_title}/{category_title}Model/Learn"
+    
+    def select_format_for_category(self, category: str) -> str:
+        """
+        Select a random format for a category based on configured distribution.
+        """
+        import random
+        
+        # Get format distribution from config
+        distribution = self.format_config.get(category, {})
+        
+        if not distribution:
+            # Fallback to hard-coded distribution if not in config
+            distribution = CATEGORY_FORMAT_DISTRIBUTION.get(category, {})
+        
+        if not distribution:
+            # Ultimate fallback
+            return 'small_540'
+        
+        formats = list(distribution.keys())
+        weights = [distribution[f].get('probability', distribution[f]) if isinstance(distribution[f], dict) else distribution[f] for f in formats]
+        return random.choices(formats, weights=weights, k=1)[0]
+    
+    def get_output_dirs_for_category_format(self, category: str, format_name: str, lr_frames: int = 5) -> dict:
+        """
+        Get output directory paths for a specific category and format.
+        
+        Args:
+            category: Category name
+            format_name: Format name (small_540, etc.)
+            lr_frames: Number of LR frames to use (5 or 7)
+        
+        Returns:
+            Dictionary with 'gt', 'lr', 'val_gt', 'val_lr' paths
+        """
+        category_path = self.get_category_path(category)
+        format_spec = FORMATS[format_name]
+        base_format_dir = format_spec['output_dir']
+        
+        # VSR++ compatible: Use 'LR' for 5-frame, 'LR_7frames' for extended
+        lr_dir_name = 'LR' if lr_frames == 5 else 'LR_7frames'
+        
+        return {
+            'gt': f"{self.base_dir}/{category_path}/{base_format_dir}/GT",
+            'lr': f"{self.base_dir}/{category_path}/{base_format_dir}/{lr_dir_name}",
+            'val_gt': f"{self.base_dir}/{category_path}/Val/GT",
+            'val_lr': f"{self.base_dir}/{category_path}/Val/LR"
+        }
+    
     def get_video_info(self, video_path: str) -> Tuple[float, float]:
         """Get video FPS and duration using ffprobe."""
         try:
@@ -119,14 +187,21 @@ class DatasetGeneratorV2:
             - Val/GT/ and Val/LR/ (validation)
         """
         for category in self.config.get('category_targets', {}).keys():
-            for format_name in CATEGORY_FORMAT_DISTRIBUTION[category].keys():
+            # Get format distribution for this category
+            category_formats = self.format_config.get(category, {})
+            
+            if not category_formats:
+                # Fallback to hard-coded distribution
+                category_formats = CATEGORY_FORMAT_DISTRIBUTION.get(category, {'small_540': 1.0})
+            
+            for format_name in category_formats.keys():
                 # Create directories for 5-frame LR (VSR++ compatible)
-                dirs_5 = get_output_dirs_for_format(self.base_dir, category, format_name, lr_frames=5)
+                dirs_5 = self.get_output_dirs_for_category_format(category, format_name, lr_frames=5)
                 for dir_path in dirs_5.values():
                     os.makedirs(dir_path, exist_ok=True)
                 
                 # Create directories for 7-frame LR (optional extended)
-                dirs_7 = get_output_dirs_for_format(self.base_dir, category, format_name, lr_frames=7)
+                dirs_7 = self.get_output_dirs_for_category_format(category, format_name, lr_frames=7)
                 for dir_path in dirs_7.values():
                     os.makedirs(dir_path, exist_ok=True)
         
@@ -218,8 +293,8 @@ class DatasetGeneratorV2:
             suffix = format_spec['suffix']
             
             # Get output directories (5-frame LR for VSR++ compatibility)
-            dirs_5 = get_output_dirs_for_format(self.base_dir, category, format_name, lr_frames=5)
-            dirs_7 = get_output_dirs_for_format(self.base_dir, category, format_name, lr_frames=7)
+            dirs_5 = self.get_output_dirs_for_category_format(category, format_name, lr_frames=5)
+            dirs_7 = self.get_output_dirs_for_category_format(category, format_name, lr_frames=7)
             
             # Generate random crop position
             max_y = 1080 - gt_h
@@ -281,7 +356,7 @@ class DatasetGeneratorV2:
             all_success = True
             for category, weight in categories.items():
                 # Select format for this category
-                format_name = select_random_format(category)
+                format_name = self.select_format_for_category(category)
                 
                 # Save with DIFFERENT random crop per category
                 success = self.save_patches(frames, category, format_name, 
