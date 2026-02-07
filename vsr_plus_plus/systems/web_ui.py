@@ -132,7 +132,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         """GET-Request-Handler"""
         if self.path == '/monitoring/data':
             self._deliver_json_snapshot()
-        elif self.path == '/monitoring/config':
+        elif self.path == '/monitoring/config' or self.path == '/config':
             self._deliver_config_json()
         elif self.path.startswith('/monitoring'):
             self._deliver_main_page()

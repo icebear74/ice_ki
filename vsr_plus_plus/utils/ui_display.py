@@ -653,9 +653,9 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
     print_line(f"ResidualBlocks: {C_CYAN}{n_blocks}{C_RESET} | Total Layers: {C_CYAN}{total_layers}{C_RESET} (incl. {fusion_layers} fusion)", ui_w)
     print_separator(ui_w, 'single')
     
-    # Display based on mode
+    # Display based on mode, passing peak layer name for marking
     _draw_activity_display(activities, display_mode, available_lines, ui_w, 
-                          bar_width_single, bar_width_double)
+                          bar_width_single, bar_width_double, peak_layer_name if activities else None)
     
     # === FOOTER ===
     print_separator(ui_w, 'double')
@@ -687,7 +687,7 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
 
 
 def _draw_activity_display(activities, display_mode, available_lines, ui_w, 
-                           bar_width_single, bar_width_double):
+                           bar_width_single, bar_width_double, peak_layer_name=None):
     """
     Draw layer activity based on selected display mode
     
@@ -707,12 +707,23 @@ def _draw_activity_display(activities, display_mode, available_lines, ui_w,
         ui_w: UI width
         bar_width_single: Width for single-column bars
         bar_width_double: Width for double-column bars
+        peak_layer_name: Name of the peak layer to highlight (optional)
     """
     if not activities:
         print_line("No activity data available", ui_w)
         return
     
     num_activities = len(activities)
+    
+    # Helper function to format a layer line with peak marker
+    def format_layer_line(name, act, bar_width, is_peak=False):
+        """Format a single layer activity line with optional peak marker"""
+        bar = get_bar_for_layer(name, act, bar_width)
+        if is_peak:
+            # Add prominent peak marker
+            return f"{C_BOLD}{C_YELLOW}▶{C_RESET} {name:<18}: {bar} {C_BOLD}{C_YELLOW}{act:>3}%{C_RESET} {C_YELLOW}◀ PEAK{C_RESET}"
+        else:
+            return f"  {name:<18}: {bar} {act:>3}%"
     
     if display_mode == 0:
         # MODE 0: NEW 2-Column Detailed Layout
@@ -749,21 +760,33 @@ def _draw_activity_display(activities, display_mode, available_lines, ui_w,
             
             if i < len(backward_layers):
                 name, act, trend, raw = backward_layers[i]
+                is_peak = (name == peak_layer_name)
                 # Extract number from "Backward N" format (e.g., "Backward 1" -> "B1")
                 if name.startswith("Backward ") and name.split()[-1].isdigit():
                     short_name = f"B{name.split()[-1]}"
                 else:
                     short_name = name[:4]  # Fallback: first 4 chars
-                left_str = f"{short_name:>4}: {get_bar_for_layer(name, act, bar_width_double)} {act:>3}%"
+                
+                bar = get_bar_for_layer(name, act, bar_width_double)
+                if is_peak:
+                    left_str = f"{C_YELLOW}▶{C_RESET}{short_name:>3}: {bar} {C_BOLD}{C_YELLOW}{act:>3}%{C_RESET}"
+                else:
+                    left_str = f" {short_name:>3}: {bar} {act:>3}%"
             
             if i < len(forward_layers):
                 name, act, trend, raw = forward_layers[i]
+                is_peak = (name == peak_layer_name)
                 # Extract number from "Forward N" format (e.g., "Forward 1" -> "F1")
                 if name.startswith("Forward ") and name.split()[-1].isdigit():
                     short_name = f"F{name.split()[-1]}"
                 else:
                     short_name = name[:4]  # Fallback: first 4 chars
-                right_str = f"{short_name:>4}: {get_bar_for_layer(name, act, bar_width_double)} {act:>3}%"
+                
+                bar = get_bar_for_layer(name, act, bar_width_double)
+                if is_peak:
+                    right_str = f"{C_YELLOW}▶{C_RESET}{short_name:>3}: {bar} {C_BOLD}{C_YELLOW}{act:>3}%{C_RESET}"
+                else:
+                    right_str = f" {short_name:>3}: {bar} {act:>3}%"
             
             print_two_columns(left_str, right_str, ui_w)
         
@@ -771,12 +794,21 @@ def _draw_activity_display(activities, display_mode, available_lines, ui_w,
         if fusion_layers:
             print_separator(ui_w, 'thin')
             for name, act, trend, raw in fusion_layers:
+                is_peak = (name == peak_layer_name)
+                bar = get_bar_for_layer(name, act, bar_width_single)
+                
                 if "Final" in name:
                     # Final fusion gets special treatment - centered
-                    print_line(f"{C_BOLD}{name:^20}{C_RESET}: {get_bar_for_layer(name, act, bar_width_single)} {act:>3}%", ui_w)
+                    if is_peak:
+                        print_line(f"{C_YELLOW}▶{C_RESET} {C_BOLD}{name:^18}{C_RESET}: {bar} {C_BOLD}{C_YELLOW}{act:>3}%{C_RESET} {C_YELLOW}◀ PEAK{C_RESET}", ui_w)
+                    else:
+                        print_line(f"  {C_BOLD}{name:^18}{C_RESET}: {bar} {act:>3}%", ui_w)
                 else:
                     # Other fusion layers (Backward Fuse, Forward Fuse)
-                    print_line(f"{name:<20}: {get_bar_for_layer(name, act, bar_width_single)} {act:>3}%", ui_w)
+                    if is_peak:
+                        print_line(f"{C_YELLOW}▶{C_RESET} {name:<18}: {bar} {C_BOLD}{C_YELLOW}{act:>3}%{C_RESET} {C_YELLOW}◀ PEAK{C_RESET}", ui_w)
+                    else:
+                        print_line(f"  {name:<18}: {bar} {act:>3}%", ui_w)
     
     elif display_mode == 1:
         # MODE 1: Grouped by Trunk → Sorted by Activity
@@ -805,13 +837,30 @@ def _draw_activity_display(activities, display_mode, available_lines, ui_w,
         
         if available_lines >= num_activities:
             for name, act, trend, raw in backward_layers:
-                print_line(f"{name:<20}: {get_bar_for_layer(name, act, bar_width_single)} {act:>3}%", ui_w)
+                is_peak = (name == peak_layer_name)
+                print_line(format_layer_line(name, act, bar_width_single, is_peak), ui_w)
         else:
             for row in range(0, len(backward_layers), 2):
                 left = backward_layers[row]
                 right = backward_layers[row+1] if row+1 < len(backward_layers) else None
-                left_str = f"{left[0]:<18}:{get_bar_for_layer(left[0], left[1], bar_width_double)}{left[1]:3}%"
-                right_str = f"{right[0]:<18}:{get_bar_for_layer(right[0], right[1], bar_width_double)}{right[1]:3}%" if right else ""
+                
+                left_is_peak = (left[0] == peak_layer_name)
+                left_bar = get_bar_for_layer(left[0], left[1], bar_width_double)
+                if left_is_peak:
+                    left_str = f"{C_YELLOW}▶{C_RESET}{left[0]:<16}:{left_bar}{C_BOLD}{C_YELLOW}{left[1]:3}%{C_RESET}"
+                else:
+                    left_str = f" {left[0]:<16}:{left_bar}{left[1]:3}%"
+                
+                if right:
+                    right_is_peak = (right[0] == peak_layer_name)
+                    right_bar = get_bar_for_layer(right[0], right[1], bar_width_double)
+                    if right_is_peak:
+                        right_str = f"{C_YELLOW}▶{C_RESET}{right[0]:<16}:{right_bar}{C_BOLD}{C_YELLOW}{right[1]:3}%{C_RESET}"
+                    else:
+                        right_str = f" {right[0]:<16}:{right_bar}{right[1]:3}%"
+                else:
+                    right_str = ""
+                
                 print_two_columns(left_str, right_str, ui_w)
         
         print_separator(ui_w, 'double')
@@ -820,32 +869,67 @@ def _draw_activity_display(activities, display_mode, available_lines, ui_w,
         
         if available_lines >= num_activities:
             for name, act, trend, raw in forward_layers:
-                print_line(f"{name:<20}: {get_bar_for_layer(name, act, bar_width_single)} {act:>3}%", ui_w)
+                is_peak = (name == peak_layer_name)
+                print_line(format_layer_line(name, act, bar_width_single, is_peak), ui_w)
         else:
             for row in range(0, len(forward_layers), 2):
                 left = forward_layers[row]
                 right = forward_layers[row+1] if row+1 < len(forward_layers) else None
-                left_str = f"{left[0]:<18}:{get_bar_for_layer(left[0], left[1], bar_width_double)}{left[1]:3}%"
-                right_str = f"{right[0]:<18}:{get_bar_for_layer(right[0], right[1], bar_width_double)}{right[1]:3}%" if right else ""
+                
+                left_is_peak = (left[0] == peak_layer_name)
+                left_bar = get_bar_for_layer(left[0], left[1], bar_width_double)
+                if left_is_peak:
+                    left_str = f"{C_YELLOW}▶{C_RESET}{left[0]:<16}:{left_bar}{C_BOLD}{C_YELLOW}{left[1]:3}%{C_RESET}"
+                else:
+                    left_str = f" {left[0]:<16}:{left_bar}{left[1]:3}%"
+                
+                if right:
+                    right_is_peak = (right[0] == peak_layer_name)
+                    right_bar = get_bar_for_layer(right[0], right[1], bar_width_double)
+                    if right_is_peak:
+                        right_str = f"{C_YELLOW}▶{C_RESET}{right[0]:<16}:{right_bar}{C_BOLD}{C_YELLOW}{right[1]:3}%{C_RESET}"
+                    else:
+                        right_str = f" {right[0]:<16}:{right_bar}{right[1]:3}%"
+                else:
+                    right_str = ""
+                
                 print_two_columns(left_str, right_str, ui_w)
         
         # Print fusion layers at end
         if fusion_layers:
             print_separator(ui_w, 'double')
             for name, act, trend, raw in fusion_layers:
-                print_line(f"{name:<20}: {get_bar_for_layer(name, act, bar_width_single)} {act:>3}%", ui_w)
+                is_peak = (name == peak_layer_name)
+                print_line(format_layer_line(name, act, bar_width_single, is_peak), ui_w)
     
     elif display_mode == 2:
         # MODE 2: Flat List → Sorted by Position
         if available_lines >= num_activities:
             for name, act, trend, raw in activities:
-                print_line(f"{name:<20}: {get_bar_for_layer(name, act, bar_width_single)} {act:>3}%", ui_w)
+                is_peak = (name == peak_layer_name)
+                print_line(format_layer_line(name, act, bar_width_single, is_peak), ui_w)
         else:
             for row in range(0, num_activities, 2):
                 left = activities[row]
                 right = activities[row+1] if row+1 < num_activities else None
-                left_str = f"{left[0]:<18}:{get_bar_for_layer(left[0], left[1], bar_width_double)}{left[1]:3}%"
-                right_str = f"{right[0]:<18}:{get_bar_for_layer(right[0], right[1], bar_width_double)}{right[1]:3}%" if right else ""
+                
+                left_is_peak = (left[0] == peak_layer_name)
+                left_bar = get_bar_for_layer(left[0], left[1], bar_width_double)
+                if left_is_peak:
+                    left_str = f"{C_YELLOW}▶{C_RESET}{left[0]:<16}:{left_bar}{C_BOLD}{C_YELLOW}{left[1]:3}%{C_RESET}"
+                else:
+                    left_str = f" {left[0]:<16}:{left_bar}{left[1]:3}%"
+                
+                if right:
+                    right_is_peak = (right[0] == peak_layer_name)
+                    right_bar = get_bar_for_layer(right[0], right[1], bar_width_double)
+                    if right_is_peak:
+                        right_str = f"{C_YELLOW}▶{C_RESET}{right[0]:<16}:{right_bar}{C_BOLD}{C_YELLOW}{right[1]:3}%{C_RESET}"
+                    else:
+                        right_str = f" {right[0]:<16}:{right_bar}{right[1]:3}%"
+                else:
+                    right_str = ""
+                
                 print_two_columns(left_str, right_str, ui_w)
     
     else:  # display_mode == 3
@@ -854,11 +938,28 @@ def _draw_activity_display(activities, display_mode, available_lines, ui_w,
         
         if available_lines >= num_activities:
             for name, act, trend, raw in sorted_acts:
-                print_line(f"{name:<20}: {get_bar_for_layer(name, act, bar_width_single)} {act:>3}%", ui_w)
+                is_peak = (name == peak_layer_name)
+                print_line(format_layer_line(name, act, bar_width_single, is_peak), ui_w)
         else:
             for row in range(0, num_activities, 2):
                 left = sorted_acts[row]
                 right = sorted_acts[row+1] if row+1 < num_activities else None
-                left_str = f"{left[0]:<18}:{get_bar_for_layer(left[0], left[1], bar_width_double)}{left[1]:3}%"
-                right_str = f"{right[0]:<18}:{get_bar_for_layer(right[0], right[1], bar_width_double)}{right[1]:3}%" if right else ""
+                
+                left_is_peak = (left[0] == peak_layer_name)
+                left_bar = get_bar_for_layer(left[0], left[1], bar_width_double)
+                if left_is_peak:
+                    left_str = f"{C_YELLOW}▶{C_RESET}{left[0]:<16}:{left_bar}{C_BOLD}{C_YELLOW}{left[1]:3}%{C_RESET}"
+                else:
+                    left_str = f" {left[0]:<16}:{left_bar}{left[1]:3}%"
+                
+                if right:
+                    right_is_peak = (right[0] == peak_layer_name)
+                    right_bar = get_bar_for_layer(right[0], right[1], bar_width_double)
+                    if right_is_peak:
+                        right_str = f"{C_YELLOW}▶{C_RESET}{right[0]:<16}:{right_bar}{C_BOLD}{C_YELLOW}{right[1]:3}%{C_RESET}"
+                    else:
+                        right_str = f" {right[0]:<16}:{right_bar}{right[1]:3}%"
+                else:
+                    right_str = ""
+                
                 print_two_columns(left_str, right_str, ui_w)

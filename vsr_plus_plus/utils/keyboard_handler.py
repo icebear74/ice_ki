@@ -78,9 +78,12 @@ class KeyboardHandler:
                 'LR_EXPONENT', 'WEIGHT_DECAY', 'VAL_STEP_EVERY', 
                 'SAVE_STEP_EVERY', 'LOG_TBOARD_EVERY', 'HIST_STEP_EVERY',
                 'ACCUMULATION_STEPS', 'DISPLAY_MODE', 'GRAD_CLIP',
-                # Runtime config parameters
+                # Runtime config parameters - SAFE
                 'plateau_patience', 'plateau_safety_threshold', 'cooldown_duration',
-                'max_lr', 'min_lr', 'initial_grad_clip'
+                'max_lr', 'min_lr', 'initial_grad_clip',
+                'log_tboard_every', 'val_step_every', 'save_step_every',
+                # Runtime config parameters - CAREFUL (loss weights)
+                'l1_weight_target', 'ms_weight_target', 'grad_weight_target', 'perceptual_weight_target'
             ]
             
             # Display current values
@@ -129,27 +132,30 @@ class KeyboardHandler:
                     elif k_name == "WEIGHT_DECAY":
                         config[k_name] = float(new_val)
                     
-                    # Runtime config parameters
-                    elif k_name in ['plateau_patience', 'plateau_safety_threshold', 'cooldown_duration']:
+                    # Runtime config parameters - safe interval parameters
+                    elif k_name in ['plateau_patience', 'plateau_safety_threshold', 'cooldown_duration',
+                                   'log_tboard_every', 'val_step_every', 'save_step_every']:
                         config[k_name] = int(new_val)
                         # Update runtime config if trainer has it
                         if trainer and hasattr(trainer, 'runtime_config') and trainer.runtime_config:
                             trainer.runtime_config.set(k_name, int(new_val))
                             print(f"✅ Runtime config updated via trainer")
                     
-                    elif k_name in ['max_lr', 'min_lr']:
+                    elif k_name in ['max_lr', 'min_lr', 'initial_grad_clip']:
                         config[k_name] = float(new_val)
                         # Update runtime config if trainer has it
                         if trainer and hasattr(trainer, 'runtime_config') and trainer.runtime_config:
                             trainer.runtime_config.set(k_name, float(new_val))
                             print(f"✅ Runtime config updated via trainer")
                     
-                    elif k_name == "initial_grad_clip":
+                    # Runtime config parameters - careful (loss weights)
+                    elif k_name in ['l1_weight_target', 'ms_weight_target', 'grad_weight_target', 'perceptual_weight_target']:
                         config[k_name] = float(new_val)
                         # Update runtime config if trainer has it
                         if trainer and hasattr(trainer, 'runtime_config') and trainer.runtime_config:
                             trainer.runtime_config.set(k_name, float(new_val))
                             print(f"✅ Runtime config updated via trainer")
+                            print(f"⚠️  Note: Loss weights must sum to ~1.0 for proper training")
                     
                     else:
                         # Try to preserve type
