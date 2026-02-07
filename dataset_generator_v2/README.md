@@ -4,7 +4,7 @@ A powerful dataset generator for creating multi-category training patches from U
 
 ## 🎯 Overview
 
-This generator processes ~497 UHD videos and creates training patches with:
+This generator processes 530+ UHD videos and creates training patches with:
 - **Dual LR generation**: Both 5-frame and 7-frame versions for flexibility
 - **Multi-category support**: Single videos can contribute to multiple categories
 - **Beautiful live GUI**: Real-time progress monitoring with rich terminal UI

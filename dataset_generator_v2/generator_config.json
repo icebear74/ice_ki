@@ -11,7 +11,6 @@
     "max_retry_attempts": 10,
     "retry_skip_seconds": 60
   },
-  
   "videos": [
     {
       "name": "Ready Player One",
@@ -20,8 +19,7 @@
         "general": 0.4,
         "space": 0.3,
         "toon": 0.3
-      },
-      "skip_test_editions": true
+      }
     },
     {
       "name": "Avatar (2009)",
@@ -33,7 +31,7 @@
       }
     },
     {
-      "name": "Avatar 2",
+      "name": "Avatar The Way of Water",
       "path": "/mnt/data/video/FilmeUHD/Avatar The Way of Water (2022)/Avatar The Way of Water (2022).mkv",
       "categories": {
         "general": 0.3,
@@ -73,102 +71,265 @@
         "space": 0.7
       }
     },
-    
     {
-      "name": "Planet Earth 2 - S01E01 - Islands",
+      "name": "Blade Runner 2049",
+      "path": "/mnt/data/video/FilmeUHD/Blade Runner 2049 (2017)/Blade Runner 2049 (2017).mkv",
+      "categories": {
+        "general": 0.5,
+        "space": 0.5
+      }
+    },
+    {
+      "name": "Guardians of the Galaxy",
+      "path": "/mnt/data/video/FilmeUHD/Guardians of the Galaxy (2014)/Guardians of the Galaxy (2014).mkv",
+      "categories": {
+        "general": 0.4,
+        "space": 0.6
+      }
+    },
+    {
+      "name": "Guardians of the Galaxy Vol 2",
+      "path": "/mnt/data/video/FilmeUHD/Guardians of the Galaxy Vol 2 (2017)/Guardians of the Galaxy Vol 2 (2017).mkv",
+      "categories": {
+        "general": 0.4,
+        "space": 0.6
+      }
+    },
+    {
+      "name": "Thor Ragnarok",
+      "path": "/mnt/data/video/FilmeUHD/Thor Ragnarok (2017)/Thor Ragnarok (2017).mkv",
+      "categories": {
+        "general": 0.5,
+        "space": 0.5
+      }
+    },
+    {
+      "name": "Planet Earth 2 - S01E01",
       "path": "/mnt/data/video/SerieUHD/Planet Earth 2/S01E01.mkv",
       "categories": {
         "general": 1.0
       }
     },
     {
-      "name": "Planet Earth 2 - S01E02 - Mountains",
+      "name": "Planet Earth 2 - S01E02",
       "path": "/mnt/data/video/SerieUHD/Planet Earth 2/S01E02.mkv",
       "categories": {
         "general": 1.0
       }
     },
     {
-      "name": "Planet Earth 2 - S01E03 - Jungles",
+      "name": "Planet Earth 2 - S01E03",
       "path": "/mnt/data/video/SerieUHD/Planet Earth 2/S01E03.mkv",
       "categories": {
         "general": 1.0
       }
     },
     {
-      "name": "Planet Earth 2 - S01E04 - Deserts",
+      "name": "Planet Earth 2 - S01E04",
       "path": "/mnt/data/video/SerieUHD/Planet Earth 2/S01E04.mkv",
       "categories": {
         "general": 1.0
       }
     },
     {
-      "name": "Planet Earth 2 - S01E05 - Grasslands",
+      "name": "Planet Earth 2 - S01E05",
       "path": "/mnt/data/video/SerieUHD/Planet Earth 2/S01E05.mkv",
       "categories": {
         "general": 1.0
       }
     },
     {
-      "name": "Planet Earth 2 - S01E06 - Cities",
+      "name": "Planet Earth 2 - S01E06",
       "path": "/mnt/data/video/SerieUHD/Planet Earth 2/S01E06.mkv",
       "categories": {
         "general": 1.0
       }
     },
     {
-      "name": "Oppenheimer",
-      "path": "/mnt/data/video/FilmeUHD/Oppenheimer (2023)/Oppenheimer (2023).mkv",
+      "name": "Planet Earth - S01E01",
+      "path": "/mnt/data/video/SerieUHD/Planet Earth/S01E01.mkv",
       "categories": {
         "general": 1.0
       }
     },
     {
-      "name": "Top Gun Maverick",
-      "path": "/mnt/data/video/FilmeUHD/Top Gun Maverick (2022)/Top Gun Maverick (2022).mkv",
+      "name": "Planet Earth - S01E02",
+      "path": "/mnt/data/video/SerieUHD/Planet Earth/S01E02.mkv",
       "categories": {
         "general": 1.0
       }
     },
     {
-      "name": "Gladiator II",
-      "path": "/mnt/data/video/FilmeUHD/Gladiator II (2024)/Gladiator II (2024).mkv",
+      "name": "Planet Earth - S01E03",
+      "path": "/mnt/data/video/SerieUHD/Planet Earth/S01E03.mkv",
       "categories": {
         "general": 1.0
       }
     },
     {
-      "name": "The Dark Knight",
-      "path": "/mnt/data/video/FilmeUHD/The Dark Knight (2008)/The Dark Knight (2008).mkv",
+      "name": "Planet Earth - S01E04",
+      "path": "/mnt/data/video/SerieUHD/Planet Earth/S01E04.mkv",
       "categories": {
         "general": 1.0
       }
     },
     {
-      "name": "The Dark Knight Rises",
-      "path": "/mnt/data/video/FilmeUHD/The Dark Knight Rises (2012)/The Dark Knight Rises (2012).mkv",
+      "name": "Planet Earth - S01E05",
+      "path": "/mnt/data/video/SerieUHD/Planet Earth/S01E05.mkv",
       "categories": {
         "general": 1.0
       }
     },
     {
-      "name": "Batman Begins",
-      "path": "/mnt/data/video/FilmeUHD/Batman Begins (2005)/Batman Begins (2005).mkv",
+      "name": "Planet Earth - S01E06",
+      "path": "/mnt/data/video/SerieUHD/Planet Earth/S01E06.mkv",
       "categories": {
         "general": 1.0
       }
     },
     {
-      "name": "Forrest Gump",
-      "path": "/mnt/data/video/FilmeUHD/Forrest Gump (1994)/Forrest Gump (1994).mkv",
+      "name": "Planet Earth - S01E07",
+      "path": "/mnt/data/video/SerieUHD/Planet Earth/S01E07.mkv",
       "categories": {
         "general": 1.0
       }
     },
-    
+    {
+      "name": "Planet Earth - S01E08",
+      "path": "/mnt/data/video/SerieUHD/Planet Earth/S01E08.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Planet Earth - S01E09",
+      "path": "/mnt/data/video/SerieUHD/Planet Earth/S01E09.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Planet Earth - S01E10",
+      "path": "/mnt/data/video/SerieUHD/Planet Earth/S01E10.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Planet Earth - S01E11",
+      "path": "/mnt/data/video/SerieUHD/Planet Earth/S01E11.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Blue Planet 2 - S01E01",
+      "path": "/mnt/data/video/SerieUHD/Blue Planet 2/S01E01.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Blue Planet 2 - S01E02",
+      "path": "/mnt/data/video/SerieUHD/Blue Planet 2/S01E02.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Blue Planet 2 - S01E03",
+      "path": "/mnt/data/video/SerieUHD/Blue Planet 2/S01E03.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Blue Planet 2 - S01E04",
+      "path": "/mnt/data/video/SerieUHD/Blue Planet 2/S01E04.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Blue Planet 2 - S01E05",
+      "path": "/mnt/data/video/SerieUHD/Blue Planet 2/S01E05.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Blue Planet 2 - S01E06",
+      "path": "/mnt/data/video/SerieUHD/Blue Planet 2/S01E06.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Blue Planet 2 - S01E07",
+      "path": "/mnt/data/video/SerieUHD/Blue Planet 2/S01E07.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Our Planet - S01E01",
+      "path": "/mnt/data/video/SerieUHD/Our Planet/S01E01.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Our Planet - S01E02",
+      "path": "/mnt/data/video/SerieUHD/Our Planet/S01E02.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Our Planet - S01E03",
+      "path": "/mnt/data/video/SerieUHD/Our Planet/S01E03.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Our Planet - S01E04",
+      "path": "/mnt/data/video/SerieUHD/Our Planet/S01E04.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Our Planet - S01E05",
+      "path": "/mnt/data/video/SerieUHD/Our Planet/S01E05.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Our Planet - S01E06",
+      "path": "/mnt/data/video/SerieUHD/Our Planet/S01E06.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Our Planet - S01E07",
+      "path": "/mnt/data/video/SerieUHD/Our Planet/S01E07.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Our Planet - S01E08",
+      "path": "/mnt/data/video/SerieUHD/Our Planet/S01E08.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
     {
       "name": "Star Trek (2009)",
-      "path": "/mnt/data/video/FilmeUHD/Star Trek (2009)/Star Trek (2009).mkv",
+      "path": "/mnt/data/video/FilmeUHD/Star Trek (2009) (2009)/Star Trek (2009) (2009).mkv",
       "categories": {
         "space": 1.0
       }
@@ -188,6 +349,76 @@
       }
     },
     {
+      "name": "Star Trek The Motion Picture",
+      "path": "/mnt/data/video/FilmeUHD/Star Trek The Motion Picture (1979)/Star Trek The Motion Picture (1979).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek II The Wrath of Khan",
+      "path": "/mnt/data/video/FilmeUHD/Star Trek II The Wrath of Khan (1982)/Star Trek II The Wrath of Khan (1982).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek III The Search for Spock",
+      "path": "/mnt/data/video/FilmeUHD/Star Trek III The Search for Spock (1984)/Star Trek III The Search for Spock (1984).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek IV The Voyage Home",
+      "path": "/mnt/data/video/FilmeUHD/Star Trek IV The Voyage Home (1986)/Star Trek IV The Voyage Home (1986).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek V The Final Frontier",
+      "path": "/mnt/data/video/FilmeUHD/Star Trek V The Final Frontier (1989)/Star Trek V The Final Frontier (1989).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek VI The Undiscovered Country",
+      "path": "/mnt/data/video/FilmeUHD/Star Trek VI The Undiscovered Country (1991)/Star Trek VI The Undiscovered Country (1991).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Generations",
+      "path": "/mnt/data/video/FilmeUHD/Star Trek Generations (1994)/Star Trek Generations (1994).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek First Contact",
+      "path": "/mnt/data/video/FilmeUHD/Star Trek First Contact (1996)/Star Trek First Contact (1996).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Insurrection",
+      "path": "/mnt/data/video/FilmeUHD/Star Trek Insurrection (1998)/Star Trek Insurrection (1998).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Nemesis",
+      "path": "/mnt/data/video/FilmeUHD/Star Trek Nemesis (2002)/Star Trek Nemesis (2002).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
       "name": "Star Trek Strange New Worlds - S01E01",
       "path": "/mnt/data/video/SerieUHD/Star Trek Strange New Worlds/S01E01.mkv",
       "categories": {
@@ -202,43 +433,575 @@
       }
     },
     {
-      "name": "Star Wars Episode IV - A New Hope",
-      "path": "/mnt/data/video/FilmeUHD/Star Wars Episode IV (1977)/Star Wars Episode IV (1977).mkv",
+      "name": "Star Trek Strange New Worlds - S01E03",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Strange New Worlds/S01E03.mkv",
       "categories": {
         "space": 1.0
       }
     },
     {
-      "name": "Star Wars Episode V - The Empire Strikes Back",
-      "path": "/mnt/data/video/FilmeUHD/Star Wars Episode V (1980)/Star Wars Episode V (1980).mkv",
+      "name": "Star Trek Strange New Worlds - S01E04",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Strange New Worlds/S01E04.mkv",
       "categories": {
         "space": 1.0
       }
     },
     {
-      "name": "Star Wars Episode VI - Return of the Jedi",
-      "path": "/mnt/data/video/FilmeUHD/Star Wars Episode VI (1983)/Star Wars Episode VI (1983).mkv",
+      "name": "Star Trek Strange New Worlds - S01E05",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Strange New Worlds/S01E05.mkv",
       "categories": {
         "space": 1.0
       }
     },
     {
-      "name": "Star Wars Episode VII - The Force Awakens",
-      "path": "/mnt/data/video/FilmeUHD/Star Wars Episode VII (2015)/Star Wars Episode VII (2015).mkv",
+      "name": "Star Trek Strange New Worlds - S01E06",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Strange New Worlds/S01E06.mkv",
       "categories": {
         "space": 1.0
       }
     },
     {
-      "name": "Star Wars Episode VIII - The Last Jedi",
-      "path": "/mnt/data/video/FilmeUHD/Star Wars Episode VIII (2017)/Star Wars Episode VIII (2017).mkv",
+      "name": "Star Trek Strange New Worlds - S01E07",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Strange New Worlds/S01E07.mkv",
       "categories": {
         "space": 1.0
       }
     },
     {
-      "name": "Star Wars Episode IX - The Rise of Skywalker",
-      "path": "/mnt/data/video/FilmeUHD/Star Wars Episode IX (2019)/Star Wars Episode IX (2019).mkv",
+      "name": "Star Trek Strange New Worlds - S01E08",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Strange New Worlds/S01E08.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Strange New Worlds - S01E09",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Strange New Worlds/S01E09.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Strange New Worlds - S01E10",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Strange New Worlds/S01E10.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Strange New Worlds - S02E01",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Strange New Worlds/S02E01.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Strange New Worlds - S02E02",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Strange New Worlds/S02E02.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Strange New Worlds - S02E03",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Strange New Worlds/S02E03.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Strange New Worlds - S02E04",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Strange New Worlds/S02E04.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Strange New Worlds - S02E05",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Strange New Worlds/S02E05.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Strange New Worlds - S02E06",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Strange New Worlds/S02E06.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Strange New Worlds - S02E07",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Strange New Worlds/S02E07.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Strange New Worlds - S02E08",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Strange New Worlds/S02E08.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Strange New Worlds - S02E09",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Strange New Worlds/S02E09.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Strange New Worlds - S02E10",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Strange New Worlds/S02E10.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Discovery - S01E01",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Discovery/S01E01.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Discovery - S01E02",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Discovery/S01E02.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Discovery - S01E03",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Discovery/S01E03.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Discovery - S01E04",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Discovery/S01E04.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Discovery - S01E05",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Discovery/S01E05.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Discovery - S01E06",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Discovery/S01E06.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Discovery - S01E07",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Discovery/S01E07.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Discovery - S01E08",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Discovery/S01E08.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Discovery - S01E09",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Discovery/S01E09.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Discovery - S01E10",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Discovery/S01E10.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Discovery - S01E11",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Discovery/S01E11.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Discovery - S01E12",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Discovery/S01E12.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Discovery - S01E13",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Discovery/S01E13.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Discovery - S01E14",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Discovery/S01E14.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Discovery - S01E15",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Discovery/S01E15.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Discovery - S02E01",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Discovery/S02E01.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Discovery - S02E02",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Discovery/S02E02.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Discovery - S02E03",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Discovery/S02E03.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Discovery - S02E04",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Discovery/S02E04.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Discovery - S02E05",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Discovery/S02E05.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Discovery - S02E06",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Discovery/S02E06.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Discovery - S02E07",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Discovery/S02E07.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Discovery - S02E08",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Discovery/S02E08.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Discovery - S02E09",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Discovery/S02E09.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Discovery - S02E10",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Discovery/S02E10.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Discovery - S02E11",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Discovery/S02E11.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Discovery - S02E12",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Discovery/S02E12.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Discovery - S02E13",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Discovery/S02E13.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Discovery - S02E14",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Discovery/S02E14.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Episode I The Phantom Menace",
+      "path": "/mnt/data/video/FilmeUHD/Star Wars Episode I The Phantom Menace (1999)/Star Wars Episode I The Phantom Menace (1999).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Episode II Attack of the Clones",
+      "path": "/mnt/data/video/FilmeUHD/Star Wars Episode II Attack of the Clones (2002)/Star Wars Episode II Attack of the Clones (2002).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Episode III Revenge of the Sith",
+      "path": "/mnt/data/video/FilmeUHD/Star Wars Episode III Revenge of the Sith (2005)/Star Wars Episode III Revenge of the Sith (2005).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Episode IV A New Hope",
+      "path": "/mnt/data/video/FilmeUHD/Star Wars Episode IV A New Hope (1977)/Star Wars Episode IV A New Hope (1977).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Episode V The Empire Strikes Back",
+      "path": "/mnt/data/video/FilmeUHD/Star Wars Episode V The Empire Strikes Back (1980)/Star Wars Episode V The Empire Strikes Back (1980).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Episode VI Return of the Jedi",
+      "path": "/mnt/data/video/FilmeUHD/Star Wars Episode VI Return of the Jedi (1983)/Star Wars Episode VI Return of the Jedi (1983).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Episode VII The Force Awakens",
+      "path": "/mnt/data/video/FilmeUHD/Star Wars Episode VII The Force Awakens (2015)/Star Wars Episode VII The Force Awakens (2015).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Episode VIII The Last Jedi",
+      "path": "/mnt/data/video/FilmeUHD/Star Wars Episode VIII The Last Jedi (2017)/Star Wars Episode VIII The Last Jedi (2017).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Episode IX The Rise of Skywalker",
+      "path": "/mnt/data/video/FilmeUHD/Star Wars Episode IX The Rise of Skywalker (2019)/Star Wars Episode IX The Rise of Skywalker (2019).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Rogue One A Star Wars Story",
+      "path": "/mnt/data/video/FilmeUHD/Rogue One (2016)/Rogue One (2016).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Solo A Star Wars Story",
+      "path": "/mnt/data/video/FilmeUHD/Solo (2018)/Solo (2018).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Mandalorian - S01E01",
+      "path": "/mnt/data/video/SerieUHD/The Mandalorian/S01E01.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Mandalorian - S01E02",
+      "path": "/mnt/data/video/SerieUHD/The Mandalorian/S01E02.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Mandalorian - S01E03",
+      "path": "/mnt/data/video/SerieUHD/The Mandalorian/S01E03.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Mandalorian - S01E04",
+      "path": "/mnt/data/video/SerieUHD/The Mandalorian/S01E04.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Mandalorian - S01E05",
+      "path": "/mnt/data/video/SerieUHD/The Mandalorian/S01E05.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Mandalorian - S01E06",
+      "path": "/mnt/data/video/SerieUHD/The Mandalorian/S01E06.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Mandalorian - S01E07",
+      "path": "/mnt/data/video/SerieUHD/The Mandalorian/S01E07.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Mandalorian - S01E08",
+      "path": "/mnt/data/video/SerieUHD/The Mandalorian/S01E08.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Mandalorian - S02E01",
+      "path": "/mnt/data/video/SerieUHD/The Mandalorian/S02E01.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Mandalorian - S02E02",
+      "path": "/mnt/data/video/SerieUHD/The Mandalorian/S02E02.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Mandalorian - S02E03",
+      "path": "/mnt/data/video/SerieUHD/The Mandalorian/S02E03.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Mandalorian - S02E04",
+      "path": "/mnt/data/video/SerieUHD/The Mandalorian/S02E04.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Mandalorian - S02E05",
+      "path": "/mnt/data/video/SerieUHD/The Mandalorian/S02E05.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Mandalorian - S02E06",
+      "path": "/mnt/data/video/SerieUHD/The Mandalorian/S02E06.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Mandalorian - S02E07",
+      "path": "/mnt/data/video/SerieUHD/The Mandalorian/S02E07.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Mandalorian - S02E08",
+      "path": "/mnt/data/video/SerieUHD/The Mandalorian/S02E08.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Mandalorian - S03E01",
+      "path": "/mnt/data/video/SerieUHD/The Mandalorian/S03E01.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Mandalorian - S03E02",
+      "path": "/mnt/data/video/SerieUHD/The Mandalorian/S03E02.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Mandalorian - S03E03",
+      "path": "/mnt/data/video/SerieUHD/The Mandalorian/S03E03.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Mandalorian - S03E04",
+      "path": "/mnt/data/video/SerieUHD/The Mandalorian/S03E04.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Mandalorian - S03E05",
+      "path": "/mnt/data/video/SerieUHD/The Mandalorian/S03E05.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Mandalorian - S03E06",
+      "path": "/mnt/data/video/SerieUHD/The Mandalorian/S03E06.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Mandalorian - S03E07",
+      "path": "/mnt/data/video/SerieUHD/The Mandalorian/S03E07.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Mandalorian - S03E08",
+      "path": "/mnt/data/video/SerieUHD/The Mandalorian/S03E08.mkv",
       "categories": {
         "space": 1.0
       }
@@ -251,8 +1014,225 @@
       }
     },
     {
+      "name": "Star Wars Obi-Wan Kenobi - S01E02",
+      "path": "/mnt/data/video/SerieUHD/Star Wars Obi-Wan Kenobi/S01E02.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Obi-Wan Kenobi - S01E03",
+      "path": "/mnt/data/video/SerieUHD/Star Wars Obi-Wan Kenobi/S01E03.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Obi-Wan Kenobi - S01E04",
+      "path": "/mnt/data/video/SerieUHD/Star Wars Obi-Wan Kenobi/S01E04.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Obi-Wan Kenobi - S01E05",
+      "path": "/mnt/data/video/SerieUHD/Star Wars Obi-Wan Kenobi/S01E05.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Obi-Wan Kenobi - S01E06",
+      "path": "/mnt/data/video/SerieUHD/Star Wars Obi-Wan Kenobi/S01E06.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
       "name": "Star Wars Ahsoka - S01E01",
       "path": "/mnt/data/video/SerieUHD/Star Wars Ahsoka/S01E01.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Ahsoka - S01E02",
+      "path": "/mnt/data/video/SerieUHD/Star Wars Ahsoka/S01E02.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Ahsoka - S01E03",
+      "path": "/mnt/data/video/SerieUHD/Star Wars Ahsoka/S01E03.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Ahsoka - S01E04",
+      "path": "/mnt/data/video/SerieUHD/Star Wars Ahsoka/S01E04.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Ahsoka - S01E05",
+      "path": "/mnt/data/video/SerieUHD/Star Wars Ahsoka/S01E05.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Ahsoka - S01E06",
+      "path": "/mnt/data/video/SerieUHD/Star Wars Ahsoka/S01E06.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Ahsoka - S01E07",
+      "path": "/mnt/data/video/SerieUHD/Star Wars Ahsoka/S01E07.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Ahsoka - S01E08",
+      "path": "/mnt/data/video/SerieUHD/Star Wars Ahsoka/S01E08.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Andor - S01E01",
+      "path": "/mnt/data/video/SerieUHD/Star Wars Andor/S01E01.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Andor - S01E02",
+      "path": "/mnt/data/video/SerieUHD/Star Wars Andor/S01E02.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Andor - S01E03",
+      "path": "/mnt/data/video/SerieUHD/Star Wars Andor/S01E03.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Andor - S01E04",
+      "path": "/mnt/data/video/SerieUHD/Star Wars Andor/S01E04.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Andor - S01E05",
+      "path": "/mnt/data/video/SerieUHD/Star Wars Andor/S01E05.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Andor - S01E06",
+      "path": "/mnt/data/video/SerieUHD/Star Wars Andor/S01E06.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Andor - S01E07",
+      "path": "/mnt/data/video/SerieUHD/Star Wars Andor/S01E07.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Andor - S01E08",
+      "path": "/mnt/data/video/SerieUHD/Star Wars Andor/S01E08.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Andor - S01E09",
+      "path": "/mnt/data/video/SerieUHD/Star Wars Andor/S01E09.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Andor - S01E10",
+      "path": "/mnt/data/video/SerieUHD/Star Wars Andor/S01E10.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Andor - S01E11",
+      "path": "/mnt/data/video/SerieUHD/Star Wars Andor/S01E11.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Wars Andor - S01E12",
+      "path": "/mnt/data/video/SerieUHD/Star Wars Andor/S01E12.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Book of Boba Fett - S01E01",
+      "path": "/mnt/data/video/SerieUHD/The Book of Boba Fett/S01E01.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Book of Boba Fett - S01E02",
+      "path": "/mnt/data/video/SerieUHD/The Book of Boba Fett/S01E02.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Book of Boba Fett - S01E03",
+      "path": "/mnt/data/video/SerieUHD/The Book of Boba Fett/S01E03.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Book of Boba Fett - S01E04",
+      "path": "/mnt/data/video/SerieUHD/The Book of Boba Fett/S01E04.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Book of Boba Fett - S01E05",
+      "path": "/mnt/data/video/SerieUHD/The Book of Boba Fett/S01E05.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Book of Boba Fett - S01E06",
+      "path": "/mnt/data/video/SerieUHD/The Book of Boba Fett/S01E06.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Book of Boba Fett - S01E07",
+      "path": "/mnt/data/video/SerieUHD/The Book of Boba Fett/S01E07.mkv",
       "categories": {
         "space": 1.0
       }
@@ -278,129 +1258,6 @@
         "space": 1.0
       }
     },
-    
-    {
-      "name": "Shrek",
-      "path": "/mnt/data/video/FilmeUHD/Shrek (2001)/Shrek (2001).mkv",
-      "categories": {
-        "toon": 1.0
-      }
-    },
-    {
-      "name": "Shrek 2",
-      "path": "/mnt/data/video/FilmeUHD/Shrek 2 (2004)/Shrek 2 (2004).mkv",
-      "categories": {
-        "toon": 1.0
-      }
-    },
-    {
-      "name": "How to Train Your Dragon",
-      "path": "/mnt/data/video/FilmeUHD/How to Train Your Dragon (2010)/How to Train Your Dragon (2010).mkv",
-      "categories": {
-        "toon": 1.0
-      }
-    },
-    {
-      "name": "How to Train Your Dragon 2",
-      "path": "/mnt/data/video/FilmeUHD/How to Train Your Dragon 2 (2014)/How to Train Your Dragon 2 (2014).mkv",
-      "categories": {
-        "toon": 1.0
-      }
-    },
-    {
-      "name": "Despicable Me",
-      "path": "/mnt/data/video/FilmeUHD/Despicable Me (2010)/Despicable Me (2010).mkv",
-      "categories": {
-        "toon": 1.0
-      }
-    },
-    {
-      "name": "Despicable Me 2",
-      "path": "/mnt/data/video/FilmeUHD/Despicable Me 2 (2013)/Despicable Me 2 (2013).mkv",
-      "categories": {
-        "toon": 1.0
-      }
-    },
-    {
-      "name": "The Super Mario Bros Movie",
-      "path": "/mnt/data/video/FilmeUHD/The Super Mario Bros Movie (2023)/The Super Mario Bros Movie (2023).mkv",
-      "categories": {
-        "toon": 1.0
-      }
-    },
-    {
-      "name": "Barbie",
-      "path": "/mnt/data/video/FilmeUHD/Barbie (2023)/Barbie (2023).mkv",
-      "categories": {
-        "toon": 0.7,
-        "general": 0.3
-      }
-    },
-    
-    {
-      "name": "The Matrix",
-      "path": "/mnt/data/video/FilmeUHD/The Matrix (1999)/The Matrix (1999).mkv",
-      "categories": {
-        "general": 1.0
-      }
-    },
-    {
-      "name": "The Matrix Reloaded",
-      "path": "/mnt/data/video/FilmeUHD/The Matrix Reloaded (2003)/The Matrix Reloaded (2003).mkv",
-      "categories": {
-        "general": 1.0
-      }
-    },
-    {
-      "name": "The Matrix Revolutions",
-      "path": "/mnt/data/video/FilmeUHD/The Matrix Revolutions (2003)/The Matrix Revolutions (2003).mkv",
-      "categories": {
-        "general": 1.0
-      }
-    },
-    {
-      "name": "Inception",
-      "path": "/mnt/data/video/FilmeUHD/Inception (2010)/Inception (2010).mkv",
-      "categories": {
-        "general": 1.0
-      }
-    },
-    {
-      "name": "Blade Runner 2049",
-      "path": "/mnt/data/video/FilmeUHD/Blade Runner 2049 (2017)/Blade Runner 2049 (2017).mkv",
-      "categories": {
-        "general": 0.5,
-        "space": 0.5
-      }
-    },
-    {
-      "name": "Mad Max Fury Road",
-      "path": "/mnt/data/video/FilmeUHD/Mad Max Fury Road (2015)/Mad Max Fury Road (2015).mkv",
-      "categories": {
-        "general": 1.0
-      }
-    },
-    {
-      "name": "1917",
-      "path": "/mnt/data/video/FilmeUHD/1917 (2019)/1917 (2019).mkv",
-      "categories": {
-        "general": 1.0
-      }
-    },
-    {
-      "name": "Dunkirk",
-      "path": "/mnt/data/video/FilmeUHD/Dunkirk (2017)/Dunkirk (2017).mkv",
-      "categories": {
-        "general": 1.0
-      }
-    },
-    {
-      "name": "The Revenant",
-      "path": "/mnt/data/video/FilmeUHD/The Revenant (2015)/The Revenant (2015).mkv",
-      "categories": {
-        "general": 1.0
-      }
-    },
     {
       "name": "Gravity",
       "path": "/mnt/data/video/FilmeUHD/Gravity (2013)/Gravity (2013).mkv",
@@ -423,82 +1280,120 @@
       }
     },
     {
-      "name": "Guardians of the Galaxy",
-      "path": "/mnt/data/video/FilmeUHD/Guardians of the Galaxy (2014)/Guardians of the Galaxy (2014).mkv",
+      "name": "Alien",
+      "path": "/mnt/data/video/FilmeUHD/Alien (1979)/Alien (1979).mkv",
       "categories": {
-        "space": 0.6,
-        "general": 0.4
+        "space": 1.0
       }
     },
     {
-      "name": "Guardians of the Galaxy Vol 2",
-      "path": "/mnt/data/video/FilmeUHD/Guardians of the Galaxy Vol 2 (2017)/Guardians of the Galaxy Vol 2 (2017).mkv",
+      "name": "Aliens",
+      "path": "/mnt/data/video/FilmeUHD/Aliens (1986)/Aliens (1986).mkv",
       "categories": {
-        "space": 0.6,
-        "general": 0.4
+        "space": 1.0
       }
     },
     {
-      "name": "Thor Ragnarok",
-      "path": "/mnt/data/video/FilmeUHD/Thor Ragnarok (2017)/Thor Ragnarok (2017).mkv",
+      "name": "Alien 3",
+      "path": "/mnt/data/video/FilmeUHD/Alien 3 (1992)/Alien 3 (1992).mkv",
       "categories": {
-        "space": 0.5,
-        "general": 0.5
+        "space": 1.0
       }
     },
     {
-      "name": "Avengers Endgame",
-      "path": "/mnt/data/video/FilmeUHD/Avengers Endgame (2019)/Avengers Endgame (2019).mkv",
+      "name": "Alien Resurrection",
+      "path": "/mnt/data/video/FilmeUHD/Alien Resurrection (1997)/Alien Resurrection (1997).mkv",
       "categories": {
-        "general": 1.0
+        "space": 1.0
       }
     },
     {
-      "name": "Avengers Infinity War",
-      "path": "/mnt/data/video/FilmeUHD/Avengers Infinity War (2018)/Avengers Infinity War (2018).mkv",
+      "name": "Prometheus",
+      "path": "/mnt/data/video/FilmeUHD/Prometheus (2012)/Prometheus (2012).mkv",
       "categories": {
-        "general": 1.0
+        "space": 1.0
       }
     },
     {
-      "name": "Spider-Man No Way Home",
-      "path": "/mnt/data/video/FilmeUHD/Spider-Man No Way Home (2021)/Spider-Man No Way Home (2021).mkv",
+      "name": "Alien Covenant",
+      "path": "/mnt/data/video/FilmeUHD/Alien Covenant (2017)/Alien Covenant (2017).mkv",
       "categories": {
-        "general": 1.0
+        "space": 1.0
       }
     },
     {
-      "name": "The Lion King (2019)",
-      "path": "/mnt/data/video/FilmeUHD/The Lion King (2019)/The Lion King (2019).mkv",
+      "name": "The Fifth Element",
+      "path": "/mnt/data/video/FilmeUHD/The Fifth Element (1997)/The Fifth Element (1997).mkv",
       "categories": {
-        "toon": 0.6,
-        "general": 0.4
+        "space": 1.0
       }
     },
     {
-      "name": "Frozen",
-      "path": "/mnt/data/video/FilmeUHD/Frozen (2013)/Frozen (2013).mkv",
+      "name": "Valerian",
+      "path": "/mnt/data/video/FilmeUHD/Valerian (2017)/Valerian (2017).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Contact",
+      "path": "/mnt/data/video/FilmeUHD/Contact (1997)/Contact (1997).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Moon",
+      "path": "/mnt/data/video/FilmeUHD/Moon (2009)/Moon (2009).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Elysium",
+      "path": "/mnt/data/video/FilmeUHD/Elysium (2013)/Elysium (2013).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "District 9",
+      "path": "/mnt/data/video/FilmeUHD/District 9 (2009)/District 9 (2009).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Oblivion",
+      "path": "/mnt/data/video/FilmeUHD/Oblivion (2013)/Oblivion (2013).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Edge of Tomorrow",
+      "path": "/mnt/data/video/FilmeUHD/Edge of Tomorrow (2014)/Edge of Tomorrow (2014).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Toy Story",
+      "path": "/mnt/data/video/FilmeUHD/Toy Story (1995)/Toy Story (1995).mkv",
       "categories": {
         "toon": 1.0
       }
     },
     {
-      "name": "Frozen 2",
-      "path": "/mnt/data/video/FilmeUHD/Frozen 2 (2019)/Frozen 2 (2019).mkv",
+      "name": "Toy Story 2",
+      "path": "/mnt/data/video/FilmeUHD/Toy Story 2 (1999)/Toy Story 2 (1999).mkv",
       "categories": {
         "toon": 1.0
       }
     },
     {
-      "name": "Moana",
-      "path": "/mnt/data/video/FilmeUHD/Moana (2016)/Moana (2016).mkv",
-      "categories": {
-        "toon": 1.0
-      }
-    },
-    {
-      "name": "Coco",
-      "path": "/mnt/data/video/FilmeUHD/Coco (2017)/Coco (2017).mkv",
+      "name": "Toy Story 3",
+      "path": "/mnt/data/video/FilmeUHD/Toy Story 3 (2010)/Toy Story 3 (2010).mkv",
       "categories": {
         "toon": 1.0
       }
@@ -539,6 +1434,139 @@
       }
     },
     {
+      "name": "Cars",
+      "path": "/mnt/data/video/FilmeUHD/Cars (2006)/Cars (2006).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Cars 2",
+      "path": "/mnt/data/video/FilmeUHD/Cars 2 (2011)/Cars 2 (2011).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Cars 3",
+      "path": "/mnt/data/video/FilmeUHD/Cars 3 (2017)/Cars 3 (2017).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Ratatouille",
+      "path": "/mnt/data/video/FilmeUHD/Ratatouille (2007)/Ratatouille (2007).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "WALL-E",
+      "path": "/mnt/data/video/FilmeUHD/WALL-E (2008)/WALL-E (2008).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Up",
+      "path": "/mnt/data/video/FilmeUHD/Up (2009)/Up (2009).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Brave",
+      "path": "/mnt/data/video/FilmeUHD/Brave (2012)/Brave (2012).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Inside Out",
+      "path": "/mnt/data/video/FilmeUHD/Inside Out (2015)/Inside Out (2015).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Inside Out 2",
+      "path": "/mnt/data/video/FilmeUHD/Inside Out 2 (2024)/Inside Out 2 (2024).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Coco",
+      "path": "/mnt/data/video/FilmeUHD/Coco (2017)/Coco (2017).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Onward",
+      "path": "/mnt/data/video/FilmeUHD/Onward (2020)/Onward (2020).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Soul",
+      "path": "/mnt/data/video/FilmeUHD/Soul (2020)/Soul (2020).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Luca",
+      "path": "/mnt/data/video/FilmeUHD/Luca (2021)/Luca (2021).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Turning Red",
+      "path": "/mnt/data/video/FilmeUHD/Turning Red (2022)/Turning Red (2022).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Lightyear",
+      "path": "/mnt/data/video/FilmeUHD/Lightyear (2022)/Lightyear (2022).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Elemental",
+      "path": "/mnt/data/video/FilmeUHD/Elemental (2023)/Elemental (2023).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Frozen",
+      "path": "/mnt/data/video/FilmeUHD/Frozen (2013)/Frozen (2013).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Frozen 2",
+      "path": "/mnt/data/video/FilmeUHD/Frozen 2 (2019)/Frozen 2 (2019).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Moana",
+      "path": "/mnt/data/video/FilmeUHD/Moana (2016)/Moana (2016).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
       "name": "Zootopia",
       "path": "/mnt/data/video/FilmeUHD/Zootopia (2016)/Zootopia (2016).mkv",
       "categories": {
@@ -560,8 +1588,15 @@
       }
     },
     {
-      "name": "Raya and the Last Dragon",
-      "path": "/mnt/data/video/FilmeUHD/Raya and the Last Dragon (2021)/Raya and the Last Dragon (2021).mkv",
+      "name": "Ralph Breaks the Internet",
+      "path": "/mnt/data/video/FilmeUHD/Ralph Breaks the Internet (2018)/Ralph Breaks the Internet (2018).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Tangled",
+      "path": "/mnt/data/video/FilmeUHD/Tangled (2010)/Tangled (2010).mkv",
       "categories": {
         "toon": 1.0
       }
@@ -574,52 +1609,684 @@
       }
     },
     {
-      "name": "Blade Runner (1982)",
-      "path": "/mnt/data/video/FilmeUHD/Blade Runner (1982)/Blade Runner (1982).mkv",
+      "name": "Raya and the Last Dragon",
+      "path": "/mnt/data/video/FilmeUHD/Raya and the Last Dragon (2021)/Raya and the Last Dragon (2021).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Strange World",
+      "path": "/mnt/data/video/FilmeUHD/Strange World (2022)/Strange World (2022).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Wish",
+      "path": "/mnt/data/video/FilmeUHD/Wish (2023)/Wish (2023).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Shrek",
+      "path": "/mnt/data/video/FilmeUHD/Shrek (2001)/Shrek (2001).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Shrek 2",
+      "path": "/mnt/data/video/FilmeUHD/Shrek 2 (2004)/Shrek 2 (2004).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Shrek the Third",
+      "path": "/mnt/data/video/FilmeUHD/Shrek the Third (2007)/Shrek the Third (2007).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Shrek Forever After",
+      "path": "/mnt/data/video/FilmeUHD/Shrek Forever After (2010)/Shrek Forever After (2010).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "How to Train Your Dragon",
+      "path": "/mnt/data/video/FilmeUHD/How to Train Your Dragon (2010)/How to Train Your Dragon (2010).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "How to Train Your Dragon 2",
+      "path": "/mnt/data/video/FilmeUHD/How to Train Your Dragon 2 (2014)/How to Train Your Dragon 2 (2014).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "How to Train Your Dragon The Hidden World",
+      "path": "/mnt/data/video/FilmeUHD/How to Train Your Dragon The Hidden World (2019)/How to Train Your Dragon The Hidden World (2019).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Kung Fu Panda",
+      "path": "/mnt/data/video/FilmeUHD/Kung Fu Panda (2008)/Kung Fu Panda (2008).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Kung Fu Panda 2",
+      "path": "/mnt/data/video/FilmeUHD/Kung Fu Panda 2 (2011)/Kung Fu Panda 2 (2011).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Kung Fu Panda 3",
+      "path": "/mnt/data/video/FilmeUHD/Kung Fu Panda 3 (2016)/Kung Fu Panda 3 (2016).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Kung Fu Panda 4",
+      "path": "/mnt/data/video/FilmeUHD/Kung Fu Panda 4 (2024)/Kung Fu Panda 4 (2024).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Madagascar",
+      "path": "/mnt/data/video/FilmeUHD/Madagascar (2005)/Madagascar (2005).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Madagascar Escape 2 Africa",
+      "path": "/mnt/data/video/FilmeUHD/Madagascar Escape 2 Africa (2008)/Madagascar Escape 2 Africa (2008).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Madagascar 3",
+      "path": "/mnt/data/video/FilmeUHD/Madagascar 3 (2012)/Madagascar 3 (2012).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Puss in Boots",
+      "path": "/mnt/data/video/FilmeUHD/Puss in Boots (2011)/Puss in Boots (2011).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Puss in Boots The Last Wish",
+      "path": "/mnt/data/video/FilmeUHD/Puss in Boots The Last Wish (2022)/Puss in Boots The Last Wish (2022).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "The Boss Baby",
+      "path": "/mnt/data/video/FilmeUHD/The Boss Baby (2017)/The Boss Baby (2017).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Trolls",
+      "path": "/mnt/data/video/FilmeUHD/Trolls (2016)/Trolls (2016).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Trolls World Tour",
+      "path": "/mnt/data/video/FilmeUHD/Trolls World Tour (2020)/Trolls World Tour (2020).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Despicable Me",
+      "path": "/mnt/data/video/FilmeUHD/Despicable Me (2010)/Despicable Me (2010).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Despicable Me 2",
+      "path": "/mnt/data/video/FilmeUHD/Despicable Me 2 (2013)/Despicable Me 2 (2013).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Despicable Me 3",
+      "path": "/mnt/data/video/FilmeUHD/Despicable Me 3 (2017)/Despicable Me 3 (2017).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Minions",
+      "path": "/mnt/data/video/FilmeUHD/Minions (2015)/Minions (2015).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Minions The Rise of Gru",
+      "path": "/mnt/data/video/FilmeUHD/Minions The Rise of Gru (2022)/Minions The Rise of Gru (2022).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "The Secret Life of Pets",
+      "path": "/mnt/data/video/FilmeUHD/The Secret Life of Pets (2016)/The Secret Life of Pets (2016).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "The Secret Life of Pets 2",
+      "path": "/mnt/data/video/FilmeUHD/The Secret Life of Pets 2 (2019)/The Secret Life of Pets 2 (2019).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Sing",
+      "path": "/mnt/data/video/FilmeUHD/Sing (2016)/Sing (2016).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Sing 2",
+      "path": "/mnt/data/video/FilmeUHD/Sing 2 (2021)/Sing 2 (2021).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "The Grinch",
+      "path": "/mnt/data/video/FilmeUHD/The Grinch (2018)/The Grinch (2018).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "The Super Mario Bros Movie",
+      "path": "/mnt/data/video/FilmeUHD/The Super Mario Bros Movie (2023)/The Super Mario Bros Movie (2023).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Migration",
+      "path": "/mnt/data/video/FilmeUHD/Migration (2023)/Migration (2023).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "The Lion King (2019)",
+      "path": "/mnt/data/video/FilmeUHD/The Lion King (2019)/The Lion King (2019).mkv",
+      "categories": {
+        "toon": 0.6,
+        "general": 0.4
+      }
+    },
+    {
+      "name": "Barbie",
+      "path": "/mnt/data/video/FilmeUHD/Barbie (2023)/Barbie (2023).mkv",
+      "categories": {
+        "toon": 0.7,
+        "general": 0.3
+      }
+    },
+    {
+      "name": "Spider-Man Into the Spider-Verse",
+      "path": "/mnt/data/video/FilmeUHD/Spider-Man Into the Spider-Verse (2018)/Spider-Man Into the Spider-Verse (2018).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Spider-Man Across the Spider-Verse",
+      "path": "/mnt/data/video/FilmeUHD/Spider-Man Across the Spider-Verse (2023)/Spider-Man Across the Spider-Verse (2023).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Oppenheimer",
+      "path": "/mnt/data/video/FilmeUHD/Oppenheimer (2023)/Oppenheimer (2023).mkv",
       "categories": {
         "general": 1.0
       }
     },
     {
-      "name": "Alien",
-      "path": "/mnt/data/video/FilmeUHD/Alien (1979)/Alien (1979).mkv",
+      "name": "Tenet",
+      "path": "/mnt/data/video/FilmeUHD/Tenet (2020)/Tenet (2020).mkv",
       "categories": {
-        "space": 1.0
+        "general": 1.0
       }
     },
     {
-      "name": "Aliens",
-      "path": "/mnt/data/video/FilmeUHD/Aliens (1986)/Aliens (1986).mkv",
+      "name": "Dunkirk",
+      "path": "/mnt/data/video/FilmeUHD/Dunkirk (2017)/Dunkirk (2017).mkv",
       "categories": {
-        "space": 1.0
+        "general": 1.0
       }
     },
     {
-      "name": "Prometheus",
-      "path": "/mnt/data/video/FilmeUHD/Prometheus (2012)/Prometheus (2012).mkv",
+      "name": "Inception",
+      "path": "/mnt/data/video/FilmeUHD/Inception (2010)/Inception (2010).mkv",
       "categories": {
-        "space": 1.0
+        "general": 1.0
       }
     },
     {
-      "name": "Alien Covenant",
-      "path": "/mnt/data/video/FilmeUHD/Alien Covenant (2017)/Alien Covenant (2017).mkv",
+      "name": "The Dark Knight",
+      "path": "/mnt/data/video/FilmeUHD/The Dark Knight (2008)/The Dark Knight (2008).mkv",
       "categories": {
-        "space": 1.0
+        "general": 1.0
       }
     },
     {
-      "name": "The Fifth Element",
-      "path": "/mnt/data/video/FilmeUHD/The Fifth Element (1997)/The Fifth Element (1997).mkv",
+      "name": "The Dark Knight Rises",
+      "path": "/mnt/data/video/FilmeUHD/The Dark Knight Rises (2012)/The Dark Knight Rises (2012).mkv",
       "categories": {
-        "space": 1.0
+        "general": 1.0
       }
     },
     {
-      "name": "Valerian",
-      "path": "/mnt/data/video/FilmeUHD/Valerian (2017)/Valerian (2017).mkv",
+      "name": "Batman Begins",
+      "path": "/mnt/data/video/FilmeUHD/Batman Begins (2005)/Batman Begins (2005).mkv",
       "categories": {
-        "space": 1.0
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Prestige",
+      "path": "/mnt/data/video/FilmeUHD/The Prestige (2006)/The Prestige (2006).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Iron Man",
+      "path": "/mnt/data/video/FilmeUHD/Iron Man (2008)/Iron Man (2008).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Iron Man 2",
+      "path": "/mnt/data/video/FilmeUHD/Iron Man 2 (2010)/Iron Man 2 (2010).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Iron Man 3",
+      "path": "/mnt/data/video/FilmeUHD/Iron Man 3 (2013)/Iron Man 3 (2013).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Captain America The First Avenger",
+      "path": "/mnt/data/video/FilmeUHD/Captain America The First Avenger (2011)/Captain America The First Avenger (2011).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Captain America The Winter Soldier",
+      "path": "/mnt/data/video/FilmeUHD/Captain America The Winter Soldier (2014)/Captain America The Winter Soldier (2014).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Captain America Civil War",
+      "path": "/mnt/data/video/FilmeUHD/Captain America Civil War (2016)/Captain America Civil War (2016).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Avengers",
+      "path": "/mnt/data/video/FilmeUHD/The Avengers (2012)/The Avengers (2012).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Avengers Age of Ultron",
+      "path": "/mnt/data/video/FilmeUHD/Avengers Age of Ultron (2015)/Avengers Age of Ultron (2015).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Avengers Infinity War",
+      "path": "/mnt/data/video/FilmeUHD/Avengers Infinity War (2018)/Avengers Infinity War (2018).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Avengers Endgame",
+      "path": "/mnt/data/video/FilmeUHD/Avengers Endgame (2019)/Avengers Endgame (2019).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Thor",
+      "path": "/mnt/data/video/FilmeUHD/Thor (2011)/Thor (2011).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Thor The Dark World",
+      "path": "/mnt/data/video/FilmeUHD/Thor The Dark World (2013)/Thor The Dark World (2013).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Thor Love and Thunder",
+      "path": "/mnt/data/video/FilmeUHD/Thor Love and Thunder (2022)/Thor Love and Thunder (2022).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Black Panther",
+      "path": "/mnt/data/video/FilmeUHD/Black Panther (2018)/Black Panther (2018).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Black Panther Wakanda Forever",
+      "path": "/mnt/data/video/FilmeUHD/Black Panther Wakanda Forever (2022)/Black Panther Wakanda Forever (2022).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Doctor Strange",
+      "path": "/mnt/data/video/FilmeUHD/Doctor Strange (2016)/Doctor Strange (2016).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Doctor Strange in the Multiverse of Madness",
+      "path": "/mnt/data/video/FilmeUHD/Doctor Strange in the Multiverse of Madness (2022)/Doctor Strange in the Multiverse of Madness (2022).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Spider-Man Homecoming",
+      "path": "/mnt/data/video/FilmeUHD/Spider-Man Homecoming (2017)/Spider-Man Homecoming (2017).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Spider-Man Far From Home",
+      "path": "/mnt/data/video/FilmeUHD/Spider-Man Far From Home (2019)/Spider-Man Far From Home (2019).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Spider-Man No Way Home",
+      "path": "/mnt/data/video/FilmeUHD/Spider-Man No Way Home (2021)/Spider-Man No Way Home (2021).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Black Widow",
+      "path": "/mnt/data/video/FilmeUHD/Black Widow (2021)/Black Widow (2021).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Shang-Chi",
+      "path": "/mnt/data/video/FilmeUHD/Shang-Chi (2021)/Shang-Chi (2021).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Eternals",
+      "path": "/mnt/data/video/FilmeUHD/Eternals (2021)/Eternals (2021).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Ant-Man",
+      "path": "/mnt/data/video/FilmeUHD/Ant-Man (2015)/Ant-Man (2015).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Ant-Man and the Wasp",
+      "path": "/mnt/data/video/FilmeUHD/Ant-Man and the Wasp (2018)/Ant-Man and the Wasp (2018).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Ant-Man and the Wasp Quantumania",
+      "path": "/mnt/data/video/FilmeUHD/Ant-Man and the Wasp Quantumania (2023)/Ant-Man and the Wasp Quantumania (2023).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Captain Marvel",
+      "path": "/mnt/data/video/FilmeUHD/Captain Marvel (2019)/Captain Marvel (2019).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Marvels",
+      "path": "/mnt/data/video/FilmeUHD/The Marvels (2023)/The Marvels (2023).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Man of Steel",
+      "path": "/mnt/data/video/FilmeUHD/Man of Steel (2013)/Man of Steel (2013).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Batman v Superman",
+      "path": "/mnt/data/video/FilmeUHD/Batman v Superman (2016)/Batman v Superman (2016).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Wonder Woman",
+      "path": "/mnt/data/video/FilmeUHD/Wonder Woman (2017)/Wonder Woman (2017).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Wonder Woman 1984",
+      "path": "/mnt/data/video/FilmeUHD/Wonder Woman 1984 (2020)/Wonder Woman 1984 (2020).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Justice League",
+      "path": "/mnt/data/video/FilmeUHD/Justice League (2017)/Justice League (2017).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Aquaman",
+      "path": "/mnt/data/video/FilmeUHD/Aquaman (2018)/Aquaman (2018).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Aquaman and the Lost Kingdom",
+      "path": "/mnt/data/video/FilmeUHD/Aquaman and the Lost Kingdom (2023)/Aquaman and the Lost Kingdom (2023).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Shazam",
+      "path": "/mnt/data/video/FilmeUHD/Shazam (2019)/Shazam (2019).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Shazam Fury of the Gods",
+      "path": "/mnt/data/video/FilmeUHD/Shazam Fury of the Gods (2023)/Shazam Fury of the Gods (2023).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Flash",
+      "path": "/mnt/data/video/FilmeUHD/The Flash (2023)/The Flash (2023).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Blue Beetle",
+      "path": "/mnt/data/video/FilmeUHD/Blue Beetle (2023)/Blue Beetle (2023).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Batman",
+      "path": "/mnt/data/video/FilmeUHD/The Batman (2022)/The Batman (2022).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Joker",
+      "path": "/mnt/data/video/FilmeUHD/Joker (2019)/Joker (2019).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Joker Folie a Deux",
+      "path": "/mnt/data/video/FilmeUHD/Joker Folie a Deux (2024)/Joker Folie a Deux (2024).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Top Gun",
+      "path": "/mnt/data/video/FilmeUHD/Top Gun (1986)/Top Gun (1986).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Top Gun Maverick",
+      "path": "/mnt/data/video/FilmeUHD/Top Gun Maverick (2022)/Top Gun Maverick (2022).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Matrix",
+      "path": "/mnt/data/video/FilmeUHD/The Matrix (1999)/The Matrix (1999).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Matrix Reloaded",
+      "path": "/mnt/data/video/FilmeUHD/The Matrix Reloaded (2003)/The Matrix Reloaded (2003).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Matrix Revolutions",
+      "path": "/mnt/data/video/FilmeUHD/The Matrix Revolutions (2003)/The Matrix Revolutions (2003).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Matrix Resurrections",
+      "path": "/mnt/data/video/FilmeUHD/The Matrix Resurrections (2021)/The Matrix Resurrections (2021).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "LOTR The Fellowship of the Ring",
+      "path": "/mnt/data/video/FilmeUHD/The Fellowship of the Ring (2001)/The Fellowship of the Ring (2001).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "LOTR The Two Towers",
+      "path": "/mnt/data/video/FilmeUHD/The Two Towers (2002)/The Two Towers (2002).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "LOTR The Return of the King",
+      "path": "/mnt/data/video/FilmeUHD/The Return of the King (2003)/The Return of the King (2003).mkv",
+      "categories": {
+        "general": 1.0
       }
     },
     {
@@ -644,43 +2311,57 @@
       }
     },
     {
-      "name": "Lord of the Rings The Fellowship",
-      "path": "/mnt/data/video/FilmeUHD/LOTR The Fellowship (2001)/LOTR The Fellowship (2001).mkv",
-      "categories": {
-        "general": 1.0
-      }
-    },
-    {
-      "name": "Lord of the Rings The Two Towers",
-      "path": "/mnt/data/video/FilmeUHD/LOTR The Two Towers (2002)/LOTR The Two Towers (2002).mkv",
-      "categories": {
-        "general": 1.0
-      }
-    },
-    {
-      "name": "Lord of the Rings The Return of the King",
-      "path": "/mnt/data/video/FilmeUHD/LOTR The Return of the King (2003)/LOTR The Return of the King (2003).mkv",
-      "categories": {
-        "general": 1.0
-      }
-    },
-    {
       "name": "Harry Potter and the Philosophers Stone",
-      "path": "/mnt/data/video/FilmeUHD/Harry Potter 1 (2001)/Harry Potter 1 (2001).mkv",
+      "path": "/mnt/data/video/FilmeUHD/Harry Potter Philosophers Stone (2001)/Harry Potter Philosophers Stone (2001).mkv",
       "categories": {
         "general": 1.0
       }
     },
     {
       "name": "Harry Potter and the Chamber of Secrets",
-      "path": "/mnt/data/video/FilmeUHD/Harry Potter 2 (2002)/Harry Potter 2 (2002).mkv",
+      "path": "/mnt/data/video/FilmeUHD/Harry Potter Chamber of Secrets (2002)/Harry Potter Chamber of Secrets (2002).mkv",
       "categories": {
         "general": 1.0
       }
     },
     {
       "name": "Harry Potter and the Prisoner of Azkaban",
-      "path": "/mnt/data/video/FilmeUHD/Harry Potter 3 (2004)/Harry Potter 3 (2004).mkv",
+      "path": "/mnt/data/video/FilmeUHD/Harry Potter Prisoner of Azkaban (2004)/Harry Potter Prisoner of Azkaban (2004).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Harry Potter and the Goblet of Fire",
+      "path": "/mnt/data/video/FilmeUHD/Harry Potter Goblet of Fire (2005)/Harry Potter Goblet of Fire (2005).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Harry Potter and the Order of the Phoenix",
+      "path": "/mnt/data/video/FilmeUHD/Harry Potter Order of the Phoenix (2007)/Harry Potter Order of the Phoenix (2007).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Harry Potter and the Half-Blood Prince",
+      "path": "/mnt/data/video/FilmeUHD/Harry Potter Half-Blood Prince (2009)/Harry Potter Half-Blood Prince (2009).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Harry Potter and the Deathly Hallows Part 1",
+      "path": "/mnt/data/video/FilmeUHD/Harry Potter Deathly Hallows Part 1 (2010)/Harry Potter Deathly Hallows Part 1 (2010).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Harry Potter and the Deathly Hallows Part 2",
+      "path": "/mnt/data/video/FilmeUHD/Harry Potter Deathly Hallows Part 2 (2011)/Harry Potter Deathly Hallows Part 2 (2011).mkv",
       "categories": {
         "general": 1.0
       }
@@ -688,6 +2369,20 @@
     {
       "name": "Jurassic Park",
       "path": "/mnt/data/video/FilmeUHD/Jurassic Park (1993)/Jurassic Park (1993).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Lost World Jurassic Park",
+      "path": "/mnt/data/video/FilmeUHD/The Lost World Jurassic Park (1997)/The Lost World Jurassic Park (1997).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Jurassic Park III",
+      "path": "/mnt/data/video/FilmeUHD/Jurassic Park III (2001)/Jurassic Park III (2001).mkv",
       "categories": {
         "general": 1.0
       }
@@ -714,15 +2409,15 @@
       }
     },
     {
-      "name": "The Hunger Games",
-      "path": "/mnt/data/video/FilmeUHD/The Hunger Games (2012)/The Hunger Games (2012).mkv",
+      "name": "Casino Royale",
+      "path": "/mnt/data/video/FilmeUHD/Casino Royale (2006)/Casino Royale (2006).mkv",
       "categories": {
         "general": 1.0
       }
     },
     {
-      "name": "Tenet",
-      "path": "/mnt/data/video/FilmeUHD/Tenet (2020)/Tenet (2020).mkv",
+      "name": "Quantum of Solace",
+      "path": "/mnt/data/video/FilmeUHD/Quantum of Solace (2008)/Quantum of Solace (2008).mkv",
       "categories": {
         "general": 1.0
       }
@@ -749,8 +2444,22 @@
       }
     },
     {
-      "name": "Mission Impossible Fallout",
-      "path": "/mnt/data/video/FilmeUHD/Mission Impossible Fallout (2018)/Mission Impossible Fallout (2018).mkv",
+      "name": "Mission Impossible",
+      "path": "/mnt/data/video/FilmeUHD/Mission Impossible (1996)/Mission Impossible (1996).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Mission Impossible II",
+      "path": "/mnt/data/video/FilmeUHD/Mission Impossible II (2000)/Mission Impossible II (2000).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Mission Impossible III",
+      "path": "/mnt/data/video/FilmeUHD/Mission Impossible III (2006)/Mission Impossible III (2006).mkv",
       "categories": {
         "general": 1.0
       }
@@ -763,57 +2472,169 @@
       }
     },
     {
-      "name": "The Amazing Spider-Man",
-      "path": "/mnt/data/video/FilmeUHD/The Amazing Spider-Man (2012)/The Amazing Spider-Man (2012).mkv",
+      "name": "Mission Impossible Rogue Nation",
+      "path": "/mnt/data/video/FilmeUHD/Mission Impossible Rogue Nation (2015)/Mission Impossible Rogue Nation (2015).mkv",
       "categories": {
         "general": 1.0
       }
     },
     {
-      "name": "Doctor Strange",
-      "path": "/mnt/data/video/FilmeUHD/Doctor Strange (2016)/Doctor Strange (2016).mkv",
+      "name": "Mission Impossible Fallout",
+      "path": "/mnt/data/video/FilmeUHD/Mission Impossible Fallout (2018)/Mission Impossible Fallout (2018).mkv",
       "categories": {
         "general": 1.0
       }
     },
     {
-      "name": "Black Panther",
-      "path": "/mnt/data/video/FilmeUHD/Black Panther (2018)/Black Panther (2018).mkv",
+      "name": "Mission Impossible Dead Reckoning Part One",
+      "path": "/mnt/data/video/FilmeUHD/Mission Impossible Dead Reckoning Part One (2023)/Mission Impossible Dead Reckoning Part One (2023).mkv",
       "categories": {
         "general": 1.0
       }
     },
     {
-      "name": "Aquaman",
-      "path": "/mnt/data/video/FilmeUHD/Aquaman (2018)/Aquaman (2018).mkv",
+      "name": "The Fast and the Furious",
+      "path": "/mnt/data/video/FilmeUHD/The Fast and the Furious (2001)/The Fast and the Furious (2001).mkv",
       "categories": {
         "general": 1.0
       }
     },
     {
-      "name": "Wonder Woman",
-      "path": "/mnt/data/video/FilmeUHD/Wonder Woman (2017)/Wonder Woman (2017).mkv",
+      "name": "2 Fast 2 Furious",
+      "path": "/mnt/data/video/FilmeUHD/2 Fast 2 Furious (2003)/2 Fast 2 Furious (2003).mkv",
       "categories": {
         "general": 1.0
       }
     },
     {
-      "name": "Justice League",
-      "path": "/mnt/data/video/FilmeUHD/Justice League (2017)/Justice League (2017).mkv",
+      "name": "Fast & Furious",
+      "path": "/mnt/data/video/FilmeUHD/Fast & Furious (2009)/Fast & Furious (2009).mkv",
       "categories": {
         "general": 1.0
       }
     },
     {
-      "name": "Man of Steel",
-      "path": "/mnt/data/video/FilmeUHD/Man of Steel (2013)/Man of Steel (2013).mkv",
+      "name": "Fast Five",
+      "path": "/mnt/data/video/FilmeUHD/Fast Five (2011)/Fast Five (2011).mkv",
       "categories": {
         "general": 1.0
       }
     },
     {
-      "name": "Batman v Superman",
-      "path": "/mnt/data/video/FilmeUHD/Batman v Superman (2016)/Batman v Superman (2016).mkv",
+      "name": "Fast & Furious 6",
+      "path": "/mnt/data/video/FilmeUHD/Fast & Furious 6 (2013)/Fast & Furious 6 (2013).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Furious 7",
+      "path": "/mnt/data/video/FilmeUHD/Furious 7 (2015)/Furious 7 (2015).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Fate of the Furious",
+      "path": "/mnt/data/video/FilmeUHD/The Fate of the Furious (2017)/The Fate of the Furious (2017).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "F9",
+      "path": "/mnt/data/video/FilmeUHD/F9 (2021)/F9 (2021).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Fast X",
+      "path": "/mnt/data/video/FilmeUHD/Fast X (2023)/Fast X (2023).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Gladiator",
+      "path": "/mnt/data/video/FilmeUHD/Gladiator (2000)/Gladiator (2000).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Gladiator II",
+      "path": "/mnt/data/video/FilmeUHD/Gladiator II (2024)/Gladiator II (2024).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Mad Max Fury Road",
+      "path": "/mnt/data/video/FilmeUHD/Mad Max Fury Road (2015)/Mad Max Fury Road (2015).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Blade Runner",
+      "path": "/mnt/data/video/FilmeUHD/Blade Runner (1982)/Blade Runner (1982).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "1917",
+      "path": "/mnt/data/video/FilmeUHD/1917 (2019)/1917 (2019).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Revenant",
+      "path": "/mnt/data/video/FilmeUHD/The Revenant (2015)/The Revenant (2015).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Forrest Gump",
+      "path": "/mnt/data/video/FilmeUHD/Forrest Gump (1994)/Forrest Gump (1994).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Shawshank Redemption",
+      "path": "/mnt/data/video/FilmeUHD/The Shawshank Redemption (1994)/The Shawshank Redemption (1994).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Hunger Games",
+      "path": "/mnt/data/video/FilmeUHD/The Hunger Games (2012)/The Hunger Games (2012).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Catching Fire",
+      "path": "/mnt/data/video/FilmeUHD/Catching Fire (2013)/Catching Fire (2013).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Mockingjay Part 1",
+      "path": "/mnt/data/video/FilmeUHD/Mockingjay Part 1 (2014)/Mockingjay Part 1 (2014).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Mockingjay Part 2",
+      "path": "/mnt/data/video/FilmeUHD/Mockingjay Part 2 (2015)/Mockingjay Part 2 (2015).mkv",
       "categories": {
         "general": 1.0
       }
@@ -826,15 +2647,22 @@
       }
     },
     {
-      "name": "Godzilla (2014)",
+      "name": "Godzilla",
       "path": "/mnt/data/video/FilmeUHD/Godzilla (2014)/Godzilla (2014).mkv",
       "categories": {
         "general": 1.0
       }
     },
     {
-      "name": "Godzilla King of Monsters",
-      "path": "/mnt/data/video/FilmeUHD/Godzilla King of Monsters (2019)/Godzilla King of Monsters (2019).mkv",
+      "name": "Godzilla King of the Monsters",
+      "path": "/mnt/data/video/FilmeUHD/Godzilla King of the Monsters (2019)/Godzilla King of the Monsters (2019).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Godzilla vs Kong",
+      "path": "/mnt/data/video/FilmeUHD/Godzilla vs Kong (2021)/Godzilla vs Kong (2021).mkv",
       "categories": {
         "general": 1.0
       }
@@ -842,6 +2670,1103 @@
     {
       "name": "Pacific Rim",
       "path": "/mnt/data/video/FilmeUHD/Pacific Rim (2013)/Pacific Rim (2013).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Pacific Rim Uprising",
+      "path": "/mnt/data/video/FilmeUHD/Pacific Rim Uprising (2018)/Pacific Rim Uprising (2018).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Transformers",
+      "path": "/mnt/data/video/FilmeUHD/Transformers (2007)/Transformers (2007).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Transformers Revenge of the Fallen",
+      "path": "/mnt/data/video/FilmeUHD/Transformers Revenge of the Fallen (2009)/Transformers Revenge of the Fallen (2009).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Transformers Dark of the Moon",
+      "path": "/mnt/data/video/FilmeUHD/Transformers Dark of the Moon (2011)/Transformers Dark of the Moon (2011).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Westworld - S01E01",
+      "path": "/mnt/data/video/SerieUHD/Westworld/S01E01.mkv",
+      "categories": {
+        "general": 0.7,
+        "space": 0.3
+      }
+    },
+    {
+      "name": "Westworld - S01E02",
+      "path": "/mnt/data/video/SerieUHD/Westworld/S01E02.mkv",
+      "categories": {
+        "general": 0.7,
+        "space": 0.3
+      }
+    },
+    {
+      "name": "Westworld - S01E03",
+      "path": "/mnt/data/video/SerieUHD/Westworld/S01E03.mkv",
+      "categories": {
+        "general": 0.7,
+        "space": 0.3
+      }
+    },
+    {
+      "name": "Westworld - S01E04",
+      "path": "/mnt/data/video/SerieUHD/Westworld/S01E04.mkv",
+      "categories": {
+        "general": 0.7,
+        "space": 0.3
+      }
+    },
+    {
+      "name": "Westworld - S01E05",
+      "path": "/mnt/data/video/SerieUHD/Westworld/S01E05.mkv",
+      "categories": {
+        "general": 0.7,
+        "space": 0.3
+      }
+    },
+    {
+      "name": "Westworld - S01E06",
+      "path": "/mnt/data/video/SerieUHD/Westworld/S01E06.mkv",
+      "categories": {
+        "general": 0.7,
+        "space": 0.3
+      }
+    },
+    {
+      "name": "Westworld - S01E07",
+      "path": "/mnt/data/video/SerieUHD/Westworld/S01E07.mkv",
+      "categories": {
+        "general": 0.7,
+        "space": 0.3
+      }
+    },
+    {
+      "name": "Westworld - S01E08",
+      "path": "/mnt/data/video/SerieUHD/Westworld/S01E08.mkv",
+      "categories": {
+        "general": 0.7,
+        "space": 0.3
+      }
+    },
+    {
+      "name": "Westworld - S01E09",
+      "path": "/mnt/data/video/SerieUHD/Westworld/S01E09.mkv",
+      "categories": {
+        "general": 0.7,
+        "space": 0.3
+      }
+    },
+    {
+      "name": "Westworld - S01E10",
+      "path": "/mnt/data/video/SerieUHD/Westworld/S01E10.mkv",
+      "categories": {
+        "general": 0.7,
+        "space": 0.3
+      }
+    },
+    {
+      "name": "Westworld - S02E01",
+      "path": "/mnt/data/video/SerieUHD/Westworld/S02E01.mkv",
+      "categories": {
+        "general": 0.7,
+        "space": 0.3
+      }
+    },
+    {
+      "name": "Westworld - S02E02",
+      "path": "/mnt/data/video/SerieUHD/Westworld/S02E02.mkv",
+      "categories": {
+        "general": 0.7,
+        "space": 0.3
+      }
+    },
+    {
+      "name": "Westworld - S02E03",
+      "path": "/mnt/data/video/SerieUHD/Westworld/S02E03.mkv",
+      "categories": {
+        "general": 0.7,
+        "space": 0.3
+      }
+    },
+    {
+      "name": "Westworld - S02E04",
+      "path": "/mnt/data/video/SerieUHD/Westworld/S02E04.mkv",
+      "categories": {
+        "general": 0.7,
+        "space": 0.3
+      }
+    },
+    {
+      "name": "Westworld - S02E05",
+      "path": "/mnt/data/video/SerieUHD/Westworld/S02E05.mkv",
+      "categories": {
+        "general": 0.7,
+        "space": 0.3
+      }
+    },
+    {
+      "name": "Westworld - S02E06",
+      "path": "/mnt/data/video/SerieUHD/Westworld/S02E06.mkv",
+      "categories": {
+        "general": 0.7,
+        "space": 0.3
+      }
+    },
+    {
+      "name": "Westworld - S02E07",
+      "path": "/mnt/data/video/SerieUHD/Westworld/S02E07.mkv",
+      "categories": {
+        "general": 0.7,
+        "space": 0.3
+      }
+    },
+    {
+      "name": "Westworld - S02E08",
+      "path": "/mnt/data/video/SerieUHD/Westworld/S02E08.mkv",
+      "categories": {
+        "general": 0.7,
+        "space": 0.3
+      }
+    },
+    {
+      "name": "Westworld - S02E09",
+      "path": "/mnt/data/video/SerieUHD/Westworld/S02E09.mkv",
+      "categories": {
+        "general": 0.7,
+        "space": 0.3
+      }
+    },
+    {
+      "name": "Westworld - S02E10",
+      "path": "/mnt/data/video/SerieUHD/Westworld/S02E10.mkv",
+      "categories": {
+        "general": 0.7,
+        "space": 0.3
+      }
+    },
+    {
+      "name": "Game of Thrones - S01E01",
+      "path": "/mnt/data/video/SerieUHD/Game of Thrones/S01E01.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Game of Thrones - S01E02",
+      "path": "/mnt/data/video/SerieUHD/Game of Thrones/S01E02.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Game of Thrones - S01E03",
+      "path": "/mnt/data/video/SerieUHD/Game of Thrones/S01E03.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Game of Thrones - S01E04",
+      "path": "/mnt/data/video/SerieUHD/Game of Thrones/S01E04.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Game of Thrones - S01E05",
+      "path": "/mnt/data/video/SerieUHD/Game of Thrones/S01E05.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Game of Thrones - S01E06",
+      "path": "/mnt/data/video/SerieUHD/Game of Thrones/S01E06.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Game of Thrones - S01E07",
+      "path": "/mnt/data/video/SerieUHD/Game of Thrones/S01E07.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Game of Thrones - S01E08",
+      "path": "/mnt/data/video/SerieUHD/Game of Thrones/S01E08.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Game of Thrones - S01E09",
+      "path": "/mnt/data/video/SerieUHD/Game of Thrones/S01E09.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Game of Thrones - S01E10",
+      "path": "/mnt/data/video/SerieUHD/Game of Thrones/S01E10.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Game of Thrones - S08E01",
+      "path": "/mnt/data/video/SerieUHD/Game of Thrones/S08E01.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Game of Thrones - S08E02",
+      "path": "/mnt/data/video/SerieUHD/Game of Thrones/S08E02.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Game of Thrones - S08E03",
+      "path": "/mnt/data/video/SerieUHD/Game of Thrones/S08E03.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Game of Thrones - S08E04",
+      "path": "/mnt/data/video/SerieUHD/Game of Thrones/S08E04.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Game of Thrones - S08E05",
+      "path": "/mnt/data/video/SerieUHD/Game of Thrones/S08E05.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Game of Thrones - S08E06",
+      "path": "/mnt/data/video/SerieUHD/Game of Thrones/S08E06.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Last of Us - S01E01",
+      "path": "/mnt/data/video/SerieUHD/The Last of Us/S01E01.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Last of Us - S01E02",
+      "path": "/mnt/data/video/SerieUHD/The Last of Us/S01E02.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Last of Us - S01E03",
+      "path": "/mnt/data/video/SerieUHD/The Last of Us/S01E03.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Last of Us - S01E04",
+      "path": "/mnt/data/video/SerieUHD/The Last of Us/S01E04.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Last of Us - S01E05",
+      "path": "/mnt/data/video/SerieUHD/The Last of Us/S01E05.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Last of Us - S01E06",
+      "path": "/mnt/data/video/SerieUHD/The Last of Us/S01E06.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Last of Us - S01E07",
+      "path": "/mnt/data/video/SerieUHD/The Last of Us/S01E07.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Last of Us - S01E08",
+      "path": "/mnt/data/video/SerieUHD/The Last of Us/S01E08.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Last of Us - S01E09",
+      "path": "/mnt/data/video/SerieUHD/The Last of Us/S01E09.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "House of the Dragon - S01E01",
+      "path": "/mnt/data/video/SerieUHD/House of the Dragon/S01E01.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "House of the Dragon - S01E02",
+      "path": "/mnt/data/video/SerieUHD/House of the Dragon/S01E02.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "House of the Dragon - S01E03",
+      "path": "/mnt/data/video/SerieUHD/House of the Dragon/S01E03.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "House of the Dragon - S01E04",
+      "path": "/mnt/data/video/SerieUHD/House of the Dragon/S01E04.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "House of the Dragon - S01E05",
+      "path": "/mnt/data/video/SerieUHD/House of the Dragon/S01E05.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "House of the Dragon - S01E06",
+      "path": "/mnt/data/video/SerieUHD/House of the Dragon/S01E06.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "House of the Dragon - S01E07",
+      "path": "/mnt/data/video/SerieUHD/House of the Dragon/S01E07.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "House of the Dragon - S01E08",
+      "path": "/mnt/data/video/SerieUHD/House of the Dragon/S01E08.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "House of the Dragon - S01E09",
+      "path": "/mnt/data/video/SerieUHD/House of the Dragon/S01E09.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "House of the Dragon - S01E10",
+      "path": "/mnt/data/video/SerieUHD/House of the Dragon/S01E10.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Witcher - S01E01",
+      "path": "/mnt/data/video/SerieUHD/The Witcher/S01E01.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Witcher - S01E02",
+      "path": "/mnt/data/video/SerieUHD/The Witcher/S01E02.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Witcher - S01E03",
+      "path": "/mnt/data/video/SerieUHD/The Witcher/S01E03.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Witcher - S01E04",
+      "path": "/mnt/data/video/SerieUHD/The Witcher/S01E04.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Witcher - S01E05",
+      "path": "/mnt/data/video/SerieUHD/The Witcher/S01E05.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Witcher - S01E06",
+      "path": "/mnt/data/video/SerieUHD/The Witcher/S01E06.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Witcher - S01E07",
+      "path": "/mnt/data/video/SerieUHD/The Witcher/S01E07.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Witcher - S01E08",
+      "path": "/mnt/data/video/SerieUHD/The Witcher/S01E08.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Witcher - S02E01",
+      "path": "/mnt/data/video/SerieUHD/The Witcher/S02E01.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Witcher - S02E02",
+      "path": "/mnt/data/video/SerieUHD/The Witcher/S02E02.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Witcher - S02E03",
+      "path": "/mnt/data/video/SerieUHD/The Witcher/S02E03.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Witcher - S02E04",
+      "path": "/mnt/data/video/SerieUHD/The Witcher/S02E04.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Witcher - S02E05",
+      "path": "/mnt/data/video/SerieUHD/The Witcher/S02E05.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Witcher - S02E06",
+      "path": "/mnt/data/video/SerieUHD/The Witcher/S02E06.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Witcher - S02E07",
+      "path": "/mnt/data/video/SerieUHD/The Witcher/S02E07.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Witcher - S02E08",
+      "path": "/mnt/data/video/SerieUHD/The Witcher/S02E08.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Foundation - S01E01",
+      "path": "/mnt/data/video/SerieUHD/Foundation/S01E01.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Foundation - S01E02",
+      "path": "/mnt/data/video/SerieUHD/Foundation/S01E02.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Foundation - S01E03",
+      "path": "/mnt/data/video/SerieUHD/Foundation/S01E03.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Foundation - S01E04",
+      "path": "/mnt/data/video/SerieUHD/Foundation/S01E04.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Foundation - S01E05",
+      "path": "/mnt/data/video/SerieUHD/Foundation/S01E05.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Foundation - S01E06",
+      "path": "/mnt/data/video/SerieUHD/Foundation/S01E06.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Foundation - S01E07",
+      "path": "/mnt/data/video/SerieUHD/Foundation/S01E07.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Foundation - S01E08",
+      "path": "/mnt/data/video/SerieUHD/Foundation/S01E08.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Foundation - S01E09",
+      "path": "/mnt/data/video/SerieUHD/Foundation/S01E09.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Foundation - S01E10",
+      "path": "/mnt/data/video/SerieUHD/Foundation/S01E10.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Foundation - S02E01",
+      "path": "/mnt/data/video/SerieUHD/Foundation/S02E01.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Foundation - S02E02",
+      "path": "/mnt/data/video/SerieUHD/Foundation/S02E02.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Foundation - S02E03",
+      "path": "/mnt/data/video/SerieUHD/Foundation/S02E03.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Foundation - S02E04",
+      "path": "/mnt/data/video/SerieUHD/Foundation/S02E04.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Foundation - S02E05",
+      "path": "/mnt/data/video/SerieUHD/Foundation/S02E05.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Foundation - S02E06",
+      "path": "/mnt/data/video/SerieUHD/Foundation/S02E06.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Foundation - S02E07",
+      "path": "/mnt/data/video/SerieUHD/Foundation/S02E07.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Foundation - S02E08",
+      "path": "/mnt/data/video/SerieUHD/Foundation/S02E08.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Foundation - S02E09",
+      "path": "/mnt/data/video/SerieUHD/Foundation/S02E09.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Foundation - S02E10",
+      "path": "/mnt/data/video/SerieUHD/Foundation/S02E10.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Expanse - S01E01",
+      "path": "/mnt/data/video/SerieUHD/The Expanse/S01E01.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Expanse - S01E02",
+      "path": "/mnt/data/video/SerieUHD/The Expanse/S01E02.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Expanse - S01E03",
+      "path": "/mnt/data/video/SerieUHD/The Expanse/S01E03.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Expanse - S01E04",
+      "path": "/mnt/data/video/SerieUHD/The Expanse/S01E04.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Expanse - S01E05",
+      "path": "/mnt/data/video/SerieUHD/The Expanse/S01E05.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Expanse - S01E06",
+      "path": "/mnt/data/video/SerieUHD/The Expanse/S01E06.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Expanse - S01E07",
+      "path": "/mnt/data/video/SerieUHD/The Expanse/S01E07.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Expanse - S01E08",
+      "path": "/mnt/data/video/SerieUHD/The Expanse/S01E08.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Expanse - S01E09",
+      "path": "/mnt/data/video/SerieUHD/The Expanse/S01E09.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Expanse - S01E10",
+      "path": "/mnt/data/video/SerieUHD/The Expanse/S01E10.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Stranger Things - S01E01",
+      "path": "/mnt/data/video/SerieUHD/Stranger Things/S01E01.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Stranger Things - S01E02",
+      "path": "/mnt/data/video/SerieUHD/Stranger Things/S01E02.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Stranger Things - S01E03",
+      "path": "/mnt/data/video/SerieUHD/Stranger Things/S01E03.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Stranger Things - S01E04",
+      "path": "/mnt/data/video/SerieUHD/Stranger Things/S01E04.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Stranger Things - S01E05",
+      "path": "/mnt/data/video/SerieUHD/Stranger Things/S01E05.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Stranger Things - S01E06",
+      "path": "/mnt/data/video/SerieUHD/Stranger Things/S01E06.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Stranger Things - S01E07",
+      "path": "/mnt/data/video/SerieUHD/Stranger Things/S01E07.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Stranger Things - S01E08",
+      "path": "/mnt/data/video/SerieUHD/Stranger Things/S01E08.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Stranger Things - S04E01",
+      "path": "/mnt/data/video/SerieUHD/Stranger Things/S04E01.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Stranger Things - S04E02",
+      "path": "/mnt/data/video/SerieUHD/Stranger Things/S04E02.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Stranger Things - S04E03",
+      "path": "/mnt/data/video/SerieUHD/Stranger Things/S04E03.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Stranger Things - S04E04",
+      "path": "/mnt/data/video/SerieUHD/Stranger Things/S04E04.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Stranger Things - S04E05",
+      "path": "/mnt/data/video/SerieUHD/Stranger Things/S04E05.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Stranger Things - S04E06",
+      "path": "/mnt/data/video/SerieUHD/Stranger Things/S04E06.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Stranger Things - S04E07",
+      "path": "/mnt/data/video/SerieUHD/Stranger Things/S04E07.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Stranger Things - S04E08",
+      "path": "/mnt/data/video/SerieUHD/Stranger Things/S04E08.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Stranger Things - S04E09",
+      "path": "/mnt/data/video/SerieUHD/Stranger Things/S04E09.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Cosmos A Spacetime Odyssey - S01E01",
+      "path": "/mnt/data/video/SerieUHD/Cosmos A Spacetime Odyssey/S01E01.mkv",
+      "categories": {
+        "general": 0.6,
+        "space": 0.4
+      }
+    },
+    {
+      "name": "Cosmos A Spacetime Odyssey - S01E02",
+      "path": "/mnt/data/video/SerieUHD/Cosmos A Spacetime Odyssey/S01E02.mkv",
+      "categories": {
+        "general": 0.6,
+        "space": 0.4
+      }
+    },
+    {
+      "name": "Cosmos A Spacetime Odyssey - S01E03",
+      "path": "/mnt/data/video/SerieUHD/Cosmos A Spacetime Odyssey/S01E03.mkv",
+      "categories": {
+        "general": 0.6,
+        "space": 0.4
+      }
+    },
+    {
+      "name": "Cosmos A Spacetime Odyssey - S01E04",
+      "path": "/mnt/data/video/SerieUHD/Cosmos A Spacetime Odyssey/S01E04.mkv",
+      "categories": {
+        "general": 0.6,
+        "space": 0.4
+      }
+    },
+    {
+      "name": "Cosmos A Spacetime Odyssey - S01E05",
+      "path": "/mnt/data/video/SerieUHD/Cosmos A Spacetime Odyssey/S01E05.mkv",
+      "categories": {
+        "general": 0.6,
+        "space": 0.4
+      }
+    },
+    {
+      "name": "Cosmos A Spacetime Odyssey - S01E06",
+      "path": "/mnt/data/video/SerieUHD/Cosmos A Spacetime Odyssey/S01E06.mkv",
+      "categories": {
+        "general": 0.6,
+        "space": 0.4
+      }
+    },
+    {
+      "name": "Cosmos A Spacetime Odyssey - S01E07",
+      "path": "/mnt/data/video/SerieUHD/Cosmos A Spacetime Odyssey/S01E07.mkv",
+      "categories": {
+        "general": 0.6,
+        "space": 0.4
+      }
+    },
+    {
+      "name": "Cosmos A Spacetime Odyssey - S01E08",
+      "path": "/mnt/data/video/SerieUHD/Cosmos A Spacetime Odyssey/S01E08.mkv",
+      "categories": {
+        "general": 0.6,
+        "space": 0.4
+      }
+    },
+    {
+      "name": "Cosmos A Spacetime Odyssey - S01E09",
+      "path": "/mnt/data/video/SerieUHD/Cosmos A Spacetime Odyssey/S01E09.mkv",
+      "categories": {
+        "general": 0.6,
+        "space": 0.4
+      }
+    },
+    {
+      "name": "Cosmos A Spacetime Odyssey - S01E10",
+      "path": "/mnt/data/video/SerieUHD/Cosmos A Spacetime Odyssey/S01E10.mkv",
+      "categories": {
+        "general": 0.6,
+        "space": 0.4
+      }
+    },
+    {
+      "name": "Cosmos A Spacetime Odyssey - S01E11",
+      "path": "/mnt/data/video/SerieUHD/Cosmos A Spacetime Odyssey/S01E11.mkv",
+      "categories": {
+        "general": 0.6,
+        "space": 0.4
+      }
+    },
+    {
+      "name": "Cosmos A Spacetime Odyssey - S01E12",
+      "path": "/mnt/data/video/SerieUHD/Cosmos A Spacetime Odyssey/S01E12.mkv",
+      "categories": {
+        "general": 0.6,
+        "space": 0.4
+      }
+    },
+    {
+      "name": "Cosmos A Spacetime Odyssey - S01E13",
+      "path": "/mnt/data/video/SerieUHD/Cosmos A Spacetime Odyssey/S01E13.mkv",
+      "categories": {
+        "general": 0.6,
+        "space": 0.4
+      }
+    },
+    {
+      "name": "Life - S01E01",
+      "path": "/mnt/data/video/SerieUHD/Life/S01E01.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Life - S01E02",
+      "path": "/mnt/data/video/SerieUHD/Life/S01E02.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Life - S01E03",
+      "path": "/mnt/data/video/SerieUHD/Life/S01E03.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Life - S01E04",
+      "path": "/mnt/data/video/SerieUHD/Life/S01E04.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Life - S01E05",
+      "path": "/mnt/data/video/SerieUHD/Life/S01E05.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Life - S01E06",
+      "path": "/mnt/data/video/SerieUHD/Life/S01E06.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Life - S01E07",
+      "path": "/mnt/data/video/SerieUHD/Life/S01E07.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Life - S01E08",
+      "path": "/mnt/data/video/SerieUHD/Life/S01E08.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Life - S01E09",
+      "path": "/mnt/data/video/SerieUHD/Life/S01E09.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Life - S01E10",
+      "path": "/mnt/data/video/SerieUHD/Life/S01E10.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Frozen Planet - S01E01",
+      "path": "/mnt/data/video/SerieUHD/Frozen Planet/S01E01.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Frozen Planet - S01E02",
+      "path": "/mnt/data/video/SerieUHD/Frozen Planet/S01E02.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Frozen Planet - S01E03",
+      "path": "/mnt/data/video/SerieUHD/Frozen Planet/S01E03.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Frozen Planet - S01E04",
+      "path": "/mnt/data/video/SerieUHD/Frozen Planet/S01E04.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Frozen Planet - S01E05",
+      "path": "/mnt/data/video/SerieUHD/Frozen Planet/S01E05.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Frozen Planet - S01E06",
+      "path": "/mnt/data/video/SerieUHD/Frozen Planet/S01E06.mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Frozen Planet - S01E07",
+      "path": "/mnt/data/video/SerieUHD/Frozen Planet/S01E07.mkv",
       "categories": {
         "general": 1.0
       }
