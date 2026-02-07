@@ -89,7 +89,7 @@ class VSRTrainer:
         
         # Web interface for remote monitoring - COMPLETE data
         from ..systems.web_ui import WebMonitoringInterface
-        self.web_monitor = WebMonitoringInterface(port_num=5050, refresh_seconds=5)
+        self.web_monitor = WebMonitoringInterface(port_num=5050, refresh_seconds=5, runtime_config=runtime_config)
     
     def set_start_step(self, step):
         """Set starting step (for resume)"""

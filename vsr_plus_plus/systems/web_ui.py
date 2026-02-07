@@ -119,6 +119,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
     data_repository = None
     action_queue = None
     refresh_interval_sec = 5
+    runtime_config_manager = None
     
     def log_message(self, format, *args):
         """Unterdrückt Standard-Logging"""
@@ -155,17 +156,38 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         self.wfile.write(json_output.encode('utf-8'))
     
     def _deliver_config_json(self):
-        """Liefert Konfiguration (z.B. Aktualisierungsintervall)"""
+        """Liefert Konfiguration (z.B. Aktualisierungsintervall) und Runtime-Config"""
         config = {
             'refresh_interval_seconds': self.refresh_interval_sec,
             'auto_refresh_enabled': True
         }
         
+        # Add runtime configuration if available
+        if hasattr(self, 'runtime_config_manager') and self.runtime_config_manager is not None:
+            try:
+                runtime_config = self.runtime_config_manager.get_all()
+                config['runtime_config'] = runtime_config
+                
+                # Add metadata about parameter categories
+                from ..systems.runtime_config import RUNTIME_SAFE_PARAMS, RUNTIME_CAREFUL_PARAMS, STARTUP_ONLY_PARAMS
+                config['config_categories'] = {
+                    'safe': list(RUNTIME_SAFE_PARAMS.keys()),
+                    'careful': list(RUNTIME_CAREFUL_PARAMS.keys()),
+                    'startup_only': list(STARTUP_ONLY_PARAMS)
+                }
+                config['config_ranges'] = {
+                    **RUNTIME_SAFE_PARAMS,
+                    **RUNTIME_CAREFUL_PARAMS
+                }
+            except Exception as e:
+                config['runtime_config_error'] = str(e)
+        
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
+        self.send_header('Cache-Control', 'no-cache')
         self.end_headers()
         
-        self.wfile.write(json.dumps(config).encode('utf-8'))
+        self.wfile.write(json.dumps(config, indent=2).encode('utf-8'))
     
     def _process_user_command(self):
         """Verarbeitet Befehle vom Benutzer"""
@@ -421,6 +443,72 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         .btn-success:hover {
             background: #56d364;
             transform: translateY(-2px);
+        }
+        
+        /* Training Score Card */
+        .training-score-card {
+            background: var(--bg-card);
+            border: 3px solid var(--border-color);
+            border-radius: 12px;
+            padding: 30px;
+            margin-bottom: 30px;
+            text-align: center;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+        }
+        
+        .training-score-card.excellent {
+            border-color: var(--accent-green);
+            background: linear-gradient(135deg, rgba(63, 185, 80, 0.05), var(--bg-card));
+        }
+        
+        .training-score-card.good {
+            border-color: var(--accent-blue);
+            background: linear-gradient(135deg, rgba(88, 166, 255, 0.05), var(--bg-card));
+        }
+        
+        .training-score-card.moderate {
+            border-color: var(--accent-orange);
+            background: linear-gradient(135deg, rgba(210, 153, 34, 0.05), var(--bg-card));
+        }
+        
+        .training-score-card.needs-attention {
+            border-color: var(--accent-red);
+            background: linear-gradient(135deg, rgba(248, 81, 73, 0.05), var(--bg-card));
+        }
+        
+        .score-title {
+            font-size: 1.3em;
+            color: var(--text-secondary);
+            margin-bottom: 15px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        .score-value {
+            font-size: 4em;
+            font-weight: 700;
+            margin: 20px 0;
+        }
+        
+        .score-label {
+            font-size: 1.5em;
+            font-weight: 600;
+            margin-bottom: 20px;
+        }
+        
+        .score-components {
+            display: flex;
+            justify-content: center;
+            gap: 30px;
+            flex-wrap: wrap;
+            margin-top: 20px;
+        }
+        
+        .score-component {
+            font-size: 1em;
+            padding: 8px 16px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 6px;
         }
         
         .link-box {
@@ -698,6 +786,18 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 <button class="btn btn-primary" onclick="openConfigPage()">
                     ⚙️ Konfiguration
                 </button>
+            </div>
+        </div>
+        
+        <!-- TRAINING SCORE - Prominent Performance Indicator -->
+        <div id="trainingScoreCard" class="training-score-card excellent">
+            <div class="score-title">⭐ TRAINING SCORE</div>
+            <div class="score-value" id="scoreValue">85.0%</div>
+            <div class="score-label" id="scoreLabel">EXCELLENT</div>
+            <div class="score-components">
+                <div class="score-component" id="scoreTrend">Trend: Converging</div>
+                <div class="score-component" id="scoreQuality">Quality: 70%</div>
+                <div class="score-component" id="scoreStability">Stability: Stable</div>
             </div>
         </div>
         
@@ -1156,6 +1256,9 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             document.getElementById('epochProgressText').textContent = 
                 data.epoch_step_current + ' / ' + data.epoch_step_total;
             
+            // Update Training Score (Prominent Performance Indicator)
+            updateTrainingScore(data);
+            
             // Status badge
             const badge = document.getElementById('statusBadge');
             if (data.validation_running) {
@@ -1248,6 +1351,126 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             document.getElementById('legendGrad').textContent = gradLoss.toFixed(4);
             document.getElementById('legendPerc').textContent = percLoss.toFixed(4);
             document.getElementById('legendTotal').textContent = totalLoss.toFixed(4);
+        }
+        
+        function updateTrainingScore(data) {
+            // Calculate training score based on multiple factors
+            let scoreTotal = 0;
+            let scoreMax = 0;
+            let components = [];
+            
+            // 1. Loss trend (up to 30 points) - based on plateau counter
+            const plateauCounter = data.adaptive_plateau_counter || 0;
+            let lossTrendScore = 0;
+            let lossTrendText = '';
+            let lossTrendColor = '';
+            
+            if (plateauCounter < 150) {
+                lossTrendScore = 30.0;
+                lossTrendText = 'Converging';
+                lossTrendColor = 'var(--accent-green)';
+            } else if (plateauCounter < 300) {
+                lossTrendScore = 20.0;
+                lossTrendText = 'Plateau';
+                lossTrendColor = 'var(--accent-blue)';
+            } else {
+                lossTrendScore = 10.0;
+                lossTrendText = 'Stagnating';
+                lossTrendColor = 'var(--accent-red)';
+            }
+            scoreTotal += lossTrendScore;
+            scoreMax += 30.0;
+            components.push({ name: 'Trend', text: lossTrendText, color: lossTrendColor });
+            
+            // 2. Quality metrics (up to 40 points) - if available
+            const kiQuality = (data.quality_ki_value || 0) * 100;
+            if (kiQuality > 0) {
+                const qualityScore = (kiQuality / 100.0) * 40.0;
+                scoreTotal += qualityScore;
+                scoreMax += 40.0;
+                
+                const qualityColor = kiQuality >= 70 ? 'var(--accent-green)' : 
+                                    kiQuality >= 50 ? 'var(--accent-blue)' : 'var(--accent-orange)';
+                components.push({ name: 'Quality', text: kiQuality.toFixed(0) + '%', color: qualityColor });
+            }
+            
+            // 3. Learning stability (up to 30 points) - based on adaptive mode
+            const adaptiveMode = data.adaptive_mode || 'Stable';
+            let stabilityScore = 0;
+            let stabilityText = '';
+            let stabilityColor = '';
+            
+            if (adaptiveMode === 'Stable' || plateauCounter < 150) {
+                stabilityScore = 30.0;
+                stabilityText = 'Stable';
+                stabilityColor = 'var(--accent-green)';
+            } else if (plateauCounter < 300) {
+                stabilityScore = 20.0;
+                stabilityText = 'Moderate';
+                stabilityColor = 'var(--accent-blue)';
+            } else {
+                stabilityScore = 10.0;
+                stabilityText = 'Unstable';
+                stabilityColor = 'var(--accent-red)';
+            }
+            scoreTotal += stabilityScore;
+            scoreMax += 30.0;
+            components.push({ name: 'Stability', text: stabilityText, color: stabilityColor });
+            
+            // Calculate overall percentage
+            const trainingScorePct = scoreMax > 0 ? (scoreTotal / scoreMax) * 100.0 : 50.0;
+            
+            // Determine card style and label
+            let cardClass = 'training-score-card ';
+            let scoreLabel = '';
+            let scoreColor = '';
+            let scoreIcon = '';
+            
+            if (trainingScorePct >= 80) {
+                cardClass += 'excellent';
+                scoreLabel = 'EXCELLENT';
+                scoreColor = 'var(--accent-green)';
+                scoreIcon = '🟢';
+            } else if (trainingScorePct >= 60) {
+                cardClass += 'good';
+                scoreLabel = 'GOOD';
+                scoreColor = 'var(--accent-blue)';
+                scoreIcon = '🔵';
+            } else if (trainingScorePct >= 40) {
+                cardClass += 'moderate';
+                scoreLabel = 'MODERATE';
+                scoreColor = 'var(--accent-orange)';
+                scoreIcon = '🟡';
+            } else {
+                cardClass += 'needs-attention';
+                scoreLabel = 'NEEDS ATTENTION';
+                scoreColor = 'var(--accent-red)';
+                scoreIcon = '🔴';
+            }
+            
+            // Update UI
+            const scoreCard = document.getElementById('trainingScoreCard');
+            scoreCard.className = cardClass;
+            
+            const scoreValue = document.getElementById('scoreValue');
+            scoreValue.textContent = scoreIcon + ' ' + trainingScorePct.toFixed(1) + '%';
+            scoreValue.style.color = scoreColor;
+            
+            document.getElementById('scoreLabel').textContent = scoreLabel;
+            
+            // Update components
+            document.getElementById('scoreTrend').innerHTML = 
+                `<span style="color: ${components[0].color}">${components[0].name}: ${components[0].text}</span>`;
+            
+            if (components.length > 1) {
+                document.getElementById('scoreQuality').innerHTML = 
+                    `<span style="color: ${components[1].color}">${components[1].name}: ${components[1].text}</span>`;
+            }
+            
+            if (components.length > 2) {
+                document.getElementById('scoreStability').innerHTML = 
+                    `<span style="color: ${components[2].color}">${components[2].name}: ${components[2].text}</span>`;
+            }
         }
         
         function updatePeakActivity(peakValue, peakLayer) {
@@ -1558,12 +1781,13 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
 class WebMonitoringInterface:
     """Hauptklasse für das Web-Monitoring-System"""
     
-    def __init__(self, port_num=5050, refresh_seconds=5):
+    def __init__(self, port_num=5050, refresh_seconds=5, runtime_config=None):
         self.server_port = port_num
         self.data_store = CompleteTrainingDataStore()
         self.command_inbox = Queue()
         self.http_server_instance = None
         self.server_daemon_thread = None
+        self.runtime_config = runtime_config
         
         # Setze Refresh-Intervall
         WebMonitorRequestProcessor.refresh_interval_sec = refresh_seconds
@@ -1571,6 +1795,7 @@ class WebMonitoringInterface:
         # Konfiguriere Request-Handler
         WebMonitorRequestProcessor.data_repository = self.data_store
         WebMonitorRequestProcessor.action_queue = self.command_inbox
+        WebMonitorRequestProcessor.runtime_config_manager = runtime_config
         
         self._start_http_server()
     

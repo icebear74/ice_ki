@@ -276,6 +276,96 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
     
     print_separator(ui_w, 'double')
     
+    # === TRAINING SCORE (Prominent indicator of training quality/performance) ===
+    # Calculate training score based on multiple factors
+    score_components = []
+    score_total = 0.0
+    score_max = 0.0
+    
+    # 1. Loss trend (up to 30 points) - based on convergence
+    if len(loss_history) >= 100:
+        recent = loss_history[-100:]
+        x = np.arange(len(recent))
+        slope = np.polyfit(x, recent, 1)[0]
+        
+        if slope < -0.00005:  # Converging
+            loss_trend_score = 30.0
+            loss_trend_status = f"{C_GREEN}Converging{C_RESET}"
+        elif abs(slope) < 0.00005:  # Plateauing
+            loss_trend_score = 20.0
+            loss_trend_status = f"{C_CYAN}Plateau{C_RESET}"
+        else:  # Diverging
+            loss_trend_score = 5.0
+            loss_trend_status = f"{C_RED}Diverging{C_RESET}"
+    else:
+        loss_trend_score = 15.0
+        loss_trend_status = f"{C_YELLOW}Warming Up{C_RESET}"
+    score_total += loss_trend_score
+    score_max += 30.0
+    score_components.append(f"Trend:{loss_trend_status}")
+    
+    # 2. Quality metrics (up to 40 points) - if available
+    if quality_metrics and ki_quality > 0:
+        # KI quality (0-100%) -> 0-40 points
+        quality_score = (ki_quality / 100.0) * 40.0
+        score_total += quality_score
+        score_max += 40.0
+        
+        quality_color = C_GREEN if ki_quality >= 70 else C_YELLOW if ki_quality >= 50 else C_RED
+        score_components.append(f"Quality:{quality_color}{ki_quality:.0f}%{C_RESET}")
+    
+    # 3. Learning stability (up to 30 points) - based on plateau counter and adaptive mode
+    if adaptive_status:
+        plateau = adaptive_status.get('plateau_counter', 0)
+        adaptive_mode_val = adaptive_status.get('mode', 'Stable')
+        
+        if plateau < 150:
+            stability_score = 30.0
+            stability_status = f"{C_GREEN}Stable{C_RESET}"
+        elif plateau < 300:
+            stability_score = 20.0
+            stability_status = f"{C_YELLOW}Moderate{C_RESET}"
+        else:
+            stability_score = 10.0
+            stability_status = f"{C_RED}Unstable{C_RESET}"
+        
+        score_total += stability_score
+        score_max += 30.0
+        score_components.append(f"Stability:{stability_status}")
+    
+    # Calculate overall score percentage
+    if score_max > 0:
+        training_score_pct = (score_total / score_max) * 100.0
+    else:
+        training_score_pct = 50.0  # Default if no components available
+    
+    # Determine color and icon based on score
+    if training_score_pct >= 80:
+        score_color = C_GREEN
+        score_icon = "🟢"
+        score_label = "EXCELLENT"
+    elif training_score_pct >= 60:
+        score_color = C_CYAN
+        score_icon = "🔵"
+        score_label = "GOOD"
+    elif training_score_pct >= 40:
+        score_color = C_YELLOW
+        score_icon = "🟡"
+        score_label = "MODERATE"
+    else:
+        score_color = C_RED
+        score_icon = "🔴"
+        score_label = "NEEDS ATTENTION"
+    
+    # Display prominent training score
+    print_line(f"{C_BOLD}⭐ TRAINING SCORE: {score_icon} {score_color}{training_score_pct:.1f}%{C_RESET} {C_BOLD}({score_label}){C_RESET}", ui_w)
+    
+    # Show component breakdown
+    components_str = " | ".join(score_components)
+    print_line(f"   {components_str}", ui_w)
+    
+    print_separator(ui_w, 'double')
+    
     # === PROGRESS ===
     print_line(f"{C_BOLD}📊 PROGRESS{C_RESET}", ui_w)
     print_separator(ui_w, 'single')
@@ -431,7 +521,7 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
         
         print_separator(ui_w, 'double')
     
-    # === PEAK LAYER ACTIVITY ===
+    # === PEAK LAYER ACTIVITY (Enhanced visibility) ===
     if activities and len(activities) > 0:
         # Find peak activity
         # activities is a list of tuples: (name, percent, trend, raw_value)
@@ -452,64 +542,55 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
                 peak_layer_name = "Unknown"
                 peak_value = 0.0
         
+        # Determine color and icon based on peak value
+        if peak_value > 2.0:
+            peak_color = C_RED
+            peak_icon = "🔥🔥🔥"
+            peak_status = "EXTREME"
+        elif peak_value > 1.5:
+            peak_color = C_YELLOW
+            peak_icon = "🔥🔥"
+            peak_status = "VERY HIGH"
+        elif peak_value > 1.0:
+            peak_color = C_CYAN
+            peak_icon = "🔥"
+            peak_status = "HIGH"
+        elif peak_value > 0.5:
+            peak_color = C_GREEN
+            peak_icon = "⚡"
+            peak_status = "MODERATE"
+        else:
+            peak_color = C_GREEN
+            peak_icon = "✓"
+            peak_status = "NORMAL"
+        
         # Create peak activity bar (0.0 - 2.0 scale)
         from .ui_terminal import make_peak_activity_bar
         peak_bar = make_peak_activity_bar(peak_value, width=ui_w - 40)
         
-        print_line(f"{C_BOLD}🔥 PEAK LAYER ACTIVITY{C_RESET}", ui_w)
-        print_line(f"Layer: {C_CYAN}{peak_layer_name}{C_RESET} | Value: {C_BOLD}{peak_value:.3f}{C_RESET}", ui_w)
-        print_line(peak_bar, ui_w)
-        
-        # Warning if extreme
-        if peak_value > 2.0:
-            print_line(f"{C_RED}🔴 EXTREME! Check training stability!{C_RESET}", ui_w)
-        elif peak_value > 1.5:
-            print_line(f"{C_YELLOW}⚠️  Unusually high activity!{C_RESET}", ui_w)
-        
+        # Enhanced header with icon and color
+        print_line(f"{C_BOLD}{peak_icon} PEAK LAYER ACTIVITY - {peak_color}{peak_status}{C_RESET}", ui_w)
         print_separator(ui_w, 'thin')
         
-        # === STREAM OVERVIEW ===
-        # Calculate averages for each stream
-        backward_vals = []
-        forward_vals = []
-        fusion_vals = []
+        # Show peak layer with enhanced formatting
+        print_line(f"Layer: {C_BOLD}{peak_color}{peak_layer_name}{C_RESET} | Value: {C_BOLD}{peak_color}{peak_value:.3f}{C_RESET}", ui_w)
+        print_separator(ui_w, 'thin')
         
-        if isinstance(activities, dict):
-            for layer_name, value in activities.items():
-                if 'backward' in layer_name.lower():
-                    backward_vals.append(value)
-                elif 'forward' in layer_name.lower():
-                    forward_vals.append(value)
-                elif 'fus' in layer_name.lower() or 'fusion' in layer_name.lower():
-                    fusion_vals.append(value)
+        # Visual bar display
+        print_line(peak_bar, ui_w)
+        print_separator(ui_w, 'thin')
+        
+        # Warning if extreme with prominent display
+        if peak_value > 2.0:
+            print_line(f"{C_BOLD}{C_RED}⚠️  🔴 EXTREME ACTIVITY! Check training stability! 🔴 ⚠️{C_RESET}", ui_w)
+        elif peak_value > 1.5:
+            print_line(f"{C_BOLD}{C_YELLOW}⚠️  Unusually high activity - Monitor closely{C_RESET}", ui_w)
+        elif peak_value > 1.0:
+            print_line(f"{C_CYAN}ℹ️  High activity detected - This is normal during training{C_RESET}", ui_w)
         else:
-            # For list of tuples: (name, percent, trend, raw_value)
-            for item in activities:
-                if isinstance(item, tuple) and len(item) > 3:
-                    layer_name, percent, trend, raw_value = item[0], item[1], item[2], item[3]
-                    if 'backward' in layer_name.lower():
-                        backward_vals.append(raw_value)
-                    elif 'forward' in layer_name.lower():
-                        forward_vals.append(raw_value)
-                    elif 'fus' in layer_name.lower() or 'fusion' in layer_name.lower():
-                        fusion_vals.append(raw_value)
+            print_line(f"{C_GREEN}✓ Activity levels within normal range{C_RESET}", ui_w)
         
-        print_line(f"{C_BOLD}📊 STREAM-ÜBERSICHT (Durchschnitt){C_RESET}", ui_w)
-        
-        if backward_vals:
-            backward_avg = sum(backward_vals) / len(backward_vals)
-            backward_bar = make_bar(min(backward_avg * 50, 100), width=20)  # Scale for visibility
-            print_line(f"⬅️  Backward: {backward_bar} {C_CYAN}{backward_avg:.3f}{C_RESET} ({len(backward_vals)} layers)", ui_w)
-        
-        if forward_vals:
-            forward_avg = sum(forward_vals) / len(forward_vals)
-            forward_bar = make_bar(min(forward_avg * 50, 100), width=20)
-            print_line(f"➡️  Forward:  {forward_bar} {C_GREEN}{forward_avg:.3f}{C_RESET} ({len(forward_vals)} layers)", ui_w)
-        
-        if fusion_vals:
-            fusion_avg = sum(fusion_vals) / len(fusion_vals)
-            fusion_bar = make_bar_fusion(min(fusion_avg * 50, 100), width=20)
-            print_line(f"🔗 Fusion:   {fusion_bar} {C_MAGENTA}{fusion_avg:.3f}{C_RESET} ({len(fusion_vals)} layers)", ui_w)
+        # Stream overview removed as per user request
         
         print_separator(ui_w, 'double')
     
