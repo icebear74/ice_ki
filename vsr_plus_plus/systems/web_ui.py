@@ -346,6 +346,27 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             background: linear-gradient(90deg, var(--accent-blue), var(--accent-purple));
         }
         
+        /* Color based on absolute activity value (0-2.0 scale) */
+        .layer-bar-fill.activity-low {
+            /* 0.0-0.5: Green */
+            background: linear-gradient(90deg, #22c55e, #10b981);
+        }
+        
+        .layer-bar-fill.activity-moderate {
+            /* 0.5-1.0: Cyan/Yellow */
+            background: linear-gradient(90deg, #06b6d4, #eab308);
+        }
+        
+        .layer-bar-fill.activity-high {
+            /* 1.0-1.5: Orange */
+            background: linear-gradient(90deg, #f97316, #ea580c);
+        }
+        
+        .layer-bar-fill.activity-extreme {
+            /* 1.5-2.0+: Red */
+            background: linear-gradient(90deg, #ef4444, #dc2626);
+        }
+        
         .layer-bar-fill.fusion {
             background: linear-gradient(90deg, var(--accent-orange), var(--accent-red));
         }
@@ -1270,7 +1291,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             const forwardLayers = [];
             const fusionLayers = [];
             
-            // Find max value for normalization (if values are > 1.0)
+            // Find max value for peak detection
             let maxValue = 0;
             let peakLayerName = '-';
             for (const [layerName, activityValue] of Object.entries(activityMap)) {
@@ -1283,52 +1304,44 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             // Update peak activity visualization
             updatePeakActivity(maxValue, peakLayerName);
             
-            // If max > 1.0, we need to normalize
-            const needsNormalization = maxValue > 1.0;
-            
+            // Process all layers using ABSOLUTE 0-2.0 scale
+            // 2.0 = 100%, 1.0 = 50%, etc.
             for (const [layerName, activityValue] of Object.entries(activityMap)) {
-                // Normalize if needed: convert to 0-100 range
-                let displayValue, barWidth, actualValue;
-                
                 // Store the actual value
-                actualValue = activityValue.toFixed(3);
+                const actualValue = activityValue.toFixed(3);
                 
-                if (needsNormalization) {
-                    // Show as percentage of max for bar width
-                    displayValue = ((activityValue / maxValue) * 100).toFixed(1);
-                    barWidth = displayValue;
-                } else {
-                    // Already in 0-1 range, convert to percentage
-                    displayValue = (activityValue * 100).toFixed(1);
-                    barWidth = displayValue;
-                }
+                // Calculate bar width based on absolute 0-2.0 scale
+                // 2.0 = 100%, anything over 2.0 is capped at 100%
+                let barWidth = Math.min((activityValue / 2.0) * 100, 100);
                 
-                // Ensure bar width is valid and doesn't exceed 100%
-                barWidth = parseFloat(barWidth);
+                // Also show percentage for display
+                const displayValue = barWidth.toFixed(1);
+                
+                // Ensure bar width is valid
                 if (isNaN(barWidth) || barWidth < 0) {
                     barWidth = 0;
                 }
-                barWidth = Math.min(100, barWidth);
                 
+                // Determine bar color based on ABSOLUTE value (0-2.0 scale)
                 let barClass = 'layer-bar-fill';
                 
-                // Categorize layer
+                // Add color class based on absolute activity value
+                if (activityValue >= 1.5) {
+                    barClass += ' activity-extreme';  // Red
+                } else if (activityValue >= 1.0) {
+                    barClass += ' activity-high';  // Orange
+                } else if (activityValue >= 0.5) {
+                    barClass += ' activity-moderate';  // Cyan/Yellow
+                } else {
+                    barClass += ' activity-low';  // Green
+                }
+                
+                // Categorize layer by type (for sorting/grouping)
                 if (layerName.toLowerCase().includes('backward')) {
-                    if (layerName.includes('Final Fusion')) {
-                        barClass += ' final-fusion';
-                    } else if (layerName.includes('Fus')) {
-                        barClass += ' fusion';
-                    }
                     backwardLayers.push({name: layerName, value: displayValue, actualValue: actualValue, width: barWidth, barClass});
                 } else if (layerName.toLowerCase().includes('forward')) {
-                    if (layerName.includes('Final Fusion')) {
-                        barClass += ' final-fusion';
-                    } else if (layerName.includes('Fus')) {
-                        barClass += ' fusion';
-                    }
                     forwardLayers.push({name: layerName, value: displayValue, actualValue: actualValue, width: barWidth, barClass});
                 } else if (layerName.toLowerCase().includes('fus')) {
-                    barClass += ' fusion';
                     fusionLayers.push({name: layerName, value: displayValue, actualValue: actualValue, width: barWidth, barClass});
                 } else {
                     // Default to fusion if unclear
