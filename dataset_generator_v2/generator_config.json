@@ -335,6 +335,516 @@
         "toon": 0.7,
         "general": 0.3
       }
+    },
+    
+    {
+      "name": "The Matrix",
+      "path": "/mnt/data/video/FilmeUHD/The Matrix (1999)/The Matrix (1999).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Matrix Reloaded",
+      "path": "/mnt/data/video/FilmeUHD/The Matrix Reloaded (2003)/The Matrix Reloaded (2003).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Matrix Revolutions",
+      "path": "/mnt/data/video/FilmeUHD/The Matrix Revolutions (2003)/The Matrix Revolutions (2003).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Inception",
+      "path": "/mnt/data/video/FilmeUHD/Inception (2010)/Inception (2010).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Blade Runner 2049",
+      "path": "/mnt/data/video/FilmeUHD/Blade Runner 2049 (2017)/Blade Runner 2049 (2017).mkv",
+      "categories": {
+        "general": 0.5,
+        "space": 0.5
+      }
+    },
+    {
+      "name": "Mad Max Fury Road",
+      "path": "/mnt/data/video/FilmeUHD/Mad Max Fury Road (2015)/Mad Max Fury Road (2015).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "1917",
+      "path": "/mnt/data/video/FilmeUHD/1917 (2019)/1917 (2019).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Dunkirk",
+      "path": "/mnt/data/video/FilmeUHD/Dunkirk (2017)/Dunkirk (2017).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Revenant",
+      "path": "/mnt/data/video/FilmeUHD/The Revenant (2015)/The Revenant (2015).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Gravity",
+      "path": "/mnt/data/video/FilmeUHD/Gravity (2013)/Gravity (2013).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Martian",
+      "path": "/mnt/data/video/FilmeUHD/The Martian (2015)/The Martian (2015).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Ad Astra",
+      "path": "/mnt/data/video/FilmeUHD/Ad Astra (2019)/Ad Astra (2019).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Guardians of the Galaxy",
+      "path": "/mnt/data/video/FilmeUHD/Guardians of the Galaxy (2014)/Guardians of the Galaxy (2014).mkv",
+      "categories": {
+        "space": 0.6,
+        "general": 0.4
+      }
+    },
+    {
+      "name": "Guardians of the Galaxy Vol 2",
+      "path": "/mnt/data/video/FilmeUHD/Guardians of the Galaxy Vol 2 (2017)/Guardians of the Galaxy Vol 2 (2017).mkv",
+      "categories": {
+        "space": 0.6,
+        "general": 0.4
+      }
+    },
+    {
+      "name": "Thor Ragnarok",
+      "path": "/mnt/data/video/FilmeUHD/Thor Ragnarok (2017)/Thor Ragnarok (2017).mkv",
+      "categories": {
+        "space": 0.5,
+        "general": 0.5
+      }
+    },
+    {
+      "name": "Avengers Endgame",
+      "path": "/mnt/data/video/FilmeUHD/Avengers Endgame (2019)/Avengers Endgame (2019).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Avengers Infinity War",
+      "path": "/mnt/data/video/FilmeUHD/Avengers Infinity War (2018)/Avengers Infinity War (2018).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Spider-Man No Way Home",
+      "path": "/mnt/data/video/FilmeUHD/Spider-Man No Way Home (2021)/Spider-Man No Way Home (2021).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Lion King (2019)",
+      "path": "/mnt/data/video/FilmeUHD/The Lion King (2019)/The Lion King (2019).mkv",
+      "categories": {
+        "toon": 0.6,
+        "general": 0.4
+      }
+    },
+    {
+      "name": "Frozen",
+      "path": "/mnt/data/video/FilmeUHD/Frozen (2013)/Frozen (2013).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Frozen 2",
+      "path": "/mnt/data/video/FilmeUHD/Frozen 2 (2019)/Frozen 2 (2019).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Moana",
+      "path": "/mnt/data/video/FilmeUHD/Moana (2016)/Moana (2016).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Coco",
+      "path": "/mnt/data/video/FilmeUHD/Coco (2017)/Coco (2017).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Toy Story 4",
+      "path": "/mnt/data/video/FilmeUHD/Toy Story 4 (2019)/Toy Story 4 (2019).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Finding Nemo",
+      "path": "/mnt/data/video/FilmeUHD/Finding Nemo (2003)/Finding Nemo (2003).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Finding Dory",
+      "path": "/mnt/data/video/FilmeUHD/Finding Dory (2016)/Finding Dory (2016).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "The Incredibles",
+      "path": "/mnt/data/video/FilmeUHD/The Incredibles (2004)/The Incredibles (2004).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "The Incredibles 2",
+      "path": "/mnt/data/video/FilmeUHD/The Incredibles 2 (2018)/The Incredibles 2 (2018).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Zootopia",
+      "path": "/mnt/data/video/FilmeUHD/Zootopia (2016)/Zootopia (2016).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Big Hero 6",
+      "path": "/mnt/data/video/FilmeUHD/Big Hero 6 (2014)/Big Hero 6 (2014).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Wreck-It Ralph",
+      "path": "/mnt/data/video/FilmeUHD/Wreck-It Ralph (2012)/Wreck-It Ralph (2012).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Raya and the Last Dragon",
+      "path": "/mnt/data/video/FilmeUHD/Raya and the Last Dragon (2021)/Raya and the Last Dragon (2021).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Encanto",
+      "path": "/mnt/data/video/FilmeUHD/Encanto (2021)/Encanto (2021).mkv",
+      "categories": {
+        "toon": 1.0
+      }
+    },
+    {
+      "name": "Blade Runner (1982)",
+      "path": "/mnt/data/video/FilmeUHD/Blade Runner (1982)/Blade Runner (1982).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Alien",
+      "path": "/mnt/data/video/FilmeUHD/Alien (1979)/Alien (1979).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Aliens",
+      "path": "/mnt/data/video/FilmeUHD/Aliens (1986)/Aliens (1986).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Prometheus",
+      "path": "/mnt/data/video/FilmeUHD/Prometheus (2012)/Prometheus (2012).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Alien Covenant",
+      "path": "/mnt/data/video/FilmeUHD/Alien Covenant (2017)/Alien Covenant (2017).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Fifth Element",
+      "path": "/mnt/data/video/FilmeUHD/The Fifth Element (1997)/The Fifth Element (1997).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Valerian",
+      "path": "/mnt/data/video/FilmeUHD/Valerian (2017)/Valerian (2017).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Hobbit An Unexpected Journey",
+      "path": "/mnt/data/video/FilmeUHD/The Hobbit An Unexpected Journey (2012)/The Hobbit An Unexpected Journey (2012).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Hobbit The Desolation of Smaug",
+      "path": "/mnt/data/video/FilmeUHD/The Hobbit The Desolation of Smaug (2013)/The Hobbit The Desolation of Smaug (2013).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Hobbit The Battle of the Five Armies",
+      "path": "/mnt/data/video/FilmeUHD/The Hobbit The Battle of the Five Armies (2014)/The Hobbit The Battle of the Five Armies (2014).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Lord of the Rings The Fellowship",
+      "path": "/mnt/data/video/FilmeUHD/LOTR The Fellowship (2001)/LOTR The Fellowship (2001).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Lord of the Rings The Two Towers",
+      "path": "/mnt/data/video/FilmeUHD/LOTR The Two Towers (2002)/LOTR The Two Towers (2002).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Lord of the Rings The Return of the King",
+      "path": "/mnt/data/video/FilmeUHD/LOTR The Return of the King (2003)/LOTR The Return of the King (2003).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Harry Potter and the Philosophers Stone",
+      "path": "/mnt/data/video/FilmeUHD/Harry Potter 1 (2001)/Harry Potter 1 (2001).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Harry Potter and the Chamber of Secrets",
+      "path": "/mnt/data/video/FilmeUHD/Harry Potter 2 (2002)/Harry Potter 2 (2002).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Harry Potter and the Prisoner of Azkaban",
+      "path": "/mnt/data/video/FilmeUHD/Harry Potter 3 (2004)/Harry Potter 3 (2004).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Jurassic Park",
+      "path": "/mnt/data/video/FilmeUHD/Jurassic Park (1993)/Jurassic Park (1993).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Jurassic World",
+      "path": "/mnt/data/video/FilmeUHD/Jurassic World (2015)/Jurassic World (2015).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Jurassic World Fallen Kingdom",
+      "path": "/mnt/data/video/FilmeUHD/Jurassic World Fallen Kingdom (2018)/Jurassic World Fallen Kingdom (2018).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Jurassic World Dominion",
+      "path": "/mnt/data/video/FilmeUHD/Jurassic World Dominion (2022)/Jurassic World Dominion (2022).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Hunger Games",
+      "path": "/mnt/data/video/FilmeUHD/The Hunger Games (2012)/The Hunger Games (2012).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Tenet",
+      "path": "/mnt/data/video/FilmeUHD/Tenet (2020)/Tenet (2020).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Skyfall",
+      "path": "/mnt/data/video/FilmeUHD/Skyfall (2012)/Skyfall (2012).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Spectre",
+      "path": "/mnt/data/video/FilmeUHD/Spectre (2015)/Spectre (2015).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "No Time to Die",
+      "path": "/mnt/data/video/FilmeUHD/No Time to Die (2021)/No Time to Die (2021).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Mission Impossible Fallout",
+      "path": "/mnt/data/video/FilmeUHD/Mission Impossible Fallout (2018)/Mission Impossible Fallout (2018).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Mission Impossible Ghost Protocol",
+      "path": "/mnt/data/video/FilmeUHD/Mission Impossible Ghost Protocol (2011)/Mission Impossible Ghost Protocol (2011).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "The Amazing Spider-Man",
+      "path": "/mnt/data/video/FilmeUHD/The Amazing Spider-Man (2012)/The Amazing Spider-Man (2012).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Doctor Strange",
+      "path": "/mnt/data/video/FilmeUHD/Doctor Strange (2016)/Doctor Strange (2016).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Black Panther",
+      "path": "/mnt/data/video/FilmeUHD/Black Panther (2018)/Black Panther (2018).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Aquaman",
+      "path": "/mnt/data/video/FilmeUHD/Aquaman (2018)/Aquaman (2018).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Wonder Woman",
+      "path": "/mnt/data/video/FilmeUHD/Wonder Woman (2017)/Wonder Woman (2017).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Justice League",
+      "path": "/mnt/data/video/FilmeUHD/Justice League (2017)/Justice League (2017).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Man of Steel",
+      "path": "/mnt/data/video/FilmeUHD/Man of Steel (2013)/Man of Steel (2013).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Batman v Superman",
+      "path": "/mnt/data/video/FilmeUHD/Batman v Superman (2016)/Batman v Superman (2016).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Kong Skull Island",
+      "path": "/mnt/data/video/FilmeUHD/Kong Skull Island (2017)/Kong Skull Island (2017).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Godzilla (2014)",
+      "path": "/mnt/data/video/FilmeUHD/Godzilla (2014)/Godzilla (2014).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Godzilla King of Monsters",
+      "path": "/mnt/data/video/FilmeUHD/Godzilla King of Monsters (2019)/Godzilla King of Monsters (2019).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Pacific Rim",
+      "path": "/mnt/data/video/FilmeUHD/Pacific Rim (2013)/Pacific Rim (2013).mkv",
+      "categories": {
+        "general": 1.0
+      }
     }
   ]
 }

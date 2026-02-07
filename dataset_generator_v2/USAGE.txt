@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""
+Example usage of the dataset generator v2.
+This demonstrates the expected workflow.
+"""
+
+print("""
+================================================================================
+              MULTI-CATEGORY DATASET GENERATOR V2.0
+================================================================================
+
+This generator creates training patches for three specialized models:
+  • GENERAL (Universal/Mastermodell) - Normal films, nature, diverse content
+  • SPACE - Star Trek, Star Wars, Sci-Fi content  
+  • TOON - Animation/Cartoon content
+
+================================================================================
+                            USAGE EXAMPLES
+================================================================================
+
+1. START GENERATION
+   -----------------
+   cd dataset_generator_v2
+   python make_dataset_multi.py
+   
+   The generator will:
+   ✓ Load 116+ videos from generator_config.json
+   ✓ Check for existing checkpoints (resume if found)
+   ✓ Create output directory structure
+   ✓ Process videos with beautiful live UI
+   ✓ Save checkpoints every 10 extractions
+   ✓ Handle Ctrl+C gracefully
+
+2. MONITOR PROGRESS (separate terminal)
+   -------------------------------------
+   cd dataset_generator_v2
+   python monitor_generator.py
+   
+   Live monitoring shows:
+   ✓ Overall progress (videos completed, ETA)
+   ✓ Current video status
+   ✓ Category statistics (images created, disk usage)
+   ✓ Checkpoint information
+   ✓ Updates every 2 seconds
+
+3. RESUME AFTER INTERRUPTION
+   ---------------------------
+   cd dataset_generator_v2
+   python make_dataset_multi.py
+   
+   Automatically:
+   ✓ Detects checkpoint file
+   ✓ Resumes from last completed video
+   ✓ Continues from last successful frame
+
+================================================================================
+                         OUTPUT STRUCTURE
+================================================================================
+
+/mnt/data/training/dataset/
+│
+├── Universal/Mastermodell/Learn/        # GENERAL category
+│   ├── Patches/                         # 540×540
+│   │   ├── GT/                          # Ground truth
+│   │   ├── LR_5frames/                  # 5-frame LR stack
+│   │   └── LR_7frames/                  # 7-frame LR stack
+│   ├── Patches_Medium169/               # 720×405 (16:9)
+│   ├── Patches_Large/                   # 720×720
+│   ├── Patches_XLarge169/               # 1440×810
+│   ├── Patches_FullHD/                  # 1920×1080
+│   └── Val/GT/                          # Manual validation
+│
+├── Space/SpaceModel/Learn/              # SPACE category
+│   ├── Patches/
+│   ├── Patches_XLarge169/
+│   ├── Patches_FullHD/
+│   └── Val/GT/
+│
+└── Toon/ToonModel/Learn/                # TOON category
+    ├── Patches/
+    ├── Patches_Medium169/
+    └── Val/GT/
+
+================================================================================
+                         EXPECTED OUTPUT
+================================================================================
+
+Total Videos: ~116 (expandable to ~497)
+Total Images: ~165,000
+  • GENERAL: ~80,000 images (across all formats)
+  • SPACE: ~55,000 images (focus on large formats)
+  • TOON: ~30,000 images (smaller formats)
+
+Total Disk: ~416 GB
+  • GENERAL: ~146 GB
+  • SPACE: ~195 GB  
+  • TOON: ~35 GB
+
+Generation Time: 5-7 days (with 12 workers)
+
+================================================================================
+                            FEATURES
+================================================================================
+
+✓ Dual LR Generation
+  → Each extraction creates GT + LR_5frames + LR_7frames
+
+✓ Multi-Category Support
+  → Same video can contribute to multiple categories
+  → Different random crops per category
+
+✓ Beautiful Live GUI
+  → Real-time progress monitoring
+  → Category statistics
+  → Disk usage tracking
+
+✓ Resume Capability
+  → Checkpoint system for long-running generation
+  → Resume from last successful frame
+
+✓ HDR Tonemap
+  → Proper HDR-to-SDR conversion
+  → High-quality patches
+
+✓ Smart Scene Validation
+  → Automatic detection of scene cuts
+  → Retry logic with different timestamps
+
+================================================================================
+                         CONFIGURATION
+================================================================================
+
+Edit generator_config.json to customize:
+
+• base_frame_limit: Frames per video (default: 3000)
+• max_workers: Parallel extraction threads (default: 12)
+• output_base_dir: Output directory (default: /mnt/data/training/dataset)
+• scene_diff_threshold: Scene stability threshold (default: 45)
+• max_retry_attempts: Retries per extraction (default: 10)
+
+Add videos:
+{
+  "name": "Video Name",
+  "path": "/full/path/to/video.mkv",
+  "categories": {
+    "general": 0.5,
+    "space": 0.5
+  }
+}
+
+================================================================================
+                        TROUBLESHOOTING
+================================================================================
+
+• Generator crashes or hangs
+  → Check .generator_status.json for last state
+  → Verify video files exist
+  → Check disk space (~450 GB free needed)
+
+• Low success rate
+  → Increase scene_diff_threshold
+  → Increase max_retry_attempts
+
+• Resume not working
+  → Verify .generator_status.json exists
+  → Delete status file to start fresh
+
+• Monitor shows no data
+  → Verify generator is running
+  → Check status file path matches
+
+================================================================================
+
+For detailed documentation, see dataset_generator_v2/README.md
+
+Ready to start? Run:
+  cd dataset_generator_v2
+  python make_dataset_multi.py
+
+================================================================================
+""")
