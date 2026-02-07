@@ -10,6 +10,11 @@ import shutil
 import numpy as np
 from .ui_terminal import *
 
+# Convergence detection thresholds
+# These values determine when loss is considered converging/diverging
+CONVERGENCE_SLOPE_THRESHOLD = -0.00005  # Negative slope indicates convergence
+DIVERGENCE_SLOPE_THRESHOLD = 0.00005    # Positive slope indicates divergence
+
 
 # Global state for UI
 activity_history = {i+1: [] for i in range(64)}  # Support up to 64 layers
@@ -288,10 +293,10 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
         x = np.arange(len(recent))
         slope = np.polyfit(x, recent, 1)[0]
         
-        if slope < -0.00005:  # Converging
+        if slope < CONVERGENCE_SLOPE_THRESHOLD:  # Converging
             loss_trend_score = 30.0
             loss_trend_status = f"{C_GREEN}Converging{C_RESET}"
-        elif abs(slope) < 0.00005:  # Plateauing
+        elif abs(slope) < DIVERGENCE_SLOPE_THRESHOLD:  # Plateauing
             loss_trend_score = 20.0
             loss_trend_status = f"{C_CYAN}Plateau{C_RESET}"
         else:  # Diverging
@@ -337,10 +342,16 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
     if score_max > 0:
         training_score_pct = (score_total / score_max) * 100.0
     else:
-        training_score_pct = 50.0  # Default if no components available
+        # No components available - indicate insufficient data instead of assuming moderate
+        training_score_pct = 0.0  # Will be labeled as "INSUFFICIENT DATA"
     
     # Determine color and icon based on score
-    if training_score_pct >= 80:
+    if score_max == 0:
+        # Insufficient data
+        score_color = C_GRAY
+        score_icon = "⚪"
+        score_label = "INSUFFICIENT DATA"
+    elif training_score_pct >= 80:
         score_color = C_GREEN
         score_icon = "🟢"
         score_label = "EXCELLENT"

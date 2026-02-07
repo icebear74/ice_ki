@@ -11,6 +11,9 @@ import socket
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from queue import Queue
 
+# Import runtime_config module at module level to avoid repeated imports
+from ..systems.runtime_config import RUNTIME_SAFE_PARAMS, RUNTIME_CAREFUL_PARAMS, STARTUP_ONLY_PARAMS
+
 
 def detect_local_ip():
     """Ermittelt die lokale IP-Adresse für TensorBoard-Links"""
@@ -168,8 +171,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 runtime_config = self.runtime_config_manager.get_all()
                 config['runtime_config'] = runtime_config
                 
-                # Add metadata about parameter categories
-                from ..systems.runtime_config import RUNTIME_SAFE_PARAMS, RUNTIME_CAREFUL_PARAMS, STARTUP_ONLY_PARAMS
+                # Add metadata about parameter categories (imported at module level)
                 config['config_categories'] = {
                     'safe': list(RUNTIME_SAFE_PARAMS.keys()),
                     'careful': list(RUNTIME_CAREFUL_PARAMS.keys()),
@@ -210,7 +212,11 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 response = {'success': True, 'message': 'Checkpoint save queued'}
             elif action_type == 'toggle_pause':
                 self.action_queue.put('toggle_pause')
-                response = {'success': True, 'message': 'Pause toggle queued', 'paused': True}
+                # Get current pause state from data repository
+                current_state = self.data_repository.get_complete_snapshot()
+                current_paused = current_state.get('training_paused', False)
+                # Return the expected new state (will be toggled by trainer)
+                response = {'success': True, 'message': 'Pause toggle queued', 'paused': not current_paused}
             else:
                 response = {'success': False, 'message': f'Unknown action: {action_type}'}
             
