@@ -819,18 +819,21 @@ class VSRTrainer:
             old = self.adaptive_system.plateau_safety_threshold
             self.adaptive_system.plateau_safety_threshold = new_threshold
             print(f"⚙️  Config Update: plateau_safety_threshold {old} → {new_threshold}")
+            self.tb_logger.log_config_change(self.global_step, 'plateau_safety_threshold', old, new_threshold)
         
         new_patience = self.runtime_config.get('plateau_patience')
         if new_patience is not None and new_patience != self.adaptive_system.plateau_patience:
             old = self.adaptive_system.plateau_patience
             self.adaptive_system.plateau_patience = new_patience
             print(f"⚙️  Config Update: plateau_patience {old} → {new_patience}")
+            self.tb_logger.log_config_change(self.global_step, 'plateau_patience', old, new_patience)
         
         new_cooldown = self.runtime_config.get('cooldown_duration')
         if new_cooldown is not None and new_cooldown != self.adaptive_system.cooldown_duration:
             old = self.adaptive_system.cooldown_duration
             self.adaptive_system.cooldown_duration = new_cooldown
             print(f"⚙️  Config Update: cooldown_duration {old} → {new_cooldown}")
+            self.tb_logger.log_config_change(self.global_step, 'cooldown_duration', old, new_cooldown)
         
         # Update LR Scheduler
         new_max_lr = self.runtime_config.get('max_lr')
@@ -839,6 +842,7 @@ class VSRTrainer:
                 old = self.lr_scheduler.max_lr
                 self.lr_scheduler.max_lr = new_max_lr
                 print(f"⚙️  Config Update: max_lr {old:.2e} → {new_max_lr:.2e}")
+                self.tb_logger.log_config_change(self.global_step, 'max_lr', old, new_max_lr)
         
         new_min_lr = self.runtime_config.get('min_lr')
         if new_min_lr is not None and hasattr(self.lr_scheduler, 'min_lr'):
@@ -846,6 +850,7 @@ class VSRTrainer:
                 old = self.lr_scheduler.min_lr
                 self.lr_scheduler.min_lr = new_min_lr
                 print(f"⚙️  Config Update: min_lr {old:.2e} → {new_min_lr:.2e}")
+                self.tb_logger.log_config_change(self.global_step, 'min_lr', old, new_min_lr)
         
         # Update gradient clipping
         new_grad_clip = self.runtime_config.get('initial_grad_clip')
@@ -853,12 +858,34 @@ class VSRTrainer:
             old = self.adaptive_system.clip_value
             self.adaptive_system.clip_value = new_grad_clip
             print(f"⚙️  Config Update: initial_grad_clip {old:.2f} → {new_grad_clip:.2f}")
+            self.tb_logger.log_config_change(self.global_step, 'initial_grad_clip', old, new_grad_clip)
     
     def run(self):
         """
         Main training loop
         """
         self.train_logger.log_event("🚀 TRAINING STARTED")
+        
+        # Log initial configuration snapshot to TensorBoard
+        self.tb_logger.log_config_snapshot(self.config)
+        
+        # Log initial hyperparameters if at step 0
+        if self.global_step == 0:
+            hparams = {
+                'n_feats': self.config.get('n_feats', 128),
+                'n_blocks': self.config.get('n_blocks', 32),
+                'batch_size': self.config.get('batch_size', 4),
+                'max_lr': self.config.get('max_lr', 1.5e-4),
+                'min_lr': self.config.get('min_lr', 1e-6),
+                'plateau_patience': self.config.get('plateau_patience', 250),
+            }
+            # Will update metrics as training progresses
+            initial_metrics = {'initial_step': 0}
+            try:
+                self.tb_logger.log_hyperparameters(hparams, initial_metrics)
+            except Exception as e:
+                # Hyperparameters might fail if already logged, continue anyway
+                pass
         
         # Setup keyboard handler
         self.keyboard.setup_raw_mode()

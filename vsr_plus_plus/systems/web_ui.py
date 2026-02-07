@@ -917,6 +917,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             <div class="peak-info">
                 <span>Peak Layer: <strong id="peakLayer">-</strong></span>
                 <span>Value: <strong id="peakValue">-</strong></span>
+                <span style="color: var(--text-secondary); font-size: 0.9em;">Actual: <strong id="peakActualValue">-</strong></span>
             </div>
             <div class="peak-warning" id="peakWarning" style="display: none;"></div>
         </div>
@@ -1199,6 +1200,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             // Update info
             document.getElementById('peakLayer').textContent = peakLayer;
             document.getElementById('peakValue').textContent = peakValue.toFixed(3);
+            document.getElementById('peakActualValue').textContent = peakValue.toFixed(3);
             
             // Update warning
             const warningEl = document.getElementById('peakWarning');
@@ -1247,9 +1249,13 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             
             for (const [layerName, activityValue] of Object.entries(activityMap)) {
                 // Normalize if needed: convert to 0-100 range
-                let displayValue, barWidth;
+                let displayValue, barWidth, actualValue;
+                
+                // Store the actual value
+                actualValue = activityValue.toFixed(3);
+                
                 if (needsNormalization) {
-                    // Show as percentage of max
+                    // Show as percentage of max for bar width
                     displayValue = ((activityValue / maxValue) * 100).toFixed(1);
                     barWidth = displayValue;
                 } else {
@@ -1274,20 +1280,20 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                     } else if (layerName.includes('Fus')) {
                         barClass += ' fusion';
                     }
-                    backwardLayers.push({name: layerName, value: displayValue, width: barWidth, barClass});
+                    backwardLayers.push({name: layerName, value: displayValue, actualValue: actualValue, width: barWidth, barClass});
                 } else if (layerName.toLowerCase().includes('forward')) {
                     if (layerName.includes('Final Fusion')) {
                         barClass += ' final-fusion';
                     } else if (layerName.includes('Fus')) {
                         barClass += ' fusion';
                     }
-                    forwardLayers.push({name: layerName, value: displayValue, width: barWidth, barClass});
+                    forwardLayers.push({name: layerName, value: displayValue, actualValue: actualValue, width: barWidth, barClass});
                 } else if (layerName.toLowerCase().includes('fus')) {
                     barClass += ' fusion';
-                    fusionLayers.push({name: layerName, value: displayValue, width: barWidth, barClass});
+                    fusionLayers.push({name: layerName, value: displayValue, actualValue: actualValue, width: barWidth, barClass});
                 } else {
                     // Default to fusion if unclear
-                    fusionLayers.push({name: layerName, value: displayValue, width: barWidth, barClass});
+                    fusionLayers.push({name: layerName, value: displayValue, actualValue: actualValue, width: barWidth, barClass});
                 }
             }
             
@@ -1301,7 +1307,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                             <div class="layer-bar-container">
                                 <div class="${layer.barClass}" style="width: ${layer.width}%"></div>
                             </div>
-                            <div class="layer-value">${layer.value}%</div>
+                            <div class="layer-value">${layer.value}% <span style="color: var(--text-secondary); font-size: 0.85em;">(${layer.actualValue})</span></div>
                         </div>
                     `;
                 }
@@ -1321,7 +1327,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                             <div class="layer-bar-container">
                                 <div class="${layer.barClass}" style="width: ${layer.width}%"></div>
                             </div>
-                            <div class="layer-value">${layer.value}%</div>
+                            <div class="layer-value">${layer.value}% <span style="color: var(--text-secondary); font-size: 0.85em;">(${layer.actualValue})</span></div>
                         </div>
                     `;
                 }
@@ -1341,7 +1347,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                             <div class="layer-bar-container">
                                 <div class="${layer.barClass}" style="width: ${layer.width}%"></div>
                             </div>
-                            <div class="layer-value">${layer.value}%</div>
+                            <div class="layer-value">${layer.value}% <span style="color: var(--text-secondary); font-size: 0.85em;">(${layer.actualValue})</span></div>
                         </div>
                     `;
                 }
