@@ -65,22 +65,24 @@ class TrackedConv2d(nn.Module):
 
 class VSRBidirectional_3x(nn.Module):
     """
-    Bidirectional VSR model with Frame-3 initialization
+    Bidirectional VSR model with center frame initialization
     
-    Input: [B, 5, 3, 180, 180] (5 frames, 180x180 LR)
-    Output: [B, 3, 540, 540] (1 frame, 540x540 HR, 3x upscale)
+    Input: [B, T, 3, H, W] where T = 5 or 7 (variable frame count)
+    Output: [B, 3, H*3, W*3] (1 frame, 3x upscale)
     
     Args:
         n_feats: Number of feature channels (64-256, auto-tuned)
         n_blocks: Total number of ResBlocks (split between trunks)
         use_checkpointing: Enable gradient checkpointing to save VRAM
+        num_frames: Number of input frames (5 or 7), default 5 for backward compatibility
     """
     
-    def __init__(self, n_feats=128, n_blocks=32, use_checkpointing=False):
+    def __init__(self, n_feats=128, n_blocks=32, use_checkpointing=False, num_frames=5):
         super().__init__()
         self.n_feats = n_feats
         self.n_blocks = n_blocks
         self.use_checkpointing = use_checkpointing
+        self.num_frames = num_frames
         
         half_blocks = max(1, n_blocks // 2)
         
@@ -114,23 +116,28 @@ class VSRBidirectional_3x(nn.Module):
         Forward pass with bidirectional propagation
         
         Args:
-            x: Input tensor [B, 5, 3, 180, 180]
+            x: Input tensor [B, T, 3, H, W] where T = 5 or 7
             
         Returns:
-            Output tensor [B, 3, 540, 540]
+            Output tensor [B, 3, H*3, W*3]
         """
         B, T, C, H, W = x.size()
         
-        # Extract features from all 5 frames
+        # Extract features from all frames
         feats = self.feat_extract(x.view(-1, C, H, W))
         feats = feats.view(B, T, self.n_feats, H, W)
         
-        # CRITICAL: Initialize with Frame 3 (center frame), NOT zeros!
-        center_feat = feats[:, 2].clone()  # Frame 3 (index 2)
+        # CRITICAL: Initialize with center frame, NOT zeros!
+        # For 5 frames: center = 2 (index 2)
+        # For 7 frames: center = 3 (index 3)
+        center_idx = T // 2
+        center_feat = feats[:, center_idx].clone()
         
-        # Backward propagation: F3 → F4 → F5
+        # Backward propagation: center → end
+        # For 5 frames (center=2): 2 → 3 → 4
+        # For 7 frames (center=3): 3 → 4 → 5 → 6
         back_prop = center_feat
-        for i in [3, 4]:
+        for i in range(center_idx + 1, T):
             # Fuse current propagation with next frame
             fused = self.backward_fuse(torch.cat([back_prop, feats[:, i]], dim=1))
             # Process through backward trunk
@@ -138,9 +145,11 @@ class VSRBidirectional_3x(nn.Module):
                 fused = block(fused)
             back_prop = fused
         
-        # Forward propagation: F3 → F2 → F1
+        # Forward propagation: center → start
+        # For 5 frames (center=2): 2 → 1 → 0
+        # For 7 frames (center=3): 3 → 2 → 1 → 0
         forw_prop = center_feat
-        for i in [1, 0]:
+        for i in range(center_idx - 1, -1, -1):
             # Fuse current propagation with previous frame
             fused = self.forward_fuse(torch.cat([forw_prop, feats[:, i]], dim=1))
             # Process through forward trunk
@@ -151,8 +160,8 @@ class VSRBidirectional_3x(nn.Module):
         # Fuse bidirectional features
         fused = self.fusion(torch.cat([back_prop, forw_prop], dim=1))
         
-        # Upsampling with residual connection
-        base = F.interpolate(x[:, 2], scale_factor=3, mode='bilinear', align_corners=False)
+        # Upsampling with residual connection from center frame
+        base = F.interpolate(x[:, center_idx], scale_factor=3, mode='bilinear', align_corners=False)
         upsampled = self.upsample(fused)
         
         return upsampled + base

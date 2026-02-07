@@ -1,0 +1,90 @@
+# Training Configuration - General Model (7 Frames)
+
+MODEL:
+  name: "VSRPlusPlus"
+  base_channels: 128
+  num_blocks: 32
+  use_checkpointing: true
+
+DATA:
+  # Category selection
+  category: "general"  # Options: "general", "space", "toon"
+  
+  # LR version selection
+  lr_version: "7frames"  # Options: "5frames", "7frames"
+  
+  # Dataset paths (auto-determined from category)
+  data_root: "/mnt/data/training/dataset"
+  # Will resolve to: /mnt/data/training/dataset/Universal/Mastermodell/Learn
+  
+  # Format selection
+  formats:
+    - "small_540"      # Always included
+    - "medium_169"     # Always included
+    - "large_720"      # Optional
+  
+  # Format weights (sampling probability)
+  format_weights:
+    small_540: 0.5
+    medium_169: 0.35
+    large_720: 0.15
+  
+  # Validation
+  val_mode: "manual"  # GT images in Val/GT/, LR generated on-the-fly
+  val_frequency: 500  # Run validation every N steps
+
+TRAINING:
+  # Fresh start!
+  resume: false
+  start_step: 0
+  total_steps: 100000
+  
+  # Batch size per format (adaptive!)
+  batch_size:
+    small_540: 4       # Can fit 4 samples
+    medium_169: 2      # 2 samples
+    large_720: 1       # Only 1 sample fits
+    xlarge_1440: 1
+    fullhd_1920: 1
+  
+  # Gradient accumulation (simulate larger batch for big formats)
+  gradient_accumulation:
+    small_540: 1       # No accumulation needed
+    medium_169: 2      # Accumulate 2 steps → effective batch 4
+    large_720: 4       # Accumulate 4 steps → effective batch 4
+    xlarge_1440: 4
+    fullhd_1920: 4
+  
+  # Optimizer
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  betas: [0.9, 0.999]
+  
+  # Scheduler
+  scheduler: "cosine"
+  warmup_steps: 1000
+  min_lr: 0.000001
+
+LOSS:
+  # Multi-scale Charbonnier Loss
+  loss_type: "charbonnier"
+  epsilon: 0.001
+  
+  # Perceptual loss (optional)
+  use_perceptual: false
+  perceptual_weight: 0.1
+
+LOGGING:
+  log_frequency: 100
+  save_frequency: 5000
+  val_save_images: 10  # Save 10 validation results
+  
+  # Output paths
+  save_dir: "/mnt/data/training/experiments/general_fresh_7frames"
+  tensorboard_dir: "/mnt/data/training/experiments/general_fresh_7frames/tensorboard"
+
+HARDWARE:
+  gpu_id: 0
+  num_workers: 4
+  pin_memory: true
+  mixed_precision: true  # AMP for speed
