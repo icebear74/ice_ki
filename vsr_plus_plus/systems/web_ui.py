@@ -674,6 +674,9 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 <button class="btn btn-success" onclick="requestValidation()">
                     🔍 Run Validation
                 </button>
+                <button class="btn btn-primary" onclick="openConfigPage()">
+                    ⚙️ Konfiguration
+                </button>
             </div>
         </div>
         
@@ -922,7 +925,36 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             <div class="peak-warning" id="peakWarning" style="display: none;"></div>
         </div>
         
-        <div class="section-header">📊 Layer-Aktivitäten</div>
+        <!-- Stream Summary: Backward, Forward, Final Fusion -->
+        <div class="layer-activity-container" style="margin-top: 20px;">
+            <div class="card-title" style="font-size: 1.1em; margin-bottom: 15px;">📊 Stream-Übersicht (Durchschnitt)</div>
+            
+            <div class="layer-row">
+                <div class="layer-name" style="color: var(--accent-blue);">⬅️ Backward Stream</div>
+                <div class="layer-bar-container">
+                    <div class="layer-bar-fill" id="backwardAvgBar" style="width: 0%; background: linear-gradient(90deg, var(--accent-blue), var(--accent-purple));"></div>
+                </div>
+                <div class="layer-value" id="backwardAvgValue">0.0%</div>
+            </div>
+            
+            <div class="layer-row">
+                <div class="layer-name" style="color: var(--accent-green);">➡️ Forward Stream</div>
+                <div class="layer-bar-container">
+                    <div class="layer-bar-fill" id="forwardAvgBar" style="width: 0%; background: linear-gradient(90deg, var(--accent-green), #00ff88);"></div>
+                </div>
+                <div class="layer-value" id="forwardAvgValue">0.0%</div>
+            </div>
+            
+            <div class="layer-row">
+                <div class="layer-name" style="color: var(--accent-orange);">🔗 Final Fusion</div>
+                <div class="layer-bar-container">
+                    <div class="layer-bar-fill final-fusion" id="fusionAvgBar" style="width: 0%;"></div>
+                </div>
+                <div class="layer-value" id="fusionAvgValue">0.0%</div>
+            </div>
+        </div>
+        
+        <div class="section-header">📊 Layer-Aktivitäten (Details)</div>
         
         <div id="layerActivitiesBackward" class="layer-activity-container">
             <h3 style="color: var(--accent-blue); margin-bottom: 15px; font-size: 1.1em;">⬅️ Backward Stream</h3>
@@ -1299,6 +1331,8 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             
             // Render backward layers
             let backwardHtml = '';
+            let backwardSum = 0;
+            let backwardCount = 0;
             if (backwardLayers.length > 0) {
                 for (const layer of backwardLayers) {
                     backwardHtml += `
@@ -1310,8 +1344,17 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                             <div class="layer-value">${layer.value}% <span style="color: var(--text-secondary); font-size: 0.85em;">(${layer.actualValue})</span></div>
                         </div>
                     `;
+                    backwardSum += parseFloat(layer.value);
+                    backwardCount++;
                 }
                 document.getElementById('backwardLayers').innerHTML = backwardHtml;
+                
+                // Update backward average
+                if (backwardCount > 0) {
+                    const backwardAvg = backwardSum / backwardCount;
+                    document.getElementById('backwardAvgBar').style.width = Math.min(backwardAvg, 100) + '%';
+                    document.getElementById('backwardAvgValue').innerHTML = `${backwardAvg.toFixed(1)}%`;
+                }
             } else {
                 document.getElementById('backwardLayers').innerHTML = 
                     '<div style="color: var(--text-secondary); text-align: center;">Keine Layer</div>';
@@ -1319,6 +1362,8 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             
             // Render forward layers
             let forwardHtml = '';
+            let forwardSum = 0;
+            let forwardCount = 0;
             if (forwardLayers.length > 0) {
                 for (const layer of forwardLayers) {
                     forwardHtml += `
@@ -1330,8 +1375,17 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                             <div class="layer-value">${layer.value}% <span style="color: var(--text-secondary); font-size: 0.85em;">(${layer.actualValue})</span></div>
                         </div>
                     `;
+                    forwardSum += parseFloat(layer.value);
+                    forwardCount++;
                 }
                 document.getElementById('forwardLayers').innerHTML = forwardHtml;
+                
+                // Update forward average
+                if (forwardCount > 0) {
+                    const forwardAvg = forwardSum / forwardCount;
+                    document.getElementById('forwardAvgBar').style.width = Math.min(forwardAvg, 100) + '%';
+                    document.getElementById('forwardAvgValue').innerHTML = `${forwardAvg.toFixed(1)}%`;
+                }
             } else {
                 document.getElementById('forwardLayers').innerHTML = 
                     '<div style="color: var(--text-secondary); text-align: center;">Keine Layer</div>';
@@ -1339,6 +1393,8 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             
             // Render fusion layers
             let fusionHtml = '';
+            let fusionSum = 0;
+            let fusionCount = 0;
             if (fusionLayers.length > 0) {
                 for (const layer of fusionLayers) {
                     fusionHtml += `
@@ -1350,8 +1406,17 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                             <div class="layer-value">${layer.value}% <span style="color: var(--text-secondary); font-size: 0.85em;">(${layer.actualValue})</span></div>
                         </div>
                     `;
+                    fusionSum += parseFloat(layer.value);
+                    fusionCount++;
                 }
                 document.getElementById('fusionLayers').innerHTML = fusionHtml;
+                
+                // Update fusion average
+                if (fusionCount > 0) {
+                    const fusionAvg = fusionSum / fusionCount;
+                    document.getElementById('fusionAvgBar').style.width = Math.min(fusionAvg, 100) + '%';
+                    document.getElementById('fusionAvgValue').innerHTML = `${fusionAvg.toFixed(1)}%`;
+                }
             } else {
                 document.getElementById('fusionLayers').innerHTML = 
                     '<div style="color: var(--text-secondary); text-align: center;">Keine Layer</div>';
@@ -1415,6 +1480,11 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         
         function requestValidation() {
             triggerValidation();
+        }
+        
+        function openConfigPage() {
+            // Check if config API is available
+            window.open('/config', '_blank');
         }
         
         function updateRefreshRate() {

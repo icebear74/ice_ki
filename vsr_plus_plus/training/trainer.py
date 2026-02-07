@@ -248,6 +248,20 @@ class VSRTrainer:
                     self.tb_logger.log_gradients(self.global_step, grad_norm, self.last_activities)
                     self.tb_logger.log_lr_phase(self.global_step, lr_phase)
                     
+                    # Log plateau state details
+                    if hasattr(self.adaptive_system, 'get_plateau_info'):
+                        plateau_info = self.adaptive_system.get_plateau_info()
+                        self.tb_logger.log_plateau_state(self.global_step, plateau_info)
+                    
+                    # Log weight statistics
+                    weights = {
+                        'l1': adaptive_status.get('loss_weights', (0.6, 0.2, 0.2))[0],
+                        'ms': adaptive_status.get('loss_weights', (0.6, 0.2, 0.2))[1],
+                        'grad': adaptive_status.get('loss_weights', (0.6, 0.2, 0.2))[2],
+                        'perceptual': adaptive_status.get('perceptual_weight', 0.0)
+                    }
+                    self.tb_logger.log_weight_statistics(self.global_step, weights)
+                    
                     # Log VRAM usage every 100 steps
                     if torch.cuda.is_available():
                         allocated = torch.cuda.memory_allocated() / 1024**3
@@ -287,6 +301,9 @@ class VSRTrainer:
                     self.tb_logger.log_metrics(self.global_step, metrics)
                     self.tb_logger.log_validation_loss(self.global_step, metrics.get('val_loss', 0.0))
                     self.tb_logger.log_adaptive(self.global_step, adaptive_status)
+                    
+                    # Log validation event
+                    self.tb_logger.log_validation_event(self.global_step, metrics)
                     
                     # Log ALL images (like in original)
                     labeled_images = metrics.get('labeled_images')
