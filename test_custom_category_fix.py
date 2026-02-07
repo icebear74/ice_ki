@@ -176,10 +176,10 @@ def test_category_without_format_config():
         },
         "category_targets": {
             "general": 10000,  # Has format_config in hard-coded CATEGORY_FORMAT_DISTRIBUTION
-            "newcat": 5000     # Does NOT have format_config anywhere
+            "unknown_category": 5000     # Does NOT have format_config anywhere
         },
         "format_config": {
-            # Only general is configured, newcat is not
+            # Only general is configured, unknown_category is not
             "general": {
                 "small_540": {"gt_size": [540, 540], "lr_size": [180, 180], "probability": 1.0}
             }
@@ -200,9 +200,9 @@ def test_category_without_format_config():
         print(f"  ✓ general format: {general_format}")
         
         # Test 'newcat' falls back to default
-        newcat_format = generator.select_format_for_category('newcat')
-        assert newcat_format == 'small_540'  # Ultimate fallback
-        print(f"  ✓ newcat format (fallback): {newcat_format}")
+        unknown_format = generator.select_format_for_category('unknown_category')
+        assert unknown_format == 'small_540'  # Ultimate fallback
+        print(f"  ✓ unknown_category format (fallback): {unknown_format}")
         
         # This should still work with fallback
         generator.create_output_directories()

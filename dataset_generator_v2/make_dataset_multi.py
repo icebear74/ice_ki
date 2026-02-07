@@ -132,7 +132,14 @@ class DatasetGeneratorV2:
             return 'small_540'
         
         formats = list(distribution.keys())
-        weights = [distribution[f].get('probability', distribution[f]) if isinstance(distribution[f], dict) else distribution[f] for f in formats]
+        # Extract probability from dict or use value directly
+        weights = []
+        for fmt in formats:
+            if isinstance(distribution[fmt], dict):
+                weights.append(distribution[fmt].get('probability', 1.0))
+            else:
+                weights.append(distribution[fmt])
+        
         return random.choices(formats, weights=weights, k=1)[0]
     
     def get_output_dirs_for_category_format(self, category: str, format_name: str, lr_frames: int = 5) -> dict:
