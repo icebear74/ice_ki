@@ -94,7 +94,12 @@ class KeyboardHandler:
                         val_display = DISPLAY_MODE_NAMES[val] if val < len(DISPLAY_MODE_NAMES) else val
                     else:
                         val_display = val
-                    print(f" {idx+1}. {k:<20}: {val_display}")
+                    
+                    # Add note for loss weight parameters
+                    if k in ['l1_weight_target', 'ms_weight_target', 'grad_weight_target', 'perceptual_weight_target']:
+                        print(f" {idx+1}. {k:<20}: {val_display} {C_YELLOW}(must sum ~1.0){C_RESET}")
+                    else:
+                        print(f" {idx+1}. {k:<20}: {val_display}")
             
             print("-" * 45 + "\n 0. ZURÜCK")
             
