@@ -16,13 +16,13 @@ from typing import Dict, Any, Tuple, List
 
 # VRAM estimates from config tests (in GB)
 VRAM_ESTIMATES = {
-    'small_540': {  # 540×540 GT, 180×180 LR
+    '540': {  # 540×540 GT, 180×180 LR
         'batch_1': 3.77,
     },
-    'medium_169': {  # 720×405 GT, 240×135 LR
+    '720_169': {  # 720×405 GT, 240×135 LR
         'batch_1': 3.77,
     },
-    'large_720': {  # 720×720 GT, 240×240 LR
+    '720': {  # 720×720 GT, 240×240 LR
         'batch_1': 3.77,
     },
 }
@@ -54,7 +54,7 @@ class AdaptiveBatchCalculator:
         Calculate batch and accumulation configuration for a given size
         
         Args:
-            gt_size: Ground truth size category ('small_540', 'medium_169', 'large_720')
+            gt_size: Ground truth size category ('540', '720_169', '720')
             effective_batch: Target effective batch size (e.g., 6, 8, 12)
         
         Returns:

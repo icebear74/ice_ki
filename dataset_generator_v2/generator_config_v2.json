@@ -3,8 +3,21 @@
   "root_path": "/mnt/data/training/datasetNeu",
   
   "source": {
-    "video_dir": "/mnt/data/training/source_videos",
-    "extensions": [".mp4", ".mkv", ".avi"]
+    "categories": {
+      "master": {
+        "video_dir": "/mnt/data/video/SerieUHD/Planet Earth 2",
+        "extensions": [".mkv", ".mp4", ".avi"]
+      },
+      "universal": {
+        "video_dir": "/mnt/data/video/Serie",
+        "extensions": [".mkv", ".mp4", ".avi"]
+      }
+    },
+    
+    "category_weights": {
+      "master": 0.25,
+      "universal": 0.75
+    }
   },
   
   "output_patches": {
@@ -26,6 +39,7 @@
   },
   
   "processing": {
+    "total_patches": 100000,
     "n_frames": 7,
     "scale": 3,
     "stride": 3,

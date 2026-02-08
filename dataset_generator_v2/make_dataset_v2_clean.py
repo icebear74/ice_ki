@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-Dataset Generator V2 - Clean Rewrite
-7-Frame Only, New Directory Structure, Horizontal LR Stacking
+Dataset Generator V2 - Complete Rewrite
+✅ UHD Quality Preservation (tonemap only, NO resize)
+✅ 7-Frame Only (5-frame code removed)
+✅ New Flat Directory Structure
+✅ Complete State Management & Resume
+✅ Category-Based Weighted Distribution
+✅ Bug Fixes
 """
 
 import os
@@ -9,303 +14,273 @@ import sys
 import json
 import cv2
 import numpy as np
+import subprocess
+import random
+import tempfile
+import shutil
+import logging
 from pathlib import Path
-from concurrent.futures import ProcessPoolExecutor, as_completed
-from typing import Dict, List, Tuple, Optional
-import traceback
 from datetime import datetime
+from typing import Dict, List, Tuple, Optional
 
 from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeRemainingColumn
 from rich.console import Console
 from rich.table import Table
+from rich.panel import Panel
+
+# Import state manager
+from state_manager import StateManager
 
 console = Console()
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 
-class DatasetConfig:
-    """Configuration loader and validator"""
+class DatasetGeneratorV2:
+    """
+    Dataset Generator V2 - Complete Rewrite
+    
+    Features:
+    - UHD quality preservation (tonemap only, NO resize to HD)
+    - Random cropping from full UHD resolution
+    - DVD-realistic LR downscaling (INTER_AREA)
+    - 7-frame only support
+    - New directory structure (patches/720/, etc.)
+    - Complete state management
+    - Resume capability
+    """
     
     def __init__(self, config_path: str = "generator_config_v2.json"):
-        self.config_path = config_path
-        self.config = self._load_config()
-        self._validate_config()
-    
-    def _load_config(self) -> dict:
-        """Load JSON configuration"""
-        try:
-            with open(self.config_path, 'r') as f:
-                return json.load(f)
-        except FileNotFoundError:
-            console.print(f"[red]Error: Config file not found: {self.config_path}[/red]")
-            sys.exit(1)
-        except json.JSONDecodeError as e:
-            console.print(f"[red]Error: Invalid JSON in config: {e}[/red]")
-            sys.exit(1)
-    
-    def _validate_config(self):
-        """Validate required config fields"""
-        required = ["root_path", "dataset_name", "videos", "sizes"]
-        missing = [field for field in required if field not in self.config]
-        if missing:
-            console.print(f"[red]Error: Missing required config fields: {missing}[/red]")
-            sys.exit(1)
+        """Initialize generator"""
+        # Load configuration
+        with open(config_path, 'r') as f:
+            self.config = json.load(f)
         
-        # Validate size keys
-        valid_size_keys = {"720", "540", "720_169"}
-        invalid_keys = set(self.config["sizes"].keys()) - valid_size_keys
-        if invalid_keys:
-            console.print(f"[yellow]Warning: Invalid size keys: {invalid_keys}[/yellow]")
-            console.print(f"[yellow]Valid keys are: {valid_size_keys}[/yellow]")
-    
-    def get_root_path(self) -> Path:
-        return Path(self.config["root_path"]).expanduser()
-    
-    def get_dataset_name(self) -> str:
-        return self.config["dataset_name"]
-    
-    def get_videos(self) -> List[str]:
-        return self.config["videos"]
-    
-    def get_sizes(self) -> Dict:
-        return self.config["sizes"]
-    
-    def get_workers(self) -> int:
-        return self.config.get("workers", 4)
-    
-    def get_scene_threshold(self) -> float:
-        return self.config.get("scene_threshold", 30.0)
-    
-    def get_blur_threshold(self) -> float:
-        return self.config.get("blur_threshold", 100.0)
-    
-    def get_stride(self) -> int:
-        return self.config.get("stride", 3)
-    
-    def get_patch_size(self) -> int:
-        return self.config.get("patch_size", 256)
-
-
-class SceneDetector:
-    """Scene change and blur detection"""
-    
-    def __init__(self, scene_threshold: float = 30.0, blur_threshold: float = 100.0):
-        self.scene_threshold = scene_threshold
-        self.blur_threshold = blur_threshold
-        self.prev_hist = None
-    
-    def reset(self):
-        """Reset detector state"""
-        self.prev_hist = None
-    
-    def is_scene_change(self, frame: np.ndarray) -> bool:
-        """Detect scene change using histogram comparison"""
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        hist = cv2.calcHist([gray], [0], None, [256], [0, 256])
-        hist = cv2.normalize(hist, hist).flatten()
-        
-        if self.prev_hist is None:
-            self.prev_hist = hist
-            return False
-        
-        diff = cv2.compareHist(self.prev_hist, hist, cv2.HISTCMP_BHATTACHARYYA)
-        diff_percent = diff * 100
-        
-        self.prev_hist = hist
-        return diff_percent > self.scene_threshold
-    
-    def is_blurry(self, frame: np.ndarray) -> bool:
-        """Detect blurry frames using Laplacian variance"""
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
-        return laplacian_var < self.blur_threshold
-
-
-class DatasetGenerator:
-    """Main dataset generator class"""
-    
-    def __init__(self, config: DatasetConfig):
-        self.config = config
-        self.root_path = config.get_root_path()
-        self.dataset_name = config.get_dataset_name()
+        self.root_path = Path(self.config['root_path']).expanduser()
+        self.dataset_name = self.config['dataset_name']
         self.dataset_path = self.root_path / self.dataset_name
         
-        self.scene_detector = SceneDetector(
-            config.get_scene_threshold(),
-            config.get_blur_threshold()
-        )
+        # Initialize state manager
+        state_file = self.dataset_path / "generation_state.json"
+        self.state_manager = StateManager(self.config, str(state_file))
         
-        self.stats = {
-            size_key: {
-                "total_patches": 0,
-                "skipped_scene": 0,
-                "skipped_blur": 0,
-                "errors": 0
-            }
-            for size_key in config.get_sizes().keys()
-        }
-        
-        self.error_log = []
+        # Setup directories
         self._setup_directories()
+        
+        # Stats
+        self.patches_since_save = 0
+        self.save_interval = 100  # Auto-save every 100 patches
+        
+        logger.info(f"✅ Generator initialized: {self.dataset_path}")
     
     def _setup_directories(self):
-        """Create directory structure"""
-        sizes = self.config.get_sizes()
-        
-        for size_key in sizes.keys():
+        """Create new flat directory structure"""
+        for size_key, size_config in self.config['output_patches'].items():
+            if not size_config.get('enabled', True):
+                continue
+            
             # Training patches
             (self.dataset_path / "patches" / size_key / "GT").mkdir(parents=True, exist_ok=True)
             (self.dataset_path / "patches" / size_key / "LR").mkdir(parents=True, exist_ok=True)
             
-            # Validation directories (empty for user to populate)
+            # Validation directories (user populates GT manually)
             (self.dataset_path / "val" / size_key / "GT").mkdir(parents=True, exist_ok=True)
             (self.dataset_path / "val" / size_key / "LR").mkdir(parents=True, exist_ok=True)
         
-        console.print(f"[green]Created directory structure at: {self.dataset_path}[/green]")
+        console.print(f"[green]✅ Directory structure created: {self.dataset_path}[/green]")
     
-    def process_video(self, video_path: str, size_key: str, size_config: dict) -> Tuple[int, int, int, int]:
+    def extract_frames_uhd(self, video_path: str, start_time: float, n_frames: int = 7) -> Optional[List[np.ndarray]]:
         """
-        Process a single video for a specific size configuration
-        Returns: (patches_created, skipped_scene, skipped_blur, errors)
+        Extract frames with HDR→SDR tonemap, NO resize
+        Keeps full UHD resolution (e.g., 3840×2160)
+        
+        Args:
+            video_path: Path to video file
+            start_time: Start timestamp in seconds
+            n_frames: Number of frames to extract (default: 7)
+        
+        Returns:
+            List of frames in UHD resolution, or None on error
         """
-        if not os.path.exists(video_path):
-            error_msg = f"Video not found: {video_path}"
-            self.error_log.append(error_msg)
-            return (0, 0, 0, 1)
-        
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            error_msg = f"Failed to open video: {video_path}"
-            self.error_log.append(error_msg)
-            return (0, 0, 0, 1)
-        
         try:
-            patches_created = 0
-            skipped_scene = 0
-            skipped_blur = 0
-            errors = 0
-            
-            # Get target dimensions
-            target_height = size_config["height"]
-            target_width = size_config["width"]
-            patch_size = self.config.get_patch_size()
-            stride = self.config.get_stride()
-            
-            video_name = Path(video_path).stem
-            self.scene_detector.reset()
-            
-            frame_buffer = []
-            frame_idx = 0
-            patch_counter = 0
-            
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    break
+            # Create temporary directory for frames
+            with tempfile.TemporaryDirectory() as temp_dir:
+                output_pattern = os.path.join(temp_dir, "frame_%04d.png")
                 
-                # Resize frame
-                frame_resized = cv2.resize(frame, (target_width, target_height), interpolation=cv2.INTER_CUBIC)
+                # FFmpeg command: HDR→SDR tonemap ONLY, NO scale!
+                # This preserves full UHD resolution
+                vf_filter = (
+                    "zscale=t=linear:npl=100,"
+                    "format=gbrpf32le,"
+                    "zscale=p=bt709,"
+                    "tonemap=tonemap=mobius:desat=0,"
+                    "zscale=t=bt709:m=bt709:range=limited,"
+                    "format=yuv420p"
+                )
                 
-                # Scene detection
-                if self.scene_detector.is_scene_change(frame_resized):
-                    frame_buffer.clear()
-                    skipped_scene += 1
-                    frame_idx += 1
-                    continue
+                cmd = [
+                    'ffmpeg',
+                    '-ss', str(start_time),
+                    '-i', video_path,
+                    '-vf', vf_filter,
+                    '-frames:v', str(n_frames),
+                    '-y',
+                    output_pattern
+                ]
                 
-                # Blur detection
-                if self.scene_detector.is_blurry(frame_resized):
-                    skipped_blur += 1
-                    frame_idx += 1
-                    continue
+                # Run ffmpeg
+                result = subprocess.run(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=60
+                )
                 
-                frame_buffer.append(frame_resized)
+                if result.returncode != 0:
+                    logger.error(f"FFmpeg failed for {video_path} at {start_time}s")
+                    return None
                 
-                # Extract 7-frame sequences
-                if len(frame_buffer) >= 7:
-                    try:
-                        created = self._extract_patches(
-                            frame_buffer[:7],
-                            video_name,
-                            size_key,
-                            patch_counter,
-                            patch_size
-                        )
-                        patches_created += created
-                        patch_counter += created
-                    except Exception as e:
-                        error_msg = f"Error extracting patches from {video_path} at frame {frame_idx}: {str(e)}"
-                        self.error_log.append(error_msg)
-                        errors += 1
+                # Load frames
+                frames = []
+                for i in range(1, n_frames + 1):
+                    frame_path = os.path.join(temp_dir, f"frame_{i:04d}.png")
+                    if not os.path.exists(frame_path):
+                        logger.warning(f"Missing frame {i} for {video_path}")
+                        return None
                     
-                    # Slide window by stride
-                    frame_buffer = frame_buffer[stride:]
+                    frame = cv2.imread(frame_path)
+                    if frame is None:
+                        logger.warning(f"Failed to read frame {i} for {video_path}")
+                        return None
+                    
+                    frames.append(frame)
                 
-                frame_idx += 1
-            
-            return (patches_created, skipped_scene, skipped_blur, errors)
+                return frames
         
-        finally:
-            cap.release()
+        except Exception as e:
+            logger.error(f"Error extracting frames from {video_path}: {e}")
+            return None
     
-    def _extract_patches(self, frames: List[np.ndarray], video_name: str, 
-                        size_key: str, patch_counter: int, patch_size: int) -> int:
+    def create_patch_pair(self, frames: List[np.ndarray], size_key: str) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         """
-        Extract patches from 7-frame sequence
-        Returns: number of patches created
+        Create GT + LR pair with random crop from UHD frames
+        
+        Args:
+            frames: 7 UHD frames (e.g., 3840×2160 each)
+            size_key: Size configuration key ('720', '540', '720_169')
+        
+        Returns:
+            (gt, lr_stacked) or (None, None) on error
         """
         if len(frames) != 7:
-            return 0
+            return None, None
         
-        height, width = frames[0].shape[:2]
-        patches_created = 0
+        size_config = self.config['output_patches'][size_key]
+        gt_h, gt_w = size_config['gt_size']
+        lr_h, lr_w = size_config['lr_size']
         
-        # Extract patches from the frame
-        for y in range(0, height - patch_size + 1, patch_size):
-            for x in range(0, width - patch_size + 1, patch_size):
-                # Extract GT patch from middle frame (index 3 of 7-frame sequence)
-                # Using center frame ensures temporal consistency
-                gt_patch = frames[3][y:y+patch_size, x:x+patch_size]
-                
-                # Extract LR patches from all 7 frames
-                lr_patches = []
-                for frame in frames:
-                    lr_patch = frame[y:y+patch_size, x:x+patch_size]
-                    lr_patches.append(lr_patch)
-                
-                # Stack LR patches HORIZONTALLY (H, W×7)
-                # Result shape: (H, W*7, 3) where W*7 = 7 consecutive frames
-                lr_stacked = np.hstack(lr_patches)  # Horizontal concatenation
-                
-                # Generate filename
-                patch_name = f"{video_name}_p{patch_counter + patches_created:06d}.png"
-                
-                # Save patches
-                gt_path = self.dataset_path / "patches" / size_key / "GT" / patch_name
-                lr_path = self.dataset_path / "patches" / size_key / "LR" / patch_name
-                
-                cv2.imwrite(str(gt_path), gt_patch)
-                cv2.imwrite(str(lr_path), lr_stacked)
-                
-                patches_created += 1
+        # Get frame dimensions (full UHD!)
+        frame_h, frame_w = frames[0].shape[:2]
         
-        return patches_created
+        # Check if frame is large enough
+        if frame_h < gt_h or frame_w < gt_w:
+            logger.warning(f"Frame too small: {frame_w}×{frame_h}, need {gt_w}×{gt_h}")
+            return None, None
+        
+        # RANDOM crop position (can be edges, corners, anywhere!)
+        max_x = frame_w - gt_w
+        max_y = frame_h - gt_h
+        crop_x = random.randint(0, max_x)
+        crop_y = random.randint(0, max_y)
+        
+        # GT: Center frame (index 3) crop from FULL UHD quality
+        center_frame = frames[3]
+        gt = center_frame[crop_y:crop_y+gt_h, crop_x:crop_x+gt_w]
+        
+        # LR: All 7 frames, same crop, DVD-realistic downscale
+        lr_frames = []
+        for frame in frames:
+            # Crop same region
+            crop = frame[crop_y:crop_y+gt_h, crop_x:crop_x+gt_w]
+            
+            # INTER_AREA = DVD-realistic quality (sweet spot)
+            # Not too good (LANCZOS/CUBIC), not too bad (LINEAR/NEAREST)
+            lr = cv2.resize(crop, (lr_w, lr_h), interpolation=cv2.INTER_AREA)
+            lr_frames.append(lr)
+        
+        # Stack horizontally: 240×1680 for 7 frames of 240×240
+        lr_stacked = np.concatenate(lr_frames, axis=1)
+        
+        return gt, lr_stacked
     
-    def process_all_videos(self):
-        """Process all videos with multi-worker support"""
-        videos = self.config.get_videos()
-        sizes = self.config.get_sizes()
-        workers = self.config.get_workers()
+    def is_scene_change(self, frames: List[np.ndarray]) -> bool:
+        """
+        Detect scene change in frame sequence
+        Compares first and last frame histograms
+        """
+        if len(frames) < 2:
+            return False
         
-        # Create task list
-        tasks = []
-        for video_path in videos:
-            for size_key, size_config in sizes.items():
-                tasks.append((video_path, size_key, size_config))
+        threshold = self.config['processing']['scene_threshold']
         
-        console.print(f"[cyan]Processing {len(videos)} videos with {len(sizes)} size configurations[/cyan]")
-        console.print(f"[cyan]Total tasks: {len(tasks)}, Workers: {workers}[/cyan]")
+        # Compare first and last frame
+        gray1 = cv2.cvtColor(frames[0], cv2.COLOR_BGR2GRAY)
+        gray2 = cv2.cvtColor(frames[-1], cv2.COLOR_BGR2GRAY)
         
-        # Process with progress bar
+        hist1 = cv2.calcHist([gray1], [0], None, [256], [0, 256])
+        hist2 = cv2.calcHist([gray2], [0], None, [256], [0, 256])
+        
+        hist1 = cv2.normalize(hist1, hist1).flatten()
+        hist2 = cv2.normalize(hist2, hist2).flatten()
+        
+        diff = cv2.compareHist(hist1, hist2, cv2.HISTCMP_BHATTACHARYYA)
+        diff_percent = diff * 100
+        
+        return diff_percent > threshold
+    
+    def is_blurry(self, frame: np.ndarray) -> bool:
+        """Detect blurry frames using Laplacian variance"""
+        threshold = self.config['quality']['blur_threshold']
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
+        return laplacian_var < threshold
+    
+    def process_video(self, video_path: str, video_info: dict, target_patches: int):
+        """
+        Process a single video to generate patches
+        
+        Args:
+            video_path: Path to video file
+            video_info: Video metadata and progress info
+            target_patches: Number of patches to generate from this video
+        """
+        logger.info(f"📹 Processing: {Path(video_path).name}")
+        logger.info(f"   Target: {target_patches} patches")
+        logger.info(f"   Resume from: {video_info['last_timestamp']:.2f}s")
+        
+        # Get video metadata
+        metadata = self.state_manager.state['video_metadata'].get(video_path)
+        if not metadata:
+            logger.error(f"No metadata for {video_path}")
+            return
+        
+        duration = metadata['duration']
+        fps = metadata['fps']
+        
+        # Calculate resume position
+        start_time = video_info['last_timestamp']
+        patches_created_total = 0
+        
+        # Process enabled sizes
+        enabled_sizes = [
+            key for key, config in self.config['output_patches'].items()
+            if config.get('enabled', True)
+        ]
+        
+        # Process video
+        current_time = start_time
+        stride_seconds = self.config['processing']['stride'] / fps if fps > 0 else 1.0
+        
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -315,154 +290,145 @@ class DatasetGenerator:
             console=console
         ) as progress:
             
-            task_id = progress.add_task("[green]Processing videos...", total=len(tasks))
-            
-            with ProcessPoolExecutor(max_workers=workers) as executor:
-                futures = {
-                    executor.submit(self._process_video_worker, video_path, size_key, size_config): (video_path, size_key)
-                    for video_path, size_key, size_config in tasks
-                }
-                
-                for future in as_completed(futures):
-                    video_path, size_key = futures[future]
-                    try:
-                        patches, skipped_scene, skipped_blur, errors = future.result()
-                        
-                        # Update stats
-                        self.stats[size_key]["total_patches"] += patches
-                        self.stats[size_key]["skipped_scene"] += skipped_scene
-                        self.stats[size_key]["skipped_blur"] += skipped_blur
-                        self.stats[size_key]["errors"] += errors
-                        
-                    except Exception as e:
-                        error_msg = f"Worker error processing {video_path} [{size_key}]: {str(e)}\n{traceback.format_exc()}"
-                        self.error_log.append(error_msg)
-                        self.stats[size_key]["errors"] += 1
-                    
-                    progress.update(task_id, advance=1)
-    
-    def _process_video_worker(self, video_path: str, size_key: str, size_config: dict) -> Tuple[int, int, int, int]:
-        """Worker function for multiprocessing"""
-        # Create new generator instance for this worker
-        worker_gen = DatasetGenerator.__new__(DatasetGenerator)
-        worker_gen.config = self.config
-        worker_gen.root_path = self.root_path
-        worker_gen.dataset_name = self.dataset_name
-        worker_gen.dataset_path = self.dataset_path
-        worker_gen.scene_detector = SceneDetector(
-            self.config.get_scene_threshold(),
-            self.config.get_blur_threshold()
-        )
-        worker_gen.error_log = []
-        
-        return worker_gen.process_video(video_path, size_key, size_config)
-    
-    def print_statistics(self):
-        """Print final statistics"""
-        console.print("\n[bold cyan]Dataset Generation Statistics[/bold cyan]")
-        
-        table = Table(show_header=True, header_style="bold magenta")
-        table.add_column("Size", style="cyan")
-        table.add_column("Patches", justify="right", style="green")
-        table.add_column("Skipped (Scene)", justify="right", style="yellow")
-        table.add_column("Skipped (Blur)", justify="right", style="yellow")
-        table.add_column("Errors", justify="right", style="red")
-        
-        total_patches = 0
-        total_skipped_scene = 0
-        total_skipped_blur = 0
-        total_errors = 0
-        
-        for size_key, stats in self.stats.items():
-            table.add_row(
-                size_key,
-                str(stats["total_patches"]),
-                str(stats["skipped_scene"]),
-                str(stats["skipped_blur"]),
-                str(stats["errors"])
+            task_id = progress.add_task(
+                f"[cyan]{Path(video_path).name}",
+                total=target_patches
             )
-            total_patches += stats["total_patches"]
-            total_skipped_scene += stats["skipped_scene"]
-            total_skipped_blur += stats["skipped_blur"]
-            total_errors += stats["errors"]
-        
-        table.add_row(
-            "[bold]TOTAL[/bold]",
-            f"[bold]{total_patches}[/bold]",
-            f"[bold]{total_skipped_scene}[/bold]",
-            f"[bold]{total_skipped_blur}[/bold]",
-            f"[bold]{total_errors}[/bold]",
-            style="bold"
-        )
-        
-        console.print(table)
-        
-        # Save statistics to file
-        stats_path = self.dataset_path / "generation_stats.json"
-        with open(stats_path, 'w') as f:
-            json.dump({
-                "timestamp": datetime.now().isoformat(),
-                "stats": self.stats,
-                "totals": {
-                    "patches": total_patches,
-                    "skipped_scene": total_skipped_scene,
-                    "skipped_blur": total_skipped_blur,
-                    "errors": total_errors
-                }
-            }, f, indent=2)
-        
-        console.print(f"\n[green]Statistics saved to: {stats_path}[/green]")
-    
-    def save_error_log(self):
-        """Save error log to file"""
-        if not self.error_log:
-            return
-        
-        error_log_path = self.dataset_path / "generation_errors.log"
-        with open(error_log_path, 'w') as f:
-            f.write(f"Dataset Generation Error Log\n")
-            f.write(f"Generated: {datetime.now().isoformat()}\n")
-            f.write("=" * 80 + "\n\n")
             
-            for i, error in enumerate(self.error_log, 1):
-                f.write(f"Error #{i}:\n{error}\n\n")
+            while patches_created_total < target_patches and current_time < duration - 1.0:
+                try:
+                    # Extract 7 UHD frames
+                    frames = self.extract_frames_uhd(video_path, current_time, n_frames=7)
+                    
+                    if frames is None:
+                        current_time += stride_seconds
+                        continue
+                    
+                    # Check for scene change
+                    if self.is_scene_change(frames):
+                        current_time += stride_seconds
+                        continue
+                    
+                    # Check for blur (center frame)
+                    if self.is_blurry(frames[3]):
+                        current_time += stride_seconds
+                        continue
+                    
+                    # Create patches for each enabled size
+                    for size_key in enabled_sizes:
+                        gt, lr_stacked = self.create_patch_pair(frames, size_key)
+                        
+                        if gt is None or lr_stacked is None:
+                            continue
+                        
+                        # Generate filename
+                        video_name = Path(video_path).stem
+                        patch_name = f"{video_name}_{int(current_time*1000):08d}_{size_key}.png"
+                        
+                        # Save patches
+                        gt_path = self.dataset_path / "patches" / size_key / "GT" / patch_name
+                        lr_path = self.dataset_path / "patches" / size_key / "LR" / patch_name
+                        
+                        cv2.imwrite(str(gt_path), gt, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+                        cv2.imwrite(str(lr_path), lr_stacked, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+                    
+                    patches_created_total += 1
+                    progress.update(task_id, advance=1)
+                    
+                    # Update progress in state manager
+                    self.patches_since_save += 1
+                    if self.patches_since_save >= self.save_interval:
+                        self.state_manager.update_video_progress(
+                            video_path,
+                            self.patches_since_save,
+                            current_time
+                        )
+                        self.state_manager.save()
+                        self.patches_since_save = 0
+                    
+                    # Move to next position
+                    current_time += stride_seconds
+                
+                except Exception as e:
+                    logger.error(f"Error at {current_time}s: {e}")
+                    current_time += stride_seconds
+                    continue
         
-        console.print(f"[yellow]Errors logged to: {error_log_path}[/yellow]")
+        # Final update
+        if self.patches_since_save > 0:
+            self.state_manager.update_video_progress(
+                video_path,
+                self.patches_since_save,
+                current_time
+            )
+            self.state_manager.save()
+            self.patches_since_save = 0
+        
+        logger.info(f"✅ Completed: {patches_created_total} patches created")
+    
+    def run(self):
+        """Main generation loop with resume support"""
+        console.print(Panel.fit(
+            "[bold cyan]Dataset Generator V2[/bold cyan]\n"
+            "UHD Quality Preservation • 7-Frame • State Management",
+            border_style="cyan"
+        ))
+        
+        # Scan videos (cached!)
+        self.state_manager.scan_videos()
+        
+        # Calculate distribution
+        if not self.state_manager.state['category_distribution']:
+            self.state_manager.calculate_distribution()
+        
+        # Display progress summary
+        console.print("\n[bold]Current Progress:[/bold]")
+        console.print(self.state_manager.get_progress_summary())
+        console.print()
+        
+        # Process videos
+        while True:
+            task = self.state_manager.get_next_video_task()
+            if task is None:
+                break
+            
+            video_path, video_info, remaining_patches = task
+            self.process_video(video_path, video_info, remaining_patches)
+        
+        # Mark complete
+        self.state_manager.mark_complete()
+        
+        console.print("\n[bold green]✅ Generation Complete![/bold green]")
+        console.print(self.state_manager.get_progress_summary())
 
 
 def main():
     """Main entry point"""
-    console.print("[bold blue]Dataset Generator V2 - Clean Rewrite[/bold blue]")
-    console.print("[blue]7-Frame Only, Horizontal LR Stacking[/blue]\n")
-    
-    # Load configuration
     config_path = "generator_config_v2.json"
     if len(sys.argv) > 1:
         config_path = sys.argv[1]
     
-    console.print(f"[cyan]Loading configuration from: {config_path}[/cyan]")
-    config = DatasetConfig(config_path)
+    # Change to script directory
+    script_dir = Path(__file__).parent
+    os.chdir(script_dir)
     
-    # Create generator
-    generator = DatasetGenerator(config)
-    
-    # Process videos
-    try:
-        generator.process_all_videos()
-    except KeyboardInterrupt:
-        console.print("\n[yellow]Processing interrupted by user[/yellow]")
-    except Exception as e:
-        console.print(f"\n[red]Fatal error: {str(e)}[/red]")
-        traceback.print_exc()
+    if not os.path.exists(config_path):
+        console.print(f"[red]Error: Config file not found: {config_path}[/red]")
+        console.print("[yellow]Please create generator_config_v2.json or specify config path[/yellow]")
         sys.exit(1)
     
-    # Print statistics
-    generator.print_statistics()
-    
-    # Save error log if any errors occurred
-    generator.save_error_log()
-    
-    console.print("\n[bold green]Dataset generation complete![/bold green]")
+    try:
+        generator = DatasetGeneratorV2(config_path)
+        generator.run()
+    except KeyboardInterrupt:
+        console.print("\n[yellow]⚠️  Interrupted by user[/yellow]")
+        console.print("[green]Progress saved. Run again to resume.[/green]")
+        sys.exit(0)
+    except Exception as e:
+        console.print(f"[red]Fatal error: {e}[/red]")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 
 
 if __name__ == "__main__":
