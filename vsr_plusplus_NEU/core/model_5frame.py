@@ -1,44 +1,62 @@
+"""
+5-Frame Bidirectional VSR Model
+MATCHES original VSRBidirectional_3x architecture exactly for realistic memory testing.
+"""
+
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 class ResidualBlock(nn.Module):
-    """Residual block with two conv layers."""
-    def __init__(self, n_feats, kernel_size=3):
-        super(ResidualBlock, self).__init__()
-        self.conv1 = nn.Conv2d(n_feats, n_feats, kernel_size, padding=kernel_size//2)
-        self.relu = nn.ReLU(inplace=True)
-        self.conv2 = nn.Conv2d(n_feats, n_feats, kernel_size, padding=kernel_size//2)
+    """Residual block matching original architecture."""
+    def __init__(self, n_feats):
+        super().__init__()
+        self.conv1 = nn.Conv2d(n_feats, n_feats, 3, 1, 1)
+        self.relu = nn.LeakyReLU(0.1, inplace=False)  # LeakyReLU like original
+        self.conv2 = nn.Conv2d(n_feats, n_feats, 3, 1, 1)
         
     def forward(self, x):
-        res = self.conv1(x)
-        res = self.relu(res)
-        res = self.conv2(res)
-        return x + res
+        residual = x
+        out = self.conv1(x)
+        out = self.relu(out)
+        out = self.conv2(out)
+        return residual + out
 
 class VSRBidirectional_5frames_3x(nn.Module):
     """
-    5-Frame Bidirectional VSR Model
-    Input: 5 frames stacked (B, 3, H, W*5)
-    Output: Upscaled center frame (B, 3, H*3, W*3)
+    5-Frame Bidirectional VSR Model - EXACT MATCH to original training architecture
+    
+    Input: [B, 5, 3, H, W] (5 frames)
+    Output: [B, 3, H*3, W*3] (upscaled center frame)
+    
+    Architecture matches VSRBidirectional_3x for realistic memory measurements.
     """
     def __init__(self, n_feats=64, n_blocks=24):
-        super(VSRBidirectional_5frames_3x, self).__init__()
-        
+        super().__init__()
         self.n_feats = n_feats
         self.n_blocks = n_blocks
         
-        # Feature extraction
-        self.fea_extract = nn.Conv2d(3, n_feats, 3, 1, 1)
+        half_blocks = max(1, n_blocks // 2)
         
-        # Bidirectional trunks
-        half_blocks = n_blocks // 2
-        self.backward_trunk = nn.Sequential(*[ResidualBlock(n_feats) for _ in range(half_blocks)])
-        self.forward_trunk = nn.Sequential(*[ResidualBlock(n_feats) for _ in range(half_blocks)])
+        # 1. Feature Extraction
+        self.feat_extract = nn.Conv2d(3, n_feats, 3, 1, 1)
         
-        # Fusion
-        self.fusion = nn.Conv2d(n_feats * 2, n_feats, 1, 1, 0)
+        # 2. Fusion layers for combining features (CRITICAL for memory)
+        self.backward_fuse = nn.Conv2d(n_feats * 2, n_feats, 1)
+        self.forward_fuse = nn.Conv2d(n_feats * 2, n_feats, 1)
         
-        # Upsampling (3x with PixelShuffle)
+        # 3. Propagation Trunks
+        self.backward_trunk = nn.ModuleList([
+            ResidualBlock(n_feats) for _ in range(half_blocks)
+        ])
+        self.forward_trunk = nn.ModuleList([
+            ResidualBlock(n_feats) for _ in range(half_blocks)
+        ])
+        
+        # 4. Final Fusion
+        self.fusion = nn.Conv2d(n_feats * 2, n_feats, 1)
+        
+        # 5. Upsampling (3x with PixelShuffle)
         self.upsample = nn.Sequential(
             nn.Conv2d(n_feats, n_feats * 9, 3, 1, 1),
             nn.PixelShuffle(3),
@@ -47,40 +65,46 @@ class VSRBidirectional_5frames_3x(nn.Module):
         
     def forward(self, x):
         """
-        x: (B, 3, H, W*5) - 5 frames horizontally stacked
-        Returns: (B, 3, H*3, W*3) - upscaled center frame
+        Forward pass matching original architecture
+        
+        Args:
+            x: Input tensor [B, 5, 3, H, W]
+            
+        Returns:
+            Output tensor [B, 3, H*3, W*3]
         """
-        B, C, H, W_total = x.shape
-        W = W_total // 5
+        B, T, C, H, W = x.size()
         
-        # Split into 5 frames
-        frames = torch.split(x, W, dim=3)  # List of 5 tensors (B, 3, H, W)
+        # Extract features from all 5 frames
+        feats = self.feat_extract(x.view(-1, C, H, W))
+        feats = feats.view(B, T, self.n_feats, H, W)
         
-        # Extract features for each frame
-        feats = [self.fea_extract(f) for f in frames]  # 5x (B, n_feats, H, W)
+        # Initialize with Frame 3 (center frame, index 2)
+        center_feat = feats[:, 2].clone()
         
-        # Initialize propagation from CENTER frame (frame 2, index 2)
-        center_feat = feats[2].clone()
-        
-        # Backward propagation: F2 → F3 → F4
+        # Backward propagation: F3 → F4
         back_prop = center_feat
-        back_feats = [center_feat]
         for i in [3, 4]:
-            back_prop = self.backward_trunk(back_prop + feats[i])
-            back_feats.append(back_prop)
+            # Fuse THEN process through trunk (like original)
+            fused = self.backward_fuse(torch.cat([back_prop, feats[:, i]], dim=1))
+            for block in self.backward_trunk:
+                fused = block(fused)
+            back_prop = fused
         
-        # Forward propagation: F2 → F1 → F0
+        # Forward propagation: F3 → F2 → F1
         forw_prop = center_feat
-        forw_feats = [center_feat]
         for i in [1, 0]:
-            forw_prop = self.forward_trunk(forw_prop + feats[i])
-            forw_feats.insert(0, forw_prop)
+            # Fuse THEN process through trunk (like original)
+            fused = self.forward_fuse(torch.cat([forw_prop, feats[:, i]], dim=1))
+            for block in self.forward_trunk:
+                fused = block(fused)
+            forw_prop = fused
         
-        # Fuse bidirectional features at center frame
-        fused = torch.cat([back_feats[0], forw_feats[2]], dim=1)  # (B, n_feats*2, H, W)
-        fused = self.fusion(fused)  # (B, n_feats, H, W)
+        # Fuse bidirectional features
+        fused = self.fusion(torch.cat([back_prop, forw_prop], dim=1))
         
-        # Upsample
-        out = self.upsample(fused)  # (B, 3, H*3, W*3)
+        # Upsampling with residual connection (CRITICAL - like original!)
+        base = F.interpolate(x[:, 2], scale_factor=3, mode='bilinear', align_corners=False)
+        upsampled = self.upsample(fused)
         
-        return out
+        return upsampled + base

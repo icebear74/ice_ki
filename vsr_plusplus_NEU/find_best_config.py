@@ -103,14 +103,27 @@ def create_model(frames, n_feats, n_blocks, precision):
     return model
 
 def create_dummy_batch(frames, batch_size, lr_size, gt_size, precision):
-    """Create dummy input/target tensors."""
+    """
+    Create dummy input/target tensors matching real training format.
+    
+    Args:
+        frames: Number of frames (5 or 7)
+        batch_size: Batch size
+        lr_size: LR frame size (H, W)
+        gt_size: GT frame size (H*3, W*3)
+        precision: 'float16' or 'float32'
+    
+    Returns:
+        lr_input: [B, T, 3, H, W] - T frames
+        gt_target: [B, 3, H*3, W*3] - upscaled center frame
+    """
     lr_h, lr_w = lr_size
     gt_h, gt_w = gt_size
     
-    # LR: stacked frames horizontally
-    lr_input = torch.randn(batch_size, 3, lr_h, lr_w * frames).cuda()
+    # LR: [B, T, C, H, W] format (MATCHES REAL TRAINING!)
+    lr_input = torch.randn(batch_size, frames, 3, lr_h, lr_w).cuda()
     
-    # GT: single upscaled frame
+    # GT: single upscaled frame [B, 3, H*3, W*3]
     gt_target = torch.randn(batch_size, 3, gt_h, gt_w).cuda()
     
     if precision == 'float16':
@@ -248,9 +261,25 @@ def main():
     logger = DualLogger(LOG_FILE)
     
     logger.info("=" * 80)
-    logger.info("VSR++ Config Finder - Automated Testing")
+    logger.info("VSR++ Config Finder - REALISTIC Memory & Timing Test")
     logger.info("=" * 80)
     logger.info(f"Start time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info("")
+    logger.info("Testing with FULL training components:")
+    logger.info("  ✓ Model architecture matches original VSRBidirectional_3x")
+    logger.info("  ✓ HybridLoss with VGG16 perceptual network")
+    logger.info("  ✓ Multi-scale and gradient loss components")
+    logger.info("  ✓ Adam optimizer with full state")
+    logger.info("  ✓ Gradient accumulation")
+    logger.info("  ✓ FP16/FP32 precision testing")
+    logger.info("")
+    logger.info("Memory measurements include:")
+    logger.info("  • Model parameters + gradients")
+    logger.info("  • Optimizer state (2x parameters for Adam)")
+    logger.info("  • VGG16 perceptual network (~400-650 MB)")
+    logger.info("  • Intermediate tensors (fusion, gradients, etc.)")
+    logger.info("")
+    logger.info("⚠️  Accuracy: ±0.2 GB memory, ±1 second timing")
     logger.info("")
     
     # Calculate total combinations
