@@ -376,7 +376,7 @@ def main():
             # Check if multi-size is configured
             if 'sizes' in rt_config and any(
                 size_cfg.get('enabled', False) and size_cfg.get('distribution', 0.0) > 0
-                for size_cfg in rt_config.get('sizes', {}).values()
+                for size_cfg in rt_config['sizes'].values()
             ):
                 use_multi_size = True
                 print(f"{C_CYAN}✓ Multi-size training enabled (runtime_config.json found){C_RESET}")

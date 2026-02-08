@@ -146,8 +146,8 @@ class VSRDataset(Dataset):
         
         # LR should be same height, width*7 (7 frames stacked horizontally)
         expected_lr_height = expected_gt_shape[0] // 3  # 3x downscale
-        # More accurate: (width * 7) // 3 to preserve precision
-        # This calculates: GT width → downscale 3x → stack 7 frames horizontally
+        # Calculate LR width: (GT_width / scale) * n_frames
+        # Mathematically equivalent: (GT_width * 7) / 3 for precision
         expected_lr_width = (expected_gt_shape[1] * 7) // 3  # 7 frames stacked horizontally, downscaled 3x
         expected_lr_shape = (expected_lr_height, expected_lr_width, 3)
         
@@ -179,7 +179,7 @@ class VSRDataset(Dataset):
             
             if gt.shape != expected_gt_shape:
                 issues_found.append(f"Invalid GT shape {gt.shape}, expected {expected_gt_shape}: {gt_path}")
-            # Allow small width variations due to rounding (±2 pixels)
+            # Allow ±2px tolerance for LR width to account for rounding in downscaling operations
             if lr.shape[0] != expected_lr_shape[0] or lr.shape[2] != expected_lr_shape[2]:
                 issues_found.append(f"Invalid LR shape {lr.shape}, expected {expected_lr_shape}: {lr_path}")
             elif abs(lr.shape[1] - expected_lr_shape[1]) > 2:

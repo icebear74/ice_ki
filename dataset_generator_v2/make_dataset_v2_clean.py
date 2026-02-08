@@ -262,7 +262,8 @@ class DatasetGenerator:
         # Extract patches from the frame
         for y in range(0, height - patch_size + 1, patch_size):
             for x in range(0, width - patch_size + 1, patch_size):
-                # Extract GT patch (middle frame, index 3)
+                # Extract GT patch from middle frame (index 3 of 7-frame sequence)
+                # Using center frame ensures temporal consistency
                 gt_patch = frames[3][y:y+patch_size, x:x+patch_size]
                 
                 # Extract LR patches from all 7 frames
@@ -272,6 +273,7 @@ class DatasetGenerator:
                     lr_patches.append(lr_patch)
                 
                 # Stack LR patches HORIZONTALLY (H, W×7)
+                # Result shape: (H, W*7, 3) where W*7 = 7 consecutive frames
                 lr_stacked = np.hstack(lr_patches)  # Horizontal concatenation
                 
                 # Generate filename
