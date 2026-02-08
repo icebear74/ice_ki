@@ -374,7 +374,7 @@ class DatasetGeneratorV2:
         Create all necessary output directories.
         
         New V2 structure:
-            - patches/{size}/GT/ and patches/{size}/LR/ (7-frame horizontal, for training)
+            - patches/{size}/GT/ and patches/{size}/LR/ (7-frame vertical, for training)
             - val/{size}/GT/ (validation, user copies manually)
         """
         for category in self.config.get('category_targets', {}).keys():
@@ -465,7 +465,7 @@ class DatasetGeneratorV2:
         return all_success
     
     def create_lr_stack(self, frames: List, lr_size: Tuple[int, int], crop_y: int, crop_x: int, crop_h: int, crop_w: int) -> any:
-        """Create horizontally stacked LR frames (7-frame horizontal stacking)."""
+        """Create vertically stacked LR frames (7-frame vertical stacking)."""
         lr_frames = []
         for frame in frames:
             # Crop from the frame
@@ -474,17 +474,17 @@ class DatasetGeneratorV2:
             resized = cv2.resize(cropped, lr_size, interpolation=cv2.INTER_LANCZOS4)
             lr_frames.append(resized)
         
-        # Stack horizontally (width × 7)
-        return cv2.hconcat(lr_frames)
+        # Stack vertically (height × 7)
+        return cv2.vconcat(lr_frames)
     
     def save_patches(self, frames: List, category: str, format_name: str, 
                      video_name: str, frame_idx: int) -> bool:
         """
         Save GT and LR patches for a specific category and format.
         
-        New V2 Training expects:
+        Training expects:
             - GT: Single ground truth frame (e.g., 540×540)
-            - LR: 7-frame stack horizontally (e.g., 180×1260 for 540 patches)
+            - LR: 7-frame stack vertically (e.g., 1260×180 for 540 patches)
         
         Returns:
             True if successful, False otherwise
@@ -514,8 +514,8 @@ class DatasetGeneratorV2:
             gt_path = os.path.join(dirs_7['gt'], filename)
             cv2.imwrite(gt_path, gt_frame, [cv2.IMWRITE_PNG_COMPRESSION, 3])
             
-            # Save 7-frame LR (all 7 frames, horizontally stacked)
-            # Result shape: (H, W×7, 3) - e.g., (180, 1260, 3) for 540 patches
+            # Save 7-frame LR (all 7 frames, vertically stacked)
+            # Result shape: (H×7, W, 3) - e.g., (1260, 180, 3) for 540 patches
             lr_7 = self.create_lr_stack(frames[0:7], (lr_w, lr_h), crop_y, crop_x, gt_h, gt_w)
             lr7_path = os.path.join(dirs_7['lr'], filename)
             cv2.imwrite(lr7_path, lr_7, [cv2.IMWRITE_PNG_COMPRESSION, 3])
