@@ -298,10 +298,13 @@ class ConfigAPIHandler:
         
         # Validate sum
         total = sum(distribution.values())
-        if not (0.99 <= total <= 1.01):
+        tolerance_min = 1.0 - DISTRIBUTION_SUM_TOLERANCE
+        tolerance_max = 1.0 + DISTRIBUTION_SUM_TOLERANCE
+        
+        if not (tolerance_min <= total <= tolerance_max):
             return {
                 'success': False,
-                'error': f'Size distribution must sum to 1.0, got {total:.4f}'
+                'error': f'Size distribution must sum to 1.0 (±{DISTRIBUTION_SUM_TOLERANCE}), got {total:.4f}'
             }
         
         # Update config

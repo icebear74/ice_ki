@@ -413,8 +413,14 @@ def print_size_distribution_panel(size_stats, ui_width=120):
     print_line(f"{C_BOLD}Size Distribution Progress{C_RESET}", ui_width)
     print_separator(ui_width, style='thin')
     
-    # Print each size category
-    for category in sorted(stats.keys()):
+    # Fixed category order for consistency
+    category_order = ['small_540', 'medium_169', 'large_720']
+    
+    # Print each size category in fixed order
+    for category in category_order:
+        if category not in stats:
+            continue
+        
         cat_stats = stats[category]
         trained = cat_stats['images_trained']
         target = cat_stats['target_images']
@@ -452,9 +458,15 @@ def format_size_stats_compact(size_stats):
         return "No size stats"
     
     stats = size_stats['size_stats']
+    
+    # Fixed category order for consistency
+    category_order = ['small_540', 'medium_169', 'large_720']
     parts = []
     
-    for category in sorted(stats.keys()):
+    for category in category_order:
+        if category not in stats:
+            continue
+        
         cat_stats = stats[category]
         trained = cat_stats['images_trained']
         target = cat_stats['target_images']

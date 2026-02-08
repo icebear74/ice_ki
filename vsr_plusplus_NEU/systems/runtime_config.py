@@ -22,6 +22,10 @@ import threading
 from typing import Dict, Any, Tuple, List, Optional
 
 
+# Constants
+DISTRIBUTION_SUM_TOLERANCE = 0.01  # Allow ±1% tolerance for sum validation
+
+
 # Import adaptive batch calculator for VRAM validation
 try:
     from .adaptive_batch import AdaptiveBatchCalculator, VRAM_LIMIT_GB
@@ -192,9 +196,9 @@ class EnhancedRuntimeConfigManager:
             # Check size distribution sum
             if 'size_distribution' in config:
                 total = sum(config['size_distribution'].values())
-                if not (0.99 <= total <= 1.01):  # Allow ±0.01 tolerance
+                if not (1.0 - DISTRIBUTION_SUM_TOLERANCE <= total <= 1.0 + DISTRIBUTION_SUM_TOLERANCE):
                     errors.append(
-                        f"Size distribution sum is {total:.4f}, must be 1.0 (±0.01)"
+                        f"Size distribution sum is {total:.4f}, must be 1.0 (±{DISTRIBUTION_SUM_TOLERANCE})"
                     )
             
             # Check VRAM limits for adaptive batch configs
@@ -339,6 +343,20 @@ class EnhancedRuntimeConfigManager:
         # Save to file
         return self.save()
     
+    def _validate_distribution_sum(self, distribution: Dict[str, float]) -> Tuple[bool, float]:
+        """
+        Validate that distribution sums to 1.0 within tolerance
+        
+        Args:
+            distribution: Dict mapping size category to percentage
+            
+        Returns:
+            Tuple of (is_valid, sum_value)
+        """
+        total = sum(distribution.values())
+        is_valid = (1.0 - DISTRIBUTION_SUM_TOLERANCE <= total <= 1.0 + DISTRIBUTION_SUM_TOLERANCE)
+        return is_valid, total
+    
     def update_size_distribution(self, distribution: Dict[str, float]) -> bool:
         """
         Update size distribution configuration
@@ -349,10 +367,10 @@ class EnhancedRuntimeConfigManager:
         Returns:
             True if updated successfully
         """
-        # Validate sum
-        total = sum(distribution.values())
-        if not (0.99 <= total <= 1.01):
-            print(f"⚠️  Size distribution sum is {total:.4f}, must be 1.0 (±0.01)")
+        # Validate sum using helper method
+        is_valid, total = self._validate_distribution_sum(distribution)
+        if not is_valid:
+            print(f"⚠️  Size distribution sum is {total:.4f}, must be 1.0 (±{DISTRIBUTION_SUM_TOLERANCE})")
             return False
         
         with self.lock:
