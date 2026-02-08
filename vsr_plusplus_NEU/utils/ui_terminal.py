@@ -362,3 +362,108 @@ def print_header(ui_width):
 def print_footer(ui_width):
     """Print UI footer"""
     sys.stdout.write(f" {C_GRAY}╚{'═'*(ui_width-2)}╝{C_RESET}\n")
+
+
+def make_size_bar(trained, target, width):
+    """
+    Create an ASCII progress bar for size tracking
+    
+    Args:
+        trained: Number of images trained
+        target: Target number of images
+        width: Width of the bar in characters
+    
+    Returns:
+        str: Formatted progress bar with ANSI colors
+    """
+    width = max(5, width)
+    
+    if target > 0:
+        percent = min(100.0, (trained / target) * 100.0)
+    else:
+        percent = 0.0
+    
+    filled = max(0, min(width, int((percent / 100.0) * width)))
+    
+    # Color based on progress
+    if percent >= 90.0:
+        color = C_GREEN
+    elif percent >= 50.0:
+        color = C_CYAN
+    else:
+        color = C_YELLOW
+    
+    return f"{color}{'█' * filled}{C_GRAY}{'░' * (width - filled)}{C_RESET}"
+
+
+def print_size_distribution_panel(size_stats, ui_width=120):
+    """
+    Print size distribution tracking panel
+    
+    Args:
+        size_stats: Dict from SizeTracker.get_stats()
+        ui_width: Total UI width
+    """
+    if not size_stats or 'size_stats' not in size_stats:
+        return
+    
+    stats = size_stats['size_stats']
+    
+    print_separator(ui_width, style='double')
+    print_line(f"{C_BOLD}Size Distribution Progress{C_RESET}", ui_width)
+    print_separator(ui_width, style='thin')
+    
+    # Print each size category
+    for category in sorted(stats.keys()):
+        cat_stats = stats[category]
+        trained = cat_stats['images_trained']
+        target = cat_stats['target_images']
+        pct = cat_stats['percentage_complete']
+        
+        # Create progress bar
+        bar_width = 30
+        bar = make_size_bar(trained, target, bar_width)
+        
+        # Format line
+        category_str = f"{category:>15}"
+        progress_str = f"{trained:>8,} / {target:>8,}"
+        pct_str = f"({pct:>6.2f}%)"
+        line = f"{category_str}: {bar} {progress_str} {pct_str}"
+        
+        print_line(line, ui_width)
+    
+    # Print total
+    total_trained = size_stats.get('total_images_trained', 0)
+    print_separator(ui_width, style='thin')
+    print_line(f"Total Images Trained: {C_BOLD}{total_trained:,}{C_RESET}", ui_width)
+
+
+def format_size_stats_compact(size_stats):
+    """
+    Format size stats as compact string for status line
+    
+    Args:
+        size_stats: Dict from SizeTracker.get_stats()
+    
+    Returns:
+        str: Compact formatted string
+    """
+    if not size_stats or 'size_stats' not in size_stats:
+        return "No size stats"
+    
+    stats = size_stats['size_stats']
+    parts = []
+    
+    for category in sorted(stats.keys()):
+        cat_stats = stats[category]
+        trained = cat_stats['images_trained']
+        target = cat_stats['target_images']
+        
+        if target > 0:
+            pct = (trained / target) * 100.0
+            parts.append(f"{category.split('_')[0]}: {pct:.0f}%")
+        else:
+            parts.append(f"{category.split('_')[0]}: 0%")
+    
+    return " | ".join(parts)
+

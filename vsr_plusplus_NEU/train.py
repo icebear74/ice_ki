@@ -83,6 +83,71 @@ def start_tensorboard(log_dir, port=6006):
         return False
 
 
+def validate_startup_config(runtime_config_manager):
+    """
+    Validate startup configuration for 7-frame VSR training
+    
+    Args:
+        runtime_config_manager: RuntimeConfigManager instance
+        
+    Returns:
+        True if validation passes, False otherwise
+    """
+    print(f"\n{C_CYAN}{'='*80}{C_RESET}")
+    print(f"{C_CYAN}Validating Startup Configuration{C_RESET}")
+    print(f"{C_CYAN}{'='*80}{C_RESET}\n")
+    
+    # Validate configuration
+    is_valid, errors = runtime_config_manager.validate()
+    
+    if not is_valid:
+        print(f"{C_RED}{C_BOLD}❌ Configuration Validation Failed!{C_RESET}\n")
+        for i, error in enumerate(errors, 1):
+            print(f"{C_RED}  {i}. {error}{C_RESET}")
+        print(f"\n{C_YELLOW}Please fix the configuration issues and try again.{C_RESET}\n")
+        return False
+    
+    # Print validation success
+    print(f"{C_GREEN}✅ Configuration validation passed!{C_RESET}\n")
+    
+    # Print key config values
+    config = runtime_config_manager.get_all()
+    
+    if 'model' in config:
+        print(f"{C_BOLD}Model Configuration:{C_RESET}")
+        print(f"  • Frames: {config['model'].get('n_frames', 'N/A')}")
+        print(f"  • Features: {config['model'].get('n_feats', 'N/A')}")
+        print(f"  • Blocks: {config['model'].get('n_blocks', 'N/A')}")
+        print(f"  • Precision: {config['model'].get('precision', 'N/A')}")
+        print()
+    
+    if 'training' in config:
+        print(f"{C_BOLD}Training Configuration:{C_RESET}")
+        print(f"  • Effective Batch Size: {config['training'].get('effective_batch_size', 'N/A')}")
+        print()
+        
+        if 'adaptive_batch' in config['training']:
+            print(f"  {C_BOLD}Adaptive Batch Configs:{C_RESET}")
+            for size, batch_config in config['training']['adaptive_batch'].items():
+                batch = batch_config.get('batch', 'N/A')
+                accum = batch_config.get('accum', 'N/A')
+                print(f"    • {size}: batch={batch}, accum={accum}")
+            print()
+    
+    if 'size_distribution' in config:
+        print(f"{C_BOLD}Size Distribution:{C_RESET}")
+        total = 0.0
+        for size, percentage in config['size_distribution'].items():
+            print(f"  • {size}: {percentage*100:.1f}%")
+            total += percentage
+        print(f"  • Total: {total*100:.1f}%")
+        print()
+    
+    print(f"{C_CYAN}{'='*80}{C_RESET}\n")
+    return True
+
+
+
 def main():
     """Main training entry point"""
     

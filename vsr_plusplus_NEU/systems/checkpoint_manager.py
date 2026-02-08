@@ -46,7 +46,7 @@ class CheckpointManager:
         step_in_cycle = step % 10000
         return 2000 <= step_in_cycle <= 8000
     
-    def save_checkpoint(self, model, optimizer, scheduler, step, metrics, log_file, runtime_config=None):
+    def save_checkpoint(self, model, optimizer, scheduler, step, metrics, log_file, runtime_config=None, size_tracker=None):
         """
         Save checkpoint file with new zero-padded naming scheme
         
@@ -58,6 +58,7 @@ class CheckpointManager:
             metrics: Validation metrics dict
             log_file: Path to log file
             runtime_config: Optional RuntimeConfigManager instance
+            size_tracker: Optional SizeTracker instance
             
         Returns:
             Path to saved checkpoint
@@ -70,6 +71,10 @@ class CheckpointManager:
             'metrics': metrics,
             'timestamp': datetime.now().isoformat()
         }
+        
+        # Add size tracking data if provided
+        if size_tracker is not None:
+            checkpoint['size_tracking'] = size_tracker.to_checkpoint_dict()
         
         # NEW: Use zero-padded naming (7 digits)
         # Emergency checkpoints should use save_emergency_checkpoint() instead
@@ -152,7 +157,7 @@ class CheckpointManager:
             print(f"⚠️  Error loading config snapshot: {e}")
             return False
     
-    def update_best_checkpoint(self, model, optimizer, scheduler, step, quality, metrics, log_file, runtime_config=None):
+    def update_best_checkpoint(self, model, optimizer, scheduler, step, quality, metrics, log_file, runtime_config=None, size_tracker=None):
         """
         Check if best, save if needed, update symlinks
         
@@ -165,6 +170,7 @@ class CheckpointManager:
             metrics: Validation metrics dict
             log_file: Path to log file
             runtime_config: Optional RuntimeConfigManager instance
+            size_tracker: Optional SizeTracker instance
             
         Returns:
             True if new best, False otherwise
@@ -174,7 +180,7 @@ class CheckpointManager:
             return False
         
         # Save new best checkpoint
-        checkpoint_path = self.save_checkpoint(model, optimizer, scheduler, step, metrics, log_file, runtime_config)
+        checkpoint_path = self.save_checkpoint(model, optimizer, scheduler, step, metrics, log_file, runtime_config, size_tracker)
         
         # Update best symlinks
         best_link = os.path.join(self.checkpoint_dir, "checkpoint_best.pth")
@@ -205,7 +211,7 @@ class CheckpointManager:
         
         return True
     
-    def save_emergency_checkpoint(self, model, optimizer, scheduler, step, metrics, log_file, runtime_config=None):
+    def save_emergency_checkpoint(self, model, optimizer, scheduler, step, metrics, log_file, runtime_config=None, size_tracker=None):
         """Save emergency checkpoint with real step number in filename"""
         # NEW: Emergency checkpoints now include actual step number
         checkpoint = {
@@ -216,6 +222,10 @@ class CheckpointManager:
             'metrics': metrics,
             'timestamp': datetime.now().isoformat()
         }
+        
+        # Add size tracking data if provided
+        if size_tracker is not None:
+            checkpoint['size_tracking'] = size_tracker.to_checkpoint_dict()
         
         filename = f"checkpoint_step_{step:07d}_emergency.pth"
         filepath = os.path.join(self.checkpoint_dir, filename)
@@ -450,6 +460,30 @@ class CheckpointManager:
                     print(f"Warning: Could not remove {log_file}: {e}")
         
         return backed_up
+    
+    def load_size_tracking_from_checkpoint(self, checkpoint_data, size_tracker):
+        """
+        Load size tracking data from checkpoint
+        
+        Args:
+            checkpoint_data: Loaded checkpoint dict
+            size_tracker: SizeTracker instance to restore into
+            
+        Returns:
+            True if loaded successfully
+        """
+        if 'size_tracking' in checkpoint_data:
+            try:
+                success = size_tracker.from_checkpoint_dict(checkpoint_data['size_tracking'])
+                if success:
+                    print("✅ Size tracking restored from checkpoint")
+                return success
+            except Exception as e:
+                print(f"⚠️  Error restoring size tracking: {e}")
+                return False
+        else:
+            print("⚠️  No size tracking data in checkpoint")
+            return False
     
     def show_checkpoint_info(self):
         """Display enhanced checkpoint table at startup"""
