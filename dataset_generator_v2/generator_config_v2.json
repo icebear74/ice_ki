@@ -59,5 +59,12 @@
   "validation": {
     "enabled": false,
     "note": "Validation GT is manually copied to val/720/GT/ and val/720_169/GT/"
-  }
+  },
+  
+  "_comment_random_seed": "Optional: Set random seed for reproducible patch generation. Omit for random behavior.",
+  "random_seed": null,
+  
+  "_comment_timeouts": "Optional: Timeouts for FFmpeg operations (in seconds)",
+  "ffmpeg_timeout": 120,
+  "ffprobe_timeout": 60
 }

@@ -90,14 +90,18 @@ class StateManager:
         return state
     
     def _compute_config_hash(self) -> str:
-        """Compute hash of configuration for change detection"""
+        """
+        Compute hash of configuration for change detection
+        Note: Using MD5 for simple change detection (not security)
+        """
         # Hash only the relevant parts
         config_str = json.dumps({
             'source': self.config.get('source'),
             'processing': self.config.get('processing'),
             'output_patches': self.config.get('output_patches')
         }, sort_keys=True)
-        return hashlib.md5(config_str.encode()).hexdigest()[:12]
+        # SHA256 for better collision resistance
+        return hashlib.sha256(config_str.encode()).hexdigest()[:12]
     
     def scan_videos(self):
         """
@@ -169,7 +173,9 @@ class StateManager:
                 video_path
             ]
             
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            # Configurable timeout (default 60s for large files)
+            timeout = self.config.get('ffprobe_timeout', 60)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
             if result.returncode != 0:
                 return None
             

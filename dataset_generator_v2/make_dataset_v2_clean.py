@@ -60,6 +60,13 @@ class DatasetGeneratorV2:
         self.dataset_name = self.config['dataset_name']
         self.dataset_path = self.root_path / self.dataset_name
         
+        # Set random seed if configured (for reproducible patch generation)
+        random_seed = self.config.get('random_seed')
+        if random_seed is not None:
+            random.seed(random_seed)
+            np.random.seed(random_seed)
+            logger.info(f"🎲 Random seed set to {random_seed} (reproducible mode)")
+        
         # Initialize state manager
         state_file = self.dataset_path / "generation_state.json"
         self.state_manager = StateManager(self.config, str(state_file))
@@ -128,12 +135,13 @@ class DatasetGeneratorV2:
                     output_pattern
                 ]
                 
-                # Run ffmpeg
+                # Run ffmpeg with configurable timeout (default 120s for UHD)
+                timeout = self.config.get('ffmpeg_timeout', 120)
                 result = subprocess.run(
                     cmd,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
-                    timeout=60
+                    timeout=timeout
                 )
                 
                 if result.returncode != 0:
