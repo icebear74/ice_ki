@@ -19,6 +19,7 @@ from torch.utils.data import DataLoader
 import subprocess
 import socket
 import time
+import json
 
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -363,24 +364,79 @@ def main():
     # Create datasets
     print("Loading datasets...")
     
-    try:
-        train_dataset = VSRDataset(DATASET_ROOT, mode='Patches', augment=True)
-        val_dataset = VSRDataset(DATASET_ROOT, mode='Val', augment=False)
+    # Check for runtime_config.json to enable multi-size training
+    runtime_config_json_path = os.path.join(DATA_ROOT, "runtime_config.json")
+    use_multi_size = False
+    
+    if os.path.exists(runtime_config_json_path):
+        try:
+            with open(runtime_config_json_path, 'r') as f:
+                rt_config = json.load(f)
+            
+            # Check if multi-size is configured
+            if 'sizes' in rt_config and any(
+                size_cfg.get('enabled', False) and size_cfg.get('distribution', 0.0) > 0
+                for size_cfg in rt_config.get('sizes', {}).values()
+            ):
+                use_multi_size = True
+                print(f"{C_CYAN}✓ Multi-size training enabled (runtime_config.json found){C_RESET}")
+        except Exception as e:
+            print(f"{C_YELLOW}⚠ Failed to load runtime_config.json, using single-size: {e}{C_RESET}")
+    
+    if use_multi_size:
+        # Use multi-size dataloader
+        try:
+            from vsr_plusplus_NEU.core.dataloader import create_train_loader
+            
+            # Prepare config for multi-size loader
+            loader_config = {
+                'data_root': DATASET_ROOT,
+                'dataset_name': rt_config.get('dataset_name', 'master'),
+                'sizes': rt_config.get('sizes', {}),
+                'augment': True,
+                'shuffle': True
+            }
+            
+            train_loader = create_train_loader(loader_config)
+            
+            # Count total samples across all sizes
+            total_samples = sum(len(ds) for ds in train_loader.datasets_dict.values())
+            print(f"✅ Multi-size training samples: {total_samples:,}")
+            for size_key, dataset in train_loader.datasets_dict.items():
+                dist = rt_config['sizes'][size_key].get('distribution', 0.0)
+                print(f"  • {size_key}: {len(dataset):,} samples ({dist*100:.1f}%)")
+            print()
+        except Exception as e:
+            print(f"{C_RED}❌ Error creating multi-size dataloader: {e}{C_RESET}")
+            print(f"{C_YELLOW}Falling back to single-size training{C_RESET}")
+            use_multi_size = False
+    
+    if not use_multi_size:
+        # Use traditional single-size dataloader
+        try:
+            train_dataset = VSRDataset(DATASET_ROOT, mode='Patches', augment=True)
+            
+            print(f"✅ Training samples: {len(train_dataset):,}\n")
+        except Exception as e:
+            print(f"❌ Error loading datasets: {e}")
+            return
         
-        print(f"✅ Training samples: {len(train_dataset):,}")
+        # Create single-size data loader
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=config['NUM_WORKERS'],
+            pin_memory=config['PIN_MEMORY']
+        )
+    
+    # Load validation dataset (always single-size)
+    try:
+        val_dataset = VSRDataset(DATASET_ROOT, mode='Val', augment=False)
         print(f"✅ Validation samples: {len(val_dataset):,}\n")
     except Exception as e:
-        print(f"❌ Error loading datasets: {e}")
+        print(f"❌ Error loading validation dataset: {e}")
         return
-    
-    # Create data loaders
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=config['NUM_WORKERS'],
-        pin_memory=config['PIN_MEMORY']
-    )
     
     val_loader = DataLoader(
         val_dataset,

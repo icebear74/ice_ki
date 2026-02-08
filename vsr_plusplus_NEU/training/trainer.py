@@ -112,7 +112,7 @@ class VSRTrainer:
         # Initialize loop timing
         loop_start_time = time.time()
         
-        for batch_idx, (lr_stack, gt) in enumerate(self.train_loader):
+        for batch_idx, batch in enumerate(self.train_loader):
             # Handle pause state
             while self.paused:
                 self._update_gui(epoch, {}, 0.1, steps_per_epoch, current_epoch_step, paused=True)
@@ -129,9 +129,18 @@ class VSRTrainer:
                 # Reset timing after validation
                 loop_start_time = time.time()
             
-            # Move to device
-            lr_stack = lr_stack.to(self.device)
-            gt = gt.to(self.device)
+            # Handle both single-size (tuple) and multi-size (dict) batches
+            if isinstance(batch, dict):
+                # Multi-size batch
+                lr_stack = batch['lr'].to(self.device)
+                gt = batch['gt'].to(self.device)
+                size_key = batch.get('size_key', 'unknown')
+            else:
+                # Traditional single-size batch (tuple)
+                lr_stack, gt = batch
+                lr_stack = lr_stack.to(self.device)
+                gt = gt.to(self.device)
+                size_key = 'default'
             
             # Forward pass
             output = self.model(lr_stack)
