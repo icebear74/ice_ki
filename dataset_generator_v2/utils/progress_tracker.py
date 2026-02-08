@@ -64,9 +64,12 @@ class ProgressTracker:
         os.makedirs(os.path.dirname(self.status_file), exist_ok=True)
         with open(self.status_file, 'w') as f:
             json.dump(self.status, f, indent=2)
-        # Flush to ensure write completes
-        f.flush()
-        os.fsync(f.fileno()) if hasattr(f, 'fileno') else None
+            # Flush to ensure write completes
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except:
+                pass  # Some systems don't support fsync
     
     def initialize_categories(self, category_targets: Dict[str, int]):
         """Initialize category stats from config."""
