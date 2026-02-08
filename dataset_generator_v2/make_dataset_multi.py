@@ -300,32 +300,33 @@ class DatasetGeneratorV2:
         # Create temp directory
         os.makedirs(self.temp_dir, exist_ok=True)
     
-    def extract_7_frames(self, video_path: str, timestamp: float, thread_id: str) -> Optional[List]:
-        """Extract 7 frames centered at timestamp using HDR tonemap."""
+    def extract_full_resolution_frames(self, video_path: str, timestamp: float, thread_id: str) -> Optional[List]:
+        """Extract 7 frames at FULL 1920×1080 resolution ONCE."""
         thread_temp = os.path.join(self.temp_dir, f"extract_{thread_id}")
         os.makedirs(thread_temp, exist_ok=True)
         
         try:
-            # HDR tonemap filter from original
+            # HDR tonemap filter
             tonemap_vf = "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=mobius,zscale=t=bt709:m=bt709,format=yuv420p,scale=1920:1080:flags=lanczos"
             
-            # Extract 7 frames
+            # Extract 7 frames at full resolution with 4 threads
             cmd = [
                 'nice', '-n', '19',
-                'ffmpeg', '-y', '-threads', '1',
+                'ffmpeg', '-y', 
+                '-threads', '4',  # USE 4 CORES instead of 1!
                 '-ss', str(round(timestamp, 3)),
                 '-i', video_path,
                 '-vf', tonemap_vf,
                 '-vframes', '7',
-                os.path.join(thread_temp, 'f_%d.png')
+                os.path.join(thread_temp, 'frame_%d.png')
             ]
             
             subprocess.run(cmd, capture_output=True, check=False, timeout=30)
             
-            # Load frames
+            # Load all 7 frames
             frames = []
             for i in range(1, 8):
-                frame_path = os.path.join(thread_temp, f"f_{i}.png")
+                frame_path = os.path.join(thread_temp, f"frame_{i}.png")
                 if os.path.exists(frame_path) and os.path.getsize(frame_path) > self.settings['min_file_size']:
                     img = cv2.imread(frame_path)
                     if img is not None and img.shape[0] == 1080 and img.shape[1] == 1920:
@@ -339,6 +340,7 @@ class DatasetGeneratorV2:
         except Exception as e:
             return None
         finally:
+            # Clean up temp files
             if os.path.exists(thread_temp):
                 shutil.rmtree(thread_temp, ignore_errors=True)
     
@@ -350,6 +352,32 @@ class DatasetGeneratorV2:
         diff = cv2.absdiff(gray_first, gray_last).mean()
         
         return diff < self.settings['scene_diff_threshold']
+    
+    def process_all_categories_from_frames(self, frames: List, categories: Dict[str, float], 
+                                          video_name: str, frame_idx: int) -> bool:
+        """Process all category patches from the same 7 full-resolution frames."""
+        
+        # Validate scene stability once
+        if not self.validate_scene_stability(frames):
+            return False
+        
+        all_success = True
+        
+        # Process each category with different random crops
+        for category, weight in categories.items():
+            # Select format for this category
+            format_name = self.select_format_for_category(category)
+            
+            # Save patches (uses DIFFERENT random crop per category)
+            success = self.save_patches(frames, category, format_name, 
+                                      video_name, frame_idx)
+            
+            if success:
+                self.tracker.increment_category_images(category, 1)
+            else:
+                all_success = False
+        
+        return all_success
     
     def create_lr_stack(self, frames: List, lr_size: Tuple[int, int], crop_y: int, crop_x: int, crop_h: int, crop_w: int) -> any:
         """Create vertically stacked LR frames."""
@@ -427,39 +455,24 @@ class DatasetGeneratorV2:
     def extract_with_retry(self, video_path: str, video_name: str, 
                           categories: Dict[str, float], frame_idx: int, 
                           duration: float) -> Tuple[bool, int]:
-        """Extract patches with retry logic."""
+        """Extract frames once with retry logic, process all categories."""
         timestamp = (frame_idx * duration / self.settings['base_frame_limit']) % duration
         thread_id = f"{random.randint(1000, 9999)}_{int(time.time()*1000) % 10000}"
         
         for attempt in range(self.settings['max_retry_attempts']):
-            # Extract 7 frames
-            frames = self.extract_7_frames(video_path, timestamp, thread_id)
+            # Extract 7 full-resolution frames ONCE
+            frames = self.extract_full_resolution_frames(video_path, timestamp, thread_id)
             
             if frames is None:
                 timestamp = (timestamp + self.settings['retry_skip_seconds']) % duration
                 continue
             
-            # Validate scene stability
-            if not self.validate_scene_stability(frames):
-                timestamp = (timestamp + self.settings['retry_skip_seconds']) % duration
-                continue
+            # Process ALL categories from these frames
+            success = self.process_all_categories_from_frames(
+                frames, categories, video_name, frame_idx
+            )
             
-            # Save patches for each category this video belongs to
-            all_success = True
-            for category, weight in categories.items():
-                # Select format for this category
-                format_name = self.select_format_for_category(category)
-                
-                # Save with DIFFERENT random crop per category
-                success = self.save_patches(frames, category, format_name, 
-                                          video_name, frame_idx)
-                
-                if success:
-                    self.tracker.increment_category_images(category, 1)
-                else:
-                    all_success = False
-            
-            if all_success:
+            if success:
                 return True, attempt + 1
             
             timestamp = (timestamp + self.settings['retry_skip_seconds']) % duration
