@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VSR++ 7-Frame Configuration</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+            color: #e2e8f0;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+            padding: 20px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            background: linear-gradient(90deg, #60a5fa, #a78bfa);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        
+        .card {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            padding: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            margin-bottom: 20px;
+        }
+        
+        .card-title {
+            font-size: 1.3em;
+            margin-bottom: 15px;
+            color: #60a5fa;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .slider-container {
+            margin: 20px 0;
+        }
+        
+        .slider-label {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 10px;
+            font-size: 1.1em;
+        }
+        
+        .slider {
+            width: 100%;
+            height: 8px;
+            border-radius: 5px;
+            background: rgba(255, 255, 255, 0.1);
+            outline: none;
+            -webkit-appearance: none;
+        }
+        
+        .slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            background: #60a5fa;
+            cursor: pointer;
+            box-shadow: 0 0 10px rgba(96, 165, 250, 0.5);
+        }
+        
+        .slider::-moz-range-thumb {
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            background: #60a5fa;
+            cursor: pointer;
+            border: none;
+            box-shadow: 0 0 10px rgba(96, 165, 250, 0.5);
+        }
+        
+        .config-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 15px;
+        }
+        
+        .config-table th,
+        .config-table td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .config-table th {
+            background: rgba(255, 255, 255, 0.05);
+            color: #60a5fa;
+            font-weight: 600;
+        }
+        
+        .vram-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+        
+        .vram-safe { background: #10b981; }
+        .vram-warning { background: #f59e0b; }
+        .vram-danger { background: #ef4444; }
+        
+        .progress-bar {
+            height: 24px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            overflow: hidden;
+            position: relative;
+            margin: 8px 0;
+        }
+        
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #10b981, #3b82f6);
+            transition: width 0.3s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.85em;
+            font-weight: 600;
+        }
+        
+        .button {
+            padding: 12px 24px;
+            background: #3b82f6;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 1em;
+            font-weight: 600;
+            transition: all 0.3s ease;
+        }
+        
+        .button:hover {
+            background: #2563eb;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4);
+        }
+        
+        .button:disabled {
+            background: #64748b;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
+        .status-message {
+            padding: 12px;
+            border-radius: 8px;
+            margin-top: 15px;
+            display: none;
+        }
+        
+        .status-success {
+            background: rgba(16, 185, 129, 0.2);
+            border: 1px solid #10b981;
+            color: #10b981;
+        }
+        
+        .status-error {
+            background: rgba(239, 68, 68, 0.2);
+            border: 1px solid #ef4444;
+            color: #ef4444;
+        }
+        
+        .distribution-slider {
+            margin: 15px 0;
+        }
+        
+        .distribution-sum {
+            text-align: center;
+            font-size: 1.2em;
+            margin-top: 15px;
+            padding: 10px;
+            border-radius: 8px;
+        }
+        
+        .sum-valid {
+            background: rgba(16, 185, 129, 0.2);
+            border: 1px solid #10b981;
+            color: #10b981;
+        }
+        
+        .sum-invalid {
+            background: rgba(239, 68, 68, 0.2);
+            border: 1px solid #ef4444;
+            color: #ef4444;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎛️ 7-Frame VSR Configuration</h1>
+            <p>Real-time training configuration and monitoring</p>
+        </div>
+        
+        <!-- Batch Size Configuration -->
+        <div class="card">
+            <div class="card-title">📦 Batch Size Configuration</div>
+            
+            <div class="slider-container">
+                <div class="slider-label">
+                    <span>Effective Batch Size:</span>
+                    <span id="batch-value">6</span>
+                </div>
+                <input type="range" min="4" max="12" value="6" class="slider" id="batch-slider">
+            </div>
+            
+            <table class="config-table" id="batch-config-table">
+                <thead>
+                    <tr>
+                        <th>Size Category</th>
+                        <th>Batch</th>
+                        <th>Accumulation</th>
+                        <th>Effective</th>
+                        <th>VRAM (GB)</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody id="batch-config-body">
+                    <!-- Populated by JavaScript -->
+                </tbody>
+            </table>
+            
+            <button class="button" id="apply-batch-btn" style="margin-top: 15px;">Apply Batch Configuration</button>
+            <div class="status-message" id="batch-status"></div>
+        </div>
+        
+        <!-- Size Distribution Configuration -->
+        <div class="card">
+            <div class="card-title">📊 Size Distribution</div>
+            
+            <div class="distribution-slider">
+                <div class="slider-label">
+                    <span>Small (540×540):</span>
+                    <span id="dist-small-value">65%</span>
+                </div>
+                <input type="range" min="0" max="100" value="65" class="slider" id="dist-small-slider">
+            </div>
+            
+            <div class="distribution-slider">
+                <div class="slider-label">
+                    <span>Medium (720×405):</span>
+                    <span id="dist-medium-value">35%</span>
+                </div>
+                <input type="range" min="0" max="100" value="35" class="slider" id="dist-medium-slider">
+            </div>
+            
+            <div class="distribution-slider">
+                <div class="slider-label">
+                    <span>Large (720×720):</span>
+                    <span id="dist-large-value">0%</span>
+                </div>
+                <input type="range" min="0" max="100" value="0" class="slider" id="dist-large-slider">
+            </div>
+            
+            <div class="distribution-sum" id="distribution-sum">
+                Total: 100%
+            </div>
+            
+            <button class="button" id="apply-distribution-btn" style="margin-top: 15px;">Apply Distribution</button>
+            <div class="status-message" id="distribution-status"></div>
+        </div>
+        
+        <!-- Size Training Progress -->
+        <div class="card">
+            <div class="card-title">📈 Training Progress by Size</div>
+            
+            <div id="size-progress-container">
+                <!-- Populated by JavaScript -->
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        // Update batch size display and preview
+        const batchSlider = document.getElementById('batch-slider');
+        const batchValue = document.getElementById('batch-value');
+        const batchConfigBody = document.getElementById('batch-config-body');
+        
+        batchSlider.addEventListener('input', async function() {
+            const value = parseInt(this.value);
+            batchValue.textContent = value;
+            await updateBatchPreview(value);
+        });
+        
+        async function updateBatchPreview(effectiveBatch) {
+            try {
+                const response = await fetch(`/api/batch_preview?effective_batch=${effectiveBatch}`);
+                const data = await response.json();
+                
+                if (data.configs) {
+                    renderBatchTable(data.configs);
+                }
+            } catch (error) {
+                console.error('Error updating batch preview:', error);
+            }
+        }
+        
+        function renderBatchTable(configs) {
+            const order = ['small_540', 'medium_169', 'large_720'];
+            let html = '';
+            
+            for (const size of order) {
+                const config = configs[size];
+                if (!config) continue;
+                
+                const statusClass = `vram-${config.status}`;
+                const statusText = config.status === 'safe' ? '✅ Safe' : 
+                                   config.status === 'warning' ? '⚠️ Warning' : 
+                                   '❌ Danger';
+                
+                html += `
+                    <tr>
+                        <td>${size}</td>
+                        <td>${config.batch}</td>
+                        <td>${config.accum}</td>
+                        <td>${config.effective}</td>
+                        <td>${config.vram_gb.toFixed(2)}</td>
+                        <td><span class="vram-indicator ${statusClass}"></span>${statusText}</td>
+                    </tr>
+                `;
+            }
+            
+            batchConfigBody.innerHTML = html;
+        }
+        
+        // Apply batch configuration
+        document.getElementById('apply-batch-btn').addEventListener('click', async function() {
+            const effectiveBatch = parseInt(batchSlider.value);
+            const statusDiv = document.getElementById('batch-status');
+            
+            try {
+                const response = await fetch(`/api/update_batch_config?effective_batch=${effectiveBatch}`, {
+                    method: 'POST'
+                });
+                const data = await response.json();
+                
+                if (data.success) {
+                    statusDiv.className = 'status-message status-success';
+                    statusDiv.textContent = data.message;
+                } else {
+                    statusDiv.className = 'status-message status-error';
+                    statusDiv.textContent = data.error || 'Failed to update configuration';
+                }
+                
+                statusDiv.style.display = 'block';
+                setTimeout(() => { statusDiv.style.display = 'none'; }, 5000);
+            } catch (error) {
+                statusDiv.className = 'status-message status-error';
+                statusDiv.textContent = 'Error: ' + error.message;
+                statusDiv.style.display = 'block';
+            }
+        });
+        
+        // Size distribution sliders
+        const distSliders = {
+            small: document.getElementById('dist-small-slider'),
+            medium: document.getElementById('dist-medium-slider'),
+            large: document.getElementById('dist-large-slider')
+        };
+        
+        const distValues = {
+            small: document.getElementById('dist-small-value'),
+            medium: document.getElementById('dist-medium-value'),
+            large: document.getElementById('dist-large-value')
+        };
+        
+        const distSum = document.getElementById('distribution-sum');
+        
+        function updateDistributionSum() {
+            const total = parseInt(distSliders.small.value) + 
+                          parseInt(distSliders.medium.value) + 
+                          parseInt(distSliders.large.value);
+            
+            distSum.textContent = `Total: ${total}%`;
+            
+            if (total === 100) {
+                distSum.className = 'distribution-sum sum-valid';
+            } else {
+                distSum.className = 'distribution-sum sum-invalid';
+            }
+            
+            return total === 100;
+        }
+        
+        for (const [key, slider] of Object.entries(distSliders)) {
+            slider.addEventListener('input', function() {
+                distValues[key].textContent = this.value + '%';
+                const isValid = updateDistributionSum();
+                document.getElementById('apply-distribution-btn').disabled = !isValid;
+            });
+        }
+        
+        // Apply distribution
+        document.getElementById('apply-distribution-btn').addEventListener('click', async function() {
+            const distribution = {
+                'small_540': parseInt(distSliders.small.value) / 100.0,
+                'medium_169': parseInt(distSliders.medium.value) / 100.0,
+                'large_720': parseInt(distSliders.large.value) / 100.0
+            };
+            
+            const statusDiv = document.getElementById('distribution-status');
+            
+            try {
+                const response = await fetch('/api/update_size_distribution', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(distribution)
+                });
+                const data = await response.json();
+                
+                if (data.success) {
+                    statusDiv.className = 'status-message status-success';
+                    statusDiv.textContent = data.message;
+                } else {
+                    statusDiv.className = 'status-message status-error';
+                    statusDiv.textContent = data.error || 'Failed to update distribution';
+                }
+                
+                statusDiv.style.display = 'block';
+                setTimeout(() => { statusDiv.style.display = 'none'; }, 5000);
+            } catch (error) {
+                statusDiv.className = 'status-message status-error';
+                statusDiv.textContent = 'Error: ' + error.message;
+                statusDiv.style.display = 'block';
+            }
+        });
+        
+        // Load size stats
+        async function loadSizeStats() {
+            try {
+                const response = await fetch('/api/size_stats');
+                const data = await response.json();
+                
+                if (data.categories) {
+                    renderSizeProgress(data.categories);
+                }
+            } catch (error) {
+                console.error('Error loading size stats:', error);
+            }
+        }
+        
+        function renderSizeProgress(categories) {
+            const container = document.getElementById('size-progress-container');
+            let html = '';
+            
+            for (const cat of categories) {
+                const percentage = cat.target > 0 ? (cat.trained / cat.target * 100) : 0;
+                
+                html += `
+                    <div style="margin: 20px 0;">
+                        <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+                            <strong>${cat.category}</strong>
+                            <span>${cat.trained.toLocaleString()} / ${cat.target.toLocaleString()} (${percentage.toFixed(1)}%)</span>
+                        </div>
+                        <div class="progress-bar">
+                            <div class="progress-fill" style="width: ${Math.min(100, percentage)}%">
+                                ${percentage > 10 ? percentage.toFixed(1) + '%' : ''}
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+            
+            container.innerHTML = html;
+        }
+        
+        // Initial load
+        updateBatchPreview(6);
+        loadSizeStats();
+        
+        // Refresh size stats every 5 seconds
+        setInterval(loadSizeStats, 5000);
+    </script>
+</body>
+</html>

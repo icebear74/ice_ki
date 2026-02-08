@@ -225,6 +225,167 @@ class ConfigAPIHandler:
                 'success': False,
                 'error': str(e)
             }
+    
+    # NEW: 7-Frame VSR System Endpoints
+    
+    def handle_update_batch_config(self, effective_batch: int) -> Dict[str, Any]:
+        """
+        Update effective batch size and recalculate adaptive configs
+        
+        Args:
+            effective_batch: New effective batch size (4-12)
+            
+        Returns:
+            Success/error response with calculated configs
+        """
+        if self.runtime_config is None:
+            return {'success': False, 'error': 'Runtime config not available'}
+        
+        # Validate range
+        if not (4 <= effective_batch <= 12):
+            return {
+                'success': False,
+                'error': f'Effective batch size must be 4-12, got {effective_batch}'
+            }
+        
+        # Update config
+        success = self.runtime_config.update_effective_batch_size(effective_batch)
+        
+        if success:
+            # Get updated configs
+            config = self.runtime_config.get_all()
+            adaptive_batch = config.get('training', {}).get('adaptive_batch', {})
+            
+            # Calculate VRAM estimates
+            from ..systems.adaptive_batch import AdaptiveBatchCalculator
+            calculator = AdaptiveBatchCalculator()
+            
+            vram_estimates = {}
+            for size, batch_config in adaptive_batch.items():
+                calc_config = calculator.calculate_batch_config(size, effective_batch)
+                vram_estimates[size] = {
+                    'batch': batch_config['batch'],
+                    'accum': batch_config['accum'],
+                    'effective': batch_config['batch'] * batch_config['accum'],
+                    'vram_est': calc_config['vram_est'],
+                    'status': calculator.get_vram_status(calc_config['vram_est'])
+                }
+            
+            return {
+                'success': True,
+                'effective_batch': effective_batch,
+                'adaptive_configs': vram_estimates,
+                'message': f'Batch configuration updated to {effective_batch}'
+            }
+        else:
+            return {
+                'success': False,
+                'error': 'Failed to update batch configuration'
+            }
+    
+    def handle_update_size_distribution(self, distribution: Dict[str, float]) -> Dict[str, Any]:
+        """
+        Update size distribution configuration
+        
+        Args:
+            distribution: Dict mapping size category to percentage (0.0-1.0)
+            
+        Returns:
+            Success/error response
+        """
+        if self.runtime_config is None:
+            return {'success': False, 'error': 'Runtime config not available'}
+        
+        # Validate sum
+        total = sum(distribution.values())
+        if not (0.99 <= total <= 1.01):
+            return {
+                'success': False,
+                'error': f'Size distribution must sum to 1.0, got {total:.4f}'
+            }
+        
+        # Update config
+        success = self.runtime_config.update_size_distribution(distribution)
+        
+        if success:
+            return {
+                'success': True,
+                'distribution': distribution,
+                'total': total,
+                'message': 'Size distribution updated successfully'
+            }
+        else:
+            return {
+                'success': False,
+                'error': 'Failed to update size distribution'
+            }
+    
+    def handle_size_stats(self, size_tracker) -> Dict[str, Any]:
+        """
+        Get size tracking statistics
+        
+        Args:
+            size_tracker: SizeTracker instance
+            
+        Returns:
+            Size tracking statistics
+        """
+        if size_tracker is None:
+            return {'error': 'Size tracker not available'}
+        
+        stats = size_tracker.get_stats()
+        
+        # Add formatted data for UI
+        formatted_stats = []
+        if 'size_stats' in stats:
+            for category, cat_stats in stats['size_stats'].items():
+                formatted_stats.append({
+                    'category': category,
+                    'trained': cat_stats['images_trained'],
+                    'target': cat_stats['target_images'],
+                    'percentage': cat_stats['percentage_complete'],
+                    'last_step': cat_stats['last_trained_step']
+                })
+        
+        return {
+            'total_images': stats.get('total_images_trained', 0),
+            'last_step': stats.get('last_step', 0),
+            'categories': formatted_stats,
+            'last_updated': stats.get('last_updated', '')
+        }
+    
+    def handle_get_batch_preview(self, effective_batch: int) -> Dict[str, Any]:
+        """
+        Preview batch configuration without saving
+        
+        Args:
+            effective_batch: Effective batch size to preview
+            
+        Returns:
+            Preview of batch configs with VRAM estimates
+        """
+        from ..systems.adaptive_batch import AdaptiveBatchCalculator
+        
+        calculator = AdaptiveBatchCalculator()
+        configs = calculator.calculate_all_configs(effective_batch)
+        
+        # Format for UI
+        formatted_configs = {}
+        for size, config in configs.items():
+            formatted_configs[size] = {
+                'batch': config['batch'],
+                'accum': config['accum'],
+                'effective': config['effective'],
+                'vram_gb': config['vram_est'],
+                'status': calculator.get_vram_status(config['vram_est']),
+                'safe': config['safe']
+            }
+        
+        return {
+            'effective_batch': effective_batch,
+            'configs': formatted_configs
+        }
+
 
 
 def parse_query_params(query_string: str) -> Dict[str, Any]:
