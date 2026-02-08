@@ -603,9 +603,10 @@ class DatasetGeneratorV2:
         )
         
         # Overall progress section
+        completion_pct = (completed_videos/total_videos*100) if total_videos > 0 else 0
         overall = f"""[bold]📊 OVERALL PROGRESS[/bold]
 ├─ Total Videos: {total_videos}
-├─ Completed: {completed_videos} ({completed_videos/total_videos*100:.1f}%)
+├─ Completed: {completed_videos} ({completion_pct:.1f}%)
 ├─ Current: {self.current_video_name[:50]}
 ├─ Remaining: {total_videos - completed_videos} videos
 ├─ Elapsed: {elapsed_str}
