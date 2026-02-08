@@ -111,8 +111,9 @@ PIN_MEMORY = True
 # ============================================================================
 
 # Training data root directory - matches generator_config.json output_base_dir
-# Contains: master/train/7frames/{small_540, medium_169, large_720}/
-DATA_ROOT = "/mnt/data/training/datasetNeu/master"
+# Generator creates: datasetNeu/Master/MasterModel/Learn/Patches/GT, Patches/LR, etc.
+# VSRDataset expects: dataset_root/Patches/GT and dataset_root/Patches/LR
+DATA_ROOT = "/mnt/data/training/datasetNeu/Master/MasterModel/Learn"
 
 # Dataset root directory (for checkpoints and logs)
 DATASET_ROOT = "/mnt/data/training/datasetNeu"
@@ -243,7 +244,10 @@ def print_config():
     print("\nDATASET PATHS:")
     print(f"  Data Root:              {DATA_ROOT}")
     print(f"  Dataset Root:           {DATASET_ROOT}")
-    print(f"  Structure:              master/train/7frames/{{small_540,medium_169,large_720}}/")
+    print(f"  Expected Structure:")
+    print(f"    {DATA_ROOT}/Patches/GT/")
+    print(f"    {DATA_ROOT}/Patches/LR/")
+    print(f"    {DATA_ROOT}/Val/GT/")
     
     print("\nADAPTIVE SYSTEM:")
     print(f"  Adaptive Loss Weights:  {ADAPTIVE_LOSS_WEIGHTS}")
@@ -258,6 +262,7 @@ def print_config():
     print("  - 7-frame model with 72 features and 26 blocks")
     print("  - Batch=1 for VRAM safety (tested at ~3.77 GB)")
     print("  - Dataset paths match dataset_generator_v2 output")
+    print("  - Generator creates: Master/MasterModel/Learn/Patches/...")
     print("  - VGG perceptual loss enabled for quality")
     print("  - Gradient accumulation for effective batch size 6")
     print("="*80 + "\n")

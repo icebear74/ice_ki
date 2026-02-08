@@ -21,7 +21,7 @@ DATASET_ROOT = "/mnt/data/training/Dataset/Universal/Mastermodell"
 
 **Neu / New:**
 ```python
-DATA_ROOT = "/mnt/data/training/datasetNeu/master"
+DATA_ROOT = "/mnt/data/training/datasetNeu/Master/MasterModel/Learn"
 DATASET_ROOT = "/mnt/data/training/datasetNeu"
 ```
 
@@ -129,7 +129,7 @@ Diese Konfiguration ist abgestimmt auf das 7-Frame VSR Training System:
 ### Dataset nicht gefunden / Dataset not found
 Überprüfen Sie, ob die Verzeichnisse existieren:
 ```bash
-ls -la /mnt/data/training/datasetNeu/master/train/7frames/
+ls -la /mnt/data/training/datasetNeu/Master/MasterModel/Learn/train/7frames/
 ```
 
 ### VRAM-Fehler / VRAM errors
@@ -140,7 +140,7 @@ ls -la /mnt/data/training/datasetNeu/master/train/7frames/
 ### Pfad-Fehler / Path errors
 Stellen Sie sicher, dass DATA_ROOT auf das `master` Verzeichnis zeigt:
 ```python
-DATA_ROOT = "/mnt/data/training/datasetNeu/master"
+DATA_ROOT = "/mnt/data/training/datasetNeu/Master/MasterModel/Learn"
 ```
 
 ## Vergleich Alt vs. Neu / Comparison Old vs. New
@@ -151,7 +151,7 @@ DATA_ROOT = "/mnt/data/training/datasetNeu/master"
 | N_BLOCKS | 24 | 26 | Bessere Qualität |
 | BATCH_SIZE | 2 | 1 | VRAM-Sicherheit |
 | ACCUMULATION_STEPS | 8 | 6 | Effektive Batch 6 |
-| DATA_ROOT | Universal/Mastermodell/Learn | datasetNeu/master | Generator V2 |
+| DATA_ROOT | Universal/Mastermodell/Learn | datasetNeu/Master/MasterModel/Learn | Generator V2 |
 | DATASET_ROOT | Dataset/Universal/Mastermodell | datasetNeu | Generator V2 |
 
 ## Weitere Informationen / More Information
