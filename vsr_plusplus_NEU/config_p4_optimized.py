@@ -1,41 +1,39 @@
 """
-VSR++ Tesla P4 Optimized Configuration
+VSR++ 7-Frame Configuration - Optimized for Tesla P4
 
-This configuration is specifically optimized for Tesla P4 hardware (8GB VRAM).
-Key optimizations:
-- Reduced model size (64 features instead of 128)
-- Reduced depth (24 blocks instead of 36)
-- Gradient accumulation for effective batch size 16
-- VGG-based perceptual loss enabled for better sharpness
+This configuration is specifically optimized for 7-frame VSR training on Tesla P4 hardware (8GB VRAM).
+Key parameters:
+- 72 feature channels (optimized for 7-frame model)
+- 26 residual blocks (balanced depth for quality)
+- Gradient accumulation for effective batch size
+- Matches dataset_generator_v2 output structure
 """
 
 # ============================================================================
-# MODEL ARCHITECTURE PARAMETERS (Optimized for Tesla P4)
+# MODEL ARCHITECTURE PARAMETERS (7-Frame Optimized)
 # ============================================================================
 
-# Number of feature channels - REDUCED for Tesla P4
-# Was: 128 (too heavy for P4)
-# Now: 64 (optimal for 8GB VRAM)
-N_FEATS = 64
+# Number of feature channels - Optimized for 7-frame model
+# 72 features provides good capacity while staying within VRAM limits
+N_FEATS = 72
 
-# Total number of residual blocks - REDUCED for Tesla P4
-# Was: 36 (too deep)
-# Now: 24 (balanced capacity/speed)
-N_BLOCKS = 24
+# Total number of residual blocks - Optimized for quality
+# 26 blocks provides excellent capacity for 7-frame processing
+N_BLOCKS = 26
 
 
 # ============================================================================
-# TRAINING BATCH PARAMETERS (Optimized for Tesla P4)
+# TRAINING BATCH PARAMETERS (Optimized for 7-Frame Model)
 # ============================================================================
 
 # Batch size per iteration
-# Keep at 4 to fit in VRAM
-BATCH_SIZE = 2
+# Keep at 1 for safety with 7-frame model (VRAM tested: ~3.77 GB @ batch=1)
+BATCH_SIZE = 1
 
 # Gradient accumulation steps
-# Effective batch = BATCH_SIZE * ACCUMULATION_STEPS = 4 * 4 = 16
+# Effective batch = BATCH_SIZE * ACCUMULATION_STEPS = 1 * 6 = 6
 # This provides stable gradients without excessive VRAM usage
-ACCUMULATION_STEPS = 8
+ACCUMULATION_STEPS = 6
 
 
 # ============================================================================
@@ -109,14 +107,17 @@ PIN_MEMORY = True
 
 
 # ============================================================================
-# PATHS
+# PATHS (Match dataset_generator_v2 output structure)
 # ============================================================================
 
-# Training data root directory
-DATA_ROOT = "/mnt/data/training/Universal/Mastermodell/Learn"
+# Training data root directory - matches generator_config.json output_base_dir
+# Generator creates: datasetNeu/Master/MasterModel/Learn/Patches/GT, Patches/LR, etc.
+# VSRDataset expects: dataset_root/Patches/GT and dataset_root/Patches/LR
+# (dataset_strucure.txt shows structure BELOW Master/ level)
+DATA_ROOT = "/mnt/data/training/datasetNeu/Master/MasterModel/Learn"
 
-# Dataset root directory
-DATASET_ROOT = "/mnt/data/training/Dataset/Universal/Mastermodell"
+# Dataset root directory (for checkpoints and logs)
+DATASET_ROOT = "/mnt/data/training/datasetNeu"
 
 
 # ============================================================================
@@ -204,17 +205,18 @@ def get_config():
 def print_config():
     """Print current configuration in a readable format."""
     print("\n" + "="*80)
-    print("TESLA P4 OPTIMIZED CONFIGURATION")
+    print("7-FRAME VSR CONFIGURATION (Tesla P4 Optimized)")
     print("="*80)
     
-    print("\nMODEL ARCHITECTURE (P4 Optimized):")
-    print(f"  Features (n_feats):     {N_FEATS} (reduced from 128)")
-    print(f"  Blocks (n_blocks):      {N_BLOCKS} (reduced from 36)")
+    print("\nMODEL ARCHITECTURE (7-Frame Optimized):")
+    print(f"  Features (n_feats):     {N_FEATS}")
+    print(f"  Blocks (n_blocks):      {N_BLOCKS}")
     
-    print("\nBATCH SETTINGS:")
+    print("\nBATCH SETTINGS (VRAM-Safe):")
     print(f"  Batch Size:             {BATCH_SIZE}")
     print(f"  Accumulation Steps:     {ACCUMULATION_STEPS}")
     print(f"  Effective Batch Size:   {BATCH_SIZE * ACCUMULATION_STEPS}")
+    print(f"  Estimated VRAM:         ~3.77 GB @ batch=1")
     
     print("\nLEARNING RATE:")
     print(f"  Initial LR:             {10**LR_EXPONENT:.2e} (10^{LR_EXPONENT})")
@@ -225,8 +227,8 @@ def print_config():
     
     print("\nLOSS WEIGHTS (VGG Perceptual Enabled):")
     print(f"  L1 Weight:              {L1_WEIGHT} (primary)")
-    print(f"  MS Weight:              {MS_WEIGHT} (disabled)")
-    print(f"  Grad Weight:            {GRAD_WEIGHT} (disabled)")
+    print(f"  MS Weight:              {MS_WEIGHT}")
+    print(f"  Grad Weight:            {GRAD_WEIGHT}")
     print(f"  Perceptual Weight:      {PERCEPTUAL_WEIGHT} (VGG16-based)")
     print(f"  Total:                  {L1_WEIGHT + MS_WEIGHT + GRAD_WEIGHT + PERCEPTUAL_WEIGHT}")
     
@@ -240,6 +242,15 @@ def print_config():
     print(f"  Workers:                {NUM_WORKERS}")
     print(f"  Pin Memory:             {PIN_MEMORY}")
     
+    print("\nDATASET PATHS:")
+    print(f"  Data Root:              {DATA_ROOT}")
+    print(f"  Dataset Root:           {DATASET_ROOT}")
+    print(f"  Expected Structure (from dataset_strucure.txt):")
+    print(f"    {DATA_ROOT}/Patches/GT/")
+    print(f"    {DATA_ROOT}/Patches/LR/")
+    print(f"    {DATA_ROOT}/Patches/LR_7frames/")
+    print(f"    {DATA_ROOT}/Val/GT/")
+    
     print("\nADAPTIVE SYSTEM:")
     print(f"  Adaptive Loss Weights:  {ADAPTIVE_LOSS_WEIGHTS}")
     print(f"  Adaptive Grad Clip:     {ADAPTIVE_GRAD_CLIP}")
@@ -249,11 +260,14 @@ def print_config():
     print(f"  Mixed Precision (AMP):  {USE_AMP}")
     
     print("\n" + "="*80)
-    print("OPTIMIZATION NOTES:")
-    print("  - Model size reduced to fit Tesla P4's 8GB VRAM")
-    print("  - VGG perceptual loss enabled to fix training stagnation")
-    print("  - Gradient accumulation used for effective batch size 16")
-    print("  - AMP enabled for faster training on Tesla P4")
+    print("CONFIGURATION NOTES:")
+    print("  - 7-frame model with 72 features and 26 blocks")
+    print("  - Batch=1 for VRAM safety (tested at ~3.77 GB)")
+    print("  - Dataset paths match dataset_generator_v2 output")
+    print("  - Generator creates: Master/MasterModel/Learn/Patches/...")
+    print("  - dataset_strucure.txt shows relative structure below Master/")
+    print("  - VGG perceptual loss enabled for quality")
+    print("  - Gradient accumulation for effective batch size 6")
     print("="*80 + "\n")
 
 
