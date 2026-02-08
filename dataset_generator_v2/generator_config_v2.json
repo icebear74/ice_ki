@@ -1,0 +1,49 @@
+{
+  "dataset_name": "master",
+  "root_path": "/mnt/data/training/datasetNeu",
+  
+  "source": {
+    "video_dir": "/mnt/data/training/source_videos",
+    "extensions": [".mp4", ".mkv", ".avi"]
+  },
+  
+  "output_patches": {
+    "720": {
+      "gt_size": [720, 720],
+      "lr_size": [240, 240],
+      "enabled": true
+    },
+    "540": {
+      "gt_size": [540, 540],
+      "lr_size": [180, 180],
+      "enabled": true
+    },
+    "720_169": {
+      "gt_size": [720, 405],
+      "lr_size": [240, 135],
+      "enabled": true
+    }
+  },
+  
+  "processing": {
+    "n_frames": 7,
+    "scale": 3,
+    "stride": 3,
+    "min_scene_length": 21,
+    "scene_threshold": 30.0
+  },
+  
+  "quality": {
+    "jpeg_quality": 95,
+    "min_sharpness": 30.0,
+    "blur_threshold": 100.0
+  },
+  
+  "workers": 8,
+  "batch_size": 4,
+  
+  "validation": {
+    "enabled": false,
+    "note": "Validation GT is manually copied to val/720/GT/ and val/720_169/GT/"
+  }
+}
