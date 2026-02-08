@@ -556,6 +556,13 @@ class DatasetGeneratorV2:
                         self.live_display.update(self._build_complete_layout())
                     except:
                         pass  # Ignore display errors
+                elif hasattr(self, '_should_update_display') and self._should_update_display():
+                    # Use professional box-drawing GUI
+                    try:
+                        from .utils.ui_display import draw_dataset_generator_ui
+                        draw_dataset_generator_ui(self)
+                    except:
+                        pass  # Ignore display errors
         
         # Mark video as completed
         self.tracker.update_video_checkpoint(video_idx, "completed")
@@ -925,10 +932,11 @@ Continue? Processing will start in 5 seconds... (Ctrl+C to cancel)
             self.console.print("  [SPACE] = Pause/Resume  |  [+/-] = Adjust workers  |  [q] = Quit")
             self.console.print()
         
-        # Clear screen once at start for clean display
+        # Clear screen once at start for clean display (professional way)
         if RICH_AVAILABLE:
-            import sys
-            print('\033[2J\033[H', end='', flush=True)  # Full clear + home at start
+            from .utils.ui_terminal import clear_and_home, hide_cursor
+            clear_and_home()
+            hide_cursor()
         
         # Initialize live display
         self.live_display = None
@@ -946,7 +954,7 @@ Continue? Processing will start in 5 seconds... (Ctrl+C to cancel)
                 # If Live doesn't work, fall back to regular display
                 self.live_display = None
                 if RICH_AVAILABLE:
-                    self.console.print(f"[yellow]⚠ Live display failed ({e}), using fallback mode[/yellow]")
+                    self.console.print(f"[yellow]⚠ Live display failed ({e}), using professional box GUI[/yellow]")
 
         
         try:
@@ -973,18 +981,9 @@ Continue? Processing will start in 5 seconds... (Ctrl+C to cancel)
                 if self.live_display:
                     self.live_display.update(self._build_complete_layout())
                 elif RICH_AVAILABLE:
-                    # Use home cursor + clear to end of screen to reduce flickering
-                    # \033[H = Move cursor to home (top-left)
-                    # \033[J = Clear from cursor to end of screen
-                    import sys
-                    print('\033[H\033[J', end='', flush=True)
-                    
-                    # Build and display the complete layout
-                    layout = self._build_complete_layout()
-                    self.console.print(layout)
-                    
-                    # Force flush
-                    sys.stdout.flush()
+                    # Use professional box-drawing GUI (vsr_plusplus style)
+                    from .utils.ui_display import draw_dataset_generator_ui
+                    draw_dataset_generator_ui(self)
                 else:
                     print(self._build_simple_status())
         
@@ -992,6 +991,11 @@ Continue? Processing will start in 5 seconds... (Ctrl+C to cancel)
             # Stop live display
             if self.live_display:
                 self.live_display.stop()
+            
+            # Show cursor again
+            if RICH_AVAILABLE:
+                from .utils.ui_terminal import show_cursor
+                show_cursor()
             
             # Stop keyboard listener
             self.stop_input_thread = True
