@@ -55,6 +55,11 @@ class DatasetGeneratorV2:
         self.videos = self.config['videos']
         self.format_config = self.config.get('format_config', {})
         
+        # Sort videos by priority (ascending: 0 first, 255 last)
+        # Within same priority, randomize order
+        random.seed(42)  # Reproducible randomization
+        self.videos.sort(key=lambda v: (v.get('priority', 255), random.random()))
+        
         # Initialize paths
         self.base_dir = self.settings['output_base_dir']
         self.temp_dir = self.settings['temp_dir']
@@ -78,6 +83,24 @@ class DatasetGeneratorV2:
         # Rich console
         if RICH_AVAILABLE:
             self.console = Console()
+            
+            # Show priority distribution
+            priority_counts = {}
+            for v in self.videos:
+                p = v.get('priority', 255)
+                priority_counts[p] = priority_counts.get(p, 0) + 1
+            
+            self.console.print("\n[bold]📋 Video Processing Order:[/bold]")
+            for priority in sorted(priority_counts.keys())[:10]:  # Show first 10 priority levels
+                count = priority_counts[priority]
+                if priority == 255:
+                    self.console.print(f"   Priority {priority} (default): {count} videos")
+                else:
+                    self.console.print(f"   Priority {priority}: {count} videos")
+            
+            if len(priority_counts) > 10:
+                remaining = sum(priority_counts[p] for p in sorted(priority_counts.keys())[10:])
+                self.console.print(f"   ... and {remaining} more videos in lower priorities")
         
         # Statistics
         self.start_time = time.time()
