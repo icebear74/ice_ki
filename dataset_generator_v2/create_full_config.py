@@ -6,6 +6,14 @@ Create complete generator_config.json with 4-category model structure.
 import json
 import os
 import re
+import random
+
+# Priority videos - processed FIRST for early training start
+PRIORITY_KEYWORDS = [
+    'planet earth', 'frozen planet', 'blue planet', 'our planet',
+    'life', 'africa', 'dynasties', 'seven worlds', 'green planet',
+    'attenborough', 'perfect planet', 'wild',
+]
 
 # Category keywords
 SPACE_KEYWORDS = [
@@ -29,6 +37,24 @@ MULTI_CATEGORY = {
     'barbie': {'master': 0.2, 'universal': 0.5, 'toon': 0.3},
     'jumanji': {'master': 0.2, 'universal': 0.5, 'toon': 0.3},
 }
+
+def get_video_priority(name, path):
+    """
+    Determine video priority for processing order.
+    
+    Returns:
+        0: High priority (nature documentaries - process FIRST)
+        1: Normal priority (random order)
+    """
+    name_lower = name.lower()
+    path_lower = path.lower()
+    
+    # Check if it's a priority video
+    for keyword in PRIORITY_KEYWORDS:
+        if keyword in name_lower or keyword in path_lower:
+            return 0  # Process FIRST
+    
+    return 1  # Normal priority
 
 def categorize_video(name, path):
     name_lower = name.lower()
@@ -73,24 +99,32 @@ def main():
         for line in f:
             line = line.strip()
             
-            # Skip empty lines
             if not line:
                 continue
             
-            # FIXED: The file format is just "/path/to/video.mkv" (no "N| " prefix!)
             path = line
             
             if path.endswith('.mkv'):
                 name = extract_name_from_path(path)
                 categories = categorize_video(name, path)
+                priority = get_video_priority(name, path)
                 
                 videos.append({
                     'name': name,
                     'path': path,
-                    'categories': categories
+                    'categories': categories,
+                    'priority': priority
                 })
     
     print(f"✅ Found {len(videos)} videos\n")
+    
+    # Sort videos: Priority first, then randomize
+    random.seed(42)
+    videos.sort(key=lambda v: (v['priority'], random.random()))
+    
+    priority_count = sum(1 for v in videos if v['priority'] == 0)
+    print(f"🌍 Priority videos (nature docs): {priority_count}")
+    print(f"🎬 Regular videos: {len(videos) - priority_count}\n")
     
     category_counts = {'master': len(videos), 'universal': 0, 'space': 0, 'toon': 0}
     for v in videos:
@@ -104,21 +138,10 @@ def main():
     print(f"   Space:     {category_counts['space']} videos")
     print(f"   Toon:      {category_counts['toon']} videos\n")
     
-    print("📝 Sample Categorizations:")
-    sample_universal = next((v for v in videos if 'universal' in v['categories']), None)
-    if sample_universal:
-        print(f"   Universal: {sample_universal['name']}")
-        print(f"              {sample_universal['categories']}")
-    
-    sample_space = next((v for v in videos if 'space' in v['categories']), None)
-    if sample_space:
-        print(f"   Space:     {sample_space['name']}")
-        print(f"              {sample_space['categories']}")
-    
-    sample_toon = next((v for v in videos if 'toon' in v['categories']), None)
-    if sample_toon:
-        print(f"   Toon:      {sample_toon['name']}")
-        print(f"              {sample_toon['categories']}")
+    print("🎯 First 5 videos to process:")
+    for i, v in enumerate(videos[:5]):
+        priority_marker = "🌍" if v['priority'] == 0 else "🎬"
+        print(f"   {i+1}. {priority_marker} {v['name']}")
     
     config = {
         "base_settings": {
@@ -168,12 +191,11 @@ def main():
         json.dump(config, f, indent=2, ensure_ascii=False)
     
     print(f"\n✅ Generated: generator_config.json")
-    print(f"   Total size: {len(json.dumps(config))} bytes")
     print(f"   Total videos: {len(videos)}")
-    print(f"\n🚀 Next steps:")
-    print(f"   1. Review: cat generator_config.json | less")
-    print(f"   2. Start: python make_dataset_multi.py")
-    print(f"   3. Monitor: python monitor_generator.py")
+    print(f"\n🚀 Processing order:")
+    print(f"   1. 🌍 Priority videos first (nature documentaries)")
+    print(f"   2. 🎬 Remaining videos in random order")
+    print(f"\n💡 You can start training after ~30-60 minutes!")
 
 if __name__ == '__main__':
     main()
