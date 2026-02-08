@@ -10,6 +10,10 @@ import urllib.parse
 from typing import Dict, Any, Optional
 
 
+# Constants - shared with runtime_config module
+DISTRIBUTION_SUM_TOLERANCE = 0.01  # Allow ±0.01 absolute tolerance for sum validation
+
+
 class ConfigAPIHandler:
     """
     Handler for configuration API requests

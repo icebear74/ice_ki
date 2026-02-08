@@ -304,6 +304,9 @@
     </div>
     
     <script>
+        // Configuration constants
+        const STATS_REFRESH_INTERVAL_MS = 10000;  // 10 seconds
+        
         // Update batch size display and preview
         const batchSlider = document.getElementById('batch-slider');
         const batchValue = document.getElementById('batch-value');
@@ -503,8 +506,8 @@
         updateBatchPreview(6);
         loadSizeStats();
         
-        // Refresh size stats every 10 seconds
-        setInterval(loadSizeStats, 10000);
+        // Refresh size stats periodically
+        setInterval(loadSizeStats, STATS_REFRESH_INTERVAL_MS);
     </script>
 </body>
 </html>

@@ -71,7 +71,8 @@ class SizeTracker:
         else:
             # Create directory if needed
             save_dir = os.path.dirname(save_path)
-            if save_dir:  # Only create if directory path is non-empty
+            # Only create directory if path has a directory component (not empty and not None)
+            if save_dir and save_dir != '.':
                 os.makedirs(save_dir, exist_ok=True)
             self.save()
         

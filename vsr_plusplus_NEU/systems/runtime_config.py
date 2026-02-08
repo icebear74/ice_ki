@@ -23,7 +23,7 @@ from typing import Dict, Any, Tuple, List, Optional
 
 
 # Constants
-DISTRIBUTION_SUM_TOLERANCE = 0.01  # Allow ±1% tolerance for sum validation
+DISTRIBUTION_SUM_TOLERANCE = 0.01  # Allow ±0.01 absolute tolerance for sum validation
 
 
 # Import adaptive batch calculator for VRAM validation
@@ -474,7 +474,7 @@ class EnhancedRuntimeConfigManager:
             return False
 
 
-# Maintain backward compatibility
+# Maintain backward compatibility with legacy code
 RuntimeConfigManager = EnhancedRuntimeConfigManager
 
 
