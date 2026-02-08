@@ -890,6 +890,28 @@ class DatasetGeneratorV2:
             return True
         return False
     
+    def _build_simple_status(self) -> str:
+        """Build simple text status when Rich is not available."""
+        elapsed = time.time() - self.start_time
+        elapsed_str = str(timedelta(seconds=int(elapsed)))
+        
+        current_idx = self.tracker.status['progress']['current_video_index']
+        total_videos = self.tracker.status['progress']['total_videos']
+        completed_videos = self.tracker.status['progress']['completed_videos']
+        
+        # Build simple text status
+        status_lines = [
+            f"\n{'='*60}",
+            f"Dataset Generator Progress",
+            f"{'='*60}",
+            f"Videos: {completed_videos}/{total_videos} ({current_idx+1} processing)",
+            f"Elapsed: {elapsed_str}",
+            f"Current: {self.current_video_name}",
+            f"{'='*60}\n"
+        ]
+        
+        return '\n'.join(status_lines)
+    
     def _build_complete_layout(self):
         """Build complete layout for live display."""
         if not RICH_AVAILABLE:
