@@ -1,0 +1,340 @@
+====================================================================================================
+VSR++ CONFIG FINDER - RESULTS
+====================================================================================================
+
+Total Configs Tested: 96
+Successful: 78
+Failed (OOM): 18
+
+====================================================================================================
+TOP 10 CONFIGS (by VRAM usage - highest capacity without OOM)
+====================================================================================================
+
+1. 7f | B2×A4 | 24b | 72f | 540×540 | FLOAT32
+   VRAM: 7.18 GB | Time: 8.108 s/iter
+
+2. 7f | B2×A4 | 24b | 72f | 720×405 | FLOAT32
+   VRAM: 7.18 GB | Time: 8.294 s/iter
+
+3. 7f | B2×A4 | 26b | 60f | 540×540 | FLOAT32
+   VRAM: 6.69 GB | Time: 6.493 s/iter
+
+4. 7f | B2×A4 | 26b | 60f | 720×405 | FLOAT32
+   VRAM: 6.69 GB | Time: 6.709 s/iter
+
+5. 7f | B1×A8 | 26b | 72f | 720×720 | FLOAT32
+   VRAM: 6.68 GB | Time: 14.374 s/iter
+
+6. 7f | B2×A4 | 24b | 60f | 540×540 | FLOAT32
+   VRAM: 6.43 GB | Time: 6.236 s/iter
+
+7. 7f | B2×A4 | 24b | 60f | 720×405 | FLOAT32
+   VRAM: 6.43 GB | Time: 6.444 s/iter
+
+8. 7f | B1×A8 | 24b | 72f | 720×720 | FLOAT32
+   VRAM: 6.39 GB | Time: 13.663 s/iter
+
+9. 7f | B1×A8 | 26b | 60f | 720×720 | FLOAT32
+   VRAM: 6.14 GB | Time: 10.703 s/iter
+
+10. 5f | B2×A4 | 26b | 72f | 540×540 | FLOAT32
+   VRAM: 6.06 GB | Time: 6.650 s/iter
+
+
+====================================================================================================
+ALL SUCCESSFUL CONFIGS (sorted by VRAM)
+====================================================================================================
+
+✅ 7f | B2×A4 | 24b | 72f | 540×540 | FLOAT32
+   VRAM: 7.18 GB | Time: 8.108 s/iter
+
+✅ 7f | B2×A4 | 24b | 72f | 720×405 | FLOAT32
+   VRAM: 7.18 GB | Time: 8.294 s/iter
+
+✅ 7f | B2×A4 | 26b | 60f | 540×540 | FLOAT32
+   VRAM: 6.69 GB | Time: 6.493 s/iter
+
+✅ 7f | B2×A4 | 26b | 60f | 720×405 | FLOAT32
+   VRAM: 6.69 GB | Time: 6.709 s/iter
+
+✅ 7f | B1×A8 | 26b | 72f | 720×720 | FLOAT32
+   VRAM: 6.68 GB | Time: 14.374 s/iter
+
+✅ 7f | B2×A4 | 24b | 60f | 540×540 | FLOAT32
+   VRAM: 6.43 GB | Time: 6.236 s/iter
+
+✅ 7f | B2×A4 | 24b | 60f | 720×405 | FLOAT32
+   VRAM: 6.43 GB | Time: 6.444 s/iter
+
+✅ 7f | B1×A8 | 24b | 72f | 720×720 | FLOAT32
+   VRAM: 6.39 GB | Time: 13.663 s/iter
+
+✅ 7f | B1×A8 | 26b | 60f | 720×720 | FLOAT32
+   VRAM: 6.14 GB | Time: 10.703 s/iter
+
+✅ 5f | B2×A4 | 26b | 72f | 540×540 | FLOAT32
+   VRAM: 6.06 GB | Time: 6.650 s/iter
+
+✅ 5f | B2×A4 | 26b | 72f | 720×405 | FLOAT32
+   VRAM: 6.06 GB | Time: 6.795 s/iter
+
+✅ 7f | B1×A8 | 24b | 60f | 720×720 | FLOAT32
+   VRAM: 5.89 GB | Time: 10.249 s/iter
+
+✅ 5f | B2×A4 | 24b | 72f | 540×540 | FLOAT32
+   VRAM: 5.84 GB | Time: 6.384 s/iter
+
+✅ 5f | B2×A4 | 24b | 72f | 720×405 | FLOAT32
+   VRAM: 5.84 GB | Time: 6.544 s/iter
+
+✅ 5f | B2×A4 | 26b | 60f | 540×540 | FLOAT32
+   VRAM: 5.50 GB | Time: 5.261 s/iter
+
+✅ 5f | B2×A4 | 26b | 60f | 720×405 | FLOAT32
+   VRAM: 5.50 GB | Time: 5.454 s/iter
+
+✅ 5f | B1×A8 | 26b | 72f | 720×720 | FLOAT32
+   VRAM: 5.39 GB | Time: 11.159 s/iter
+
+✅ 5f | B2×A4 | 24b | 60f | 540×540 | FLOAT32
+   VRAM: 5.33 GB | Time: 5.096 s/iter
+
+✅ 5f | B2×A4 | 24b | 60f | 720×405 | FLOAT32
+   VRAM: 5.33 GB | Time: 5.281 s/iter
+
+✅ 5f | B1×A8 | 24b | 72f | 720×720 | FLOAT32
+   VRAM: 5.20 GB | Time: 10.741 s/iter
+
+✅ 7f | B2×A4 | 26b | 72f | 540×540 | FLOAT16
+   VRAM: 5.15 GB | Time: 8.060 s/iter
+
+✅ 7f | B2×A4 | 26b | 72f | 720×405 | FLOAT16
+   VRAM: 5.14 GB | Time: 7.716 s/iter
+
+✅ 5f | B1×A8 | 26b | 60f | 720×720 | FLOAT32
+   VRAM: 5.02 GB | Time: 8.665 s/iter
+
+✅ 7f | B2×A4 | 24b | 72f | 540×540 | FLOAT16
+   VRAM: 4.99 GB | Time: 7.699 s/iter
+
+✅ 7f | B2×A4 | 24b | 72f | 720×405 | FLOAT16
+   VRAM: 4.99 GB | Time: 7.383 s/iter
+
+✅ 5f | B1×A8 | 24b | 60f | 720×720 | FLOAT32
+   VRAM: 4.86 GB | Time: 8.391 s/iter
+
+✅ 7f | B2×A4 | 26b | 60f | 540×540 | FLOAT16
+   VRAM: 4.77 GB | Time: 6.459 s/iter
+
+✅ 7f | B2×A4 | 26b | 60f | 720×405 | FLOAT16
+   VRAM: 4.76 GB | Time: 7.018 s/iter
+
+✅ 7f | B2×A4 | 24b | 60f | 720×405 | FLOAT16
+   VRAM: 4.63 GB | Time: 6.723 s/iter
+
+✅ 7f | B2×A4 | 24b | 60f | 540×540 | FLOAT16
+   VRAM: 4.63 GB | Time: 6.202 s/iter
+
+✅ 7f | B1×A8 | 26b | 72f | 720×720 | FLOAT16
+   VRAM: 4.58 GB | Time: 13.985 s/iter
+
+✅ 7f | B1×A8 | 24b | 72f | 720×720 | FLOAT16
+   VRAM: 4.44 GB | Time: 13.336 s/iter
+
+✅ 5f | B2×A4 | 26b | 72f | 540×540 | FLOAT16
+   VRAM: 4.43 GB | Time: 6.336 s/iter
+
+✅ 5f | B2×A4 | 26b | 72f | 720×405 | FLOAT16
+   VRAM: 4.43 GB | Time: 6.151 s/iter
+
+✅ 5f | B2×A4 | 24b | 72f | 540×540 | FLOAT16
+   VRAM: 4.33 GB | Time: 6.070 s/iter
+
+✅ 5f | B2×A4 | 24b | 72f | 720×405 | FLOAT16
+   VRAM: 4.32 GB | Time: 5.927 s/iter
+
+✅ 7f | B1×A8 | 26b | 60f | 720×720 | FLOAT16
+   VRAM: 4.24 GB | Time: 10.923 s/iter
+
+✅ 5f | B2×A4 | 26b | 60f | 540×540 | FLOAT16
+   VRAM: 4.17 GB | Time: 5.227 s/iter
+
+✅ 5f | B2×A4 | 26b | 60f | 720×405 | FLOAT16
+   VRAM: 4.17 GB | Time: 5.662 s/iter
+
+✅ 7f | B1×A8 | 24b | 60f | 720×720 | FLOAT16
+   VRAM: 4.13 GB | Time: 10.471 s/iter
+
+✅ 5f | B2×A4 | 24b | 60f | 540×540 | FLOAT16
+   VRAM: 4.08 GB | Time: 5.052 s/iter
+
+✅ 5f | B2×A4 | 24b | 60f | 720×405 | FLOAT16
+   VRAM: 4.08 GB | Time: 5.461 s/iter
+
+✅ 5f | B1×A8 | 26b | 72f | 720×720 | FLOAT16
+   VRAM: 3.95 GB | Time: 10.886 s/iter
+
+✅ 5f | B1×A8 | 24b | 72f | 720×720 | FLOAT16
+   VRAM: 3.85 GB | Time: 10.458 s/iter
+
+✅ 7f | B1×A8 | 26b | 72f | 540×540 | FLOAT32
+   VRAM: 3.77 GB | Time: 8.568 s/iter
+
+✅ 7f | B1×A8 | 26b | 72f | 720×405 | FLOAT32
+   VRAM: 3.77 GB | Time: 8.701 s/iter
+
+✅ 5f | B1×A8 | 26b | 60f | 720×720 | FLOAT16
+   VRAM: 3.71 GB | Time: 8.813 s/iter
+
+✅ 5f | B1×A8 | 24b | 60f | 720×720 | FLOAT16
+   VRAM: 3.64 GB | Time: 8.507 s/iter
+
+✅ 7f | B1×A8 | 24b | 72f | 540×540 | FLOAT32
+   VRAM: 3.61 GB | Time: 8.148 s/iter
+
+✅ 7f | B1×A8 | 24b | 72f | 720×405 | FLOAT32
+   VRAM: 3.61 GB | Time: 8.278 s/iter
+
+✅ 7f | B1×A8 | 26b | 60f | 540×540 | FLOAT32
+   VRAM: 3.38 GB | Time: 6.497 s/iter
+
+✅ 7f | B1×A8 | 26b | 60f | 720×405 | FLOAT32
+   VRAM: 3.38 GB | Time: 6.684 s/iter
+
+✅ 7f | B1×A8 | 24b | 60f | 540×540 | FLOAT32
+   VRAM: 3.25 GB | Time: 6.229 s/iter
+
+✅ 7f | B1×A8 | 24b | 60f | 720×405 | FLOAT32
+   VRAM: 3.25 GB | Time: 6.405 s/iter
+
+✅ 5f | B1×A8 | 26b | 72f | 540×540 | FLOAT32
+   VRAM: 3.06 GB | Time: 6.694 s/iter
+
+✅ 5f | B1×A8 | 26b | 72f | 720×405 | FLOAT32
+   VRAM: 3.06 GB | Time: 6.795 s/iter
+
+✅ 5f | B1×A8 | 24b | 72f | 540×540 | FLOAT32
+   VRAM: 2.95 GB | Time: 6.439 s/iter
+
+✅ 5f | B1×A8 | 24b | 72f | 720×405 | FLOAT32
+   VRAM: 2.95 GB | Time: 6.557 s/iter
+
+✅ 5f | B1×A8 | 26b | 60f | 540×540 | FLOAT32
+   VRAM: 2.79 GB | Time: 5.280 s/iter
+
+✅ 5f | B1×A8 | 26b | 60f | 720×405 | FLOAT32
+   VRAM: 2.79 GB | Time: 5.426 s/iter
+
+✅ 5f | B1×A8 | 24b | 60f | 540×540 | FLOAT32
+   VRAM: 2.70 GB | Time: 5.042 s/iter
+
+✅ 5f | B1×A8 | 24b | 60f | 720×405 | FLOAT32
+   VRAM: 2.70 GB | Time: 5.249 s/iter
+
+✅ 7f | B1×A8 | 26b | 72f | 540×540 | FLOAT16
+   VRAM: 2.61 GB | Time: 8.579 s/iter
+
+✅ 7f | B1×A8 | 26b | 72f | 720×405 | FLOAT16
+   VRAM: 2.61 GB | Time: 7.749 s/iter
+
+✅ 7f | B1×A8 | 24b | 72f | 540×540 | FLOAT16
+   VRAM: 2.53 GB | Time: 8.185 s/iter
+
+✅ 7f | B1×A8 | 24b | 72f | 720×405 | FLOAT16
+   VRAM: 2.53 GB | Time: 7.415 s/iter
+
+✅ 7f | B1×A8 | 26b | 60f | 540×540 | FLOAT16
+   VRAM: 2.42 GB | Time: 8.721 s/iter
+
+✅ 7f | B1×A8 | 26b | 60f | 720×405 | FLOAT16
+   VRAM: 2.42 GB | Time: 8.457 s/iter
+
+✅ 7f | B1×A8 | 24b | 60f | 540×540 | FLOAT16
+   VRAM: 2.35 GB | Time: 8.392 s/iter
+
+✅ 7f | B1×A8 | 24b | 60f | 720×405 | FLOAT16
+   VRAM: 2.35 GB | Time: 8.160 s/iter
+
+✅ 5f | B1×A8 | 26b | 72f | 540×540 | FLOAT16
+   VRAM: 2.26 GB | Time: 6.714 s/iter
+
+✅ 5f | B1×A8 | 26b | 72f | 720×405 | FLOAT16
+   VRAM: 2.26 GB | Time: 6.163 s/iter
+
+✅ 5f | B1×A8 | 24b | 72f | 540×540 | FLOAT16
+   VRAM: 2.20 GB | Time: 6.443 s/iter
+
+✅ 5f | B1×A8 | 24b | 72f | 720×405 | FLOAT16
+   VRAM: 2.20 GB | Time: 5.958 s/iter
+
+✅ 5f | B1×A8 | 26b | 60f | 540×540 | FLOAT16
+   VRAM: 2.12 GB | Time: 6.843 s/iter
+
+✅ 5f | B1×A8 | 26b | 60f | 720×405 | FLOAT16
+   VRAM: 2.12 GB | Time: 6.697 s/iter
+
+✅ 5f | B1×A8 | 24b | 60f | 540×540 | FLOAT16
+   VRAM: 2.07 GB | Time: 6.573 s/iter
+
+✅ 5f | B1×A8 | 24b | 60f | 720×405 | FLOAT16
+   VRAM: 2.07 GB | Time: 6.465 s/iter
+
+
+====================================================================================================
+FAILED CONFIGS
+====================================================================================================
+
+❌ 5f | B2×A4 | 24b | 60f | 720×720 | FLOAT16
+   Error: OOM
+
+❌ 5f | B2×A4 | 24b | 60f | 720×720 | FLOAT32
+   Error: OOM
+
+❌ 5f | B2×A4 | 24b | 72f | 720×720 | FLOAT16
+   Error: OOM
+
+❌ 5f | B2×A4 | 24b | 72f | 720×720 | FLOAT32
+   Error: OOM
+
+❌ 5f | B2×A4 | 26b | 60f | 720×720 | FLOAT16
+   Error: OOM
+
+❌ 5f | B2×A4 | 26b | 60f | 720×720 | FLOAT32
+   Error: OOM
+
+❌ 5f | B2×A4 | 26b | 72f | 720×720 | FLOAT16
+   Error: OOM
+
+❌ 5f | B2×A4 | 26b | 72f | 720×720 | FLOAT32
+   Error: OOM
+
+❌ 7f | B2×A4 | 24b | 60f | 720×720 | FLOAT16
+   Error: OOM
+
+❌ 7f | B2×A4 | 24b | 60f | 720×720 | FLOAT32
+   Error: OOM
+
+❌ 7f | B2×A4 | 24b | 72f | 720×720 | FLOAT16
+   Error: OOM
+
+❌ 7f | B2×A4 | 24b | 72f | 720×720 | FLOAT32
+   Error: OOM
+
+❌ 7f | B2×A4 | 26b | 60f | 720×720 | FLOAT16
+   Error: OOM
+
+❌ 7f | B2×A4 | 26b | 60f | 720×720 | FLOAT32
+   Error: OOM
+
+❌ 7f | B2×A4 | 26b | 72f | 540×540 | FLOAT32
+   Error: OOM
+
+❌ 7f | B2×A4 | 26b | 72f | 720×405 | FLOAT32
+   Error: OOM
+
+❌ 7f | B2×A4 | 26b | 72f | 720×720 | FLOAT16
+   Error: OOM
+
+❌ 7f | B2×A4 | 26b | 72f | 720×720 | FLOAT32
+   Error: OOM
+
