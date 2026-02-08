@@ -571,6 +571,33 @@ class DatasetGeneratorV2:
             'success_count': success_count
         }
     
+    def _get_terminal_width(self) -> int:
+        """Get terminal width, with fallback to default."""
+        try:
+            import shutil
+            return shutil.get_terminal_size().columns
+        except:
+            return 120  # Default fallback
+    
+    def _calculate_bar_widths(self) -> dict:
+        """Calculate optimal bar widths based on terminal width."""
+        terminal_width = self._get_terminal_width()
+        
+        # Reserve space for labels and other content
+        # Overall bar: "Overall Progress  " (20 chars) + percentage (10) + ETA (15) = ~45 chars
+        # Category bar: "CATEGORYNAME  " (15) + percentage (10) + "Images: X,XXX,XXX" (20) + "ETA: X:XX:XX" (15) = ~60 chars
+        
+        # Calculate bar widths as percentage of terminal width
+        overall_bar_width = max(30, min(80, int((terminal_width - 45) * 0.6)))
+        video_bar_width = max(30, min(80, int((terminal_width - 40) * 0.6)))
+        category_bar_width = max(25, min(60, int((terminal_width - 60) * 0.5)))
+        
+        return {
+            'overall': overall_bar_width,
+            'video': video_bar_width,
+            'category': category_bar_width
+        }
+    
     def build_gui_layout(self) -> tuple:
         """Build the beautiful GUI layout using rich with progress bars."""
         if not RICH_AVAILABLE:
@@ -600,12 +627,15 @@ class DatasetGeneratorV2:
         else:
             speed_str = "Calculating..."
         
+        # Get dynamic bar widths based on terminal size
+        bar_widths = self._calculate_bar_widths()
+        
         # ===== OVERALL PROGRESS BAR =====
         from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, TaskProgressColumn
         
         overall_progress = Progress(
             TextColumn("[bold blue]{task.description}"),
-            BarColumn(bar_width=40),
+            BarColumn(bar_width=bar_widths['overall']),
             TaskProgressColumn(),
             TextColumn("•"),
             TimeRemainingColumn(),
@@ -647,7 +677,7 @@ class DatasetGeneratorV2:
             # Create a Rich progress bar for current video
             video_progress = Progress(
                 TextColumn("[cyan]{task.description}"),
-                BarColumn(bar_width=40),
+                BarColumn(bar_width=bar_widths['video']),
                 TaskProgressColumn(),
             )
             video_task = video_progress.add_task(
@@ -663,7 +693,7 @@ class DatasetGeneratorV2:
         # ===== CATEGORY PROGRESS BARS =====
         category_progress = Progress(
             TextColumn("[bold]{task.description}", justify="left", style="cyan"),
-            BarColumn(bar_width=30),
+            BarColumn(bar_width=bar_widths['category']),
             TaskProgressColumn(),
             TextColumn("[bold green]Images:"),
             TextColumn("[green]{task.fields[images]:>8,}"),
@@ -933,17 +963,17 @@ Continue? Processing will start in 5 seconds... (Ctrl+C to cancel)
                 if self.live_display:
                     self.live_display.update(self._build_complete_layout())
                 elif RICH_AVAILABLE:
-                    # Use clear screen and home cursor positioning
-                    self.console.clear()
+                    # Use home cursor positioning instead of clear to reduce flickering
+                    # Move cursor to home position (top-left)
+                    import sys
+                    print('\033[H', end='', flush=True)
+                    
                     # Build and display the complete layout
                     layout = self._build_complete_layout()
                     self.console.print(layout)
+                    
                     # Force flush
-                    try:
-                        import sys
-                        sys.stdout.flush()
-                    except:
-                        pass
+                    sys.stdout.flush()
                 else:
                     print(self._build_simple_status())
         
