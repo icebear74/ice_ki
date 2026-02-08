@@ -365,12 +365,12 @@ def main():
     print("Loading datasets...")
     
     # Check for runtime_config.json to enable multi-size training
-    runtime_config_json_path = os.path.join(DATA_ROOT, "runtime_config.json")
+    runtime_config_path = os.path.join(DATA_ROOT, "runtime_config.json")
     use_multi_size = False
     
-    if os.path.exists(runtime_config_json_path):
+    if os.path.exists(runtime_config_path):
         try:
-            with open(runtime_config_json_path, 'r') as f:
+            with open(runtime_config_path, 'r') as f:
                 rt_config = json.load(f)
             
             # Check if multi-size is configured
@@ -449,8 +449,7 @@ def main():
     # Create checkpoint manager
     checkpoint_mgr = CheckpointManager(DATA_ROOT)
     
-    # Create runtime config manager
-    runtime_config_path = os.path.join(DATA_ROOT, "runtime_config.json")
+    # Create runtime config manager (reuse runtime_config_path defined earlier)
     runtime_config = RuntimeConfigManager(
         config_path=runtime_config_path,
         base_config=config
