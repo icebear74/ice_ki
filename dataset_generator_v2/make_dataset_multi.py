@@ -925,6 +925,11 @@ Continue? Processing will start in 5 seconds... (Ctrl+C to cancel)
             self.console.print("  [SPACE] = Pause/Resume  |  [+/-] = Adjust workers  |  [q] = Quit")
             self.console.print()
         
+        # Clear screen once at start for clean display
+        if RICH_AVAILABLE:
+            import sys
+            print('\033[2J\033[H', end='', flush=True)  # Full clear + home at start
+        
         # Initialize live display
         self.live_display = None
         if RICH_AVAILABLE:
@@ -935,9 +940,14 @@ Continue? Processing will start in 5 seconds... (Ctrl+C to cancel)
                     console=self.console
                 )
                 self.live_display.start()
-            except:
+                if RICH_AVAILABLE:
+                    self.console.print("[dim]✓ Live display mode activated[/dim]")
+            except Exception as e:
                 # If Live doesn't work, fall back to regular display
                 self.live_display = None
+                if RICH_AVAILABLE:
+                    self.console.print(f"[yellow]⚠ Live display failed ({e}), using fallback mode[/yellow]")
+
         
         try:
             # Process videos
@@ -963,10 +973,11 @@ Continue? Processing will start in 5 seconds... (Ctrl+C to cancel)
                 if self.live_display:
                     self.live_display.update(self._build_complete_layout())
                 elif RICH_AVAILABLE:
-                    # Use home cursor positioning instead of clear to reduce flickering
-                    # Move cursor to home position (top-left)
+                    # Use home cursor + clear to end of screen to reduce flickering
+                    # \033[H = Move cursor to home (top-left)
+                    # \033[J = Clear from cursor to end of screen
                     import sys
-                    print('\033[H', end='', flush=True)
+                    print('\033[H\033[J', end='', flush=True)
                     
                     # Build and display the complete layout
                     layout = self._build_complete_layout()
