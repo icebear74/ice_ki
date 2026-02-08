@@ -10,10 +10,6 @@
     "scene_diff_threshold": 45,
     "max_retry_attempts": 10,
     "retry_skip_seconds": 60,
-    "lr_versions": [
-      "5frames",
-      "7frames"
-    ],
     "enable_debug_logging": true,
     "debug_log_path": "/mnt/data/training/dataset/generator_debug.log"
   },

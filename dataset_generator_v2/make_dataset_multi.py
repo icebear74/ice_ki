@@ -328,14 +328,13 @@ class DatasetGeneratorV2:
         
         return random.choices(formats, weights=weights, k=1)[0]
     
-    def get_output_dirs_for_category_format(self, category: str, format_name: str, lr_frames: int = 5) -> dict:
+    def get_output_dirs_for_category_format(self, category: str, format_name: str) -> dict:
         """
         Get output directory paths for a specific category and format.
         
         Args:
-            category: Category name
-            format_name: Format name (small_540, etc.)
-            lr_frames: Number of LR frames to use (5 or 7)
+            category: Category name (e.g., 'master', 'universal')
+            format_name: Format name (e.g., 'small_540', 'medium_169')
         
         Returns:
             Dictionary with 'gt', 'lr', 'val_gt', 'val_lr' paths
@@ -388,7 +387,7 @@ class DatasetGeneratorV2:
             
             for format_name in category_formats.keys():
                 # Create directories for 7-frame LR (new V2 standard)
-                dirs_7 = self.get_output_dirs_for_category_format(category, format_name, lr_frames=7)
+                dirs_7 = self.get_output_dirs_for_category_format(category, format_name)
                 for dir_path in dirs_7.values():
                     os.makedirs(dir_path, exist_ok=True)
         
@@ -498,7 +497,7 @@ class DatasetGeneratorV2:
             suffix = format_spec['suffix']
             
             # Get output directories (7-frame LR only)
-            dirs_7 = self.get_output_dirs_for_category_format(category, format_name, lr_frames=7)
+            dirs_7 = self.get_output_dirs_for_category_format(category, format_name)
             
             # Generate random crop position
             max_y = 1080 - gt_h
