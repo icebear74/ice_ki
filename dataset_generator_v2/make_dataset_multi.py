@@ -14,6 +14,7 @@ import shutil
 import re
 import time
 import signal
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Tuple, Optional
 from datetime import datetime, timedelta
@@ -67,6 +68,8 @@ class DatasetGeneratorV2:
         self.workers = self.settings['max_workers']
         self.running = True
         self.paused = False
+        self.last_update_time = time.time()
+        self.update_interval = 0.5  # Update GUI every 0.5 seconds
         
         # Rich console
         if RICH_AVAILABLE:
@@ -78,6 +81,10 @@ class DatasetGeneratorV2:
         self.success_count = 0
         self.current_video_name = ""
         
+        # Keyboard input handling
+        self.input_thread = None
+        self.stop_input_thread = False
+        
         # Setup signal handlers
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
@@ -85,14 +92,88 @@ class DatasetGeneratorV2:
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals gracefully."""
         if RICH_AVAILABLE:
-            self.console.print("\n[yellow]Received shutdown signal. Saving progress...[/yellow]")
+            self.console.print("\n[yellow]⏸️  Saving current progress before exit...[/yellow]")
         else:
-            print("\nReceived shutdown signal. Saving progress...")
+            print("\n⏸️  Saving current progress before exit...")
         
+        self.stop_input_thread = True
         self.running = False
+        
+        # Force save current state
         self.tracker.set_status("interrupted")
         self.tracker.save()
+        
+        if RICH_AVAILABLE:
+            self.console.print("[green]✅ Progress saved. You can resume later.[/green]")
+        else:
+            print("✅ Progress saved. You can resume later.")
+        
         sys.exit(0)
+    
+    def _keyboard_listener(self):
+        """Listen for keyboard input in a separate thread."""
+        import sys
+        import tty
+        import termios
+        
+        # Save terminal settings
+        old_settings = None
+        try:
+            old_settings = termios.tcgetattr(sys.stdin)
+            tty.setcbreak(sys.stdin.fileno())
+            
+            while not self.stop_input_thread and self.running:
+                try:
+                    # Non-blocking read with timeout
+                    import select
+                    if select.select([sys.stdin], [], [], 0.1)[0]:
+                        ch = sys.stdin.read(1)
+                        
+                        if ch == ' ':  # Space bar - pause/resume
+                            self.paused = not self.paused
+                            status = "PAUSED" if self.paused else "RESUMED"
+                            if RICH_AVAILABLE:
+                                self.console.print(f"\n[yellow]⏸️  {status}[/yellow]")
+                        
+                        elif ch == '+' or ch == '=':  # Increase workers
+                            if self.workers < 32:  # Max 32 workers
+                                self.workers += 1
+                                if RICH_AVAILABLE:
+                                    self.console.print(f"\n[green]⬆️  Workers increased to {self.workers}[/green]")
+                        
+                        elif ch == '-' or ch == '_':  # Decrease workers
+                            if self.workers > 1:  # Min 1 worker
+                                self.workers -= 1
+                                if RICH_AVAILABLE:
+                                    self.console.print(f"\n[yellow]⬇️  Workers decreased to {self.workers}[/yellow]")
+                        
+                        elif ch == 'q' or ch == 'Q':  # Quit
+                            if RICH_AVAILABLE:
+                                self.console.print("\n[yellow]Quitting...[/yellow]")
+                            self.running = False
+                            self.stop_input_thread = True
+                            break
+                
+                except Exception:
+                    pass
+        
+        finally:
+            # Restore terminal settings
+            if old_settings:
+                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+    
+    def _start_keyboard_listener(self):
+        """Start keyboard listener thread."""
+        if not RICH_AVAILABLE:
+            return  # Only enable for rich mode
+        
+        try:
+            self.input_thread = threading.Thread(target=self._keyboard_listener, daemon=True)
+            self.input_thread.start()
+        except Exception as e:
+            # If keyboard listener fails, continue without it
+            if RICH_AVAILABLE:
+                self.console.print(f"[yellow]⚠️  Keyboard controls unavailable: {e}[/yellow]")
     
     def get_category_path(self, category: str) -> str:
         """
@@ -428,6 +509,15 @@ class DatasetGeneratorV2:
         
         for frame_idx in range(total_extractions):
             if not self.running:
+                # Save checkpoint before breaking on stop
+                self.tracker.update_video_checkpoint(
+                    video_idx,
+                    "interrupted",
+                    last_frame_idx=frame_idx,
+                    extractions_done=frame_idx,
+                    extractions_target=total_extractions
+                )
+                self.tracker.save()
                 break
             
             while self.paused:
@@ -443,16 +533,25 @@ class DatasetGeneratorV2:
             
             self.extractions_count += 1
             
-            # Update checkpoint every 10 extractions
-            if frame_idx % 10 == 0:
-                self.tracker.update_video_checkpoint(
-                    video_idx,
-                    "in_progress",
-                    last_frame_idx=frame_idx,
-                    extractions_done=frame_idx + 1,
-                    extractions_target=total_extractions
-                )
+            # Update checkpoint EVERY extraction for instant resume capability
+            # Save to disk every 5 extractions to balance performance and safety
+            self.tracker.update_video_checkpoint(
+                video_idx,
+                "in_progress",
+                last_frame_idx=frame_idx,
+                extractions_done=frame_idx + 1,
+                extractions_target=total_extractions
+            )
+            
+            if frame_idx % 5 == 0:  # Save every 5 extractions (was 10)
                 self.tracker.save()
+                
+                # Update live display if enabled
+                if hasattr(self, 'live_display') and self.live_display and self._should_update_display():
+                    try:
+                        self.live_display.update(self._build_complete_layout())
+                    except:
+                        pass  # Ignore display errors
         
         # Mark video as completed
         self.tracker.update_video_checkpoint(video_idx, "completed")
@@ -468,10 +567,10 @@ class DatasetGeneratorV2:
             'success_count': success_count
         }
     
-    def build_gui_layout(self) -> str:
+    def build_gui_layout(self) -> tuple:
         """Build the beautiful GUI layout using rich."""
         if not RICH_AVAILABLE:
-            return self._build_simple_status()
+            return self._build_simple_status(), None, None, None
         
         # Calculate statistics
         elapsed = time.time() - self.start_time
@@ -490,6 +589,13 @@ class DatasetGeneratorV2:
         else:
             eta_str = "Calculating..."
         
+        # Extraction speed
+        if elapsed > 0:
+            extractions_per_sec = self.extractions_count / elapsed
+            speed_str = f"{extractions_per_sec:.1f} extractions/sec"
+        else:
+            speed_str = "Calculating..."
+        
         # Build header
         header = Panel(
             "[bold cyan]DATASET GENERATOR v2.0 - MULTI-CATEGORY[/bold cyan]",
@@ -504,6 +610,7 @@ class DatasetGeneratorV2:
 ├─ Remaining: {total_videos - completed_videos} videos
 ├─ Elapsed: {elapsed_str}
 ├─ ETA: {eta_str}
+├─ Speed: {speed_str}
 └─ Workers: {self.workers}
 """
         
@@ -515,10 +622,19 @@ class DatasetGeneratorV2:
             progress_pct = (done / target * 100) if target > 0 else 0
             success_rate = (self.success_count / self.extractions_count * 100) if self.extractions_count > 0 else 0
             
+            # Create a visual progress bar
+            bar_width = 30
+            filled = int(progress_pct / 100 * bar_width)
+            bar = "█" * filled + "░" * (bar_width - filled)
+            
             current_video = f"""[bold]🎬 CURRENT VIDEO[/bold]
-├─ Path: {self.tracker.status['progress']['current_video_path'][-60:]}
+├─ Name: {self.current_video_name[:60]}
+├─ Path: ...{self.tracker.status['progress']['current_video_path'][-50:]}
 ├─ Extractions: {done} / {target} ({progress_pct:.1f}%)
+├─ Progress: [{bar}] {progress_pct:.0f}%
 ├─ Success Rate: {success_rate:.1f}%
+├─ Total Extractions: {self.extractions_count}
+├─ Successful: {self.success_count}
 └─ Status: {'[green]Running[/green]' if self.running else '[red]Stopped[/red]'}
 """
         else:
@@ -562,10 +678,16 @@ class DatasetGeneratorV2:
         disk_lines.append(f"└─ Total: {total_disk:.1f} GB")
         disk_usage = "\n".join(disk_lines)
         
-        # Controls
-        controls = """[bold]⚙️  CONTROLS[/bold]
-├─ [Ctrl+C] Save & Exit
-└─ Press 'q' to quit
+        # Controls with live status
+        pause_status = "[yellow]PAUSED[/yellow]" if self.paused else "[green]RUNNING[/green]"
+        controls = f"""[bold]⚙️  LIVE CONTROLS[/bold]
+├─ Status: {pause_status}
+├─ Workers: {self.workers} cores
+├─ [bold cyan][SPACE][/bold cyan] Pause/Resume
+├─ [bold cyan][+][/bold cyan] Increase workers (current: {self.workers})
+├─ [bold cyan][-][/bold cyan] Decrease workers (current: {self.workers})
+├─ [bold cyan][Ctrl+C][/bold cyan] Save & Exit
+└─ [bold cyan][q][/bold cyan] Quick quit
 """
         
         # Combine all sections
@@ -573,7 +695,38 @@ class DatasetGeneratorV2:
         
         return output, table, disk_usage, controls
     
-    def _build_simple_status(self) -> str:
+    def _should_update_display(self) -> bool:
+        """Check if enough time has passed to update the display."""
+        current_time = time.time()
+        if current_time - self.last_update_time >= self.update_interval:
+            self.last_update_time = current_time
+            return True
+        return False
+    
+    def _build_complete_layout(self):
+        """Build complete layout for live display."""
+        if not RICH_AVAILABLE:
+            return self._build_simple_status()
+        
+        output, table, disk, controls = self.build_gui_layout()
+        
+        # Combine everything into a single renderable
+        from rich.console import Group
+        from rich.panel import Panel
+        
+        header = Panel(
+            "[bold cyan]DATASET GENERATOR v2.0 - LIVE MODE[/bold cyan]",
+            style="bold white on blue"
+        )
+        
+        return Group(
+            header,
+            output,
+            table,
+            disk,
+            controls
+        )
+    
         """Build simple text status for when rich is not available."""
         elapsed = time.time() - self.start_time
         current_idx = self.tracker.status['progress']['current_video_index']
@@ -705,35 +858,71 @@ Continue? Processing will start in 5 seconds... (Ctrl+C to cancel)
         self.tracker.set_status("running")
         self.tracker.save()
         
-        # Process videos
-        for idx in range(resume_idx, len(self.videos)):
-            if not self.running:
-                break
+        # Start keyboard listener for live controls
+        self._start_keyboard_listener()
+        
+        # Show initial message about controls
+        if RICH_AVAILABLE:
+            self.console.print("\n[bold cyan]🎮 Live controls enabled:[/bold cyan]")
+            self.console.print("  [SPACE] = Pause/Resume  |  [+/-] = Adjust workers  |  [q] = Quit")
+            self.console.print()
+        
+        # Initialize live display
+        self.live_display = None
+        if RICH_AVAILABLE:
+            try:
+                self.live_display = Live(
+                    self._build_complete_layout(),
+                    refresh_per_second=2,  # Update twice per second
+                    console=self.console
+                )
+                self.live_display.start()
+            except:
+                # If Live doesn't work, fall back to regular display
+                self.live_display = None
+        
+        try:
+            # Process videos
+            for idx in range(resume_idx, len(self.videos)):
+                if not self.running:
+                    break
+                
+                video_info = self.videos[idx]
+                
+                # Skip if already completed
+                if self.tracker.is_video_completed(idx):
+                    continue
+                
+                # Process video
+                result = self.process_video(idx, video_info)
+                
+                # Update progress
+                self.tracker.update_progress(completed_videos=idx + 1)
+                self.tracker.calculate_disk_usage(self.base_dir)
+                self.tracker.save()
+                
+                # Update live display or print status
+                if self.live_display:
+                    self.live_display.update(self._build_complete_layout())
+                elif RICH_AVAILABLE:
+                    output, table, disk, controls = self.build_gui_layout()
+                    self.console.clear()
+                    self.console.print(output)
+                    self.console.print(table)
+                    self.console.print(disk)
+                    self.console.print(controls)
+                else:
+                    print(self._build_simple_status())
+        
+        finally:
+            # Stop live display
+            if self.live_display:
+                self.live_display.stop()
             
-            video_info = self.videos[idx]
-            
-            # Skip if already completed
-            if self.tracker.is_video_completed(idx):
-                continue
-            
-            # Process video
-            result = self.process_video(idx, video_info)
-            
-            # Update progress
-            self.tracker.update_progress(completed_videos=idx + 1)
-            self.tracker.calculate_disk_usage(self.base_dir)
-            self.tracker.save()
-            
-            # Display status
-            if RICH_AVAILABLE:
-                output, table, disk, controls = self.build_gui_layout()
-                self.console.clear()
-                self.console.print(output)
-                self.console.print(table)
-                self.console.print(disk)
-                self.console.print(controls)
-            else:
-                print(self._build_simple_status())
+            # Stop keyboard listener
+            self.stop_input_thread = True
+            if self.input_thread and self.input_thread.is_alive():
+                self.input_thread.join(timeout=1)
         
         # Finalize
         self.tracker.set_status("finished")
