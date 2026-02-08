@@ -147,7 +147,8 @@ class VSRDataset(Dataset):
         # LR should be same height, width*7 (7 frames stacked horizontally)
         expected_lr_height = expected_gt_shape[0] // 3  # 3x downscale
         # More accurate: (width * 7) // 3 to preserve precision
-        expected_lr_width = (expected_gt_shape[1] * 7) // 3  # 7 frames stacked
+        # This calculates: GT width → downscale 3x → stack 7 frames horizontally
+        expected_lr_width = (expected_gt_shape[1] * 7) // 3  # 7 frames stacked horizontally, downscaled 3x
         expected_lr_shape = (expected_lr_height, expected_lr_width, 3)
         
         for i in range(samples_to_check):
