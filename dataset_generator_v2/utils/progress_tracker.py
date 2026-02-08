@@ -64,6 +64,26 @@ class ProgressTracker:
         os.makedirs(os.path.dirname(self.status_file), exist_ok=True)
         with open(self.status_file, 'w') as f:
             json.dump(self.status, f, indent=2)
+            # Flush to ensure write completes
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except:
+                pass  # Some systems don't support fsync
+    
+    def initialize_categories(self, category_targets: Dict[str, int]):
+        """Initialize category stats from config."""
+        for category, target in category_targets.items():
+            if category not in self.status["category_stats"]:
+                self.status["category_stats"][category] = {
+                    "videos_processed": 0,
+                    "images_created": 0,
+                    "target": target,
+                    "disk_usage_gb": 0.0
+                }
+            else:
+                # Update target if it changed
+                self.status["category_stats"][category]["target"] = target
     
     def update_progress(self, **kwargs):
         """Update progress fields."""
@@ -80,13 +100,27 @@ class ProgressTracker:
     
     def increment_category_images(self, category: str, count: int = 1):
         """Increment image count for a category."""
-        if category in self.status["category_stats"]:
-            self.status["category_stats"][category]["images_created"] += count
+        # Auto-create category stats if it doesn't exist
+        if category not in self.status["category_stats"]:
+            self.status["category_stats"][category] = {
+                "videos_processed": 0,
+                "images_created": 0,
+                "target": 0,
+                "disk_usage_gb": 0.0
+            }
+        self.status["category_stats"][category]["images_created"] += count
     
     def increment_category_videos(self, category: str):
         """Increment video count for a category."""
-        if category in self.status["category_stats"]:
-            self.status["category_stats"][category]["videos_processed"] += 1
+        # Auto-create category stats if it doesn't exist
+        if category not in self.status["category_stats"]:
+            self.status["category_stats"][category] = {
+                "videos_processed": 0,
+                "images_created": 0,
+                "target": 0,
+                "disk_usage_gb": 0.0
+            }
+        self.status["category_stats"][category]["videos_processed"] += 1
     
     def update_video_checkpoint(self, video_index: int, status: str, **kwargs):
         """Update checkpoint for a specific video."""

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Multi-Category Dataset Generator v2.0
-Generates training patches for GENERAL, SPACE, and TOON models.
+Generates training patches for multiple model categories (dynamically configured).
 """
 
 import os
@@ -14,6 +14,7 @@ import shutil
 import re
 import time
 import signal
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Tuple, Optional
 from datetime import datetime, timedelta
@@ -52,6 +53,7 @@ class DatasetGeneratorV2:
         
         self.settings = self.config['base_settings']
         self.videos = self.config['videos']
+        self.format_config = self.config.get('format_config', {})
         
         # Initialize paths
         self.base_dir = self.settings['output_base_dir']
@@ -62,10 +64,16 @@ class DatasetGeneratorV2:
         self.tracker = ProgressTracker(self.status_file)
         self.tracker.update_progress(total_videos=len(self.videos))
         
+        # Initialize category stats from config
+        if 'category_targets' in self.config:
+            self.tracker.initialize_categories(self.config['category_targets'])
+        
         # Runtime state
         self.workers = self.settings['max_workers']
         self.running = True
         self.paused = False
+        self.last_update_time = time.time()
+        self.update_interval = 0.5  # Update GUI every 0.5 seconds
         
         # Rich console
         if RICH_AVAILABLE:
@@ -77,6 +85,10 @@ class DatasetGeneratorV2:
         self.success_count = 0
         self.current_video_name = ""
         
+        # Keyboard input handling
+        self.input_thread = None
+        self.stop_input_thread = False
+        
         # Setup signal handlers
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
@@ -84,14 +96,162 @@ class DatasetGeneratorV2:
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals gracefully."""
         if RICH_AVAILABLE:
-            self.console.print("\n[yellow]Received shutdown signal. Saving progress...[/yellow]")
+            self.console.print("\n[yellow]⏸️  Saving current progress before exit...[/yellow]")
         else:
-            print("\nReceived shutdown signal. Saving progress...")
+            print("\n⏸️  Saving current progress before exit...")
         
+        self.stop_input_thread = True
         self.running = False
+        
+        # Force save current state
         self.tracker.set_status("interrupted")
         self.tracker.save()
+        
+        if RICH_AVAILABLE:
+            self.console.print("[green]✅ Progress saved. You can resume later.[/green]")
+        else:
+            print("✅ Progress saved. You can resume later.")
+        
         sys.exit(0)
+    
+    def _keyboard_listener(self):
+        """Listen for keyboard input in a separate thread."""
+        import sys
+        import tty
+        import termios
+        
+        # Save terminal settings
+        old_settings = None
+        try:
+            old_settings = termios.tcgetattr(sys.stdin)
+            tty.setcbreak(sys.stdin.fileno())
+            
+            while not self.stop_input_thread and self.running:
+                try:
+                    # Non-blocking read with timeout
+                    import select
+                    if select.select([sys.stdin], [], [], 0.1)[0]:
+                        ch = sys.stdin.read(1)
+                        
+                        if ch == ' ':  # Space bar - pause/resume
+                            self.paused = not self.paused
+                            status = "PAUSED" if self.paused else "RESUMED"
+                            if RICH_AVAILABLE:
+                                self.console.print(f"\n[yellow]⏸️  {status}[/yellow]")
+                        
+                        elif ch == '+' or ch == '=':  # Increase workers
+                            if self.workers < 32:  # Max 32 workers
+                                self.workers += 1
+                                if RICH_AVAILABLE:
+                                    self.console.print(f"\n[green]⬆️  Workers increased to {self.workers}[/green]")
+                        
+                        elif ch == '-' or ch == '_':  # Decrease workers
+                            if self.workers > 1:  # Min 1 worker
+                                self.workers -= 1
+                                if RICH_AVAILABLE:
+                                    self.console.print(f"\n[yellow]⬇️  Workers decreased to {self.workers}[/yellow]")
+                        
+                        elif ch == 'q' or ch == 'Q':  # Quit
+                            if RICH_AVAILABLE:
+                                self.console.print("\n[yellow]Quitting...[/yellow]")
+                            self.running = False
+                            self.stop_input_thread = True
+                            break
+                
+                except Exception:
+                    pass
+        
+        finally:
+            # Restore terminal settings
+            if old_settings:
+                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+    
+    def _start_keyboard_listener(self):
+        """Start keyboard listener thread."""
+        if not RICH_AVAILABLE:
+            return  # Only enable for rich mode
+        
+        try:
+            self.input_thread = threading.Thread(target=self._keyboard_listener, daemon=True)
+            self.input_thread.start()
+        except Exception as e:
+            # If keyboard listener fails, continue without it
+            if RICH_AVAILABLE:
+                self.console.print(f"[yellow]⚠️  Keyboard controls unavailable: {e}[/yellow]")
+    
+    def get_category_path(self, category: str) -> str:
+        """
+        Get the base path for a category.
+        Falls back to hard-coded paths for known categories,
+        or generates a default path for custom categories.
+        """
+        # Check if there's a category_paths config (future enhancement)
+        if 'category_paths' in self.config:
+            if category in self.config['category_paths']:
+                return self.config['category_paths'][category]
+        
+        # Fall back to hard-coded paths for backward compatibility
+        if category in CATEGORY_PATHS:
+            return CATEGORY_PATHS[category]
+        
+        # Generate default path for custom categories
+        # Format: CategoryName/CategoryNameModel/Learn
+        category_title = category.capitalize()
+        return f"{category_title}/{category_title}Model/Learn"
+    
+    def select_format_for_category(self, category: str) -> str:
+        """
+        Select a random format for a category based on configured distribution.
+        """
+        import random
+        
+        # Get format distribution from config
+        distribution = self.format_config.get(category, {})
+        
+        if not distribution:
+            # Fallback to hard-coded distribution if not in config
+            distribution = CATEGORY_FORMAT_DISTRIBUTION.get(category, {})
+        
+        if not distribution:
+            # Ultimate fallback
+            return 'small_540'
+        
+        formats = list(distribution.keys())
+        # Extract probability from dict or use value directly
+        weights = []
+        for fmt in formats:
+            if isinstance(distribution[fmt], dict):
+                weights.append(distribution[fmt].get('probability', 1.0))
+            else:
+                weights.append(distribution[fmt])
+        
+        return random.choices(formats, weights=weights, k=1)[0]
+    
+    def get_output_dirs_for_category_format(self, category: str, format_name: str, lr_frames: int = 5) -> dict:
+        """
+        Get output directory paths for a specific category and format.
+        
+        Args:
+            category: Category name
+            format_name: Format name (small_540, etc.)
+            lr_frames: Number of LR frames to use (5 or 7)
+        
+        Returns:
+            Dictionary with 'gt', 'lr', 'val_gt', 'val_lr' paths
+        """
+        category_path = self.get_category_path(category)
+        format_spec = FORMATS[format_name]
+        base_format_dir = format_spec['output_dir']
+        
+        # VSR++ compatible: Use 'LR' for 5-frame, 'LR_7frames' for extended
+        lr_dir_name = 'LR' if lr_frames == 5 else 'LR_7frames'
+        
+        return {
+            'gt': f"{self.base_dir}/{category_path}/{base_format_dir}/GT",
+            'lr': f"{self.base_dir}/{category_path}/{base_format_dir}/{lr_dir_name}",
+            'val_gt': f"{self.base_dir}/{category_path}/Val/GT",
+            'val_lr': f"{self.base_dir}/{category_path}/Val/LR"
+        }
     
     def get_video_info(self, video_path: str) -> Tuple[float, float]:
         """Get video FPS and duration using ffprobe."""
@@ -118,15 +278,22 @@ class DatasetGeneratorV2:
             - Patches/LR_7frames/ (7-frame, optional extended)
             - Val/GT/ and Val/LR/ (validation)
         """
-        for category in CATEGORY_PATHS.keys():
-            for format_name in CATEGORY_FORMAT_DISTRIBUTION[category].keys():
+        for category in self.config.get('category_targets', {}).keys():
+            # Get format distribution for this category
+            category_formats = self.format_config.get(category, {})
+            
+            if not category_formats:
+                # Fallback to hard-coded distribution
+                category_formats = CATEGORY_FORMAT_DISTRIBUTION.get(category, {'small_540': 1.0})
+            
+            for format_name in category_formats.keys():
                 # Create directories for 5-frame LR (VSR++ compatible)
-                dirs_5 = get_output_dirs_for_format(self.base_dir, category, format_name, lr_frames=5)
+                dirs_5 = self.get_output_dirs_for_category_format(category, format_name, lr_frames=5)
                 for dir_path in dirs_5.values():
                     os.makedirs(dir_path, exist_ok=True)
                 
                 # Create directories for 7-frame LR (optional extended)
-                dirs_7 = get_output_dirs_for_format(self.base_dir, category, format_name, lr_frames=7)
+                dirs_7 = self.get_output_dirs_for_category_format(category, format_name, lr_frames=7)
                 for dir_path in dirs_7.values():
                     os.makedirs(dir_path, exist_ok=True)
         
@@ -218,8 +385,8 @@ class DatasetGeneratorV2:
             suffix = format_spec['suffix']
             
             # Get output directories (5-frame LR for VSR++ compatibility)
-            dirs_5 = get_output_dirs_for_format(self.base_dir, category, format_name, lr_frames=5)
-            dirs_7 = get_output_dirs_for_format(self.base_dir, category, format_name, lr_frames=7)
+            dirs_5 = self.get_output_dirs_for_category_format(category, format_name, lr_frames=5)
+            dirs_7 = self.get_output_dirs_for_category_format(category, format_name, lr_frames=7)
             
             # Generate random crop position
             max_y = 1080 - gt_h
@@ -281,7 +448,7 @@ class DatasetGeneratorV2:
             all_success = True
             for category, weight in categories.items():
                 # Select format for this category
-                format_name = select_random_format(category)
+                format_name = self.select_format_for_category(category)
                 
                 # Save with DIFFERENT random crop per category
                 success = self.save_patches(frames, category, format_name, 
@@ -346,6 +513,15 @@ class DatasetGeneratorV2:
         
         for frame_idx in range(total_extractions):
             if not self.running:
+                # Save checkpoint before breaking on stop
+                self.tracker.update_video_checkpoint(
+                    video_idx,
+                    "interrupted",
+                    last_frame_idx=frame_idx,
+                    extractions_done=frame_idx,
+                    extractions_target=total_extractions
+                )
+                self.tracker.save()
                 break
             
             while self.paused:
@@ -361,16 +537,32 @@ class DatasetGeneratorV2:
             
             self.extractions_count += 1
             
-            # Update checkpoint every 10 extractions
-            if frame_idx % 10 == 0:
-                self.tracker.update_video_checkpoint(
-                    video_idx,
-                    "in_progress",
-                    last_frame_idx=frame_idx,
-                    extractions_done=frame_idx + 1,
-                    extractions_target=total_extractions
-                )
+            # Update checkpoint EVERY extraction for instant resume capability
+            # Save to disk every 5 extractions to balance performance and safety
+            self.tracker.update_video_checkpoint(
+                video_idx,
+                "in_progress",
+                last_frame_idx=frame_idx,
+                extractions_done=frame_idx + 1,
+                extractions_target=total_extractions
+            )
+            
+            if frame_idx % 5 == 0:  # Save every 5 extractions (was 10)
                 self.tracker.save()
+                
+                # Update live display if enabled
+                if hasattr(self, 'live_display') and self.live_display and self._should_update_display():
+                    try:
+                        self.live_display.update(self._build_complete_layout())
+                    except:
+                        pass  # Ignore display errors
+                elif hasattr(self, '_should_update_display') and self._should_update_display():
+                    # Use professional box-drawing GUI
+                    try:
+                        from utils.ui_display import draw_dataset_generator_ui
+                        draw_dataset_generator_ui(self)
+                    except:
+                        pass  # Ignore display errors
         
         # Mark video as completed
         self.tracker.update_video_checkpoint(video_idx, "completed")
@@ -386,10 +578,37 @@ class DatasetGeneratorV2:
             'success_count': success_count
         }
     
-    def build_gui_layout(self) -> str:
-        """Build the beautiful GUI layout using rich."""
+    def _get_terminal_width(self) -> int:
+        """Get terminal width, with fallback to default."""
+        try:
+            import shutil
+            return shutil.get_terminal_size().columns
+        except:
+            return 120  # Default fallback
+    
+    def _calculate_bar_widths(self) -> dict:
+        """Calculate optimal bar widths based on terminal width."""
+        terminal_width = self._get_terminal_width()
+        
+        # Reserve space for labels and other content
+        # Overall bar: "Overall Progress  " (20 chars) + percentage (10) + ETA (15) = ~45 chars
+        # Category bar: "CATEGORYNAME  " (15) + percentage (10) + "Images: X,XXX,XXX" (20) + "ETA: X:XX:XX" (15) = ~60 chars
+        
+        # Calculate bar widths as percentage of terminal width
+        overall_bar_width = max(30, min(80, int((terminal_width - 45) * 0.6)))
+        video_bar_width = max(30, min(80, int((terminal_width - 40) * 0.6)))
+        category_bar_width = max(25, min(60, int((terminal_width - 60) * 0.5)))
+        
+        return {
+            'overall': overall_bar_width,
+            'video': video_bar_width,
+            'category': category_bar_width
+        }
+    
+    def build_gui_layout(self) -> tuple:
+        """Build the beautiful GUI layout using rich with progress bars."""
         if not RICH_AVAILABLE:
-            return self._build_simple_status()
+            return self._build_simple_status(), None, None, None
         
         # Calculate statistics
         elapsed = time.time() - self.start_time
@@ -399,97 +618,180 @@ class DatasetGeneratorV2:
         total_videos = self.tracker.status['progress']['total_videos']
         completed_videos = self.tracker.status['progress']['completed_videos']
         
-        # ETA calculation
+        # ETA calculation for overall progress
         if completed_videos > 0:
             avg_time_per_video = elapsed / completed_videos
             remaining_videos = total_videos - completed_videos
             eta_seconds = avg_time_per_video * remaining_videos
-            eta_str = str(timedelta(seconds=int(eta_seconds)))
+            overall_eta_str = str(timedelta(seconds=int(eta_seconds)))
         else:
-            eta_str = "Calculating..."
+            overall_eta_str = "Calculating..."
         
-        # Build header
-        header = Panel(
-            "[bold cyan]DATASET GENERATOR v2.0 - MULTI-CATEGORY[/bold cyan]",
-            style="bold white on blue"
+        # Extraction speed
+        if elapsed > 0:
+            extractions_per_sec = self.extractions_count / elapsed
+            speed_str = f"{extractions_per_sec:.1f} extractions/sec"
+        else:
+            speed_str = "Calculating..."
+        
+        # Get dynamic bar widths based on terminal size
+        bar_widths = self._calculate_bar_widths()
+        
+        # ===== OVERALL PROGRESS BAR =====
+        from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, TaskProgressColumn
+        
+        overall_progress = Progress(
+            TextColumn("[bold blue]{task.description}"),
+            BarColumn(bar_width=bar_widths['overall']),
+            TaskProgressColumn(),
+            TextColumn("•"),
+            TimeRemainingColumn(),
+        )
+        overall_task = overall_progress.add_task(
+            "Overall Progress", 
+            total=total_videos if total_videos > 0 else 100,
+            completed=completed_videos
         )
         
-        # Overall progress section
+        # Build prominent header with current movie
+        current_movie_name = self.current_video_name if self.current_video_name else "Initializing..."
+        header = Panel(
+            f"[bold yellow]🎬 CURRENT: {current_movie_name[:70]}[/bold yellow]\n"
+            f"[bold cyan]⚙️  CPU CORES: {self.workers}[/bold cyan] • "
+            f"[bold green]⚡ SPEED: {speed_str}[/bold green]",
+            title="[bold white on blue] DATASET GENERATOR v2.0 - LIVE ",
+            border_style="bold blue"
+        )
+        
+        # Overall progress section with bar
+        completion_pct = (completed_videos/total_videos*100) if total_videos > 0 else 0
         overall = f"""[bold]📊 OVERALL PROGRESS[/bold]
-├─ Total Videos: {total_videos}
-├─ Completed: {completed_videos} ({completed_videos/total_videos*100:.1f}%)
-├─ Current: {self.current_video_name[:50]}
+├─ Videos: {completed_videos}/{total_videos} ({completion_pct:.1f}%)
 ├─ Remaining: {total_videos - completed_videos} videos
-├─ Elapsed: {elapsed_str}
-├─ ETA: {eta_str}
-└─ Workers: {self.workers}
+├─ Elapsed: {elapsed_str} | ETA: {overall_eta_str}
+├─ Total Extractions: {self.extractions_count:,}
+├─ Successful: {self.success_count:,} ({(self.success_count/self.extractions_count*100) if self.extractions_count > 0 else 0:.1f}%)
+└─ Status: {'[green]●RUNNING[/green]' if not self.paused else '[yellow]●PAUSED[/yellow]'}
 """
         
-        # Current video section
+        # Current video section with progress bar
         checkpoint = self.tracker.get_video_checkpoint(current_idx)
         if checkpoint and checkpoint.get('status') == 'in_progress':
             done = checkpoint.get('extractions_done', 0)
             target = checkpoint.get('extractions_target', 1)
             progress_pct = (done / target * 100) if target > 0 else 0
-            success_rate = (self.success_count / self.extractions_count * 100) if self.extractions_count > 0 else 0
             
-            current_video = f"""[bold]🎬 CURRENT VIDEO[/bold]
-├─ Path: {self.tracker.status['progress']['current_video_path'][-60:]}
-├─ Extractions: {done} / {target} ({progress_pct:.1f}%)
-├─ Success Rate: {success_rate:.1f}%
-└─ Status: {'[green]Running[/green]' if self.running else '[red]Stopped[/red]'}
-"""
+            # Create a Rich progress bar for current video
+            video_progress = Progress(
+                TextColumn("[cyan]{task.description}"),
+                BarColumn(bar_width=bar_widths['video']),
+                TaskProgressColumn(),
+            )
+            video_task = video_progress.add_task(
+                f"{self.current_video_name[:40]}", 
+                total=target,
+                completed=done
+            )
+            
+            current_video = video_progress
         else:
-            current_video = "[bold]🎬 CURRENT VIDEO[/bold]\n└─ Initializing..."
+            current_video = Text("Waiting for next video...", style="dim")
         
-        # Category progress table
-        table = Table(title="📦 CATEGORY PROGRESS", show_header=True, header_style="bold magenta")
-        table.add_column("Category", style="cyan", width=12)
-        table.add_column("Videos", justify="right")
-        table.add_column("Images", justify="right")
-        table.add_column("Target", justify="right")
-        table.add_column("Progress", width=12)
+        # ===== CATEGORY PROGRESS BARS =====
+        category_progress = Progress(
+            TextColumn("[bold]{task.description}", justify="left", style="cyan"),
+            BarColumn(bar_width=bar_widths['category']),
+            TaskProgressColumn(),
+            TextColumn("[bold green]Images:"),
+            TextColumn("[green]{task.fields[images]:>8,}"),
+            TextColumn("[bold yellow]ETA:"),
+            TextColumn("[yellow]{task.fields[eta]}"),
+        )
         
-        for cat_name in ['general', 'space', 'toon']:
-            stats = self.tracker.status['category_stats'][cat_name]
-            videos = stats['videos_processed']
-            images = stats['images_created']
-            target = stats['target']
-            progress = (images / target * 100) if target > 0 else 0
+        for cat_name in sorted(self.config.get('category_targets', {}).keys()):
+            stats = self.tracker.status['category_stats'].get(cat_name, {})
+            images = stats.get('images_created', 0)
+            target = stats.get('target', 1)
             
-            # Progress bar
-            filled = int(progress / 10)
-            bar = "█" * filled + "░" * (10 - filled)
+            # Calculate ETA for this category
+            if images > 0 and elapsed > 0:
+                rate = images / elapsed
+                remaining = target - images
+                eta_secs = remaining / rate if rate > 0 else 0
+                eta_str = str(timedelta(seconds=int(eta_secs))) if eta_secs > 0 else "Complete"
+            else:
+                eta_str = "Calculating..."
             
-            table.add_row(
-                cat_name.upper(),
-                str(videos),
-                f"{images:,}",
-                f"{target:,}",
-                f"{bar} {progress:.1f}%"
+            category_progress.add_task(
+                f"{cat_name.upper():12s}",
+                total=target,
+                completed=images,
+                images=images,
+                eta=eta_str
             )
         
         # Disk usage
-        total_disk = sum(s['disk_usage_gb'] for s in self.tracker.status['category_stats'].values())
-        disk_usage = f"""[bold]💾 DISK USAGE[/bold]
-├─ GENERAL: {self.tracker.status['category_stats']['general']['disk_usage_gb']:.1f} GB
-├─ SPACE: {self.tracker.status['category_stats']['space']['disk_usage_gb']:.1f} GB
-├─ TOON: {self.tracker.status['category_stats']['toon']['disk_usage_gb']:.1f} GB
-└─ Total: {total_disk:.1f} GB
+        total_disk = sum(s.get('disk_usage_gb', 0) for s in self.tracker.status['category_stats'].values())
+        disk_lines = ["[bold]💾 DISK USAGE[/bold]"]
+        categories = sorted(self.config.get('category_targets', {}).keys())
+        for i, cat_name in enumerate(categories):
+            usage = self.tracker.status['category_stats'].get(cat_name, {}).get('disk_usage_gb', 0)
+            prefix = "├─"
+            disk_lines.append(f"{prefix} {cat_name.upper()}: {usage:.2f} GB")
+        disk_lines.append(f"└─ [bold]Total: {total_disk:.2f} GB[/bold]")
+        disk_usage = "\n".join(disk_lines)
+        
+        # Controls with live status
+        pause_status = "[yellow]●PAUSED[/yellow]" if self.paused else "[green]●RUNNING[/green]"
+        controls = f"""[bold]⚙️  LIVE CONTROLS[/bold]
+├─ Status: {pause_status} | Workers: [bold cyan]{self.workers}[/bold cyan] cores
+├─ [SPACE] Pause/Resume | [+/-] Adjust workers
+└─ [Ctrl+C] Save & Exit | [q] Quick quit
 """
         
-        # Controls
-        controls = """[bold]⚙️  CONTROLS[/bold]
-├─ [Ctrl+C] Save & Exit
-└─ Press 'q' to quit
-"""
-        
-        # Combine all sections
-        output = f"\n{overall}\n{current_video}\n"
-        
-        return output, table, disk_usage, controls
+        return header, overall, overall_progress, current_video, category_progress, disk_usage, controls
     
-    def _build_simple_status(self) -> str:
+    def _should_update_display(self) -> bool:
+        """Check if enough time has passed to update the display."""
+        current_time = time.time()
+        if current_time - self.last_update_time >= self.update_interval:
+            self.last_update_time = current_time
+            return True
+        return False
+    
+    def _build_complete_layout(self):
+        """Build complete layout for live display."""
+        if not RICH_AVAILABLE:
+            return self._build_simple_status()
+        
+        header, overall, overall_progress, current_video, category_progress, disk_usage, controls = self.build_gui_layout()
+        
+        # Combine everything into a single renderable with proper spacing
+        from rich.console import Group
+        from rich.text import Text
+        
+        # Build the complete display
+        components = [
+            header,
+            Text(""),  # Blank line
+            Text(overall, style=""),
+            Text(""),
+            Text("[bold]📊 OVERALL PROGRESS BAR:[/bold]"),
+            overall_progress,
+            Text(""),
+            Text("[bold]🎬 CURRENT VIDEO PROGRESS:[/bold]"),
+            current_video,
+            Text(""),
+            Text("[bold]📦 CATEGORY PROGRESS BARS:[/bold]"),
+            category_progress,
+            Text(""),
+            Text(disk_usage),
+            Text(""),
+            Text(controls),
+        ]
+        
+        return Group(*components)
+    
         """Build simple text status for when rich is not available."""
         elapsed = time.time() - self.start_time
         current_idx = self.tracker.status['progress']['current_video_index']
@@ -591,6 +893,20 @@ Continue? Processing will start in 5 seconds... (Ctrl+C to cancel)
                 print(warning)
             
             time.sleep(5)
+        else:
+            # All or most videos found - show success message
+            if len(missing_videos) == 0:
+                success_msg = "\n[bold green]✅ All videos found! Starting dataset generation...[/bold green]\n"
+            else:
+                success_msg = f"\n[bold green]✅ Ready to process {len(existing_videos)} videos. Starting dataset generation...[/bold green]\n"
+            
+            if RICH_AVAILABLE:
+                self.console.print(success_msg)
+            else:
+                # Strip rich formatting for plain text
+                plain_msg = success_msg.replace('[bold green]', '').replace('[/bold green]', '').replace('[bold]', '').replace('[/bold]', '')
+                print(plain_msg)
+
         
         # Create directories
         self.create_output_directories()
@@ -607,35 +923,84 @@ Continue? Processing will start in 5 seconds... (Ctrl+C to cancel)
         self.tracker.set_status("running")
         self.tracker.save()
         
-        # Process videos
-        for idx in range(resume_idx, len(self.videos)):
-            if not self.running:
-                break
+        # Start keyboard listener for live controls
+        self._start_keyboard_listener()
+        
+        # Show initial message about controls
+        if RICH_AVAILABLE:
+            self.console.print("\n[bold cyan]🎮 Live controls enabled:[/bold cyan]")
+            self.console.print("  [SPACE] = Pause/Resume  |  [+/-] = Adjust workers  |  [q] = Quit")
+            self.console.print()
+        
+        # Clear screen once at start for clean display (professional way)
+        if RICH_AVAILABLE:
+            from utils.ui_terminal import clear_and_home, hide_cursor
+            clear_and_home()
+            hide_cursor()
+        
+        # Initialize live display
+        self.live_display = None
+        if RICH_AVAILABLE:
+            try:
+                self.live_display = Live(
+                    self._build_complete_layout(),
+                    refresh_per_second=2,  # Update twice per second
+                    console=self.console
+                )
+                self.live_display.start()
+                if RICH_AVAILABLE:
+                    self.console.print("[dim]✓ Live display mode activated[/dim]")
+            except Exception as e:
+                # If Live doesn't work, fall back to regular display
+                self.live_display = None
+                if RICH_AVAILABLE:
+                    self.console.print(f"[yellow]⚠ Live display failed ({e}), using professional box GUI[/yellow]")
+
+        
+        try:
+            # Process videos
+            for idx in range(resume_idx, len(self.videos)):
+                if not self.running:
+                    break
+                
+                video_info = self.videos[idx]
+                
+                # Skip if already completed
+                if self.tracker.is_video_completed(idx):
+                    continue
+                
+                # Process video
+                result = self.process_video(idx, video_info)
+                
+                # Update progress
+                self.tracker.update_progress(completed_videos=idx + 1)
+                self.tracker.calculate_disk_usage(self.base_dir)
+                self.tracker.save()
+                
+                # Update live display or print status
+                if self.live_display:
+                    self.live_display.update(self._build_complete_layout())
+                elif RICH_AVAILABLE:
+                    # Use professional box-drawing GUI (vsr_plusplus style)
+                    from utils.ui_display import draw_dataset_generator_ui
+                    draw_dataset_generator_ui(self)
+                else:
+                    print(self._build_simple_status())
+        
+        finally:
+            # Stop live display
+            if self.live_display:
+                self.live_display.stop()
             
-            video_info = self.videos[idx]
-            
-            # Skip if already completed
-            if self.tracker.is_video_completed(idx):
-                continue
-            
-            # Process video
-            result = self.process_video(idx, video_info)
-            
-            # Update progress
-            self.tracker.update_progress(completed_videos=idx + 1)
-            self.tracker.calculate_disk_usage(self.base_dir)
-            self.tracker.save()
-            
-            # Display status
+            # Show cursor again
             if RICH_AVAILABLE:
-                output, table, disk, controls = self.build_gui_layout()
-                self.console.clear()
-                self.console.print(output)
-                self.console.print(table)
-                self.console.print(disk)
-                self.console.print(controls)
-            else:
-                print(self._build_simple_status())
+                from utils.ui_terminal import show_cursor
+                show_cursor()
+            
+            # Stop keyboard listener
+            self.stop_input_thread = True
+            if self.input_thread and self.input_thread.is_alive():
+                self.input_thread.join(timeout=1)
         
         # Finalize
         self.tracker.set_status("finished")

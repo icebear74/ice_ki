@@ -1,1 +1,457 @@
-{\n  "base_settings": {\n    "base_frame_limit": 3000,\n    "max_workers": 12,\n    "val_percent": 0.0,\n    "output_base_dir": "/mnt/data/training/dataset",\n    "temp_dir": "/mnt/data/training/dataset/temp",\n    "status_file": "/mnt/data/training/dataset/.generator_status.json",\n    "min_file_size": 10000,\n    "scene_diff_threshold": 45,\n    "max_retry_attempts": 10,\n    "retry_skip_seconds": 60,\n    "lr_versions": [\n      "5frames",\n      "7frames"\n    ]\n  },\n  \n  "category_targets": {\n    "general": 110000,\n    "space": 82500,\n    "toon": 30000\n  },\n  \n  "format_config": {\n    "general": {\n      "small_540": {"gt_size": [540, 540], "lr_size": [180, 180], "probability": 0.50},\n      "medium_169": {"gt_size": [720, 405], "lr_size": [240, 135], "probability": 0.35},\n      "large_720": {"gt_size": [720, 720], "lr_size": [240, 240], "probability": 0.15}\n    },\n    "space": {\n      "small_540": {"gt_size": [540, 540], "lr_size": [180, 180], "probability": 0.40},\n      "medium_169": {"gt_size": [720, 405], "lr_size": [240, 135], "probability": 0.35},\n      "large_720": {"gt_size": [720, 720], "lr_size": [240, 240], "probability": 0.25}\n    },\n    "toon": {\n      "small_540": {"gt_size": [540, 540], "lr_size": [180, 180], "probability": 0.65},\n      "medium_169": {"gt_size": [720, 405], "lr_size": [240, 135], "probability": 0.35}\n    }\n  },\n  \n  "videos": [\n    {"name": "Planet Earth 2 - Islands", "path": "/mnt/data/video/SerieUHD/Planet Earth 2 (UHD HDR Referenz)/S01E01 (001) - Inseln (Islands).mkv", "categories": {"general": 1.0}},\n    {"name": "Planet Earth 2 - Mountains", "path": "/mnt/data/video/SerieUHD/Planet Earth 2 (UHD HDR Referenz)/S01E02 (002) - Die Berge (Mountains).mkv", "categories": {"general": 1.0}},\n    {"name": "Planet Earth 2 - Jungles", "path": "/mnt/data/video/SerieUHD/Planet Earth 2 (UHD HDR Referenz)/S01E03 (003) - Dschungel (Jungles).mkv", "categories": {"general": 1.0}},\n    {"name": "Planet Earth 2 - Deserts", "path": "/mnt/data/video/SerieUHD/Planet Earth 2 (UHD HDR Referenz)/S01E04 (004) - Wüsten (Deserts).mkv", "categories": {"general": 1.0}},\n    {"name": "Planet Earth 2 - Grassland", "path": "/mnt/data/video/SerieUHD/Planet Earth 2 (UHD HDR Referenz)/S01E05 (005) - Grasland (Grassland).mkv", "categories": {"general": 1.0}},\n    {"name": "Planet Earth 2 - Cities", "path": "/mnt/data/video/SerieUHD/Planet Earth 2 (UHD HDR Referenz)/S01E06 (006) - Städte (Cities).mkv", "categories": {"general": 1.0}},\n    {"name": "Avatar (2009)", "path": "/mnt/data/video/filme/UHD/Avatar (2009)/Avatar (2009).mkv", "categories": {"general": 0.3, "space": 0.4, "toon": 0.3}},\n    {"name": "Avatar 2 Way of Water", "path": "/mnt/data/video/filme/UHD/Avatar 2 - The Way Of Water (2023)/Avatar 2 - The Way Of Water (2023).mkv", "categories": {"general": 0.3, "space": 0.4, "toon": 0.3}},\n    {"name": "Ready Player One", "path": "/mnt/data/video/filme/UHD/Ready Player One/Ready Player One.mkv", "categories": {"general": 0.4, "space": 0.3, "toon": 0.3}},\n    {"name": "Barbie", "path": "/mnt/data/video/filme/UHD/Barbie (2023)/Barbie (2023).mkv", "categories": {"general": 0.3, "toon": 0.7}},\n    {"name": "Dune (2021)", "path": "/mnt/data/video/filme/UHD/Dune (2021)/Dune (2021).mkv", "categories": {"general": 0.5, "space": 0.5}},\n    {"name": "Dune Part Two", "path": "/mnt/data/video/filme/UHD/Dune - Part Two (2024)/Dune - Part Two (2024).mkv", "categories": {"general": 0.5, "space": 0.5}},\n    {"name": "Interstellar", "path": "/mnt/data/video/filme/UHD/Interstellar (2014)/Interstellar (2014).mkv", "categories": {"space": 1.0}},\n    {"name": "Ad Astra", "path": "/mnt/data/video/filme/UHD/Ad Astra - Zu den Sternen/Ad Astra - Zu den Sternen.mkv", "categories": {"space": 1.0}},\n    {"name": "Arrival", "path": "/mnt/data/video/filme/UHD/Arrival/Arrival (2016).mkv", "categories": {"space": 0.8, "general": 0.2}},\n    {"name": "The Marsianer", "path": "/mnt/data/video/filme/UHD/Der Marsianer - Rettet Mark Watney (2015)/Der Marsianer - Rettet Mark Watney (2015).mkv", "categories": {"space": 1.0}},\n    {"name": "Passengers", "path": "/mnt/data/video/filme/UHD/Passengers/Passengers (2016)_t00.mkv", "categories": {"space": 0.8, "general": 0.2}},\n    {"name": "Oblivion", "path": "/mnt/data/video/filme/UHD/Oblivion/Oblivion.mkv", "categories": {"space": 1.0}},\n    {"name": "2001 Space Odyssey", "path": "/mnt/data/video/filme/UHD/2001 - Odyssee Im Weltraum (1968)/2001 - Odyssee Im Weltraum (1968).mkv", "categories": {"space": 1.0}},\n    {"name": "The Creator", "path": "/mnt/data/video/filme/UHD/The Creator (2023)/The Creator (2023).mkv", "categories": {"space": 0.7, "general": 0.3}},\n    {"name": "Moonfall", "path": "/mnt/data/video/filme/UHD/Moonfall/Moonfall.mkv", "categories": {"space": 1.0}},\n    {"name": "Elysium", "path": "/mnt/data/video/filme/UHD/Elysium/Elysium.mkv", "categories": {"space": 1.0}},\n    {"name": "Gattaca", "path": "/mnt/data/video/filme/UHD/Gattaca/Gattaca.mkv", "categories": {"space": 1.0}},\n    {"name": "Event Horizon", "path": "/mnt/data/video/filme/UHD/Event Horizon (1997)/Event Horizon (1997).mkv", "categories": {"space": 1.0}},\n    {"name": "Independence Day", "path": "/mnt/data/video/filme/UHD/Independence Day/Independence Day.mkv", "categories": {"space": 1.0}},\n    {"name": "Independence Day Resurgence", "path": "/mnt/data/video/filme/UHD/Independence Day- Wiederkehr/Independence Day- Wiederkehr.mkv", "categories": {"space": 1.0}},\n    {"name": "Alien Romulus", "path": "/mnt/data/video/filme/UHD/Alien Romulus (2024)/Alien Romulus (2024).mkv", "categories": {"space": 1.0}},\n    {"name": "Unheimliche Begegnung", "path": "/mnt/data/video/filme/UHD/Unheimliche Begegnung Der Dritten Art/Unheimliche Begegnung Der Dritten Art.mkv", "categories": {"space": 1.0}},\n    {"name": "E.T.", "path": "/mnt/data/video/filme/UHD/E.T. Der Außerirdische (The Extra-Terrestrial)/E.T. The Extra-Terrestrial.mkv", "categories": {"space": 0.7, "general": 0.3}},\n    {"name": "Krieg der Welten", "path": "/mnt/data/video/filme/UHD/Krieg Der Welten (2005)/Krieg Der Welten (2005).mkv", "categories": {"space": 1.0}},\n    {"name": "Galaxy Quest", "path": "/mnt/data/video/filme/UHD/Galaxy Quest – Planlos durchs Weltall (1999)/Galaxy Quest – Planlos durchs Weltall (1999).mkv", "categories": {"space": 0.7, "general": 0.3}},\n    {"name": "Cosmic Sin", "path": "/mnt/data/video/filme/UHD/Cosmic Sin (2021)/Cosmic Sin (2021).mkv", "categories": {"space": 1.0}},\n    {"name": "Star Trek (2009)", "path": "/mnt/data/video/filme/UHD/Star Trek (2009)/Star Trek (2009).mkv", "categories": {"space": 1.0}},\n    {"name": "Star Trek Into Darkness", "path": "/mnt/data/video/filme/UHD/Star Trek XII - Into Darkness/Star Trek Into Darkness.mkv", "categories": {"space": 1.0}},\n    {"name": "Star Trek Beyond", "path": "/mnt/data/video/filme/UHD/Star Trek Beyond (2016)/Star Trek Beyond (2016).mkv", "categories": {"space": 1.0}},\n    {"name": "Star Trek The Motion Picture", "path": "/mnt/data/video/filme/UHD/Star Trek - Der Film (1979)/Star Trek - Der Film (1979).mkv", "categories": {"space": 1.0}},\n    {"name": "Star Trek II Wrath of Khan", "path": "/mnt/data/video/filme/UHD/Star Trek II - Der Zorn Des Kahn (1982)/Star Trek II - Der Zorn Des Kahn (1982).mkv", "categories": {"space": 1.0}},\n    {"name": "Star Trek III Search for Spock", "path": "/mnt/data/video/filme/UHD/Star Trek III - Auf Der Suche Nach Mr. Spock (1984)/Star Trek III - Auf Der Suche Nach Mr. Spock (1984).mkv", "categories": {"space": 1.0}},\n    {"name": "Star Trek IV Voyage Home", "path": "/mnt/data/video/filme/UHD/Star Trek IV - Zurück In Die Gegenwart (1986)/Star Trek IV- The Voyage Home.mkv", "categories": {"space": 1.0}},\n    {"name": "Star Trek V Final Frontier", "path": "/mnt/data/video/filme/UHD/Star Trek V - Am Rande Des Universums (1989)/Star Trek V - Am Rande Des Universums (1989).mkv", "categories": {"space": 1.0}},\n    {"name": "Star Trek VI Undiscovered Country", "path": "/mnt/data/video/filme/UHD/Star Trek VI - Das Unentdeckte Land (1991)/Star Trek VI - Das Unentdeckte Land (1991).mkv", "categories": {"space": 1.0}},\n    {"name": "Star Trek Generations", "path": "/mnt/data/video/filme/UHD/Star Trek VII - Treffen Der Generationen (1994)/Star Trek VII - Treffen Der Generationen (1994).mkv", "categories": {"space": 1.0}},\n    {"name": "Star Trek First Contact", "path": "/mnt/data/video/filme/UHD/Star Trek VIII - Der Erste Kontakt (1996)/Star Trek VIII - Der Erste Kontakt (1996).mkv", "categories": {"space": 1.0}},\n    {"name": "Star Trek Insurrection", "path": "/mnt/data/video/filme/UHD/Star Trek VIIII - Der Aufstand/Star Trek VIIII - Der Aufstand.mkv", "categories": {"space": 1.0}},\n    {"name": "Star Trek Nemesis", "path": "/mnt/data/video/filme/UHD/Star Trek Nemesis (2002)/Star Trek Nemesis (2002).mkv", "categories": {"space": 1.0}},\n    {"name": "Star Trek Section 31", "path": "/mnt/data/video/filme/UHD/Star Trek - Section 31 (2025)/Star Trek - Section 31 (2025).mkv", "categories": {"space": 1.0}}\n  ]\n}
+{
+  "base_settings": {
+    "base_frame_limit": 3000,
+    "max_workers": 12,
+    "val_percent": 0.0,
+    "output_base_dir": "/mnt/data/training/dataset",
+    "temp_dir": "/mnt/data/training/dataset/temp",
+    "status_file": "/mnt/data/training/dataset/.generator_status.json",
+    "min_file_size": 10000,
+    "scene_diff_threshold": 45,
+    "max_retry_attempts": 10,
+    "retry_skip_seconds": 60,
+    "lr_versions": [
+      "5frames",
+      "7frames"
+    ]
+  },
+  "category_targets": {
+    "general": 110000,
+    "space": 82500,
+    "toon": 30000
+  },
+  "format_config": {
+    "general": {
+      "small_540": {
+        "gt_size": [
+          540,
+          540
+        ],
+        "lr_size": [
+          180,
+          180
+        ],
+        "probability": 0.5
+      },
+      "medium_169": {
+        "gt_size": [
+          720,
+          405
+        ],
+        "lr_size": [
+          240,
+          135
+        ],
+        "probability": 0.35
+      },
+      "large_720": {
+        "gt_size": [
+          720,
+          720
+        ],
+        "lr_size": [
+          240,
+          240
+        ],
+        "probability": 0.15
+      }
+    },
+    "space": {
+      "small_540": {
+        "gt_size": [
+          540,
+          540
+        ],
+        "lr_size": [
+          180,
+          180
+        ],
+        "probability": 0.4
+      },
+      "medium_169": {
+        "gt_size": [
+          720,
+          405
+        ],
+        "lr_size": [
+          240,
+          135
+        ],
+        "probability": 0.35
+      },
+      "large_720": {
+        "gt_size": [
+          720,
+          720
+        ],
+        "lr_size": [
+          240,
+          240
+        ],
+        "probability": 0.25
+      }
+    },
+    "toon": {
+      "small_540": {
+        "gt_size": [
+          540,
+          540
+        ],
+        "lr_size": [
+          180,
+          180
+        ],
+        "probability": 0.65
+      },
+      "medium_169": {
+        "gt_size": [
+          720,
+          405
+        ],
+        "lr_size": [
+          240,
+          135
+        ],
+        "probability": 0.35
+      }
+    }
+  },
+  "videos": [
+    {
+      "name": "Planet Earth 2 - Islands",
+      "path": "/mnt/data/video/SerieUHD/Planet Earth 2 (UHD HDR Referenz)/S01E01 (001) - Inseln (Islands).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Planet Earth 2 - Mountains",
+      "path": "/mnt/data/video/SerieUHD/Planet Earth 2 (UHD HDR Referenz)/S01E02 (002) - Die Berge (Mountains).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Planet Earth 2 - Jungles",
+      "path": "/mnt/data/video/SerieUHD/Planet Earth 2 (UHD HDR Referenz)/S01E03 (003) - Dschungel (Jungles).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Planet Earth 2 - Deserts",
+      "path": "/mnt/data/video/SerieUHD/Planet Earth 2 (UHD HDR Referenz)/S01E04 (004) - W\u00fcsten (Deserts).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Planet Earth 2 - Grassland",
+      "path": "/mnt/data/video/SerieUHD/Planet Earth 2 (UHD HDR Referenz)/S01E05 (005) - Grasland (Grassland).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Planet Earth 2 - Cities",
+      "path": "/mnt/data/video/SerieUHD/Planet Earth 2 (UHD HDR Referenz)/S01E06 (006) - St\u00e4dte (Cities).mkv",
+      "categories": {
+        "general": 1.0
+      }
+    },
+    {
+      "name": "Avatar (2009)",
+      "path": "/mnt/data/video/filme/UHD/Avatar (2009)/Avatar (2009).mkv",
+      "categories": {
+        "general": 0.3,
+        "space": 0.4,
+        "toon": 0.3
+      }
+    },
+    {
+      "name": "Avatar 2 Way of Water",
+      "path": "/mnt/data/video/filme/UHD/Avatar 2 - The Way Of Water (2023)/Avatar 2 - The Way Of Water (2023).mkv",
+      "categories": {
+        "general": 0.3,
+        "space": 0.4,
+        "toon": 0.3
+      }
+    },
+    {
+      "name": "Ready Player One",
+      "path": "/mnt/data/video/filme/UHD/Ready Player One/Ready Player One.mkv",
+      "categories": {
+        "general": 0.4,
+        "space": 0.3,
+        "toon": 0.3
+      }
+    },
+    {
+      "name": "Barbie",
+      "path": "/mnt/data/video/filme/UHD/Barbie (2023)/Barbie (2023).mkv",
+      "categories": {
+        "general": 0.3,
+        "toon": 0.7
+      }
+    },
+    {
+      "name": "Dune (2021)",
+      "path": "/mnt/data/video/filme/UHD/Dune (2021)/Dune (2021).mkv",
+      "categories": {
+        "general": 0.5,
+        "space": 0.5
+      }
+    },
+    {
+      "name": "Dune Part Two",
+      "path": "/mnt/data/video/filme/UHD/Dune - Part Two (2024)/Dune - Part Two (2024).mkv",
+      "categories": {
+        "general": 0.5,
+        "space": 0.5
+      }
+    },
+    {
+      "name": "Interstellar",
+      "path": "/mnt/data/video/filme/UHD/Interstellar (2014)/Interstellar (2014).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Ad Astra",
+      "path": "/mnt/data/video/filme/UHD/Ad Astra - Zu den Sternen/Ad Astra - Zu den Sternen.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Arrival",
+      "path": "/mnt/data/video/filme/UHD/Arrival/Arrival (2016).mkv",
+      "categories": {
+        "space": 0.8,
+        "general": 0.2
+      }
+    },
+    {
+      "name": "The Marsianer",
+      "path": "/mnt/data/video/filme/UHD/Der Marsianer - Rettet Mark Watney (2015)/Der Marsianer - Rettet Mark Watney (2015).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Passengers",
+      "path": "/mnt/data/video/filme/UHD/Passengers/Passengers (2016)_t00.mkv",
+      "categories": {
+        "space": 0.8,
+        "general": 0.2
+      }
+    },
+    {
+      "name": "Oblivion",
+      "path": "/mnt/data/video/filme/UHD/Oblivion/Oblivion.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "2001 Space Odyssey",
+      "path": "/mnt/data/video/filme/UHD/2001 - Odyssee Im Weltraum (1968)/2001 - Odyssee Im Weltraum (1968).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "The Creator",
+      "path": "/mnt/data/video/filme/UHD/The Creator (2023)/The Creator (2023).mkv",
+      "categories": {
+        "space": 0.7,
+        "general": 0.3
+      }
+    },
+    {
+      "name": "Moonfall",
+      "path": "/mnt/data/video/filme/UHD/Moonfall/Moonfall.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Elysium",
+      "path": "/mnt/data/video/filme/UHD/Elysium/Elysium.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Gattaca",
+      "path": "/mnt/data/video/filme/UHD/Gattaca/Gattaca.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Event Horizon",
+      "path": "/mnt/data/video/filme/UHD/Event Horizon (1997)/Event Horizon (1997).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Independence Day",
+      "path": "/mnt/data/video/filme/UHD/Independence Day/Independence Day.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Independence Day Resurgence",
+      "path": "/mnt/data/video/filme/UHD/Independence Day- Wiederkehr/Independence Day- Wiederkehr.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Alien Romulus",
+      "path": "/mnt/data/video/filme/UHD/Alien Romulus (2024)/Alien Romulus (2024).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Unheimliche Begegnung",
+      "path": "/mnt/data/video/filme/UHD/Unheimliche Begegnung Der Dritten Art/Unheimliche Begegnung Der Dritten Art.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "E.T.",
+      "path": "/mnt/data/video/filme/UHD/E.T. Der Au\u00dferirdische (The Extra-Terrestrial)/E.T. The Extra-Terrestrial.mkv",
+      "categories": {
+        "space": 0.7,
+        "general": 0.3
+      }
+    },
+    {
+      "name": "Krieg der Welten",
+      "path": "/mnt/data/video/filme/UHD/Krieg Der Welten (2005)/Krieg Der Welten (2005).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Galaxy Quest",
+      "path": "/mnt/data/video/filme/UHD/Galaxy Quest \u2013 Planlos durchs Weltall (1999)/Galaxy Quest \u2013 Planlos durchs Weltall (1999).mkv",
+      "categories": {
+        "space": 0.7,
+        "general": 0.3
+      }
+    },
+    {
+      "name": "Cosmic Sin",
+      "path": "/mnt/data/video/filme/UHD/Cosmic Sin (2021)/Cosmic Sin (2021).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek (2009)",
+      "path": "/mnt/data/video/filme/UHD/Star Trek (2009)/Star Trek (2009).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Into Darkness",
+      "path": "/mnt/data/video/filme/UHD/Star Trek XII - Into Darkness/Star Trek Into Darkness.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Beyond",
+      "path": "/mnt/data/video/filme/UHD/Star Trek Beyond (2016)/Star Trek Beyond (2016).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek The Motion Picture",
+      "path": "/mnt/data/video/filme/UHD/Star Trek - Der Film (1979)/Star Trek - Der Film (1979).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek II Wrath of Khan",
+      "path": "/mnt/data/video/filme/UHD/Star Trek II - Der Zorn Des Kahn (1982)/Star Trek II - Der Zorn Des Kahn (1982).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek III Search for Spock",
+      "path": "/mnt/data/video/filme/UHD/Star Trek III - Auf Der Suche Nach Mr. Spock (1984)/Star Trek III - Auf Der Suche Nach Mr. Spock (1984).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek IV Voyage Home",
+      "path": "/mnt/data/video/filme/UHD/Star Trek IV - Zur\u00fcck In Die Gegenwart (1986)/Star Trek IV- The Voyage Home.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek V Final Frontier",
+      "path": "/mnt/data/video/filme/UHD/Star Trek V - Am Rande Des Universums (1989)/Star Trek V - Am Rande Des Universums (1989).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek VI Undiscovered Country",
+      "path": "/mnt/data/video/filme/UHD/Star Trek VI - Das Unentdeckte Land (1991)/Star Trek VI - Das Unentdeckte Land (1991).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Generations",
+      "path": "/mnt/data/video/filme/UHD/Star Trek VII - Treffen Der Generationen (1994)/Star Trek VII - Treffen Der Generationen (1994).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek First Contact",
+      "path": "/mnt/data/video/filme/UHD/Star Trek VIII - Der Erste Kontakt (1996)/Star Trek VIII - Der Erste Kontakt (1996).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Insurrection",
+      "path": "/mnt/data/video/filme/UHD/Star Trek VIIII - Der Aufstand/Star Trek VIIII - Der Aufstand.mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Nemesis",
+      "path": "/mnt/data/video/filme/UHD/Star Trek Nemesis (2002)/Star Trek Nemesis (2002).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    },
+    {
+      "name": "Star Trek Section 31",
+      "path": "/mnt/data/video/filme/UHD/Star Trek - Section 31 (2025)/Star Trek - Section 31 (2025).mkv",
+      "categories": {
+        "space": 1.0
+      }
+    }
+  ]
+}
