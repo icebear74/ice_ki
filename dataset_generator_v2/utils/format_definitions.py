@@ -11,8 +11,8 @@ FORMATS = {
         'aspect_ratio': '1:1'
     },
     '720_169': {
-        'gt_size': (720, 405),
-        'lr_size': (240, 135),
+        'gt_size': (405, 720),
+        'lr_size': (135, 240),
         'output_dir': 'patches/720_169',
         'suffix': '',
         'aspect_ratio': '16:9'
@@ -33,8 +33,8 @@ FORMATS = {
         'aspect_ratio': '1:1'
     },
     'medium_169': {
-        'gt_size': (720, 405),
-        'lr_size': (240, 135),
+        'gt_size': (405, 720),
+        'lr_size': (135, 240),
         'output_dir': 'patches/720_169',
         'suffix': '',
         'aspect_ratio': '16:9'
