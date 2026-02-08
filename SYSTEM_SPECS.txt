@@ -1,0 +1,4 @@
+# TODO
+- Test optimal n_feats and n_blocks configuration for 7-frame model.
+- Test what fits in 8GB VRAM with real training (try 80/26, then 72/26, then 64/26 if OOM).
+- Test with actual 540x540 GT images and 7-frame LR stacks during first training run.
