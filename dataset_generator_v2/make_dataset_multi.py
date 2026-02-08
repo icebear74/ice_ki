@@ -1094,6 +1094,7 @@ Continue? Processing will start in 5 seconds... (Ctrl+C to cancel)
         
         try:
             # Process videos
+            last_processed_idx = resume_idx - 1  # Track the last successfully processed video
             for idx in range(resume_idx, len(self.videos)):
                 self.logger.debug(f"--- Loop iteration {idx} / {len(self.videos)} ---")
                 
@@ -1123,6 +1124,7 @@ Continue? Processing will start in 5 seconds... (Ctrl+C to cancel)
                     # Log successful completion
                     self.logger.info(f"Video {idx} completed successfully")
                     self.logger.debug(f"Moving to next video (idx={idx+1})")
+                    last_processed_idx = idx  # Update last processed index
                     
                     # Update live display or print status
                     if self.live_display:
@@ -1139,7 +1141,8 @@ Continue? Processing will start in 5 seconds... (Ctrl+C to cancel)
                     continue
             
             # Log main loop ended
-            self.logger.info(f"=== MAIN LOOP ENDED === (processed {idx+1} videos)")
+            videos_processed = last_processed_idx - resume_idx + 1 if last_processed_idx >= resume_idx else 0
+            self.logger.info(f"=== MAIN LOOP ENDED === (processed {videos_processed} videos, last index: {last_processed_idx})")
         except Exception as e:
             self.logger.critical(f"FATAL EXCEPTION in main loop: {type(e).__name__}: {e}", exc_info=True)
             raise
