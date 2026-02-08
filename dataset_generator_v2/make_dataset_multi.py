@@ -391,7 +391,6 @@ class DatasetGeneratorV2:
             if os.path.exists(thread_temp):
                 shutil.rmtree(thread_temp, ignore_errors=True)
     
-
     def process_all_categories_from_frames(self, frames: List, categories: Dict[str, float], 
                                           video_name: str, frame_idx: int) -> bool:
         """Process all category patches from the same 7 full-resolution frames."""
