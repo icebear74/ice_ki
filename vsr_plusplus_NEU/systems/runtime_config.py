@@ -71,15 +71,15 @@ DEFAULT_CONFIG = {
     "training": {
         "effective_batch_size": 6,
         "adaptive_batch": {
-            "small_540": {"batch": 1, "accum": 6},
-            "medium_169": {"batch": 1, "accum": 6},
-            "large_720": {"batch": 1, "accum": 6}
+            "540": {"batch": 1, "accum": 6},
+            "720_169": {"batch": 1, "accum": 6},
+            "720": {"batch": 1, "accum": 6}
         }
     },
     "size_distribution": {
-        "small_540": 0.65,
-        "medium_169": 0.35,
-        "large_720": 0.00
+        "540": 0.65,
+        "720_169": 0.35,
+        "720": 0.00
     }
 }
 
@@ -406,7 +406,7 @@ class EnhancedRuntimeConfigManager:
                 if 'adaptive_batch' not in self.config['training']:
                     self.config['training']['adaptive_batch'] = {}
                 
-                for size in ['small_540', 'medium_169', 'large_720']:
+                for size in ['540', '720_169', '720']:
                     batch_config = self.batch_calculator.calculate_batch_config(
                         size, effective_batch
                     )
@@ -507,9 +507,9 @@ if __name__ == "__main__":
     # Update size distribution
     print("\nUpdating size distribution...")
     manager.update_size_distribution({
-        'small_540': 0.70,
-        'medium_169': 0.30,
-        'large_720': 0.00
+        '540': 0.70,
+        '720_169': 0.30,
+        '720': 0.00
     })
     
     # Validate again

@@ -1,9 +1,12 @@
 """
 VSRDataset - Video Super-Resolution Dataset Loader
 
-Loads VSR training data:
-- GT images: 540x540 (single frame)
-- LR stack: 180x900 (5 frames stacked vertically)
+Loads VSR training data with new dataset structure:
+- Dataset structure: root/dataset_name/patches/{size_key}/GT/ and LR/
+- Validation structure: root/dataset_name/val/{size_key}/GT/ (GT) + patches/{size_key}/LR/ (LR)
+- GT images: Variable size based on size_key (e.g., 720x1280 for '720', 540x960 for '540')
+- LR stack: 7 frames stacked horizontally (e.g., H x W*7 x 3)
+- Supported size_keys: '720', '540', '720_169' (16:9 aspect ratio variants)
 """
 
 import os
@@ -19,23 +22,43 @@ class VSRDataset(Dataset):
     VSR Dataset for training and validation
     
     Args:
-        dataset_root: Root directory of dataset
-        mode: 'Patches' (training) or 'Val' (validation)
+        root: Root directory (e.g., /mnt/data/training/datasetNeu)
+        dataset_name: Dataset name (e.g., 'master')
+        size_key: Size variant ('720', '540', or '720_169')
+        mode: 'train' or 'val'
         augment: Whether to apply augmentations (flip, rotate)
     """
     
-    def __init__(self, dataset_root, mode='Patches', augment=True):
-        self.dataset_root = dataset_root
+    def __init__(self, root, dataset_name='master', size_key='720', mode='train', augment=True):
+        self.root = root
+        self.dataset_name = dataset_name
+        self.size_key = size_key
         self.mode = mode
-        self.augment = augment and (mode == 'Patches')
+        self.augment = augment and (mode == 'train')
         
-        # Build paths
-        self.gt_dir = os.path.join(dataset_root, mode, 'GT')
-        self.lr_dir = os.path.join(dataset_root, mode, 'LR')
-        # For validation, also check Patches/LR as fallback (like original train.py)
-        self.patch_lr_dir = os.path.join(dataset_root, 'Patches', 'LR')
+        # Build paths based on mode
+        dataset_path = os.path.join(root, dataset_name)
+        
+        if mode == 'train':
+            # Training: root/dataset_name/patches/size_key/GT and LR
+            patches_path = os.path.join(dataset_path, 'patches', size_key)
+            self.gt_dir = os.path.join(patches_path, 'GT')
+            self.lr_dir = os.path.join(patches_path, 'LR')
+            self.patch_lr_dir = None  # Not needed for training
+        elif mode == 'val':
+            # Validation: GT from val/size_key/GT, LR from patches/size_key/LR
+            val_path = os.path.join(dataset_path, 'val', size_key)
+            self.gt_dir = os.path.join(val_path, 'GT')
+            self.lr_dir = os.path.join(val_path, 'LR')  # Try val/LR first
+            # Fallback to patches/LR for validation
+            self.patch_lr_dir = os.path.join(dataset_path, 'patches', size_key, 'LR')
+        else:
+            raise ValueError(f"Invalid mode: {mode}. Must be 'train' or 'val'")
         
         # Get all GT files
+        if not os.path.exists(self.gt_dir):
+            raise ValueError(f"GT directory not found: {self.gt_dir}")
+        
         all_gt_files = sorted([f for f in os.listdir(self.gt_dir) if f.endswith('.png')])
         
         if not all_gt_files:
@@ -51,28 +74,31 @@ class VSRDataset(Dataset):
         
         for gt_file in all_gt_files:
             lr_path = os.path.join(self.lr_dir, gt_file)
-            patch_lr_path = os.path.join(self.patch_lr_dir, gt_file)
             
             if os.path.exists(lr_path):
                 self.gt_files.append(gt_file)
                 self.lr_paths[gt_file] = self.lr_dir
                 matched_val_lr += 1
-            elif mode == 'Val' and os.path.exists(patch_lr_path):
-                # For validation, fallback to Patches/LR
-                self.gt_files.append(gt_file)
-                self.lr_paths[gt_file] = self.patch_lr_dir
-                matched_patches_lr += 1
+            elif mode == 'val' and self.patch_lr_dir:
+                # For validation, fallback to patches/LR
+                patch_lr_path = os.path.join(self.patch_lr_dir, gt_file)
+                if os.path.exists(patch_lr_path):
+                    self.gt_files.append(gt_file)
+                    self.lr_paths[gt_file] = self.patch_lr_dir
+                    matched_patches_lr += 1
+                else:
+                    skipped_files.append(gt_file)
             else:
                 skipped_files.append(gt_file)
         
-        # Show detailed statistics for Val mode
-        if mode == 'Val':
+        # Show detailed statistics for val mode
+        if mode == 'val':
             print("\n" + "="*60)
-            print(f"📂 VALIDATION DATASET LOADING")
+            print(f"📂 VALIDATION DATASET LOADING ({size_key})")
             print("="*60)
             print(f"  GT files found:           {len(all_gt_files)}")
-            print(f"  Matched in Val/LR:        {matched_val_lr}")
-            print(f"  Matched in Patches/LR:    {matched_patches_lr}")
+            print(f"  Matched in val/LR:        {matched_val_lr}")
+            print(f"  Matched in patches/LR:    {matched_patches_lr}")
             print(f"  ───────────────────────────────────")
             print(f"  Skipped (no LR):          {len(skipped_files)}")
             print(f"  Final samples loaded:     {len(self.gt_files)}")
@@ -86,7 +112,8 @@ class VSRDataset(Dataset):
                     print(f"  ... and {len(skipped_files) - 15} more")
                 print("\n💡 To include these files, ensure LR versions exist in:")
                 print(f"     {self.lr_dir}")
-                print(f"  OR {self.patch_lr_dir}")
+                if self.patch_lr_dir:
+                    print(f"  OR {self.patch_lr_dir}")
                 print()
         elif skipped_files:
             # For training mode, just show count
@@ -104,6 +131,25 @@ class VSRDataset(Dataset):
         samples_to_check = min(5, len(self.gt_files))
         
         issues_found = []
+        
+        # Expected shapes based on size_key
+        expected_gt_shapes = {
+            '720': (720, 1280, 3),     # 720p 16:9
+            '540': (540, 960, 3),      # 540p 16:9
+            '720_169': (720, 1280, 3)  # 720p 16:9 (alternative naming)
+        }
+        
+        expected_gt_shape = expected_gt_shapes.get(self.size_key)
+        if not expected_gt_shape:
+            print(f"\n⚠️  Unknown size_key '{self.size_key}', skipping shape validation")
+            return
+        
+        # LR should be same height, width*7 (7 frames stacked horizontally)
+        expected_lr_height = expected_gt_shape[0] // 3  # 3x downscale
+        # Calculate LR width: (GT_width / scale) * n_frames
+        # Mathematically equivalent: (GT_width * 7) / 3 for precision
+        expected_lr_width = (expected_gt_shape[1] * 7) // 3  # 7 frames stacked horizontally, downscaled 3x
+        expected_lr_shape = (expected_lr_height, expected_lr_width, 3)
         
         for i in range(samples_to_check):
             gt_file = self.gt_files[i]
@@ -131,14 +177,17 @@ class VSRDataset(Dataset):
                 issues_found.append(f"Corrupted LR image: {lr_path}")
                 continue
             
-            if gt.shape != (540, 540, 3):
-                issues_found.append(f"Invalid GT shape {gt.shape}, expected (540, 540, 3): {gt_path}")
-            if lr.shape != (900, 180, 3):
-                issues_found.append(f"Invalid LR shape {lr.shape}, expected (900, 180, 3): {lr_path}")
+            if gt.shape != expected_gt_shape:
+                issues_found.append(f"Invalid GT shape {gt.shape}, expected {expected_gt_shape}: {gt_path}")
+            # Allow ±2px tolerance for LR width to account for rounding in downscaling operations
+            if lr.shape[0] != expected_lr_shape[0] or lr.shape[2] != expected_lr_shape[2]:
+                issues_found.append(f"Invalid LR shape {lr.shape}, expected {expected_lr_shape}: {lr_path}")
+            elif abs(lr.shape[1] - expected_lr_shape[1]) > 2:
+                issues_found.append(f"Invalid LR width {lr.shape[1]}, expected {expected_lr_shape[1]} (±2px): {lr_path}")
         
         # Report issues as warnings instead of errors
         if issues_found:
-            print(f"\n⚠️  Dataset validation warnings in {self.mode}:")
+            print(f"\n⚠️  Dataset validation warnings in {self.mode} (size_key={self.size_key}):")
             for issue in issues_found:
                 print(f"  - {issue}")
             print()
@@ -151,8 +200,8 @@ class VSRDataset(Dataset):
         Load and process a single sample
         
         Returns:
-            lr_stack: [5, 3, 180, 180] - 5 LR frames
-            gt: [3, 540, 540] - GT frame
+            lr_stack: [7, 3, H, W] - 7 LR frames
+            gt: [3, H*3, W*3] - GT frame (3x upscale)
         """
         gt_file = self.gt_files[idx]
         gt_path = os.path.join(self.gt_dir, gt_file)
@@ -172,10 +221,14 @@ class VSRDataset(Dataset):
         gt = cv2.cvtColor(gt, cv2.COLOR_BGR2RGB)
         lr = cv2.cvtColor(lr, cv2.COLOR_BGR2RGB)
         
-        # Split LR into 5 frames (stacked vertically: 900 = 5 * 180)
+        # Split LR into 7 frames (stacked horizontally: W_total = W_frame * 7)
+        lr_height = lr.shape[0]
+        lr_width_total = lr.shape[1]
+        lr_width_per_frame = lr_width_total // 7
+        
         lr_frames = []
-        for i in range(5):
-            frame = lr[i*180:(i+1)*180, :, :]  # Extract 180x180 frame
+        for i in range(7):
+            frame = lr[:, i*lr_width_per_frame:(i+1)*lr_width_per_frame, :]
             lr_frames.append(frame)
         
         # Apply augmentations (only for training)

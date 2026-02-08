@@ -328,14 +328,13 @@ class DatasetGeneratorV2:
         
         return random.choices(formats, weights=weights, k=1)[0]
     
-    def get_output_dirs_for_category_format(self, category: str, format_name: str, lr_frames: int = 5) -> dict:
+    def get_output_dirs_for_category_format(self, category: str, format_name: str) -> dict:
         """
         Get output directory paths for a specific category and format.
         
         Args:
-            category: Category name
-            format_name: Format name (small_540, etc.)
-            lr_frames: Number of LR frames to use (5 or 7)
+            category: Category name (e.g., 'master', 'universal')
+            format_name: Format name (e.g., 'small_540', 'medium_169')
         
         Returns:
             Dictionary with 'gt', 'lr', 'val_gt', 'val_lr' paths
@@ -344,14 +343,14 @@ class DatasetGeneratorV2:
         format_spec = FORMATS[format_name]
         base_format_dir = format_spec['output_dir']
         
-        # VSR++ compatible: Use 'LR' for 5-frame, 'LR_7frames' for extended
-        lr_dir_name = 'LR' if lr_frames == 5 else 'LR_7frames'
+        # V2 Generator: Use 'LR' for 7-frame (new standard)
+        lr_dir_name = 'LR'
         
         return {
             'gt': f"{self.base_dir}/{category_path}/{base_format_dir}/GT",
             'lr': f"{self.base_dir}/{category_path}/{base_format_dir}/{lr_dir_name}",
-            'val_gt': f"{self.base_dir}/{category_path}/Val/GT",
-            'val_lr': f"{self.base_dir}/{category_path}/Val/LR"
+            'val_gt': f"{self.base_dir}/{category_path}/val/{base_format_dir.split('/')[-1]}/GT",
+            'val_lr': f"{self.base_dir}/{category_path}/val/{base_format_dir.split('/')[-1]}/LR"
         }
     
     def get_video_info(self, video_path: str) -> Tuple[float, float]:
@@ -374,10 +373,9 @@ class DatasetGeneratorV2:
         """
         Create all necessary output directories.
         
-        For VSR++ compatibility:
-            - Patches/GT/ and Patches/LR/ (5-frame, for training)
-            - Patches/LR_7frames/ (7-frame, optional extended)
-            - Val/GT/ and Val/LR/ (validation)
+        New V2 structure:
+            - patches/{size}/GT/ and patches/{size}/LR/ (7-frame vertical, for training)
+            - val/{size}/GT/ (validation, user copies manually)
         """
         for category in self.config.get('category_targets', {}).keys():
             # Get format distribution for this category
@@ -388,13 +386,8 @@ class DatasetGeneratorV2:
                 category_formats = CATEGORY_FORMAT_DISTRIBUTION.get(category, {'small_540': 1.0})
             
             for format_name in category_formats.keys():
-                # Create directories for 5-frame LR (VSR++ compatible)
-                dirs_5 = self.get_output_dirs_for_category_format(category, format_name, lr_frames=5)
-                for dir_path in dirs_5.values():
-                    os.makedirs(dir_path, exist_ok=True)
-                
-                # Create directories for 7-frame LR (optional extended)
-                dirs_7 = self.get_output_dirs_for_category_format(category, format_name, lr_frames=7)
+                # Create directories for 7-frame LR (new V2 standard)
+                dirs_7 = self.get_output_dirs_for_category_format(category, format_name)
                 for dir_path in dirs_7.values():
                     os.makedirs(dir_path, exist_ok=True)
         
@@ -472,7 +465,7 @@ class DatasetGeneratorV2:
         return all_success
     
     def create_lr_stack(self, frames: List, lr_size: Tuple[int, int], crop_y: int, crop_x: int, crop_h: int, crop_w: int) -> any:
-        """Create vertically stacked LR frames."""
+        """Create vertically stacked LR frames (7-frame vertical stacking)."""
         lr_frames = []
         for frame in frames:
             # Crop from the frame
@@ -481,7 +474,7 @@ class DatasetGeneratorV2:
             resized = cv2.resize(cropped, lr_size, interpolation=cv2.INTER_LANCZOS4)
             lr_frames.append(resized)
         
-        # Stack vertically
+        # Stack vertically (height × 7)
         return cv2.vconcat(lr_frames)
     
     def save_patches(self, frames: List, category: str, format_name: str, 
@@ -489,10 +482,9 @@ class DatasetGeneratorV2:
         """
         Save GT and LR patches for a specific category and format.
         
-        VSR++ Training expects:
+        Training expects:
             - GT: Single ground truth frame (e.g., 540×540)
-            - LR: 5-frame stack vertically (e.g., 180×900)
-            - Optional: 7-frame stack in separate directory
+            - LR: 7-frame stack vertically (e.g., 1260×180 for 540 patches)
         
         Returns:
             True if successful, False otherwise
@@ -504,9 +496,8 @@ class DatasetGeneratorV2:
             lr_h, lr_w = format_spec['lr_size']
             suffix = format_spec['suffix']
             
-            # Get output directories (5-frame LR for VSR++ compatibility)
-            dirs_5 = self.get_output_dirs_for_category_format(category, format_name, lr_frames=5)
-            dirs_7 = self.get_output_dirs_for_category_format(category, format_name, lr_frames=7)
+            # Get output directories (7-frame LR only)
+            dirs_7 = self.get_output_dirs_for_category_format(category, format_name)
             
             # Generate random crop position
             max_y = 1080 - gt_h
@@ -520,23 +511,17 @@ class DatasetGeneratorV2:
             
             # Save GT (middle frame = frames[3])
             gt_frame = frames[3][crop_y:crop_y+gt_h, crop_x:crop_x+gt_w]
-            gt_path = os.path.join(dirs_5['gt'], filename)
+            gt_path = os.path.join(dirs_7['gt'], filename)
             cv2.imwrite(gt_path, gt_frame, [cv2.IMWRITE_PNG_COMPRESSION, 3])
             
-            # Save 5-frame LR (VSR++ compatible: frames 1-5, indices 1:6)
-            # This goes into 'LR' directory for VSR++ training
-            lr_5 = self.create_lr_stack(frames[1:6], (lr_w, lr_h), crop_y, crop_x, gt_h, gt_w)
-            lr5_path = os.path.join(dirs_5['lr'], filename)
-            cv2.imwrite(lr5_path, lr_5, [cv2.IMWRITE_PNG_COMPRESSION, 3])
-            
-            # Save 7-frame LR (optional extended version)
-            # This goes into 'LR_7frames' directory for future use
+            # Save 7-frame LR (all 7 frames, vertically stacked)
+            # Result shape: (H×7, W, 3) - e.g., (1260, 180, 3) for 540 patches
             lr_7 = self.create_lr_stack(frames[0:7], (lr_w, lr_h), crop_y, crop_x, gt_h, gt_w)
             lr7_path = os.path.join(dirs_7['lr'], filename)
             cv2.imwrite(lr7_path, lr_7, [cv2.IMWRITE_PNG_COMPRESSION, 3])
             
             # Verify files were created
-            if os.path.exists(gt_path) and os.path.exists(lr5_path) and os.path.exists(lr7_path):
+            if os.path.exists(gt_path) and os.path.exists(lr7_path):
                 return True
             
             return False
@@ -889,6 +874,28 @@ class DatasetGeneratorV2:
             self.last_update_time = current_time
             return True
         return False
+    
+    def _build_simple_status(self) -> str:
+        """Build simple text status when Rich is not available."""
+        elapsed = time.time() - self.start_time
+        elapsed_str = str(timedelta(seconds=int(elapsed)))
+        
+        current_idx = self.tracker.status['progress']['current_video_index']
+        total_videos = self.tracker.status['progress']['total_videos']
+        completed_videos = self.tracker.status['progress']['completed_videos']
+        
+        # Build simple text status
+        status_lines = [
+            f"\n{'='*60}",
+            f"Dataset Generator Progress",
+            f"{'='*60}",
+            f"Videos: {completed_videos}/{total_videos} ({current_idx+1} processing)",
+            f"Elapsed: {elapsed_str}",
+            f"Current: {self.current_video_name}",
+            f"{'='*60}\n"
+        ]
+        
+        return '\n'.join(status_lines)
     
     def _build_complete_layout(self):
         """Build complete layout for live display."""

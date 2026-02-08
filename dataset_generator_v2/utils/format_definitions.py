@@ -1,41 +1,50 @@
 """Format definitions for multi-category dataset generator."""
 
 # Format specifications for different patch sizes
+# New V2 structure: uses simple size keys (720, 540, 720_169)
 FORMATS = {
+    '540': {
+        'gt_size': (540, 540),
+        'lr_size': (180, 180),
+        'output_dir': 'patches/540',
+        'suffix': '',
+        'aspect_ratio': '1:1'
+    },
+    '720_169': {
+        'gt_size': (405, 720),
+        'lr_size': (135, 240),
+        'output_dir': 'patches/720_169',
+        'suffix': '',
+        'aspect_ratio': '16:9'
+    },
+    '720': {
+        'gt_size': (720, 720),
+        'lr_size': (240, 240),
+        'output_dir': 'patches/720',
+        'suffix': '',
+        'aspect_ratio': '1:1'
+    },
+    # Legacy format names for backward compatibility
     'small_540': {
         'gt_size': (540, 540),
         'lr_size': (180, 180),
-        'output_dir': 'Patches',
+        'output_dir': 'patches/540',
         'suffix': '',
         'aspect_ratio': '1:1'
     },
     'medium_169': {
         'gt_size': (405, 720),
         'lr_size': (135, 240),
-        'output_dir': 'Patches_Medium169',
-        'suffix': '_med169',
+        'output_dir': 'patches/720_169',
+        'suffix': '',
         'aspect_ratio': '16:9'
     },
     'large_720': {
         'gt_size': (720, 720),
         'lr_size': (240, 240),
-        'output_dir': 'Patches_Large',
-        'suffix': '_large',
+        'output_dir': 'patches/720',
+        'suffix': '',
         'aspect_ratio': '1:1'
-    },
-    'xlarge_1440': {
-        'gt_size': (810, 1440),
-        'lr_size': (270, 480),
-        'output_dir': 'Patches_XLarge169',
-        'suffix': '_xl169',
-        'aspect_ratio': '16:9'
-    },
-    'fullhd_1920': {
-        'gt_size': (1080, 1920),
-        'lr_size': (360, 640),
-        'output_dir': 'Patches_FullHD',
-        'suffix': '_fullhd',
-        'aspect_ratio': '16:9'
     }
 }
 
@@ -62,12 +71,12 @@ CATEGORY_FORMAT_DISTRIBUTION = {
     }
 }
 
-# Base paths for each category
+# Base paths for each category - NEW V2 STRUCTURE: flat category names
 CATEGORY_PATHS = {
-    'master': 'Master/MasterModel/Learn',
-    'universal': 'Universal/UniversalModel/Learn',
-    'space': 'Space/SpaceModel/Learn',
-    'toon': 'Toon/ToonModel/Learn'
+    'master': 'master',
+    'universal': 'universal',
+    'space': 'space',
+    'toon': 'toon'
 }
 
 def get_format_for_category(category):
