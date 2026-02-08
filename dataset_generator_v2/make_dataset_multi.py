@@ -45,6 +45,9 @@ except ImportError:
 class DatasetGeneratorV2:
     """Multi-category dataset generator with beautiful GUI."""
     
+    # Maximum number of priority levels to display in console output
+    MAX_DISPLAYED_PRIORITIES = 10
+    
     def __init__(self, config_path: str):
         """Initialize the generator."""
         # Load configuration
@@ -54,6 +57,17 @@ class DatasetGeneratorV2:
         self.settings = self.config['base_settings']
         self.videos = self.config['videos']
         self.format_config = self.config.get('format_config', {})
+        
+        # Sort videos by priority (ascending: 0 first, 255 last)
+        # Within same priority, randomize order using pre-generated random values
+        random.seed(42)  # Reproducible randomization
+        # Attach a random value to each video for stable sorting
+        for i, video in enumerate(self.videos):
+            video['_sort_random'] = random.random()
+        self.videos.sort(key=lambda v: (v.get('priority', 255), v['_sort_random']))
+        # Clean up temporary sort keys
+        for video in self.videos:
+            video.pop('_sort_random', None)
         
         # Initialize paths
         self.base_dir = self.settings['output_base_dir']
@@ -78,6 +92,39 @@ class DatasetGeneratorV2:
         # Rich console
         if RICH_AVAILABLE:
             self.console = Console()
+            
+            # Show priority distribution
+            priority_counts = {}
+            for v in self.videos:
+                p = v.get('priority', 255)
+                priority_counts[p] = priority_counts.get(p, 0) + 1
+            
+            self.console.print("\n[bold]📋 Video Processing Order:[/bold]")
+            sorted_priorities = sorted(priority_counts.keys())
+            
+            # Always show priority 255 (default) if it exists, plus first MAX_DISPLAYED_PRIORITIES-1 levels
+            priorities_to_show = []
+            if 255 in priority_counts:
+                # Show first levels (excluding 255 if present)
+                priorities_to_show = [p for p in sorted_priorities if p != 255][:self.MAX_DISPLAYED_PRIORITIES - 1]
+                # Always include 255
+                priorities_to_show.append(255)
+                priorities_to_show.sort()
+            else:
+                priorities_to_show = sorted_priorities[:self.MAX_DISPLAYED_PRIORITIES]
+            
+            for priority in priorities_to_show:
+                count = priority_counts[priority]
+                if priority == 255:
+                    self.console.print(f"   Priority {priority} (default): {count} videos")
+                else:
+                    self.console.print(f"   Priority {priority}: {count} videos")
+            
+            # Show remaining count if there are more priorities
+            remaining_priorities = [p for p in sorted_priorities if p not in priorities_to_show]
+            if remaining_priorities:
+                remaining = sum(priority_counts[p] for p in remaining_priorities)
+                self.console.print(f"   ... and {remaining} more videos in other priority levels")
         
         # Statistics
         self.start_time = time.time()

@@ -70,6 +70,7 @@ def scan_videos(root_path):
                 videos.append({
                     "name": name,
                     "path": full_path,
+                    "priority": 255,  # Default priority - user can edit in JSON
                     "categories": categories
                 })
     
