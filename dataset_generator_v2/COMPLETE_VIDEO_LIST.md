@@ -230,7 +230,7 @@ All videos follow the path structure:
 - All video paths are standardized
 - Multi-category videos use different random crops per category
 - Each extraction creates: 1× GT + 1× LR_5frames + 1× LR_7frames
-- Scene validation ensures no scene cuts
+- All frames accepted including scenes with cuts (realistic training data)
 - HDR tonemap applied for proper color conversion
 - Checkpoint system allows resumption at any point
 

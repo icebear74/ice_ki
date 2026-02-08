@@ -188,8 +188,7 @@ Output: /mnt/data/training/dataset/
 ### Retry Logic
 ```
 Attempt 1: Failed (only 5 frames extracted, need 7)
-Attempt 2: Failed (scene cut detected, diff: 78.3)
-Attempt 3: Success (scene stable, diff: 18.2) ✓
+Attempt 2: Success (all 7 frames valid) ✓
 ```
 
 ### Checkpoint Saves
