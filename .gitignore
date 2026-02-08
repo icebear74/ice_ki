@@ -62,3 +62,4 @@ vsr_plus_plus/config.py
 tmp/
 temp/
 *.backup
+vsr_plusplus_NEU/config.py
