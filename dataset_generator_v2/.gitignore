@@ -1,2 +1,14 @@
 generate_complete_config.py
 # Original structure restored
+
+# Backup files
+*.old
+*.bak
+
+# State files (will be generated)
+generation_state.json
+
+# Temp directories
+temp/
+__pycache__/
+*.pyc
