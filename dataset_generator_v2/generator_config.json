@@ -13,13 +13,15 @@
     "lr_versions": [
       "5frames",
       "7frames"
-    ]
+    ],
+    "enable_debug_logging": true,
+    "debug_log_path": "/mnt/data/training/dataset/generator_debug.log"
   },
   "category_targets": {
-    "master": 100000,
-    "universal": 50000,
-    "space": 50000,
-    "toon": 30000
+    "master": 300000,
+    "universal": 350000,
+    "space": 160000,
+    "toon": 90000
   },
   "format_config": {
     "master": {
@@ -1349,7 +1351,6 @@
     {
       "name": "Zurück In Die Zukunft - Teil 3",
       "path": "/mnt/data/video/filme/UHD/Zurück In Die Zukunft - Teil 3/Zurück In Die Zukunft - Teil 3.mkv",
-      "priority": 2,
       "categories": {
         "master": 0.25,
         "universal": 0.75
@@ -1406,7 +1407,6 @@
     {
       "name": "Zurück In Die Zukunft",
       "path": "/mnt/data/video/filme/UHD/Zurück In Die Zukunft/Zurück In Die Zukunft.mkv",
-      "priority": 2,
       "categories": {
         "master": 0.25,
         "universal": 0.75
@@ -2143,7 +2143,6 @@
     {
       "name": "Zurück In Die Zukunft - Teil 2",
       "path": "/mnt/data/video/filme/UHD/Zurück In Die Zukunft - Teil 2/Back to the Future Part II.mkv",
-      "priority": 2,
       "categories": {
         "master": 0.25,
         "universal": 0.75
@@ -2152,7 +2151,6 @@
     {
       "name": "Rambo 2",
       "path": "/mnt/data/video/filme/UHD/Rambo 2/Rambo 2.mkv",
-      "priority": 3,
       "categories": {
         "master": 0.25,
         "universal": 0.75
@@ -2185,7 +2183,6 @@
     {
       "name": "ES - Kapitel 1 (IT - Episode 1)",
       "path": "/mnt/data/video/filme/UHD/ES - Kapitel 1 (IT - Episode 1)/IT_t00.mkv",
-      "priority": 4,
       "categories": {
         "master": 0.25,
         "universal": 0.75
@@ -2274,7 +2271,6 @@
     {
       "name": "Rocky",
       "path": "/mnt/data/video/filme/UHD/Rocky  (1976)/Rocky (1976).mkv",
-      "priority": 4,
       "categories": {
         "master": 0.25,
         "universal": 0.75
@@ -2307,7 +2303,6 @@
     {
       "name": "Avatar 2 - The Way Of Water",
       "path": "/mnt/data/video/filme/UHD/Avatar 2 - The Way Of Water (2023)/Avatar 2 - The Way Of Water (2023).mkv",
-      "priority": 3,
       "categories": {
         "master": 0.2,
         "universal": 0.2,
@@ -2519,7 +2514,6 @@
     {
       "name": "Forrest Gump",
       "path": "/mnt/data/video/filme/UHD/Forrest Gump/Forrest Gump.mkv",
-      "priority": 1,
       "categories": {
         "master": 0.25,
         "universal": 0.75
@@ -3864,17 +3858,14 @@
     {
       "name": "SerieUHD - S01E02 (002) - Die Berge (Mountains)",
       "path": "/mnt/data/video/SerieUHD/Planet Earth 2 (UHD HDR Referenz)/S01E02 (002) - Die Berge (Mountains).mkv",
-      "priority": 0,
       "categories": {
         "master": 0.25,
         "universal": 0.75
-        
       }
     },
     {
       "name": "SerieUHD - S01E01 (001) - Inseln (Islands)",
       "path": "/mnt/data/video/SerieUHD/Planet Earth 2 (UHD HDR Referenz)/S01E01 (001) - Inseln (Islands).mkv",
-      "priority": 0,
       "categories": {
         "master": 0.25,
         "universal": 0.75
@@ -3883,7 +3874,6 @@
     {
       "name": "SerieUHD - S01E04 (004) - Wüsten (Deserts)",
       "path": "/mnt/data/video/SerieUHD/Planet Earth 2 (UHD HDR Referenz)/S01E04 (004) - Wüsten (Deserts).mkv",
-      "priority": 0,
       "categories": {
         "master": 0.25,
         "universal": 0.75
@@ -3892,7 +3882,6 @@
     {
       "name": "SerieUHD - S01E05 (005) - Grasland (Grassland)",
       "path": "/mnt/data/video/SerieUHD/Planet Earth 2 (UHD HDR Referenz)/S01E05 (005) - Grasland (Grassland).mkv",
-      "priority": 0,
       "categories": {
         "master": 0.25,
         "universal": 0.75
@@ -3901,7 +3890,6 @@
     {
       "name": "SerieUHD - S01E06 (006) - Städte (Cities)",
       "path": "/mnt/data/video/SerieUHD/Planet Earth 2 (UHD HDR Referenz)/S01E06 (006) - Städte (Cities).mkv",
-      "priority": 0,
       "categories": {
         "master": 0.25,
         "universal": 0.75
@@ -3910,7 +3898,6 @@
     {
       "name": "SerieUHD - S01E03 (003) - Dschungel (Jungles)",
       "path": "/mnt/data/video/SerieUHD/Planet Earth 2 (UHD HDR Referenz)/S01E03 (003) - Dschungel (Jungles).mkv",
-      "priority": 0,
       "categories": {
         "master": 0.25,
         "universal": 0.75
