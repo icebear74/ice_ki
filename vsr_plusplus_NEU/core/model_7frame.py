@@ -31,7 +31,7 @@ class VSRBidirectional_7frames_3x(nn.Module):
     
     Architecture matches VSRBidirectional_3x for realistic memory measurements.
     """
-    def __init__(self, n_feats=64, n_blocks=24):
+    def __init__(self, n_feats=72, n_blocks=26):
         super().__init__()
         self.n_feats = n_feats
         self.n_blocks = n_blocks
