@@ -22,6 +22,8 @@ import time
 
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Add current directory to path for local config.py
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from vsr_plus_plus.core.model import VSRBidirectional_3x
 from vsr_plus_plus.core.loss import HybridLoss
@@ -35,7 +37,8 @@ from vsr_plus_plus.systems.adaptive_system import AdaptiveSystem
 from vsr_plus_plus.systems.runtime_config import RuntimeConfigManager
 
 # Import manual configuration
-import vsr_plus_plus.config as cfg
+# Import from local directory (config.py is not in repo due to .gitignore)
+import config as cfg
 
 # ANSI colors
 C_GREEN = "\033[92m"
