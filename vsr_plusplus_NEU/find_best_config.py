@@ -2,6 +2,18 @@
 """
 Automated Config Finder for VSR++ Training
 Tests all combinations of parameters to find optimal config.
+
+IMPORTANT: This script uses HybridLoss (including VGG16 perceptual loss) to accurately
+measure memory usage as it will be in actual training. The perceptual loss component
+adds approximately 400-650MB of VRAM usage, which is critical for realistic testing.
+
+Memory components tested:
+- Model parameters and gradients
+- Optimizer state (Adam: 2x parameters)
+- Input/output tensors
+- HybridLoss with VGG16 perceptual network
+- Multi-scale and gradient loss computations
+- Gradient accumulation
 """
 
 import os
@@ -17,6 +29,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from core.model_5frame import VSRBidirectional_5frames_3x
 from core.model_7frame import VSRBidirectional_7frames_3x
+from core.loss import HybridLoss
 
 # Setup dual logging (screen + file)
 LOG_FILE = "config_test_results.log"
@@ -123,12 +136,26 @@ def test_config(frames, batch_size, n_blocks, n_feats, gt_size, precision, logge
         # Create model
         model = create_model(frames, n_feats, n_blocks, precision)
         optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-        criterion = nn.L1Loss()
+        
+        # Use HybridLoss to match actual training (includes VGG16 perceptual loss)
+        # This significantly increases memory usage compared to simple L1Loss
+        criterion = HybridLoss(
+            l1_weight=0.6,
+            ms_weight=0.2,
+            grad_weight=0.2,
+            perceptual_weight=0.1  # Enable perceptual loss (VGG16) for realistic memory test
+        )
+        if precision == 'float16':
+            # VGG stays in FP32 for stability
+            criterion = criterion.cuda()
+        else:
+            criterion = criterion.cuda()
         
         # Warmup (1 iteration)
         lr_input, gt_target = create_dummy_batch(frames, batch_size, lr_size, gt_size, precision)
         output = model(lr_input)
-        loss = criterion(output, gt_target)
+        loss_dict = criterion(output, gt_target)
+        loss = loss_dict['total']  # HybridLoss returns a dict
         loss.backward()
         optimizer.zero_grad()
         
@@ -146,7 +173,8 @@ def test_config(frames, batch_size, n_blocks, n_feats, gt_size, precision, logge
                 lr_input, gt_target = create_dummy_batch(frames, batch_size, lr_size, gt_size, precision)
                 
                 output = model(lr_input)
-                loss = criterion(output, gt_target) / accumulation
+                loss_dict = criterion(output, gt_target)
+                loss = loss_dict['total'] / accumulation  # HybridLoss returns a dict
                 loss.backward()
             
             optimizer.step()
