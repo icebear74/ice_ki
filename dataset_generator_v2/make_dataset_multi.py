@@ -559,7 +559,7 @@ class DatasetGeneratorV2:
                 elif hasattr(self, '_should_update_display') and self._should_update_display():
                     # Use professional box-drawing GUI
                     try:
-                        from .utils.ui_display import draw_dataset_generator_ui
+                        from utils.ui_display import draw_dataset_generator_ui
                         draw_dataset_generator_ui(self)
                     except:
                         pass  # Ignore display errors
@@ -934,7 +934,7 @@ Continue? Processing will start in 5 seconds... (Ctrl+C to cancel)
         
         # Clear screen once at start for clean display (professional way)
         if RICH_AVAILABLE:
-            from .utils.ui_terminal import clear_and_home, hide_cursor
+            from utils.ui_terminal import clear_and_home, hide_cursor
             clear_and_home()
             hide_cursor()
         
@@ -982,7 +982,7 @@ Continue? Processing will start in 5 seconds... (Ctrl+C to cancel)
                     self.live_display.update(self._build_complete_layout())
                 elif RICH_AVAILABLE:
                     # Use professional box-drawing GUI (vsr_plusplus style)
-                    from .utils.ui_display import draw_dataset_generator_ui
+                    from utils.ui_display import draw_dataset_generator_ui
                     draw_dataset_generator_ui(self)
                 else:
                     print(self._build_simple_status())
@@ -994,7 +994,7 @@ Continue? Processing will start in 5 seconds... (Ctrl+C to cancel)
             
             # Show cursor again
             if RICH_AVAILABLE:
-                from .utils.ui_terminal import show_cursor
+                from utils.ui_terminal import show_cursor
                 show_cursor()
             
             # Stop keyboard listener
