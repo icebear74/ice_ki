@@ -15,6 +15,7 @@ import re
 import time
 import signal
 import threading
+import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Tuple, Optional
 from datetime import datetime, timedelta
@@ -58,6 +59,12 @@ class DatasetGeneratorV2:
         self.videos = self.config['videos']
         self.format_config = self.config.get('format_config', {})
         
+        # Initialize logger
+        self.logger = self._setup_logger()
+        
+        # Make logger available globally for exception handler
+        sys.logger = self.logger
+        
         # Sort videos by priority (ascending: 0 first, 255 last)
         # Within same priority, randomize order using pre-generated random values
         random.seed(42)  # Reproducible randomization
@@ -68,6 +75,10 @@ class DatasetGeneratorV2:
         # Clean up temporary sort keys
         for video in self.videos:
             video.pop('_sort_random', None)
+        
+        # Log initialization info
+        self.logger.info(f"Initializing generator with {len(self.videos)} videos")
+        self.logger.debug(f"First 5 videos: {[v['name'] for v in self.videos[:5]]}")
         
         # Initialize paths
         self.base_dir = self.settings['output_base_dir']
@@ -139,6 +150,49 @@ class DatasetGeneratorV2:
         # Setup signal handlers
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
+    
+    def _setup_logger(self) -> logging.Logger:
+        """Setup and configure the debug logger."""
+        logger = logging.getLogger('DatasetGeneratorV2')
+        
+        # Check if logging is enabled
+        enable_logging = self.settings.get('enable_debug_logging', True)
+        
+        if not enable_logging:
+            # Use NullHandler if logging is disabled
+            logger.addHandler(logging.NullHandler())
+            logger.setLevel(logging.CRITICAL)
+            return logger
+        
+        # Set logging level
+        logger.setLevel(logging.DEBUG)
+        
+        # Clear any existing handlers
+        logger.handlers = []
+        
+        # Get log file path from config
+        log_path = self.settings.get('debug_log_path', '/mnt/data/training/dataset/generator_debug.log')
+        
+        # Create log directory if it doesn't exist
+        log_dir = os.path.dirname(log_path)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+        
+        # Create file handler
+        file_handler = logging.FileHandler(log_path, mode='a')
+        file_handler.setLevel(logging.DEBUG)
+        
+        # Create formatter
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        file_handler.setFormatter(formatter)
+        
+        # Add handler to logger
+        logger.addHandler(file_handler)
+        
+        # Prevent propagation to root logger
+        logger.propagate = False
+        
+        return logger
     
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals gracefully."""
@@ -368,6 +422,9 @@ class DatasetGeneratorV2:
                 os.path.join(thread_temp, 'frame_%d.png')
             ]
             
+            # Log FFmpeg command
+            self.logger.debug(f"FFmpeg command: {' '.join(cmd)}")
+            
             subprocess.run(cmd, capture_output=True, check=False, timeout=30)
             
             # Load all 7 frames
@@ -499,8 +556,12 @@ class DatasetGeneratorV2:
             frames = self.extract_full_resolution_frames(video_path, timestamp, thread_id)
             
             if frames is None:
+                self.logger.debug(f"Extracted 0 frames on attempt {attempt + 1}")
                 timestamp = (timestamp + self.settings['retry_skip_seconds']) % duration
                 continue
+            
+            # Log successful extraction
+            self.logger.debug(f"Extracted {len(frames)} frames on attempt {attempt + 1}")
             
             # Process ALL categories from these frames
             success = self.process_all_categories_from_frames(
@@ -520,111 +581,133 @@ class DatasetGeneratorV2:
         video_name = video_info['name']
         categories = video_info['categories']
         
-        # Check if video exists
-        if not os.path.exists(video_path):
-            if RICH_AVAILABLE:
-                self.console.print(f"[red]⚠️  Skipping '{video_name}': File not found[/red]")
-                self.console.print(f"[dim]    Path: {video_path}[/dim]")
-            else:
-                print(f"⚠️  Skipping '{video_name}': File not found")
-                print(f"    Path: {video_path}")
+        try:
+            self.logger.debug(f"process_video({video_idx}): {video_name}")
+            self.logger.debug(f"Video path: {video_path}")
+            self.logger.debug(f"Video exists: {os.path.exists(video_path)}")
             
+            # Check if video exists
+            if not os.path.exists(video_path):
+                self.logger.error(f"Video {video_idx} not found: {video_path}")
+                if RICH_AVAILABLE:
+                    self.console.print(f"[red]⚠️  Skipping '{video_name}': File not found[/red]")
+                    self.console.print(f"[dim]    Path: {video_path}[/dim]")
+                else:
+                    print(f"⚠️  Skipping '{video_name}': File not found")
+                    print(f"    Path: {video_path}")
+                
+                return {
+                    'success': False,
+                    'video_name': video_name,
+                    'message': 'Video file not found'
+                }
+            
+            # Get video info
+            fps, duration = self.get_video_info(video_path)
+            
+            # Calculate total weighted extractions for this video
+            total_weight = sum(categories.values())
+            total_extractions = int(self.settings['base_frame_limit'] * total_weight)
+            
+            self.logger.debug(f"Video {video_idx}: total_extractions={total_extractions}, duration={duration}s")
+            
+            # Update tracker
+            self.tracker.update_progress(
+                current_video_index=video_idx,
+                current_video_path=video_path
+            )
+            self.tracker.update_video_checkpoint(
+                video_idx, 
+                "in_progress",
+                extractions_done=0,
+                extractions_target=total_extractions
+            )
+            self.tracker.save()
+            
+            # Process extractions
+            success_count = 0
+            self.current_video_name = video_name
+            
+            for frame_idx in range(total_extractions):
+                if not self.running:
+                    # Save checkpoint before breaking on stop
+                    self.tracker.update_video_checkpoint(
+                        video_idx,
+                        "interrupted",
+                        last_frame_idx=frame_idx,
+                        extractions_done=frame_idx,
+                        extractions_target=total_extractions
+                    )
+                    self.tracker.save()
+                    break
+                
+                while self.paused:
+                    time.sleep(0.1)
+                
+                # Log extraction progress every 100 frames
+                if frame_idx % 100 == 0:
+                    self.logger.debug(f"Video {video_idx}: extraction {frame_idx}/{total_extractions}")
+                
+                success, attempts = self.extract_with_retry(
+                    video_path, video_name, categories, frame_idx, duration
+                )
+                
+                if success:
+                    success_count += 1
+                    self.success_count += 1
+                
+                self.extractions_count += 1
+                
+                # Update checkpoint EVERY extraction for instant resume capability
+                # Save to disk every 5 extractions to balance performance and safety
+                self.tracker.update_video_checkpoint(
+                    video_idx,
+                    "in_progress",
+                    last_frame_idx=frame_idx,
+                    extractions_done=frame_idx + 1,
+                    extractions_target=total_extractions
+                )
+                
+                if frame_idx % 5 == 0:  # Save every 5 extractions (was 10)
+                    self.tracker.save()
+                    
+                    # Update live display if enabled
+                    if hasattr(self, 'live_display') and self.live_display and self._should_update_display():
+                        try:
+                            self.live_display.update(self._build_complete_layout())
+                        except:
+                            pass  # Ignore display errors
+                    elif hasattr(self, '_should_update_display') and self._should_update_display():
+                        # Use professional box-drawing GUI
+                        try:
+                            from utils.ui_display import draw_dataset_generator_ui
+                            draw_dataset_generator_ui(self)
+                        except:
+                            pass  # Ignore display errors
+            
+            # Mark video as completed
+            self.tracker.update_video_checkpoint(video_idx, "completed")
+            for category in categories.keys():
+                self.tracker.increment_category_videos(category)
+            
+            self.tracker.save()
+            
+            # Log completion
+            self.logger.info(f"Video {video_idx} COMPLETED: {success_count}/{total_extractions} successful")
+            
+            return {
+                'success': True,
+                'video_name': video_name,
+                'extractions': total_extractions,
+                'success_count': success_count
+            }
+        except Exception as e:
+            self.logger.error(f"Exception in process_video({video_idx}): {e}", exc_info=True)
             return {
                 'success': False,
                 'video_name': video_name,
-                'message': 'Video file not found'
+                'message': f'Exception: {e}'
             }
-        
-        # Get video info
-        fps, duration = self.get_video_info(video_path)
-        
-        # Calculate total weighted extractions for this video
-        total_weight = sum(categories.values())
-        total_extractions = int(self.settings['base_frame_limit'] * total_weight)
-        
-        # Update tracker
-        self.tracker.update_progress(
-            current_video_index=video_idx,
-            current_video_path=video_path
-        )
-        self.tracker.update_video_checkpoint(
-            video_idx, 
-            "in_progress",
-            extractions_done=0,
-            extractions_target=total_extractions
-        )
-        self.tracker.save()
-        
-        # Process extractions
-        success_count = 0
-        self.current_video_name = video_name
-        
-        for frame_idx in range(total_extractions):
-            if not self.running:
-                # Save checkpoint before breaking on stop
-                self.tracker.update_video_checkpoint(
-                    video_idx,
-                    "interrupted",
-                    last_frame_idx=frame_idx,
-                    extractions_done=frame_idx,
-                    extractions_target=total_extractions
-                )
-                self.tracker.save()
-                break
-            
-            while self.paused:
-                time.sleep(0.1)
-            
-            success, attempts = self.extract_with_retry(
-                video_path, video_name, categories, frame_idx, duration
-            )
-            
-            if success:
-                success_count += 1
-                self.success_count += 1
-            
-            self.extractions_count += 1
-            
-            # Update checkpoint EVERY extraction for instant resume capability
-            # Save to disk every 5 extractions to balance performance and safety
-            self.tracker.update_video_checkpoint(
-                video_idx,
-                "in_progress",
-                last_frame_idx=frame_idx,
-                extractions_done=frame_idx + 1,
-                extractions_target=total_extractions
-            )
-            
-            if frame_idx % 5 == 0:  # Save every 5 extractions (was 10)
-                self.tracker.save()
-                
-                # Update live display if enabled
-                if hasattr(self, 'live_display') and self.live_display and self._should_update_display():
-                    try:
-                        self.live_display.update(self._build_complete_layout())
-                    except:
-                        pass  # Ignore display errors
-                elif hasattr(self, '_should_update_display') and self._should_update_display():
-                    # Use professional box-drawing GUI
-                    try:
-                        from utils.ui_display import draw_dataset_generator_ui
-                        draw_dataset_generator_ui(self)
-                    except:
-                        pass  # Ignore display errors
-        
-        # Mark video as completed
-        self.tracker.update_video_checkpoint(video_idx, "completed")
-        for category in categories.keys():
-            self.tracker.increment_category_videos(category)
-        
-        self.tracker.save()
-        
-        return {
-            'success': True,
-            'video_name': video_name,
-            'extractions': total_extractions,
-            'success_count': success_count
-        }
     
     def _get_terminal_width(self) -> int:
         """Get terminal width, with fallback to default."""
@@ -1005,37 +1088,66 @@ Continue? Processing will start in 5 seconds... (Ctrl+C to cancel)
                     self.console.print(f"[yellow]⚠ Live display failed ({e}), using professional box GUI[/yellow]")
 
         
+        # Log main loop start
+        self.logger.info("=== STARTING GENERATOR ===")
+        self.logger.info(f"Resume from video index: {resume_idx}")
+        
         try:
             # Process videos
+            last_processed_idx = resume_idx - 1  # Track the last successfully processed video
             for idx in range(resume_idx, len(self.videos)):
+                self.logger.debug(f"--- Loop iteration {idx} / {len(self.videos)} ---")
+                
                 if not self.running:
+                    self.logger.warning(f"Generator stopped by self.running=False at video {idx}")
                     break
                 
                 video_info = self.videos[idx]
+                self.logger.info(f"Processing video {idx}: {video_info['name']}")
                 
                 # Skip if already completed
                 if self.tracker.is_video_completed(idx):
+                    self.logger.info(f"Video {idx} already completed - SKIPPING")
                     continue
                 
-                # Process video
-                result = self.process_video(idx, video_info)
-                
-                # Update progress
-                self.tracker.update_progress(completed_videos=idx + 1)
-                self.tracker.calculate_disk_usage(self.base_dir)
-                self.tracker.save()
-                
-                # Update live display or print status
-                if self.live_display:
-                    self.live_display.update(self._build_complete_layout())
-                elif RICH_AVAILABLE:
-                    # Use professional box-drawing GUI (vsr_plusplus style)
-                    from utils.ui_display import draw_dataset_generator_ui
-                    draw_dataset_generator_ui(self)
-                else:
-                    print(self._build_simple_status())
-        
+                try:
+                    # Process video
+                    self.logger.debug(f"Calling process_video() for video {idx}")
+                    result = self.process_video(idx, video_info)
+                    self.logger.debug(f"process_video() returned: {result}")
+                    
+                    # Update progress
+                    self.tracker.update_progress(completed_videos=idx + 1)
+                    self.tracker.calculate_disk_usage(self.base_dir)
+                    self.tracker.save()
+                    
+                    # Log successful completion
+                    self.logger.info(f"Video {idx} completed successfully")
+                    self.logger.debug(f"Moving to next video (idx={idx+1})")
+                    last_processed_idx = idx  # Update last processed index
+                    
+                    # Update live display or print status
+                    if self.live_display:
+                        self.live_display.update(self._build_complete_layout())
+                    elif RICH_AVAILABLE:
+                        # Use professional box-drawing GUI (vsr_plusplus style)
+                        from utils.ui_display import draw_dataset_generator_ui
+                        draw_dataset_generator_ui(self)
+                    else:
+                        print(self._build_simple_status())
+                except Exception as e:
+                    self.logger.error(f"EXCEPTION in video {idx}: {type(e).__name__}: {e}", exc_info=True)
+                    # Continue to next video instead of crashing
+                    continue
+            
+            # Log main loop ended
+            videos_processed = last_processed_idx - resume_idx + 1 if last_processed_idx >= resume_idx else 0
+            self.logger.info(f"=== MAIN LOOP ENDED === (processed {videos_processed} videos, last index: {last_processed_idx})")
+        except Exception as e:
+            self.logger.critical(f"FATAL EXCEPTION in main loop: {type(e).__name__}: {e}", exc_info=True)
+            raise
         finally:
+            self.logger.info("Entering finally block - cleaning up")
             # Stop live display
             if self.live_display:
                 self.live_display.stop()
@@ -1051,6 +1163,7 @@ Continue? Processing will start in 5 seconds... (Ctrl+C to cancel)
                 self.input_thread.join(timeout=1)
         
         # Finalize
+        self.logger.info("Setting status to 'finished'")
         self.tracker.set_status("finished")
         self.tracker.save()
         
@@ -1058,6 +1171,15 @@ Continue? Processing will start in 5 seconds... (Ctrl+C to cancel)
             self.console.print("\n[bold green]✅ Dataset generation complete![/bold green]")
         else:
             print("\n✅ Dataset generation complete!")
+
+def exception_handler(exc_type, exc_value, exc_traceback):
+    """Log uncaught exceptions."""
+    if hasattr(sys, 'logger'):
+        sys.logger.critical("UNCAUGHT EXCEPTION", exc_info=(exc_type, exc_value, exc_traceback))
+    else:
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+
+sys.excepthook = exception_handler
 
 def main():
     """Main entry point."""

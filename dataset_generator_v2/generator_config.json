@@ -13,13 +13,15 @@
     "lr_versions": [
       "5frames",
       "7frames"
-    ]
+    ],
+    "enable_debug_logging": true,
+    "debug_log_path": "/mnt/data/training/dataset/generator_debug.log"
   },
   "category_targets": {
-    "master": 100000,
-    "universal": 50000,
-    "space": 50000,
-    "toon": 30000
+    "master": 300000,
+    "universal": 350000,
+    "space": 160000,
+    "toon": 90000
   },
   "format_config": {
     "master": {
