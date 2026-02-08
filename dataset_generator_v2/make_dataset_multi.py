@@ -391,23 +391,12 @@ class DatasetGeneratorV2:
             if os.path.exists(thread_temp):
                 shutil.rmtree(thread_temp, ignore_errors=True)
     
-    def validate_scene_stability(self, frames: List) -> bool:
-        """Check if scene is stable (not a cut/transition)."""
-        # Check difference between first and last frame
-        gray_first = cv2.cvtColor(frames[0], cv2.COLOR_BGR2GRAY)
-        gray_last = cv2.cvtColor(frames[6], cv2.COLOR_BGR2GRAY)
-        diff = cv2.absdiff(gray_first, gray_last).mean()
-        
-        return diff < self.settings['scene_diff_threshold']
-    
+
     def process_all_categories_from_frames(self, frames: List, categories: Dict[str, float], 
                                           video_name: str, frame_idx: int) -> bool:
         """Process all category patches from the same 7 full-resolution frames."""
         
-        # Validate scene stability once
-        if not self.validate_scene_stability(frames):
-            return False
-        
+        # Accept all frames (including scenes with cuts - realistic training data)
         all_success = True
         
         # Process each category with different random crops
