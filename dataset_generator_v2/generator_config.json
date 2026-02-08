@@ -16,10 +16,10 @@
     ]
   },
   "category_targets": {
-    "master": 300000,
-    "universal": 350000,
-    "space": 160000,
-    "toon": 90000
+    "master": 100000,
+    "universal": 50000,
+    "space": 50000,
+    "toon": 30000
   },
   "format_config": {
     "master": {
