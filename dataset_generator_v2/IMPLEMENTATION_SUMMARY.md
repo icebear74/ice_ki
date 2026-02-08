@@ -15,7 +15,7 @@ A comprehensive dataset generation system that creates training patches from UHD
    - Multi-category video processing
    - Dual LR generation (5-frame + 7-frame)
    - HDR tonemap support (from original generator)
-   - Scene validation and retry logic
+   - Frame validation and retry logic
    - Beautiful Rich-based TUI with live progress
    - Graceful shutdown with checkpoint saving
    - Resume capability from any point
@@ -144,7 +144,7 @@ scale=1920:1080:flags=lanczos
 ### Frame Extraction Process
 1. Extract 7 frames centered at timestamp
 2. Validate all frames (size, count, quality)
-3. Check scene stability (first vs last frame)
+3. Accept all frames (including scenes with cuts - realistic training data)
 4. For each category:
    - Select format based on distribution
    - Generate random crop position
@@ -339,7 +339,7 @@ The Multi-Category Dataset Generator v2.0 is a complete, production-ready system
 - **Flexibility**: Multi-category, dual LR formats
 - **Robustness**: Checkpoints, resume, error handling
 - **User-Friendly**: Beautiful GUI, live monitoring
-- **Quality**: HDR tonemap, scene validation
+- **Quality**: HDR tonemap, realistic training data with scene cuts
 - **Scalability**: 116+ videos, ~165,000 images
 - **Well-Documented**: Comprehensive guides and examples
 

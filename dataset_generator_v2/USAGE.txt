@@ -122,9 +122,9 @@ Generation Time: 5-7 days (with 12 workers)
   → Proper HDR-to-SDR conversion
   → High-quality patches
 
-✓ Smart Scene Validation
-  → Automatic detection of scene cuts
-  → Retry logic with different timestamps
+✓ Realistic Training Data
+  → Accepts all frames including scenes with cuts
+  → Model learns to handle cuts naturally
 
 ================================================================================
                          CONFIGURATION
@@ -135,7 +135,7 @@ Edit generator_config.json to customize:
 • base_frame_limit: Frames per video (default: 3000)
 • max_workers: Parallel extraction threads (default: 12)
 • output_base_dir: Output directory (default: /mnt/data/training/dataset)
-• scene_diff_threshold: Scene stability threshold (default: 45)
+• scene_diff_threshold: (Unused - kept for compatibility) (default: 45)
 • max_retry_attempts: Retries per extraction (default: 10)
 
 Add videos:
@@ -158,7 +158,6 @@ Add videos:
   → Check disk space (~450 GB free needed)
 
 • Low success rate
-  → Increase scene_diff_threshold
   → Increase max_retry_attempts
 
 • Resume not working
