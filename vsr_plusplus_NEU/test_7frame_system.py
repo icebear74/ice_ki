@@ -96,9 +96,9 @@ def test_runtime_config():
         # Update size distribution
         print("Updating size distribution...")
         success = manager.update_size_distribution({
-            'small_540': 0.70,
-            'medium_169': 0.30,
-            'large_720': 0.00
+            '540': 0.70,
+            '720_169': 0.30,
+            '720': 0.00
         })
         if success:
             print("✅ Updated successfully\n")
@@ -149,9 +149,9 @@ def test_size_tracking():
         
         # Set targets
         distribution = {
-            'small_540': 0.65,
-            'medium_169': 0.35,
-            'large_720': 0.00,
+            '540': 0.65,
+            '720_169': 0.35,
+            '720': 0.00,
         }
         tracker.update_targets(distribution, total_target=1000)
         
@@ -159,9 +159,9 @@ def test_size_tracking():
         # Simulate training
         for step in range(1, 51):
             if step % 2 == 0:
-                tracker.record_batch('small_540', batch_size=1, step=step)
+                tracker.record_batch('540', batch_size=1, step=step)
             else:
-                tracker.record_batch('medium_169', batch_size=1, step=step)
+                tracker.record_batch('720_169', batch_size=1, step=step)
         
         # Print summary
         print(tracker.get_summary())
@@ -216,9 +216,9 @@ def test_terminal_ui():
     # Test compact stats
     size_stats = {
         'size_stats': {
-            'small_540': {'images_trained': 650, 'target_images': 650, 'percentage_complete': 100.0},
-            'medium_169': {'images_trained': 200, 'target_images': 350, 'percentage_complete': 57.1},
-            'large_720': {'images_trained': 0, 'target_images': 0, 'percentage_complete': 0.0},
+            '540': {'images_trained': 650, 'target_images': 650, 'percentage_complete': 100.0},
+            '720_169': {'images_trained': 200, 'target_images': 350, 'percentage_complete': 57.1},
+            '720': {'images_trained': 0, 'target_images': 0, 'percentage_complete': 0.0},
         }
     }
     

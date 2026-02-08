@@ -39,7 +39,7 @@ class SizeTracker:
         
         # Default size categories
         if size_categories is None:
-            size_categories = ['small_540', 'medium_169', 'large_720']
+            size_categories = ['540', '720_169', '720']
         
         self.size_categories = size_categories
         
@@ -109,7 +109,7 @@ class SizeTracker:
         Record a batch of images trained for a size category
         
         Args:
-            size_category: Size category ('small_540', 'medium_169', 'large_720')
+            size_category: Size category ('540', '720_169', '720')
             batch_size: Number of images in batch
             step: Current training step
         """
@@ -318,9 +318,9 @@ if __name__ == "__main__":
     
     # Set targets based on distribution
     distribution = {
-        'small_540': 0.65,
-        'medium_169': 0.35,
-        'large_720': 0.00,
+        '540': 0.65,
+        '720_169': 0.35,
+        '720': 0.00,
     }
     tracker.update_targets(distribution, total_target=10000)
     
@@ -329,13 +329,13 @@ if __name__ == "__main__":
     for step in range(1, 101):
         # Simulate batches
         if step % 2 == 0:
-            tracker.record_batch('small_540', batch_size=1, step=step)
+            tracker.record_batch('540', batch_size=1, step=step)
         else:
-            tracker.record_batch('medium_169', batch_size=1, step=step)
+            tracker.record_batch('720_169', batch_size=1, step=step)
     
     # Print summary
     print(tracker.get_summary())
     
     # Get specific stats
-    print("\nSmall 540 stats:")
-    print(tracker.get_stats('small_540'))
+    print("\n540 stats:")
+    print(tracker.get_stats('540'))

@@ -414,7 +414,7 @@ def print_size_distribution_panel(size_stats, ui_width=120):
     print_separator(ui_width, style='thin')
     
     # Fixed category order for consistency
-    category_order = ['small_540', 'medium_169', 'large_720']
+    category_order = ['540', '720_169', '720']
     
     # Print each size category in fixed order
     for category in category_order:
@@ -460,7 +460,7 @@ def format_size_stats_compact(size_stats):
     stats = size_stats['size_stats']
     
     # Fixed category order for consistency
-    category_order = ['small_540', 'medium_169', 'large_720']
+    category_order = ['540', '720_169', '720']
     parts = []
     
     for category in category_order:
