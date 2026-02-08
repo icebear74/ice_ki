@@ -64,6 +64,10 @@ class DatasetGeneratorV2:
         self.tracker = ProgressTracker(self.status_file)
         self.tracker.update_progress(total_videos=len(self.videos))
         
+        # Initialize category stats from config
+        if 'category_targets' in self.config:
+            self.tracker.initialize_categories(self.config['category_targets'])
+        
         # Runtime state
         self.workers = self.settings['max_workers']
         self.running = True
@@ -568,7 +572,7 @@ class DatasetGeneratorV2:
         }
     
     def build_gui_layout(self) -> tuple:
-        """Build the beautiful GUI layout using rich."""
+        """Build the beautiful GUI layout using rich with progress bars."""
         if not RICH_AVAILABLE:
             return self._build_simple_status(), None, None, None
         
@@ -580,14 +584,14 @@ class DatasetGeneratorV2:
         total_videos = self.tracker.status['progress']['total_videos']
         completed_videos = self.tracker.status['progress']['completed_videos']
         
-        # ETA calculation
+        # ETA calculation for overall progress
         if completed_videos > 0:
             avg_time_per_video = elapsed / completed_videos
             remaining_videos = total_videos - completed_videos
             eta_seconds = avg_time_per_video * remaining_videos
-            eta_str = str(timedelta(seconds=int(eta_seconds)))
+            overall_eta_str = str(timedelta(seconds=int(eta_seconds)))
         else:
-            eta_str = "Calculating..."
+            overall_eta_str = "Calculating..."
         
         # Extraction speed
         if elapsed > 0:
@@ -596,105 +600,119 @@ class DatasetGeneratorV2:
         else:
             speed_str = "Calculating..."
         
-        # Build header
-        header = Panel(
-            "[bold cyan]DATASET GENERATOR v2.0 - MULTI-CATEGORY[/bold cyan]",
-            style="bold white on blue"
+        # ===== OVERALL PROGRESS BAR =====
+        from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, TaskProgressColumn
+        
+        overall_progress = Progress(
+            TextColumn("[bold blue]{task.description}"),
+            BarColumn(bar_width=40),
+            TaskProgressColumn(),
+            TextColumn("•"),
+            TimeRemainingColumn(),
+        )
+        overall_task = overall_progress.add_task(
+            "Overall Progress", 
+            total=total_videos if total_videos > 0 else 100,
+            completed=completed_videos
         )
         
-        # Overall progress section
+        # Build prominent header with current movie
+        current_movie_name = self.current_video_name if self.current_video_name else "Initializing..."
+        header = Panel(
+            f"[bold yellow]🎬 CURRENT: {current_movie_name[:70]}[/bold yellow]\n"
+            f"[bold cyan]⚙️  CPU CORES: {self.workers}[/bold cyan] • "
+            f"[bold green]⚡ SPEED: {speed_str}[/bold green]",
+            title="[bold white on blue] DATASET GENERATOR v2.0 - LIVE ",
+            border_style="bold blue"
+        )
+        
+        # Overall progress section with bar
         completion_pct = (completed_videos/total_videos*100) if total_videos > 0 else 0
         overall = f"""[bold]📊 OVERALL PROGRESS[/bold]
-├─ Total Videos: {total_videos}
-├─ Completed: {completed_videos} ({completion_pct:.1f}%)
-├─ Current: {self.current_video_name[:50]}
+├─ Videos: {completed_videos}/{total_videos} ({completion_pct:.1f}%)
 ├─ Remaining: {total_videos - completed_videos} videos
-├─ Elapsed: {elapsed_str}
-├─ ETA: {eta_str}
-├─ Speed: {speed_str}
-└─ Workers: {self.workers}
+├─ Elapsed: {elapsed_str} | ETA: {overall_eta_str}
+├─ Total Extractions: {self.extractions_count:,}
+├─ Successful: {self.success_count:,} ({(self.success_count/self.extractions_count*100) if self.extractions_count > 0 else 0:.1f}%)
+└─ Status: {'[green]●RUNNING[/green]' if not self.paused else '[yellow]●PAUSED[/yellow]'}
 """
         
-        # Current video section
+        # Current video section with progress bar
         checkpoint = self.tracker.get_video_checkpoint(current_idx)
         if checkpoint and checkpoint.get('status') == 'in_progress':
             done = checkpoint.get('extractions_done', 0)
             target = checkpoint.get('extractions_target', 1)
             progress_pct = (done / target * 100) if target > 0 else 0
-            success_rate = (self.success_count / self.extractions_count * 100) if self.extractions_count > 0 else 0
             
-            # Create a visual progress bar
-            bar_width = 30
-            filled = int(progress_pct / 100 * bar_width)
-            bar = "█" * filled + "░" * (bar_width - filled)
+            # Create a Rich progress bar for current video
+            video_progress = Progress(
+                TextColumn("[cyan]{task.description}"),
+                BarColumn(bar_width=40),
+                TaskProgressColumn(),
+            )
+            video_task = video_progress.add_task(
+                f"{self.current_video_name[:40]}", 
+                total=target,
+                completed=done
+            )
             
-            current_video = f"""[bold]🎬 CURRENT VIDEO[/bold]
-├─ Name: {self.current_video_name[:60]}
-├─ Path: ...{self.tracker.status['progress']['current_video_path'][-50:]}
-├─ Extractions: {done} / {target} ({progress_pct:.1f}%)
-├─ Progress: [{bar}] {progress_pct:.0f}%
-├─ Success Rate: {success_rate:.1f}%
-├─ Total Extractions: {self.extractions_count}
-├─ Successful: {self.success_count}
-└─ Status: {'[green]Running[/green]' if self.running else '[red]Stopped[/red]'}
-"""
+            current_video = video_progress
         else:
-            current_video = "[bold]🎬 CURRENT VIDEO[/bold]\n└─ Initializing..."
+            current_video = Text("Waiting for next video...", style="dim")
         
-        # Category progress table
-        table = Table(title="📦 CATEGORY PROGRESS", show_header=True, header_style="bold magenta")
-        table.add_column("Category", style="cyan", width=12)
-        table.add_column("Videos", justify="right")
-        table.add_column("Images", justify="right")
-        table.add_column("Target", justify="right")
-        table.add_column("Progress", width=12)
+        # ===== CATEGORY PROGRESS BARS =====
+        category_progress = Progress(
+            TextColumn("[bold]{task.description}", justify="left", style="cyan"),
+            BarColumn(bar_width=30),
+            TaskProgressColumn(),
+            TextColumn("[bold green]Images:"),
+            TextColumn("[green]{task.fields[images]:>8,}"),
+            TextColumn("[bold yellow]ETA:"),
+            TextColumn("[yellow]{task.fields[eta]}"),
+        )
         
-        for cat_name in self.config.get('category_targets', {}).keys():
-            stats = self.tracker.status['category_stats'][cat_name]
-            videos = stats['videos_processed']
-            images = stats['images_created']
-            target = stats['target']
-            progress = (images / target * 100) if target > 0 else 0
+        for cat_name in sorted(self.config.get('category_targets', {}).keys()):
+            stats = self.tracker.status['category_stats'].get(cat_name, {})
+            images = stats.get('images_created', 0)
+            target = stats.get('target', 1)
             
-            # Progress bar
-            filled = int(progress / 10)
-            bar = "█" * filled + "░" * (10 - filled)
+            # Calculate ETA for this category
+            if images > 0 and elapsed > 0:
+                rate = images / elapsed
+                remaining = target - images
+                eta_secs = remaining / rate if rate > 0 else 0
+                eta_str = str(timedelta(seconds=int(eta_secs))) if eta_secs > 0 else "Complete"
+            else:
+                eta_str = "Calculating..."
             
-            table.add_row(
-                cat_name.upper(),
-                str(videos),
-                f"{images:,}",
-                f"{target:,}",
-                f"{bar} {progress:.1f}%"
+            category_progress.add_task(
+                f"{cat_name.upper():12s}",
+                total=target,
+                completed=images,
+                images=images,
+                eta=eta_str
             )
         
         # Disk usage
-        total_disk = sum(s['disk_usage_gb'] for s in self.tracker.status['category_stats'].values())
+        total_disk = sum(s.get('disk_usage_gb', 0) for s in self.tracker.status['category_stats'].values())
         disk_lines = ["[bold]💾 DISK USAGE[/bold]"]
-        categories = list(self.config.get('category_targets', {}).keys())
+        categories = sorted(self.config.get('category_targets', {}).keys())
         for i, cat_name in enumerate(categories):
-            usage = self.tracker.status['category_stats'][cat_name]['disk_usage_gb']
+            usage = self.tracker.status['category_stats'].get(cat_name, {}).get('disk_usage_gb', 0)
             prefix = "├─"
-            disk_lines.append(f"{prefix} {cat_name.upper()}: {usage:.1f} GB")
-        disk_lines.append(f"└─ Total: {total_disk:.1f} GB")
+            disk_lines.append(f"{prefix} {cat_name.upper()}: {usage:.2f} GB")
+        disk_lines.append(f"└─ [bold]Total: {total_disk:.2f} GB[/bold]")
         disk_usage = "\n".join(disk_lines)
         
         # Controls with live status
-        pause_status = "[yellow]PAUSED[/yellow]" if self.paused else "[green]RUNNING[/green]"
+        pause_status = "[yellow]●PAUSED[/yellow]" if self.paused else "[green]●RUNNING[/green]"
         controls = f"""[bold]⚙️  LIVE CONTROLS[/bold]
-├─ Status: {pause_status}
-├─ Workers: {self.workers} cores
-├─ [bold cyan][SPACE][/bold cyan] Pause/Resume
-├─ [bold cyan][+][/bold cyan] Increase workers (current: {self.workers})
-├─ [bold cyan][-][/bold cyan] Decrease workers (current: {self.workers})
-├─ [bold cyan][Ctrl+C][/bold cyan] Save & Exit
-└─ [bold cyan][q][/bold cyan] Quick quit
+├─ Status: {pause_status} | Workers: [bold cyan]{self.workers}[/bold cyan] cores
+├─ [SPACE] Pause/Resume | [+/-] Adjust workers
+└─ [Ctrl+C] Save & Exit | [q] Quick quit
 """
         
-        # Combine all sections
-        output = f"\n{overall}\n{current_video}\n"
-        
-        return output, table, disk_usage, controls
+        return header, overall, overall_progress, current_video, category_progress, disk_usage, controls
     
     def _should_update_display(self) -> bool:
         """Check if enough time has passed to update the display."""
@@ -709,24 +727,33 @@ class DatasetGeneratorV2:
         if not RICH_AVAILABLE:
             return self._build_simple_status()
         
-        output, table, disk, controls = self.build_gui_layout()
+        header, overall, overall_progress, current_video, category_progress, disk_usage, controls = self.build_gui_layout()
         
-        # Combine everything into a single renderable
+        # Combine everything into a single renderable with proper spacing
         from rich.console import Group
-        from rich.panel import Panel
+        from rich.text import Text
         
-        header = Panel(
-            "[bold cyan]DATASET GENERATOR v2.0 - LIVE MODE[/bold cyan]",
-            style="bold white on blue"
-        )
-        
-        return Group(
+        # Build the complete display
+        components = [
             header,
-            output,
-            table,
-            disk,
-            controls
-        )
+            Text(""),  # Blank line
+            Text(overall, style=""),
+            Text(""),
+            Text("[bold]📊 OVERALL PROGRESS BAR:[/bold]"),
+            overall_progress,
+            Text(""),
+            Text("[bold]🎬 CURRENT VIDEO PROGRESS:[/bold]"),
+            current_video,
+            Text(""),
+            Text("[bold]📦 CATEGORY PROGRESS BARS:[/bold]"),
+            category_progress,
+            Text(""),
+            Text(disk_usage),
+            Text(""),
+            Text(controls),
+        ]
+        
+        return Group(*components)
     
         """Build simple text status for when rich is not available."""
         elapsed = time.time() - self.start_time
@@ -906,12 +933,17 @@ Continue? Processing will start in 5 seconds... (Ctrl+C to cancel)
                 if self.live_display:
                     self.live_display.update(self._build_complete_layout())
                 elif RICH_AVAILABLE:
-                    output, table, disk, controls = self.build_gui_layout()
+                    # Use clear screen and home cursor positioning
                     self.console.clear()
-                    self.console.print(output)
-                    self.console.print(table)
-                    self.console.print(disk)
-                    self.console.print(controls)
+                    # Build and display the complete layout
+                    layout = self._build_complete_layout()
+                    self.console.print(layout)
+                    # Force flush
+                    try:
+                        import sys
+                        sys.stdout.flush()
+                    except:
+                        pass
                 else:
                     print(self._build_simple_status())
         
