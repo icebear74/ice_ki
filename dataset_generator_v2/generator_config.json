@@ -11,7 +11,7 @@
     "max_retry_attempts": 10,
     "retry_skip_seconds": 60,
     "enable_debug_logging": true,
-    "debug_log_path": "/mnt/data/training/dataset/generator_debug.log"
+    "debug_log_path": "/mnt/data/training/datasetNeu/generator_debug.log"
   },
   "category_targets": {
     "master": 300000,
