@@ -349,8 +349,8 @@ class DatasetGeneratorV2:
         return {
             'gt': f"{self.base_dir}/{category_path}/{base_format_dir}/GT",
             'lr': f"{self.base_dir}/{category_path}/{base_format_dir}/{lr_dir_name}",
-            'val_gt': f"{self.base_dir}/{category_path}/Val/GT",
-            'val_lr': f"{self.base_dir}/{category_path}/Val/LR"
+            'val_gt': f"{self.base_dir}/{category_path}/val/{base_format_dir.split('/')[-1]}/GT",
+            'val_lr': f"{self.base_dir}/{category_path}/val/{base_format_dir.split('/')[-1]}/LR"
         }
     
     def get_video_info(self, video_path: str) -> Tuple[float, float]:
@@ -374,8 +374,8 @@ class DatasetGeneratorV2:
         Create all necessary output directories.
         
         New V2 structure:
-            - Patches/GT/ and Patches/LR/ (7-frame horizontal, for training)
-            - Val/GT/ and Val/LR/ (validation)
+            - patches/{size}/GT/ and patches/{size}/LR/ (7-frame horizontal, for training)
+            - val/{size}/GT/ (validation, user copies manually)
         """
         for category in self.config.get('category_targets', {}).keys():
             # Get format distribution for this category
