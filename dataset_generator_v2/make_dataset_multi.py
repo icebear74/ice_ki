@@ -45,6 +45,9 @@ except ImportError:
 class DatasetGeneratorV2:
     """Multi-category dataset generator with beautiful GUI."""
     
+    # Maximum number of priority levels to display in console output
+    MAX_DISPLAYED_PRIORITIES = 10
+    
     def __init__(self, config_path: str):
         """Initialize the generator."""
         # Load configuration
@@ -56,9 +59,15 @@ class DatasetGeneratorV2:
         self.format_config = self.config.get('format_config', {})
         
         # Sort videos by priority (ascending: 0 first, 255 last)
-        # Within same priority, randomize order
+        # Within same priority, randomize order using pre-generated random values
         random.seed(42)  # Reproducible randomization
-        self.videos.sort(key=lambda v: (v.get('priority', 255), random.random()))
+        # Attach a random value to each video for stable sorting
+        for i, video in enumerate(self.videos):
+            video['_sort_random'] = random.random()
+        self.videos.sort(key=lambda v: (v.get('priority', 255), v['_sort_random']))
+        # Clean up temporary sort keys
+        for video in self.videos:
+            video.pop('_sort_random', None)
         
         # Initialize paths
         self.base_dir = self.settings['output_base_dir']
@@ -91,15 +100,15 @@ class DatasetGeneratorV2:
                 priority_counts[p] = priority_counts.get(p, 0) + 1
             
             self.console.print("\n[bold]📋 Video Processing Order:[/bold]")
-            for priority in sorted(priority_counts.keys())[:10]:  # Show first 10 priority levels
+            for priority in sorted(priority_counts.keys())[:self.MAX_DISPLAYED_PRIORITIES]:
                 count = priority_counts[priority]
                 if priority == 255:
                     self.console.print(f"   Priority {priority} (default): {count} videos")
                 else:
                     self.console.print(f"   Priority {priority}: {count} videos")
             
-            if len(priority_counts) > 10:
-                remaining = sum(priority_counts[p] for p in sorted(priority_counts.keys())[10:])
+            if len(priority_counts) > self.MAX_DISPLAYED_PRIORITIES:
+                remaining = sum(priority_counts[p] for p in sorted(priority_counts.keys())[self.MAX_DISPLAYED_PRIORITIES:])
                 self.console.print(f"   ... and {remaining} more videos in lower priorities")
         
         # Statistics
