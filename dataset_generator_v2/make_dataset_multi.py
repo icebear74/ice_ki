@@ -100,16 +100,31 @@ class DatasetGeneratorV2:
                 priority_counts[p] = priority_counts.get(p, 0) + 1
             
             self.console.print("\n[bold]📋 Video Processing Order:[/bold]")
-            for priority in sorted(priority_counts.keys())[:self.MAX_DISPLAYED_PRIORITIES]:
+            sorted_priorities = sorted(priority_counts.keys())
+            
+            # Always show priority 255 (default) if it exists, plus first MAX_DISPLAYED_PRIORITIES-1 levels
+            priorities_to_show = []
+            if 255 in priority_counts:
+                # Show first levels (excluding 255 if present)
+                priorities_to_show = [p for p in sorted_priorities if p != 255][:self.MAX_DISPLAYED_PRIORITIES - 1]
+                # Always include 255
+                priorities_to_show.append(255)
+                priorities_to_show.sort()
+            else:
+                priorities_to_show = sorted_priorities[:self.MAX_DISPLAYED_PRIORITIES]
+            
+            for priority in priorities_to_show:
                 count = priority_counts[priority]
                 if priority == 255:
                     self.console.print(f"   Priority {priority} (default): {count} videos")
                 else:
                     self.console.print(f"   Priority {priority}: {count} videos")
             
-            if len(priority_counts) > self.MAX_DISPLAYED_PRIORITIES:
-                remaining = sum(priority_counts[p] for p in sorted(priority_counts.keys())[self.MAX_DISPLAYED_PRIORITIES:])
-                self.console.print(f"   ... and {remaining} more videos in lower priorities")
+            # Show remaining count if there are more priorities
+            remaining_priorities = [p for p in sorted_priorities if p not in priorities_to_show]
+            if remaining_priorities:
+                remaining = sum(priority_counts[p] for p in remaining_priorities)
+                self.console.print(f"   ... and {remaining} more videos in other priority levels")
         
         # Statistics
         self.start_time = time.time()
