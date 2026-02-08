@@ -10,7 +10,7 @@ This generator processes 530+ UHD videos and creates training patches with:
 - **Beautiful live GUI**: Real-time progress monitoring with rich terminal UI
 - **Resume capability**: Checkpoint system for long-running generation (5+ days)
 - **HDR tonemap**: Proper HDR-to-SDR conversion for high-quality patches
-- **Smart scene validation**: Automatic detection and skipping of scene cuts
+- **Realistic training data**: Accepts all frames including scenes with cuts
 
 ## 📁 Structure
 
@@ -246,7 +246,7 @@ Edit `generator_config.json` to customize:
     "output_base_dir": "/mnt/data/training/dataset",
     "temp_dir": "/mnt/data/training/dataset/temp",
     "min_file_size": 10000,           // Minimum valid frame size
-    "scene_diff_threshold": 45,       // Scene stability threshold
+    "scene_diff_threshold": 45,       // (Unused - kept for compatibility)
     "max_retry_attempts": 10,         // Retries per extraction
     "retry_skip_seconds": 60          // Skip ahead on retry
   }
@@ -297,21 +297,21 @@ tonemap=tonemap=mobius,zscale=t=bt709:m=bt709,format=yuv420p,
 scale=1920:1080:flags=lanczos
 ```
 
-### Scene Validation
+### Frame Acceptance
 
-Automatically validates scene stability:
+Accepts all extracted frames including scenes with cuts:
 - Extracts 7 frames centered at timestamp
-- Compares first and last frame (grayscale diff)
-- Rejects if mean difference > 45 (scene cut detected)
-- Retries with different timestamp (skips +60s)
+- Validates frame count and file sizes
+- Accepts all frames (realistic training data with scene changes)
+- Model learns to handle cuts naturally during training
 
 ### Smart Retry Logic
 
 For each extraction attempt:
 1. Extract 7 frames at timestamp
 2. Validate frame count and file sizes
-3. Check scene stability
-4. If any check fails, skip ahead +60s and retry
+3. Accept all valid frames (including scenes with cuts)
+4. If validation fails, skip ahead +60s and retry
 5. Maximum 10 attempts per extraction
 
 ### Checkpoint System
@@ -380,7 +380,6 @@ This ensures validation data is carefully curated.
 - Reduce `max_workers` if system is overloaded
 
 ### Low success rate
-- Increase `scene_diff_threshold` (default: 45)
 - Increase `max_retry_attempts` (default: 10)
 - Check video quality and encoding
 
