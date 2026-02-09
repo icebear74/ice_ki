@@ -599,6 +599,9 @@ class DatasetGeneratorV2UHD:
         Extract patches from video for MULTIPLE categories simultaneously.
         This avoids opening the video file multiple times.
         
+        NOTE: This method is legacy and replaced by _extract_patches_multi_format.
+        Kept for backward compatibility.
+        
         Args:
             video_path: Path to video file
             duration: Video duration in seconds
@@ -634,7 +637,7 @@ class DatasetGeneratorV2UHD:
                     continue
                 
                 # Save patches for this category
-                saved = self._save_patch_pair(
+                saved, gt_path, lr_path = self._save_patch_pair(
                     gt, lr, video_path, current_time,
                     category, format_name, n_frames
                 )
@@ -658,6 +661,11 @@ class DatasetGeneratorV2UHD:
         
         This implements the NEW requirement: each video extracts ALL formats,
         not randomly selected. Distribution is pre-calculated per video.
+        
+        Also implements black frame detection with retry logic:
+        - If GT < 15 KB (likely black frame): delete, retry with +1 second
+        - Maximum 5 retries per extraction
+        - Failed frames still count in statistics
         
         Args:
             video_path: Path to video file
@@ -684,21 +692,18 @@ class DatasetGeneratorV2UHD:
         
         stride_seconds = 3.0
         current_time = 0.0
+        max_retries = 5
+        retry_jump_seconds = 1.0
+        black_frame_threshold_kb = 15
         
         total_target = sum(sum(formats.values()) for formats in format_distribution.values())
         total_created = 0
+        black_frames_detected = 0
         
         self.logger.info(f"Extracting {total_target} patches for {len(format_distribution)} categories")
         
         # Extract frames and create patches until all targets are met
         while current_time < duration - 1.0 and total_created < total_target:
-            # Extract frames ONCE
-            frames = self.extract_frames_uhd(video_path, current_time, n_frames)
-            
-            if frames is None:
-                current_time += stride_seconds
-                continue
-            
             # For each category-format combination that needs more patches
             for category, formats in format_distribution.items():
                 for format_name, target_count in formats.items():
@@ -709,22 +714,93 @@ class DatasetGeneratorV2UHD:
                     # Get format config
                     format_config = self.format_config[category][format_name]
                     
-                    # Create patch pair for this category/format
-                    gt, lr = self.create_patch_pair(frames, format_name, format_config)
+                    # Try extraction with retry logic for black frames
+                    retry_count = 0
+                    extraction_successful = False
+                    retry_time = current_time
                     
-                    if gt is None or lr is None:
-                        continue
-                    
-                    # Save patches for this category/format
-                    saved = self._save_patch_pair(
-                        gt, lr, video_path, current_time,
-                        category, format_name, n_frames
-                    )
-                    
-                    if saved:
-                        patches_targets[category][format_name]['created'] += 1
-                        patches_created[category] += 1
-                        total_created += 1
+                    while retry_count <= max_retries and not extraction_successful:
+                        # Extract frames for this retry attempt
+                        frames = self.extract_frames_uhd(video_path, retry_time, n_frames)
+                        
+                        if frames is None:
+                            retry_count += 1
+                            retry_time += retry_jump_seconds
+                            if retry_time >= duration - 1.0:
+                                break
+                            continue
+                        
+                        # Create patch pair for this category/format
+                        gt, lr = self.create_patch_pair(frames, format_name, format_config)
+                        
+                        if gt is None or lr is None:
+                            retry_count += 1
+                            retry_time += retry_jump_seconds
+                            if retry_time >= duration - 1.0:
+                                break
+                            continue
+                        
+                        # Save patches for this category/format
+                        saved, gt_path, lr_path = self._save_patch_pair(
+                            gt, lr, video_path, retry_time,
+                            category, format_name, n_frames
+                        )
+                        
+                        if saved:
+                            # Check if GT is a black frame (< 15 KB)
+                            if self._is_black_frame(gt_path, black_frame_threshold_kb):
+                                black_frames_detected += 1
+                                self.logger.warning(
+                                    f"Black frame detected at {retry_time:.2f}s "
+                                    f"(retry {retry_count}/{max_retries}). Deleting and retrying..."
+                                )
+                                
+                                # Delete the files
+                                try:
+                                    if os.path.exists(gt_path):
+                                        os.remove(gt_path)
+                                    if os.path.exists(lr_path):
+                                        os.remove(lr_path)
+                                except Exception as e:
+                                    self.logger.error(f"Error deleting black frame files: {e}")
+                                
+                                # Jump forward 1 second and retry
+                                retry_count += 1
+                                retry_time += retry_jump_seconds
+                                
+                                if retry_count > max_retries:
+                                    # Max retries reached, count it but don't create patch
+                                    self.logger.warning(
+                                        f"Max retries ({max_retries}) reached for black frame. "
+                                        f"Counting as created but no patch saved."
+                                    )
+                                    patches_targets[category][format_name]['created'] += 1
+                                    patches_created[category] += 1
+                                    total_created += 1
+                                    extraction_successful = True
+                                
+                                if retry_time >= duration - 1.0:
+                                    # Reached end of video, count it but don't create patch
+                                    self.logger.warning(
+                                        f"Reached end of video during black frame retry. "
+                                        f"Counting as created but no patch saved."
+                                    )
+                                    patches_targets[category][format_name]['created'] += 1
+                                    patches_created[category] += 1
+                                    total_created += 1
+                                    extraction_successful = True
+                            else:
+                                # Valid frame (not black), successfully saved
+                                patches_targets[category][format_name]['created'] += 1
+                                patches_created[category] += 1
+                                total_created += 1
+                                extraction_successful = True
+                        else:
+                            # Save failed, retry
+                            retry_count += 1
+                            retry_time += retry_jump_seconds
+                            if retry_time >= duration - 1.0:
+                                break
             
             current_time += stride_seconds
             
@@ -734,6 +810,8 @@ class DatasetGeneratorV2UHD:
         
         # Log final statistics
         self.logger.info(f"Extraction complete for {video_name}: {total_created}/{total_target} patches")
+        if black_frames_detected > 0:
+            self.logger.info(f"  Black frames detected and handled: {black_frames_detected}")
         for category, formats in patches_targets.items():
             for format_name, stats in formats.items():
                 created = stats['created']
@@ -846,10 +924,43 @@ class DatasetGeneratorV2UHD:
     #     pass
     
     
+    def _is_black_frame(self, gt_path: str, threshold_kb: int = 15) -> bool:
+        """
+        Check if GT file is likely a black/dark frame based on file size.
+        
+        Args:
+            gt_path: Path to GT file
+            threshold_kb: File size threshold in KB (default: 15 KB)
+        
+        Returns:
+            True if file is likely a black frame (< threshold), False otherwise
+        """
+        try:
+            if not os.path.exists(gt_path):
+                return False
+            
+            file_size = os.path.getsize(gt_path)
+            threshold_bytes = threshold_kb * 1024
+            
+            if file_size < threshold_bytes:
+                self.logger.debug(f"Black frame detected: {gt_path} ({file_size} bytes < {threshold_bytes} bytes)")
+                return True
+            
+            return False
+        
+        except Exception as e:
+            self.logger.error(f"Error checking file size: {e}")
+            return False
+    
     def _save_patch_pair(self, gt: np.ndarray, lr: np.ndarray,
                         video_path: str, timestamp: float,
-                        category: str, format_name: str, n_frames: int) -> bool:
-        """Save GT and LR patches to appropriate directories"""
+                        category: str, format_name: str, n_frames: int) -> tuple:
+        """
+        Save GT and LR patches to appropriate directories.
+        
+        Returns:
+            Tuple of (success: bool, gt_path: str or None, lr_path: str or None)
+        """
         try:
             lr_version = f"{n_frames}frames"
             
@@ -875,11 +986,11 @@ class DatasetGeneratorV2UHD:
             cv2.imwrite(gt_path, gt, [cv2.IMWRITE_PNG_COMPRESSION, 1])
             cv2.imwrite(lr_path, lr, [cv2.IMWRITE_PNG_COMPRESSION, 1])
             
-            return True
+            return (True, gt_path, lr_path)
         
         except Exception as e:
             self.logger.error(f"Error saving patches: {e}")
-            return False
+            return (False, None, None)
     
     def run(self):
         """Main generation loop with proportional distribution"""
