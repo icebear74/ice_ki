@@ -685,6 +685,62 @@ class DatasetGeneratorV2UHD:
             if temp_dir and os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir, ignore_errors=True)
     
+    def _run_ffmpeg_with_progress(self, cmd: List[str], description: str = "FFmpeg", timeout: int = 300) -> int:
+        """
+        Run FFmpeg command and display progress in real-time.
+        Shows only the progress line (frame, fps, time, speed).
+        
+        Args:
+            cmd: FFmpeg command as list
+            description: Description to show before progress
+            timeout: Timeout in seconds
+            
+        Returns:
+            Return code (0 = success)
+        """
+        import re
+        
+        try:
+            # Start FFmpeg process
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True,
+                bufsize=1
+            )
+            
+            print(f"\n{description}:")
+            
+            # Read stderr line by line for progress
+            last_line = ""
+            for line in iter(process.stderr.readline, ''):
+                # FFmpeg progress format: frame= 123 fps=25 q=... time=00:00:05.00 bitrate=... speed=1.0x
+                if 'frame=' in line and 'fps=' in line:
+                    # Extract the progress line
+                    # Clean up the line
+                    progress_line = line.strip()
+                    # Display with carriage return to update same line
+                    print(f"\r  {progress_line}", end='', flush=True)
+                    last_line = progress_line
+            
+            # Wait for process to complete
+            returncode = process.wait(timeout=timeout)
+            
+            # Print newline after progress
+            if last_line:
+                print()  # Move to next line
+            
+            return returncode
+            
+        except subprocess.TimeoutExpired:
+            process.kill()
+            print(f"\n  ERROR: FFmpeg timeout after {timeout}s")
+            return -1
+        except Exception as e:
+            self.logger.error(f"Error running FFmpeg: {e}")
+            return -1
+    
     def extract_frames_batch_uhd(self, video_path: str, timestamps: List[float],
                                  n_frames: int = 7, fps: float = 25.0) -> Dict[float, List[np.ndarray]]:
         """
@@ -810,14 +866,15 @@ class DatasetGeneratorV2UHD:
             timeout = self.config.get('ffmpeg_timeout', 120) * len(timestamps) // 10
             timeout = max(timeout, 300)
             
-            result = subprocess.run(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+            # Run FFmpeg with progress display
+            video_name = os.path.basename(video_path)
+            returncode = self._run_ffmpeg_with_progress(
+                cmd, 
+                description=f"🎬 Batch extracting {len(timestamps)} scenes from {video_name[:40]}",
                 timeout=timeout
             )
             
-            if result.returncode != 0:
+            if returncode != 0:
                 # If CUDA was used and failed, try CPU fallback
                 if use_cuda_for_this and self.cuda_fallback:
                     self.logger.warning("CUDA batch extraction failed, retrying with CPU")
@@ -831,17 +888,16 @@ class DatasetGeneratorV2UHD:
                         '-y',
                         output_pattern
                     ]
-                    result = subprocess.run(
+                    returncode = self._run_ffmpeg_with_progress(
                         cmd,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
+                        description=f"🔄 Retrying with CPU: {video_name[:40]}",
                         timeout=timeout
                     )
-                    if result.returncode != 0:
-                        self.logger.error(f"Batch extraction failed (CPU fallback): {result.stderr.decode()}")
+                    if returncode != 0:
+                        self.logger.error(f"Batch extraction failed (CPU fallback)")
                         return {}
                 else:
-                    self.logger.error(f"Batch extraction failed: {result.stderr.decode()}")
+                    self.logger.error(f"Batch extraction failed")
                     return {}
             
             # Instead of loading all frames into memory, return frame file paths
@@ -2022,75 +2078,114 @@ class DatasetGeneratorV2UHD:
             if start_idx > 0:
                 self.logger.info(f"Resuming from video {start_idx + 1}/{len(self.videos)}")
             
-            # Parallel extraction: Extract next video while processing current
-            # This overlaps FFmpeg extraction with Python processing for ~2x speedup
-            next_video_extraction = None
-            extraction_lock = threading.Lock()
+            # Parallel extraction and processing
+            # Rule: Max 1 extraction + Max 1 processing running simultaneously
+            self.logger.info("\n" + "=" * 80)
+            self.logger.info("PARALLEL MODE: 1 FFmpeg extraction + 1 processing running")
+            self.logger.info("=" * 80)
             
-            def extract_video_async(video_idx):
-                """Extract frames for a video in background thread"""
-                try:
-                    video = self.videos[video_idx]
-                    target = distribution.get(video['path'], 0)
-                    if target == 0:
-                        return None
-                    
-                    # This will be called in background thread
-                    # Just extract frames, don't process yet
-                    self.logger.info(f"[Background] Pre-extracting frames for {video['name']}")
-                    
-                    # Call the extraction part of process_video
-                    # For now, return video info - actual parallel implementation later
-                    return {'video_idx': video_idx, 'target': target}
-                except Exception as e:
-                    self.logger.error(f"Error in background extraction: {e}")
-                    return None
+            extraction_queue = queue.Queue(maxsize=1)  # Only 1 video can be queued
+            extraction_done = threading.Event()
+            processing_active = threading.Lock()
             
-            # Process videos with proportional targets
-            for idx in range(start_idx, len(self.videos)):
-                if not self.running:
-                    break
-                
-                video = self.videos[idx]
-                video_path = video['path']
-                
-                # Get target patches for this video from distribution
-                target_patches = distribution.get(video_path, 0)
-                
-                if target_patches == 0:
-                    self.logger.warning(f"No patches allocated for {video['name']}, skipping")
-                    continue
-                
-                self.logger.info(f"Processing {video['name']}: target={target_patches} patches")
-                
-                # TODO: Start extracting NEXT video in parallel while processing THIS one
-                # For now, sequential processing (parallel extraction will be added)
-                
-                # Set target for this video (used in process_video method)
-                self._current_video_target = target_patches
-                
+            def extraction_worker():
+                """Producer: Extract frames for videos one at a time"""
                 try:
-                    stats = self.process_video(idx)
+                    for idx in range(start_idx, len(self.videos)):
+                        if not self.running:
+                            break
+                        
+                        video = self.videos[idx]
+                        video_path = video['path']
+                        target_patches = distribution.get(video_path, 0)
+                        
+                        if target_patches == 0:
+                            continue
+                        
+                        self.logger.info(f"\n[EXTRACTION] Starting: {video['name']} (video {idx+1}/{len(self.videos)})")
+                        
+                        # Extract frames (this shows FFmpeg progress)
+                        result = {
+                            'idx': idx,
+                            'video': video,
+                            'target': target_patches,
+                            'extracted_data': None  # Will be filled by process_video
+                        }
+                        
+                        # Put in queue (blocks if queue is full = previous video still processing)
+                        extraction_queue.put(result)
+                        self.logger.info(f"[EXTRACTION] Queued: {video['name']}")
+                    
+                    # Signal end
+                    extraction_queue.put(None)
+                    extraction_done.set()
+                    
                 except Exception as e:
-                    self.logger.error(f"Error processing video {video['name']}: {e}")
-                    self.logger.error("Continuing with next video...")
+                    self.logger.error(f"[EXTRACTION] Fatal error: {e}")
                     import traceback
                     traceback.print_exc()
-                    # Save progress before continuing
-                    self.tracker.save()
-                    continue
+                    extraction_queue.put(None)
+                    extraction_done.set()
+            
+            def processing_worker():
+                """Consumer: Process extracted frames one at a time"""
+                try:
+                    while True:
+                        # Get next video to process (blocks if queue is empty)
+                        result = extraction_queue.get()
+                        
+                        if result is None:
+                            # End signal
+                            break
+                        
+                        idx = result['idx']
+                        video = result['video']
+                        target_patches = result['target']
+                        
+                        # Acquire processing lock (only 1 processing at a time)
+                        with processing_active:
+                            self.logger.info(f"\n[PROCESSING] Starting: {video['name']} (target={target_patches} patches)")
+                            
+                            # Set target for this video
+                            self._current_video_target = target_patches
+                            
+                            try:
+                                stats = self.process_video(idx)
+                                
+                                # Update tracker
+                                self.tracker.update_progress(
+                                    current_video_index=idx + 1,
+                                    patches_created=stats.get('patches_created', 0)
+                                )
+                                self.tracker.save()
+                                
+                                self.logger.info(f"[PROCESSING] Complete: {video['name']} - {stats.get('patches_created', 0)} patches created")
+                                
+                            except Exception as e:
+                                self.logger.error(f"[PROCESSING] Error: {video['name']}: {e}")
+                                import traceback
+                                traceback.print_exc()
+                                self.tracker.save()
                 
-                # Update tracker
-                self.tracker.update_progress(
-                    current_video_index=idx + 1,
-                    completed_videos=idx + 1
-                )
-                
-                for category, count in stats.items():
-                    current = self.tracker.status['category_stats'].get(category, {}).get('images_created', 0)
-                    self.tracker.update_category_stats(category, images_created=current + count)
-                
-                self.tracker.save()
+                except Exception as e:
+                    self.logger.error(f"[PROCESSING] Fatal error: {e}")
+                    import traceback
+                    traceback.print_exc()
+            
+            # Start both worker threads
+            extract_thread = threading.Thread(target=extraction_worker, name="ExtractionWorker", daemon=True)
+            process_thread = threading.Thread(target=processing_worker, name="ProcessingWorker", daemon=True)
+            
+            self.logger.info("Starting parallel workers...")
+            extract_thread.start()
+            process_thread.start()
+            
+            # Wait for both to complete
+            self.logger.info("Waiting for extraction worker...")
+            extract_thread.join()
+            self.logger.info("Extraction worker finished, waiting for processing worker...")
+            process_thread.join()
+            self.logger.info("Processing worker finished")
             
             if RICH_AVAILABLE:
                 console.print("\n[bold green]✅ Generation Complete![/bold green]")
