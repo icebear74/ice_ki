@@ -449,9 +449,71 @@ class DatasetGeneratorV2UHD:
         
         return gt, lr_stacked
     
+    def calculate_format_distribution_for_video(self, video: dict, target_patches: int) -> Dict[str, Dict[str, int]]:
+        """
+        Calculate exact format distribution for a video.
+        
+        Each video extracts ALL formats according to pre-calculated distribution.
+        
+        Example:
+        - Video needs 4000 patches total
+        - Categories: master 50%, universal 50%
+        - Formats: large 50%, small 25%, medium 25%
+        
+        Result:
+        {
+            'master': {'large_720': 1000, 'small_540': 500, 'medium_169': 500},
+            'universal': {'large_720': 1000, 'small_540': 500, 'medium_169': 500}
+        }
+        
+        Args:
+            video: Video configuration dict
+            target_patches: Total patches for this video
+        
+        Returns:
+            Dictionary of {category: {format_name: count}}
+        """
+        distribution = {}
+        
+        # Get category weights for this video
+        video_categories = video.get('categories', {})
+        
+        for category, category_weight in video_categories.items():
+            if category not in self.format_config:
+                continue
+            
+            # Calculate patches for this category
+            category_patches = int(target_patches * category_weight)
+            
+            # Get format probabilities for this category
+            format_probs = self.settings['format_probabilities'].get(category, {})
+            
+            # Calculate patches per format
+            distribution[category] = {}
+            remaining_patches = category_patches
+            
+            # Sort by probability (descending) for better rounding
+            sorted_formats = sorted(format_probs.items(), key=lambda x: x[1], reverse=True)
+            
+            for idx, (format_name, prob) in enumerate(sorted_formats):
+                if idx == len(sorted_formats) - 1:
+                    # Last format gets remaining patches
+                    distribution[category][format_name] = remaining_patches
+                else:
+                    count = int(category_patches * prob)
+                    distribution[category][format_name] = count
+                    remaining_patches -= count
+        
+        return distribution
+    
     def process_video(self, video_idx: int) -> Dict[str, int]:
         """
-        Process a single video
+        Process a single video and extract patches for ALL formats.
+        
+        NEW BEHAVIOR (per user requirement):
+        - Each video extracts ALL formats (not randomly selected)
+        - Format distribution is pre-calculated per video
+        - Ensures every video has all formats in all categories
         
         Returns:
             Statistics dict with patches created per category
@@ -470,8 +532,6 @@ class DatasetGeneratorV2UHD:
         
         self.logger.info(f"Processing video {video_idx + 1}/{len(self.videos)}: {video_name}")
         
-        stats = {}
-        
         # Get video metadata
         metadata = self._get_video_metadata(video_path)
         if not metadata:
@@ -479,51 +539,33 @@ class DatasetGeneratorV2UHD:
         
         duration = metadata['duration']
         
-        # Get all categories and their configurations
-        categories = video.get('categories', {})
+        # Calculate target patches for this video (from proportional distribution)
+        # This is passed via an instance variable from the run() method
+        target_patches = getattr(self, '_current_video_target', 1000)
         
-        # Prepare category configurations (format selection per category)
-        category_configs = {}
-        for category, weight in categories.items():
-            if category not in self.format_config:
-                continue
-            
-            # Get format for this category
-            format_name = select_random_format(category)
-            format_config = self.format_config[category][format_name]
-            
-            category_configs[category] = {
-                'weight': weight,
-                'format_name': format_name,
-                'format_config': format_config
-            }
-            stats[category] = 0
-            
-            # Log format selection for first few extractions
-            if video_name and (not hasattr(self, '_format_log_count')):
-                self._format_log_count = 0
-            if hasattr(self, '_format_log_count') and self._format_log_count < 20:
-                self.logger.info(f"  {category}: selected format {format_name}")
-                self._format_log_count += 1
+        # Calculate format distribution for this video
+        format_distribution = self.calculate_format_distribution_for_video(video, target_patches)
         
-        if not category_configs:
-            self.logger.warning(f"No valid categories for video: {video_name}")
+        if not format_distribution:
+            self.logger.warning(f"No valid format distribution for video: {video_name}")
             return {}
+        
+        # Log the distribution plan
+        self.logger.info(f"Format distribution for {video_name} (target: {target_patches} total):")
+        for category, formats in format_distribution.items():
+            total = sum(formats.values())
+            self.logger.info(f"  {category} ({total} patches): {formats}")
         
         # Determine frame count
         lr_versions = self.settings.get('lr_versions', ['7frames'])
         n_frames = 7 if '7frames' in lr_versions else 5
         
-        # Extract patches for ALL categories simultaneously (single video scan)
-        patches_created = self._extract_patches_multi_category(
-            video_path, duration, category_configs, n_frames
+        # Extract patches for ALL categories and formats
+        patches_created = self._extract_patches_multi_format(
+            video_path, duration, format_distribution, n_frames, video_name
         )
         
-        # Update stats
-        for category, count in patches_created.items():
-            stats[category] = count
-        
-        return stats
+        return patches_created
     
     def _extract_patches_multi_category(self, video_path: str, duration: float,
                                        category_configs: dict, n_frames: int) -> Dict[str, int]:
@@ -579,6 +621,98 @@ class DatasetGeneratorV2UHD:
             # Check if should stop
             if not self.running:
                 break
+        
+        return patches_created
+    
+    def _extract_patches_multi_format(self, video_path: str, duration: float,
+                                      format_distribution: Dict[str, Dict[str, int]], 
+                                      n_frames: int, video_name: str) -> Dict[str, int]:
+        """
+        Extract patches from video for MULTIPLE categories and MULTIPLE formats.
+        
+        This implements the NEW requirement: each video extracts ALL formats,
+        not randomly selected. Distribution is pre-calculated per video.
+        
+        Args:
+            video_path: Path to video file
+            duration: Video duration in seconds
+            format_distribution: Dict of {category: {format_name: target_count}}
+            n_frames: Number of frames to extract (5 or 7)
+            video_name: Video name for logging
+        
+        Returns:
+            Dict of {category: patches_created_count}
+        """
+        # Initialize counters for each category-format combination
+        patches_created = {}
+        patches_targets = {}
+        
+        for category, formats in format_distribution.items():
+            patches_created[category] = 0
+            patches_targets[category] = {}
+            for format_name, target_count in formats.items():
+                patches_targets[category][format_name] = {
+                    'target': target_count,
+                    'created': 0
+                }
+        
+        stride_seconds = 3.0
+        current_time = 0.0
+        
+        total_target = sum(sum(formats.values()) for formats in format_distribution.values())
+        total_created = 0
+        
+        self.logger.info(f"Extracting {total_target} patches for {len(format_distribution)} categories")
+        
+        # Extract frames and create patches until all targets are met
+        while current_time < duration - 1.0 and total_created < total_target:
+            # Extract frames ONCE
+            frames = self.extract_frames_uhd(video_path, current_time, n_frames)
+            
+            if frames is None:
+                current_time += stride_seconds
+                continue
+            
+            # For each category-format combination that needs more patches
+            for category, formats in format_distribution.items():
+                for format_name, target_count in formats.items():
+                    # Check if this format still needs patches
+                    if patches_targets[category][format_name]['created'] >= target_count:
+                        continue
+                    
+                    # Get format config
+                    format_config = self.format_config[category][format_name]
+                    
+                    # Create patch pair for this category/format
+                    gt, lr = self.create_patch_pair(frames, format_name, format_config)
+                    
+                    if gt is None or lr is None:
+                        continue
+                    
+                    # Save patches for this category/format
+                    saved = self._save_patch_pair(
+                        gt, lr, video_path, current_time,
+                        category, format_name, n_frames
+                    )
+                    
+                    if saved:
+                        patches_targets[category][format_name]['created'] += 1
+                        patches_created[category] += 1
+                        total_created += 1
+            
+            current_time += stride_seconds
+            
+            # Check if should stop
+            if not self.running:
+                break
+        
+        # Log final statistics
+        self.logger.info(f"Extraction complete for {video_name}: {total_created}/{total_target} patches")
+        for category, formats in patches_targets.items():
+            for format_name, stats in formats.items():
+                created = stats['created']
+                target = stats['target']
+                self.logger.info(f"  {category}/{format_name}: {created}/{target} patches")
         
         return patches_created
     
@@ -766,6 +900,9 @@ class DatasetGeneratorV2UHD:
                 continue
             
             self.logger.info(f"Processing {video['name']}: target={target_patches} patches")
+            
+            # Set target for this video (used in process_video method)
+            self._current_video_target = target_patches
             
             stats = self.process_video(idx)
             
