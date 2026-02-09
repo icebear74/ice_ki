@@ -1282,9 +1282,74 @@ class DatasetGeneratorV2UHD:
         total_created = 0
         processed_count = 0
         
+        # Calculate which scenes each format should use
+        # This ensures each format covers the entire video timeline evenly
+        total_scenes = len(frame_paths_dict)
+        timestamps_list = sorted(frame_paths_dict.keys())
+        
+        scene_selection = {}
+        self.logger.info(f"\n📊 Scene distribution per format:")
+        
+        for category, formats in format_distribution.items():
+            scene_selection[category] = {}
+            format_idx = 0
+            for format_name, target_count in formats.items():
+                # Calculate which scenes this format should use
+                if target_count >= total_scenes:
+                    # Use all scenes
+                    selected_indices = list(range(total_scenes))
+                else:
+                    # Select evenly distributed subset
+                    stride = total_scenes / target_count
+                    selected_indices = []
+                    for i in range(target_count):
+                        # Add small offset per format to distribute different formats across timeline
+                        offset = (format_idx % 3) * 0.3  # Offset up to 0.9
+                        scene_idx = int(offset + i * stride)
+                        # Ensure within bounds
+                        scene_idx = min(scene_idx, total_scenes - 1)
+                        selected_indices.append(scene_idx)
+                
+                scene_selection[category][format_name] = set(selected_indices)
+                
+                # Log distribution
+                coverage_start = 100.0 * selected_indices[0] / max(total_scenes - 1, 1)
+                coverage_end = 100.0 * selected_indices[-1] / max(total_scenes - 1, 1)
+                self.logger.info(f"  {category}/{format_name}: {target_count} patches")
+                if len(selected_indices) == total_scenes:
+                    self.logger.info(f"    Using all {total_scenes} scenes (indices 0-{total_scenes-1})")
+                else:
+                    stride_val = stride if target_count < total_scenes else 1.0
+                    self.logger.info(f"    Using {len(selected_indices)} scenes (stride {stride_val:.1f})")
+                    if len(selected_indices) <= 10:
+                        self.logger.info(f"    Indices: {selected_indices}")
+                    else:
+                        self.logger.info(f"    Indices: [{selected_indices[0]},{selected_indices[1]},...,{selected_indices[-2]},{selected_indices[-1]}]")
+                self.logger.info(f"    Coverage: {coverage_start:.1f}% to {coverage_end:.1f}% of video")
+                
+                format_idx += 1
+        
         # Process each timestamp (load frames on-demand to avoid OOM)
-        for ts in sorted(frame_paths_dict.keys()):
+        for scene_idx, ts in enumerate(timestamps_list):
             frame_file_paths = frame_paths_dict[ts]
+            
+            # Check if any format needs this scene
+            scene_needed = False
+            for category, formats in format_distribution.items():
+                for format_name in formats.keys():
+                    if scene_idx in scene_selection[category][format_name]:
+                        scene_needed = True
+                        break
+                if scene_needed:
+                    break
+            
+            # Skip this scene if no format needs it (shouldn't happen with current logic)
+            if not scene_needed:
+                # Delete the files
+                for frame_path in frame_file_paths:
+                    if os.path.exists(frame_path):
+                        os.remove(frame_path)
+                continue
             
             # Load frames from disk ONLY when needed (prevents OOM)
             frames = []
@@ -1304,10 +1369,13 @@ class DatasetGeneratorV2UHD:
                         os.remove(frame_path)
                 continue
             
-            # Process for each category-format combination
-            # We process ALL scenes, creating one patch per category-format from each scene
+            # Process for each category-format combination that needs this scene
             for category, formats in format_distribution.items():
                 for format_name, target_count in formats.items():
+                    # Only process if this format needs this scene
+                    if scene_idx not in scene_selection[category][format_name]:
+                        continue
+                    
                     # Get format config
                     format_config = self.format_config[category][format_name]
                     
