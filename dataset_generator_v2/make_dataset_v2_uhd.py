@@ -171,6 +171,140 @@ class DatasetGeneratorV2UHD:
         self.logger.info(f"Received signal {signum}, shutting down gracefully...")
         self.running = False
     
+    def scan_video_durations(self) -> Dict[str, float]:
+        """
+        Scan all videos to get their durations.
+        This is Phase 1 - required for proportional distribution.
+        
+        Returns:
+            Dictionary mapping video_path -> duration in seconds
+        """
+        if RICH_AVAILABLE:
+            console.print("\n[bold cyan]📹 Phase 1: Scanning Video Durations[/bold cyan]")
+            console.print("Analyzing all videos to calculate proportional distribution...")
+        
+        durations = {}
+        total_duration = 0.0
+        
+        from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
+        
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+            console=console if RICH_AVAILABLE else None
+        ) as progress:
+            
+            task = progress.add_task("Scanning videos...", total=len(self.videos))
+            
+            for idx, video in enumerate(self.videos):
+                video_path = video['path']
+                
+                if not os.path.exists(video_path):
+                    self.logger.warning(f"Video not found: {video_path}")
+                    progress.update(task, advance=1)
+                    continue
+                
+                # Get video metadata
+                metadata = self._get_video_metadata(video_path)
+                if metadata and 'duration' in metadata:
+                    duration = metadata['duration']
+                    durations[video_path] = duration
+                    total_duration += duration
+                    
+                    progress.update(task, description=f"Scanned: {video['name'][:40]}...", advance=1)
+                else:
+                    self.logger.warning(f"Could not get duration for: {video_path}")
+                    progress.update(task, advance=1)
+        
+        if RICH_AVAILABLE:
+            console.print(f"\n✓ Scanned {len(durations)} videos")
+            console.print(f"✓ Total duration: {total_duration/3600:.1f} hours ({total_duration:.0f} seconds)")
+        
+        self.logger.info(f"Scanned {len(durations)} videos, total duration: {total_duration:.1f}s")
+        
+        return durations
+    
+    def calculate_proportional_distribution(self, durations: Dict[str, float]) -> Dict[str, int]:
+        """
+        Calculate how many patches each video should get based on its duration.
+        This is Phase 2 - distribute proportionally.
+        
+        Args:
+            durations: Dictionary of video_path -> duration in seconds
+        
+        Returns:
+            Dictionary of video_path -> number of patches to create
+        """
+        total_duration = sum(durations.values())
+        total_target_patches = sum(self.category_targets.values())
+        
+        if total_duration == 0:
+            self.logger.warning("Total duration is 0, using equal distribution")
+            return {path: total_target_patches // len(durations) for path in durations.keys()}
+        
+        distribution = {}
+        
+        if RICH_AVAILABLE:
+            console.print(f"\n[bold cyan]📊 Phase 2: Calculating Proportional Distribution[/bold cyan]")
+            console.print(f"Target patches: {total_target_patches:,}")
+            console.print(f"Total duration: {total_duration/3600:.1f} hours\n")
+        
+        for video_path, duration in durations.items():
+            # Calculate proportional share
+            proportion = duration / total_duration
+            patches_for_video = int(total_target_patches * proportion)
+            distribution[video_path] = patches_for_video
+            
+            # Find video name for display
+            video_name = "Unknown"
+            for v in self.videos:
+                if v['path'] == video_path:
+                    video_name = v['name']
+                    break
+            
+            self.logger.debug(f"  {video_name}: {duration:.0f}s ({proportion*100:.1f}%) → {patches_for_video} patches")
+        
+        # Show summary
+        if RICH_AVAILABLE:
+            from rich.table import Table
+            
+            table = Table(title="Distribution Summary (Top 10 videos)")
+            table.add_column("Video", style="cyan")
+            table.add_column("Duration", justify="right", style="yellow")
+            table.add_column("Patches", justify="right", style="green")
+            table.add_column("%", justify="right", style="magenta")
+            
+            # Sort by patches descending
+            sorted_dist = sorted(distribution.items(), key=lambda x: x[1], reverse=True)[:10]
+            
+            for video_path, patches in sorted_dist:
+                video_name = "Unknown"
+                for v in self.videos:
+                    if v['path'] == video_path:
+                        video_name = v['name']
+                        break
+                
+                duration = durations.get(video_path, 0)
+                proportion = duration / total_duration * 100
+                
+                table.add_row(
+                    video_name[:40],
+                    f"{duration/60:.1f} min",
+                    f"{patches:,}",
+                    f"{proportion:.1f}%"
+                )
+            
+            console.print(table)
+        
+        return distribution
+    
+    def _signal_handler(self, signum, frame):
+        """Handle shutdown signals gracefully"""
+        self.logger.info(f"Received signal {signum}, shutting down gracefully...")
+        self.running = False
+    
     def extract_frames_uhd(self, video_path: str, start_time: float, n_frames: int = 7) -> Optional[List[np.ndarray]]:
         """
         Extract frames with HDR→SDR tonemap, NO resize (UHD quality)
@@ -445,13 +579,27 @@ class DatasetGeneratorV2UHD:
             return False
     
     def run(self):
-        """Main generation loop"""
+        """Main generation loop with proportional distribution"""
         if RICH_AVAILABLE:
             console.print(Panel.fit(
                 "[bold cyan]Dataset Generator V2 - UHD Quality[/bold cyan]\n"
-                "UHD Preservation • Multi-Category • Priorities • GUI",
+                "UHD Preservation • Multi-Category • Priorities • Proportional Distribution",
                 border_style="cyan"
             ))
+        
+        # Phase 1: Scan all videos to get durations
+        durations = self.scan_video_durations()
+        
+        if not durations:
+            self.logger.error("No video durations found, cannot proceed")
+            return
+        
+        # Phase 2: Calculate proportional distribution
+        distribution = self.calculate_proportional_distribution(durations)
+        
+        if RICH_AVAILABLE:
+            console.print(f"\n[bold green]✓ Distribution calculated[/bold green]")
+            console.print(f"[bold cyan]📹 Phase 3: Generating Patches[/bold cyan]\n")
         
         # Get resume point
         start_idx = self.tracker.status['progress']['current_video_index']
@@ -459,10 +607,22 @@ class DatasetGeneratorV2UHD:
         if start_idx > 0:
             self.logger.info(f"Resuming from video {start_idx + 1}/{len(self.videos)}")
         
-        # Process videos
+        # Process videos with proportional targets
         for idx in range(start_idx, len(self.videos)):
             if not self.running:
                 break
+            
+            video = self.videos[idx]
+            video_path = video['path']
+            
+            # Get target patches for this video from distribution
+            target_patches = distribution.get(video_path, 0)
+            
+            if target_patches == 0:
+                self.logger.warning(f"No patches allocated for {video['name']}, skipping")
+                continue
+            
+            self.logger.info(f"Processing {video['name']}: target={target_patches} patches")
             
             stats = self.process_video(idx)
             
