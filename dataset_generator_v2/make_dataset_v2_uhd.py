@@ -94,6 +94,9 @@ class DatasetGeneratorV2UHD:
         
         self.logger.info(f"Loaded {len(self.videos)} videos from config")
         
+        # Extract format probabilities from format_config
+        self.format_probabilities = self._extract_format_probabilities()
+        
         # Initialize video metadata cache
         self.metadata_cache_file = os.path.join(self.base_dir, '.video_metadata_cache.json')
         self.metadata_cache = self._load_metadata_cache()
@@ -196,6 +199,29 @@ class DatasetGeneratorV2UHD:
         """Handle shutdown signals gracefully"""
         self.logger.info(f"Received signal {signum}, shutting down gracefully...")
         self.running = False
+    
+    def _extract_format_probabilities(self) -> Dict[str, Dict[str, float]]:
+        """
+        Extract format probabilities from format_config.
+        
+        Returns:
+            Dictionary mapping category -> {format_name: probability}
+            
+        Example:
+            {
+                'master': {'small_540': 0.5, 'medium_169': 0.35, 'large_720': 0.15},
+                'universal': {'small_540': 0.5, 'medium_169': 0.35, 'large_720': 0.15}
+            }
+        """
+        probabilities = {}
+        
+        for category, formats in self.format_config.items():
+            probabilities[category] = {}
+            for format_name, format_info in formats.items():
+                probabilities[category][format_name] = format_info.get('probability', 0.0)
+        
+        self.logger.debug(f"Extracted format probabilities: {probabilities}")
+        return probabilities
     
     def scan_video_durations(self) -> Dict[str, float]:
         """
@@ -486,7 +512,7 @@ class DatasetGeneratorV2UHD:
             category_patches = int(target_patches * category_weight)
             
             # Get format probabilities for this category
-            format_probs = self.settings['format_probabilities'].get(category, {})
+            format_probs = self.format_probabilities.get(category, {})
             
             # Calculate patches per format
             distribution[category] = {}
