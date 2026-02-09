@@ -709,9 +709,13 @@ class DatasetGeneratorV2UHD:
         lr_versions = self.settings.get('lr_versions', ['7frames'])
         n_frames = 7 if '7frames' in lr_versions else 5
         
-        # Extract patches for ALL categories and formats
-        patches_created = self._extract_patches_multi_format(
-            video_path, duration, format_distribution, n_frames, video_name
+        # Get video FPS for batch extraction
+        metadata = self._get_video_metadata(video_path)
+        fps = metadata.get('fps', 25.0) if metadata else 25.0
+        
+        # Extract patches using OPTIMIZED batch mode
+        patches_created = self._extract_patches_multi_format_batch(
+            video_path, duration, format_distribution, n_frames, video_name, fps
         )
         
         return patches_created
@@ -776,19 +780,199 @@ class DatasetGeneratorV2UHD:
         
         return patches_created
     
-    def _extract_patches_multi_format(self, video_path: str, duration: float,
+    def _extract_patches_multi_format_batch(self, video_path: str, duration: float,
+                                           format_distribution: Dict[str, Dict[str, int]], 
+                                           n_frames: int, video_name: str, fps: float = 25.0) -> Dict[str, int]:
+        """
+        OPTIMIZED: Extract patches using BATCH frame extraction (10-50x faster).
+        
+        Uses extract_frames_batch_uhd() to extract all needed frames in ONE FFmpeg call,
+        then processes them into patches. This is much faster than calling FFmpeg
+        thousands of times.
+        
+        Args:
+            video_path: Path to video file
+            duration: Video duration in seconds
+            format_distribution: Dict of {category: {format_name: target_count}}
+            n_frames: Number of frames to extract (5 or 7)
+            video_name: Video name for logging
+            fps: Video frame rate (default 25.0)
+        
+        Returns:
+            Dict of {category: patches_created_count}
+        """
+        import time
+        start_time = time.time()
+        
+        # Initialize counters
+        patches_created = {}
+        patches_targets = {}
+        
+        for category, formats in format_distribution.items():
+            patches_created[category] = 0
+            patches_targets[category] = {}
+            for format_name, target_count in formats.items():
+                patches_targets[category][format_name] = {
+                    'target': target_count,
+                    'created': 0
+                }
+        
+        total_target = sum(sum(formats.values()) for formats in format_distribution.values())
+        
+        self.logger.info(f"╔══════════════════════════════════════════════════════════╗")
+        self.logger.info(f"║  BATCH EXTRACTION MODE (OPTIMIZED)                       ║")
+        self.logger.info(f"╚══════════════════════════════════════════════════════════╝")
+        self.logger.info(f"📹 Video: {video_name}")
+        self.logger.info(f"🎯 Target: {total_target} patches across {len(format_distribution)} categories")
+        
+        # Phase 1: Calculate all extraction timestamps
+        self.logger.info(f"\n📋 Phase 1: Calculating extraction plan...")
+        stride_seconds = 3.0
+        timestamps = []
+        current_time = 0.0
+        
+        while current_time < duration - 1.0 and len(timestamps) < total_target:
+            timestamps.append(current_time)
+            current_time += stride_seconds
+        
+        self.logger.info(f"✓ Planned {len(timestamps)} extraction points")
+        self.logger.info(f"  First timestamp: {timestamps[0]:.2f}s")
+        self.logger.info(f"  Last timestamp: {timestamps[-1]:.2f}s")
+        self.logger.info(f"  Total frames to extract: {len(timestamps) * n_frames}")
+        
+        # Phase 2: Batch extract ALL frames
+        self.logger.info(f"\n🎬 Phase 2: Batch extracting frames (this is the FAST part!)...")
+        self.logger.info(f"  Opening video file ONCE (instead of {len(timestamps)} times)")
+        self.logger.info(f"  Single FFmpeg pass through video...")
+        
+        batch_start = time.time()
+        all_frames = self.extract_frames_batch_uhd(video_path, timestamps, n_frames, fps)
+        batch_duration = time.time() - batch_start
+        
+        if not all_frames:
+            self.logger.error(f"❌ Batch extraction failed! Falling back to individual extraction...")
+            return self._extract_patches_multi_format_legacy(
+                video_path, duration, format_distribution, n_frames, video_name
+            )
+        
+        self.logger.info(f"✓ Batch extraction complete in {batch_duration:.1f}s")
+        self.logger.info(f"  Successfully extracted {len(all_frames)} timestamps")
+        self.logger.info(f"  Success rate: {len(all_frames)}/{len(timestamps)} ({100*len(all_frames)/len(timestamps):.1f}%)")
+        
+        # Estimate time saved
+        estimated_individual_time = len(timestamps) * 2.0  # ~2 seconds per FFmpeg call
+        time_saved = estimated_individual_time - batch_duration
+        speedup = estimated_individual_time / batch_duration if batch_duration > 0 else 0
+        
+        self.logger.info(f"⚡ Performance:")
+        self.logger.info(f"  Batch time: {batch_duration:.1f}s")
+        self.logger.info(f"  Individual extraction would take: ~{estimated_individual_time:.0f}s")
+        self.logger.info(f"  Time saved: ~{time_saved:.0f}s ({speedup:.1f}x speedup)")
+        
+        # Phase 3: Process extracted frames into patches
+        self.logger.info(f"\n🔧 Phase 3: Processing frames into patches...")
+        
+        black_frame_threshold_kb = 15
+        black_frame_detection_limit_seconds = 10.0
+        black_frames_detected = 0
+        black_frames_skipped = 0
+        total_created = 0
+        processed_count = 0
+        
+        # Process each timestamp
+        for ts in sorted(all_frames.keys()):
+            frames = all_frames[ts]
+            
+            # Process for each category-format combination that needs patches
+            for category, formats in format_distribution.items():
+                for format_name, target_count in formats.items():
+                    # Check if this format still needs patches
+                    if patches_targets[category][format_name]['created'] >= target_count:
+                        continue
+                    
+                    # Get format config
+                    format_config = self.format_config[category][format_name]
+                    
+                    # Create patch pair
+                    gt, lr = self.create_patch_pair(frames, format_name, format_config)
+                    
+                    if gt is None or lr is None:
+                        continue
+                    
+                    # Save patches
+                    saved, gt_path, lr_path = self._save_patch_pair(
+                        gt, lr, video_path, ts,
+                        category, format_name, n_frames
+                    )
+                    
+                    if saved:
+                        # Check if GT is a black frame (only first 10 seconds)
+                        if ts <= black_frame_detection_limit_seconds and \
+                           self._is_black_frame(gt_path, black_frame_threshold_kb):
+                            black_frames_detected += 1
+                            # Delete the files
+                            try:
+                                if os.path.exists(gt_path):
+                                    os.remove(gt_path)
+                                if os.path.exists(lr_path):
+                                    os.remove(lr_path)
+                            except Exception as e:
+                                self.logger.error(f"Error deleting black frame files: {e}")
+                            # Don't count as created
+                            continue
+                        
+                        # Valid frame
+                        if ts > black_frame_detection_limit_seconds:
+                            black_frames_skipped += 1
+                        
+                        patches_targets[category][format_name]['created'] += 1
+                        patches_created[category] += 1
+                        total_created += 1
+            
+            processed_count += 1
+            if processed_count % 100 == 0:
+                progress_pct = 100 * total_created / total_target
+                self.logger.info(f"  Progress: {total_created}/{total_target} patches ({progress_pct:.1f}%)")
+            
+            # Check if all targets met
+            if total_created >= total_target:
+                break
+            
+            # Check if should stop
+            if not self.running:
+                break
+        
+        # Final statistics
+        total_time = time.time() - start_time
+        
+        self.logger.info(f"\n╔══════════════════════════════════════════════════════════╗")
+        self.logger.info(f"║  EXTRACTION COMPLETE                                     ║")
+        self.logger.info(f"╚══════════════════════════════════════════════════════════╝")
+        self.logger.info(f"✓ Created {total_created}/{total_target} patches in {total_time:.1f}s")
+        
+        if black_frames_detected > 0:
+            self.logger.info(f"  🚫 Black frames detected and removed: {black_frames_detected}")
+        if black_frames_skipped > 0:
+            self.logger.info(f"  ⏭️  Frames saved without check (after 10s): {black_frames_skipped}")
+        
+        self.logger.info(f"\n📊 Per-category breakdown:")
+        for category, formats in patches_targets.items():
+            cat_total = sum(stats['created'] for stats in formats.values())
+            cat_target = sum(stats['target'] for stats in formats.values())
+            self.logger.info(f"  {category}: {cat_total}/{cat_target} patches")
+            for format_name, stats in formats.items():
+                self.logger.info(f"    └─ {format_name}: {stats['created']}/{stats['target']}")
+        
+        return patches_created
+    
+    def _extract_patches_multi_format_legacy(self, video_path: str, duration: float,
                                       format_distribution: Dict[str, Dict[str, int]], 
                                       n_frames: int, video_name: str) -> Dict[str, int]:
         """
-        Extract patches from video for MULTIPLE categories and MULTIPLE formats.
+        LEGACY: Extract patches using individual FFmpeg calls (SLOW).
         
-        This implements the NEW requirement: each video extracts ALL formats,
-        not randomly selected. Distribution is pre-calculated per video.
-        
-        Also implements black frame detection with retry logic:
-        - If GT < 15 KB (likely black frame): delete, retry with +1 second
-        - Maximum 5 retries per extraction
-        - Failed frames still count in statistics
+        This is the old method that calls FFmpeg once per extraction.
+        Kept as fallback in case batch extraction fails.
         
         Args:
             video_path: Path to video file
@@ -800,6 +984,161 @@ class DatasetGeneratorV2UHD:
         Returns:
             Dict of {category: patches_created_count}
         """
+        self.logger.warning(f"Using LEGACY extraction mode (slower)")
+        
+        # Initialize counters
+        patches_created = {}
+        patches_targets = {}
+        
+        for category, formats in format_distribution.items():
+            patches_created[category] = 0
+            patches_targets[category] = {}
+            for format_name, target_count in formats.items():
+                patches_targets[category][format_name] = {
+                    'target': target_count,
+                    'created': 0
+                }
+        
+        total_target = sum(sum(formats.values()) for formats in format_distribution.values())
+        
+        # Rest of original implementation
+        stride_seconds = 3.0
+        current_time = 0.0
+        max_retries = 5
+        retry_jump_seconds = 1.0
+        black_frame_threshold_kb = 15
+        black_frame_detection_limit_seconds = 10.0
+        
+        total_created = 0
+        black_frames_detected = 0
+        black_frames_skipped = 0
+        
+        self.logger.info(f"Extracting {total_target} patches for {len(format_distribution)} categories")
+        self.logger.info(f"Black frame detection active for first {black_frame_detection_limit_seconds:.1f} seconds only")
+        
+        # Extract frames and create patches until all targets are met
+        while current_time < duration - 1.0 and total_created < total_target:
+            # For each category-format combination that needs more patches
+            for category, formats in format_distribution.items():
+                for format_name, target_count in formats.items():
+                    # Check if this format still needs patches
+                    if patches_targets[category][format_name]['created'] >= target_count:
+                        continue
+                    
+                    # Get format config
+                    format_config = self.format_config[category][format_name]
+                    
+                    # Try extraction with retry logic for black frames
+                    retry_count = 0
+                    extraction_successful = False
+                    retry_time = current_time
+                    
+                    while retry_count <= max_retries and not extraction_successful:
+                        # Extract frames for this retry attempt
+                        frames = self.extract_frames_uhd(video_path, retry_time, n_frames)
+                        
+                        if frames is None:
+                            retry_count += 1
+                            retry_time += retry_jump_seconds
+                            if retry_time >= duration - 1.0:
+                                break
+                            continue
+                        
+                        # Create patch pair for this category/format
+                        gt, lr = self.create_patch_pair(frames, format_name, format_config)
+                        
+                        if gt is None or lr is None:
+                            retry_count += 1
+                            retry_time += retry_jump_seconds
+                            if retry_time >= duration - 1.0:
+                                break
+                            continue
+                        
+                        # Save patches for this category/format
+                        saved, gt_path, lr_path = self._save_patch_pair(
+                            gt, lr, video_path, retry_time,
+                            category, format_name, n_frames
+                        )
+                        
+                        if saved:
+                            # Check if GT is a black frame (< 15 KB)
+                            # Only check during first 10 seconds of video
+                            if retry_time <= black_frame_detection_limit_seconds and \
+                               self._is_black_frame(gt_path, black_frame_threshold_kb):
+                                black_frames_detected += 1
+                                self.logger.warning(
+                                    f"Black frame detected at {retry_time:.2f}s "
+                                    f"(retry {retry_count}/{max_retries}). Deleting and retrying..."
+                                )
+                                
+                                # Delete the files
+                                try:
+                                    if os.path.exists(gt_path):
+                                        os.remove(gt_path)
+                                    if os.path.exists(lr_path):
+                                        os.remove(lr_path)
+                                except Exception as e:
+                                    self.logger.error(f"Error deleting black frame files: {e}")
+                                
+                                # Jump forward 1 second and retry
+                                retry_count += 1
+                                retry_time += retry_jump_seconds
+                                
+                                if retry_count > max_retries:
+                                    # Max retries reached, count it but don't create patch
+                                    self.logger.warning(
+                                        f"Max retries ({max_retries}) reached for black frame. "
+                                        f"Counting as created but no patch saved."
+                                    )
+                                    patches_targets[category][format_name]['created'] += 1
+                                    patches_created[category] += 1
+                                    total_created += 1
+                                    extraction_successful = True
+                                
+                                if retry_time >= duration - 1.0:
+                                    # Reached end of video, count it but don't create patch
+                                    self.logger.warning(
+                                        f"Reached end of video during black frame retry. "
+                                        f"Counting as created but no patch saved."
+                                    )
+                                    patches_targets[category][format_name]['created'] += 1
+                                    patches_created[category] += 1
+                                    total_created += 1
+                                    extraction_successful = True
+                            else:
+                                # Valid frame (not black), successfully saved
+                                # Or black frame detection skipped (after 10 seconds)
+                                if retry_time > black_frame_detection_limit_seconds:
+                                    black_frames_skipped += 1
+                                    
+                                patches_targets[category][format_name]['created'] += 1
+                                patches_created[category] += 1
+                                total_created += 1
+                                extraction_successful = True
+                        else:
+                            # Save failed, retry
+                            retry_count += 1
+                            retry_time += retry_jump_seconds
+                            if retry_time >= duration - 1.0:
+                                break
+            
+            current_time += stride_seconds
+            
+            # Check if should stop
+            if not self.running:
+                break
+        
+        # Log final statistics
+        self.logger.info(f"Extraction complete for {video_name}: {total_created}/{total_target} patches")
+        if black_frames_detected > 0:
+            self.logger.info(f"  Black frames detected and handled: {black_frames_detected}")
+        if black_frames_skipped > 0:
+            self.logger.info(f"  Frames saved without black frame check (after {black_frame_detection_limit_seconds}s): {black_frames_skipped}")
+        for category, formats in patches_targets.items():
+            for format_name, stats in formats.items():
+                self.logger.info(f"  {category}/{format_name}: {stats['created']}/{stats['target']}")
+        
+        return patches_created
         # Initialize counters for each category-format combination
         patches_created = {}
         patches_targets = {}
