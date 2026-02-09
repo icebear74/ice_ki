@@ -20,6 +20,7 @@ import logging
 import signal
 import threading
 import time
+import psutil  # For memory monitoring
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
@@ -209,6 +210,43 @@ class DatasetGeneratorV2UHD:
         self.logger.info(f"Received signal {signum}, shutting down gracefully...")
         self.running = False
     
+    def _log_system_resources(self, operation: str = ""):
+        """Log current system resource usage"""
+        try:
+            # Get system memory info
+            mem = psutil.virtual_memory()
+            swap = psutil.swap_memory()
+            
+            self.logger.info(f"System Resources{' - ' + operation if operation else ''}:")
+            self.logger.info(f"  RAM: {mem.used / (1024**3):.1f}GB / {mem.total / (1024**3):.1f}GB ({mem.percent}% used)")
+            self.logger.info(f"  Available RAM: {mem.available / (1024**3):.1f}GB")
+            self.logger.info(f"  Swap: {swap.used / (1024**3):.1f}GB / {swap.total / (1024**3):.1f}GB ({swap.percent}% used)")
+            
+            # Warn if memory is getting low
+            if mem.percent > 90:
+                self.logger.warning("⚠️  WARNING: RAM usage >90%! Risk of OOM kill!")
+            elif mem.percent > 80:
+                self.logger.warning("⚠️  WARNING: RAM usage >80%! Monitor carefully!")
+            
+            # Try to get GPU memory if CUDA is available
+            if self.cuda_available:
+                try:
+                    result = subprocess.run(['nvidia-smi', '--query-gpu=memory.used,memory.total', '--format=csv,noheader,nounits'],
+                                          capture_output=True, text=True, timeout=5)
+                    if result.returncode == 0:
+                        lines = result.stdout.strip().split('\n')
+                        if lines:
+                            used, total = map(int, lines[0].split(','))
+                            gpu_percent = (used / total * 100) if total > 0 else 0
+                            self.logger.info(f"  GPU Memory: {used}MB / {total}MB ({gpu_percent:.1f}% used)")
+                            
+                            if gpu_percent > 90:
+                                self.logger.warning("⚠️  WARNING: GPU memory >90%! Risk of CUDA OOM!")
+                except Exception as e:
+                    self.logger.debug(f"Could not get GPU memory: {e}")
+        except Exception as e:
+            self.logger.debug(f"Could not log system resources: {e}")
+    
     def _extract_format_probabilities(self) -> Dict[str, Dict[str, float]]:
         """
         Extract format probabilities from format_config.
@@ -323,53 +361,92 @@ class DatasetGeneratorV2UHD:
         Returns:
             Dictionary mapping video_path -> duration in seconds
         """
+        self.logger.info("=" * 80)
+        self.logger.info("PHASE 1: Scanning Video Durations")
+        self.logger.info("=" * 80)
+        
+        # Log system resources before heavy operation
+        self._log_system_resources("Before video scanning")
+        
         if RICH_AVAILABLE:
             console.print("\n[bold cyan]📹 Phase 1: Scanning Video Durations[/bold cyan]")
             console.print("Analyzing all videos to calculate proportional distribution...")
         
         durations = {}
         total_duration = 0.0
+        errors = 0
         
         from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
         
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-            console=console if RICH_AVAILABLE else None
-        ) as progress:
-            
-            task = progress.add_task("Scanning videos...", total=len(self.videos))
-            
-            for idx, video in enumerate(self.videos):
-                video_path = video['path']
+        try:
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                console=console if RICH_AVAILABLE else None
+            ) as progress:
                 
-                if not os.path.exists(video_path):
-                    self.logger.warning(f"Video not found: {video_path}")
-                    progress.update(task, advance=1)
-                    continue
+                task = progress.add_task("Scanning videos...", total=len(self.videos))
                 
-                # Get video metadata
-                metadata = self._get_video_metadata(video_path)
-                if metadata and 'duration' in metadata:
-                    duration = metadata['duration']
-                    durations[video_path] = duration
-                    total_duration += duration
+                for idx, video in enumerate(self.videos):
+                    video_path = video['path']
+                    video_name = video.get('name', os.path.basename(video_path))
                     
-                    progress.update(task, description=f"Scanned: {video['name'][:40]}...", advance=1)
-                else:
-                    self.logger.warning(f"Could not get duration for: {video_path}")
-                    progress.update(task, advance=1)
+                    try:
+                        if not os.path.exists(video_path):
+                            self.logger.warning(f"Video not found: {video_path}")
+                            errors += 1
+                            progress.update(task, advance=1)
+                            continue
+                        
+                        # Get video metadata with timeout protection
+                        try:
+                            metadata = self._get_video_metadata(video_path)
+                        except Exception as e:
+                            self.logger.error(f"Error getting metadata for {video_name}: {e}")
+                            errors += 1
+                            progress.update(task, advance=1)
+                            continue
+                        
+                        if metadata and 'duration' in metadata:
+                            duration = metadata['duration']
+                            durations[video_path] = duration
+                            total_duration += duration
+                            
+                            progress.update(task, description=f"Scanned: {video_name[:40]}...", advance=1)
+                            self.logger.debug(f"Scanned {video_name}: {duration:.1f}s")
+                        else:
+                            self.logger.warning(f"Could not get duration for: {video_name}")
+                            errors += 1
+                            progress.update(task, advance=1)
+                            
+                    except Exception as e:
+                        self.logger.error(f"Unexpected error scanning {video_name}: {e}")
+                        errors += 1
+                        progress.update(task, advance=1)
+                        continue
+        
+        except Exception as e:
+            self.logger.error(f"FATAL: Error during video scanning progress display: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
         
         if RICH_AVAILABLE:
             console.print(f"\n✓ Scanned {len(durations)} videos")
             console.print(f"✓ Total duration: {total_duration/3600:.1f} hours ({total_duration:.0f} seconds)")
+            if errors > 0:
+                console.print(f"⚠️  Errors: {errors} videos could not be scanned")
         
         # Save metadata cache after scanning
-        self._save_metadata_cache()
+        try:
+            self._save_metadata_cache()
+        except Exception as e:
+            self.logger.warning(f"Could not save metadata cache: {e}")
         
-        self.logger.info(f"Scanned {len(durations)} videos, total duration: {total_duration:.1f}s")
+        self.logger.info(f"Scan complete: {len(durations)} videos, total duration: {total_duration:.1f}s, errors: {errors}")
+        self._log_system_resources("After video scanning")
         
         return durations
     
@@ -384,68 +461,87 @@ class DatasetGeneratorV2UHD:
         Returns:
             Dictionary of video_path -> number of patches to create
         """
-        total_duration = sum(durations.values())
-        total_target_patches = sum(self.category_targets.values())
+        self.logger.info("=" * 80)
+        self.logger.info("PHASE 2: Calculating Proportional Distribution")
+        self.logger.info("=" * 80)
         
-        if total_duration == 0:
-            self.logger.warning("Total duration is 0, using equal distribution")
-            return {path: total_target_patches // len(durations) for path in durations.keys()}
-        
-        distribution = {}
-        
-        if RICH_AVAILABLE:
-            console.print(f"\n[bold cyan]📊 Phase 2: Calculating Proportional Distribution[/bold cyan]")
-            console.print(f"Target patches: {total_target_patches:,}")
-            console.print(f"Total duration: {total_duration/3600:.1f} hours\n")
-        
-        for video_path, duration in durations.items():
-            # Calculate proportional share
-            proportion = duration / total_duration
-            patches_for_video = int(total_target_patches * proportion)
-            distribution[video_path] = patches_for_video
+        try:
+            total_duration = sum(durations.values())
+            total_target_patches = sum(self.category_targets.values())
             
-            # Find video name for display
-            video_name = "Unknown"
-            for v in self.videos:
-                if v['path'] == video_path:
-                    video_name = v['name']
-                    break
+            if total_duration == 0:
+                self.logger.warning("Total duration is 0, using equal distribution")
+                return {path: total_target_patches // len(durations) for path in durations.keys()}
             
-            self.logger.debug(f"  {video_name}: {duration:.0f}s ({proportion*100:.1f}%) → {patches_for_video} patches")
-        
-        # Show summary
-        if RICH_AVAILABLE:
-            from rich.table import Table
+            distribution = {}
             
-            table = Table(title="Distribution Summary (Top 10 videos)")
-            table.add_column("Video", style="cyan")
-            table.add_column("Duration", justify="right", style="yellow")
-            table.add_column("Patches", justify="right", style="green")
-            table.add_column("%", justify="right", style="magenta")
+            if RICH_AVAILABLE:
+                console.print(f"\n[bold cyan]📊 Phase 2: Calculating Proportional Distribution[/bold cyan]")
+                console.print(f"Target patches: {total_target_patches:,}")
+                console.print(f"Total duration: {total_duration/3600:.1f} hours\n")
             
-            # Sort by patches descending
-            sorted_dist = sorted(distribution.items(), key=lambda x: x[1], reverse=True)[:10]
+            for video_path, duration in durations.items():
+                try:
+                    # Calculate proportional share
+                    proportion = duration / total_duration
+                    patches_for_video = int(total_target_patches * proportion)
+                    distribution[video_path] = patches_for_video
+                    
+                    # Find video name for display
+                    video_name = "Unknown"
+                    for v in self.videos:
+                        if v['path'] == video_path:
+                            video_name = v['name']
+                            break
+                    
+                    self.logger.debug(f"  {video_name}: {duration:.0f}s ({proportion*100:.1f}%) → {patches_for_video} patches")
+                except Exception as e:
+                    self.logger.error(f"Error calculating distribution for {video_path}: {e}")
+                    continue
             
-            for video_path, patches in sorted_dist:
-                video_name = "Unknown"
-                for v in self.videos:
-                    if v['path'] == video_path:
-                        video_name = v['name']
-                        break
-                
-                duration = durations.get(video_path, 0)
-                proportion = duration / total_duration * 100
-                
-                table.add_row(
-                    video_name[:40],
-                    f"{duration/60:.1f} min",
-                    f"{patches:,}",
-                    f"{proportion:.1f}%"
-                )
+            # Show summary
+            if RICH_AVAILABLE:
+                try:
+                    from rich.table import Table
+                    
+                    table = Table(title="Distribution Summary (Top 10 videos)")
+                    table.add_column("Video", style="cyan")
+                    table.add_column("Duration", justify="right", style="yellow")
+                    table.add_column("Patches", justify="right", style="green")
+                    table.add_column("%", justify="right", style="magenta")
+                    
+                    # Sort by patches descending
+                    sorted_dist = sorted(distribution.items(), key=lambda x: x[1], reverse=True)[:10]
+                    
+                    for video_path, patches in sorted_dist:
+                        video_name = "Unknown"
+                        for v in self.videos:
+                            if v['path'] == video_path:
+                                video_name = v['name']
+                                break
+                        
+                        duration = durations.get(video_path, 0)
+                        proportion = duration / total_duration * 100
+                        
+                        table.add_row(
+                            video_name[:40],
+                            f"{duration/60:.1f} min",
+                            f"{patches:,}",
+                            f"{proportion:.1f}%"
+                        )
+                    
+                    console.print(table)
+                except Exception as e:
+                    self.logger.warning(f"Could not display distribution table: {e}")
             
-            console.print(table)
-        
-        return distribution
+            self.logger.info(f"Distribution calculated for {len(distribution)} videos")
+            return distribution
+            
+        except Exception as e:
+            self.logger.error(f"FATAL: Error in calculate_proportional_distribution: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
     
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals gracefully"""
@@ -1724,71 +1820,102 @@ class DatasetGeneratorV2UHD:
     
     def run(self):
         """Main generation loop with proportional distribution"""
-        if RICH_AVAILABLE:
-            console.print(Panel.fit(
-                "[bold cyan]Dataset Generator V2 - UHD Quality[/bold cyan]\n"
-                "UHD Preservation • Multi-Category • Priorities • Proportional Distribution",
-                border_style="cyan"
-            ))
-        
-        # Phase 1: Scan all videos to get durations
-        durations = self.scan_video_durations()
-        
-        if not durations:
-            self.logger.error("No video durations found, cannot proceed")
-            return
-        
-        # Phase 2: Calculate proportional distribution
-        distribution = self.calculate_proportional_distribution(durations)
-        
-        if RICH_AVAILABLE:
-            console.print(f"\n[bold green]✓ Distribution calculated[/bold green]")
-            console.print(f"[bold cyan]📹 Phase 3: Generating Patches[/bold cyan]\n")
-        
-        # Get resume point
-        start_idx = self.tracker.status['progress']['current_video_index']
-        
-        if start_idx > 0:
-            self.logger.info(f"Resuming from video {start_idx + 1}/{len(self.videos)}")
-        
-        # Process videos with proportional targets
-        for idx in range(start_idx, len(self.videos)):
-            if not self.running:
-                break
+        try:
+            if RICH_AVAILABLE:
+                console.print(Panel.fit(
+                    "[bold cyan]Dataset Generator V2 - UHD Quality[/bold cyan]\n"
+                    "UHD Preservation • Multi-Category • Priorities • Proportional Distribution",
+                    border_style="cyan"
+                ))
             
-            video = self.videos[idx]
-            video_path = video['path']
+            # Phase 1: Scan all videos to get durations
+            self.logger.info("Starting Phase 1: Scanning video durations...")
+            try:
+                durations = self.scan_video_durations()
+            except Exception as e:
+                self.logger.error(f"FATAL: Error during video duration scanning: {e}")
+                self.logger.error(f"This often indicates: out of memory, file access issues, or corrupted videos")
+                import traceback
+                traceback.print_exc()
+                return
             
-            # Get target patches for this video from distribution
-            target_patches = distribution.get(video_path, 0)
+            if not durations:
+                self.logger.error("No video durations found, cannot proceed")
+                return
             
-            if target_patches == 0:
-                self.logger.warning(f"No patches allocated for {video['name']}, skipping")
-                continue
+            # Phase 2: Calculate proportional distribution
+            self.logger.info("Starting Phase 2: Calculating proportional distribution...")
+            try:
+                distribution = self.calculate_proportional_distribution(durations)
+            except Exception as e:
+                self.logger.error(f"FATAL: Error during distribution calculation: {e}")
+                import traceback
+                traceback.print_exc()
+                return
             
-            self.logger.info(f"Processing {video['name']}: target={target_patches} patches")
+            if RICH_AVAILABLE:
+                console.print(f"\n[bold green]✓ Distribution calculated[/bold green]")
+                console.print(f"[bold cyan]📹 Phase 3: Generating Patches[/bold cyan]\n")
             
-            # Set target for this video (used in process_video method)
-            self._current_video_target = target_patches
+            # Get resume point
+            start_idx = self.tracker.status['progress']['current_video_index']
             
-            stats = self.process_video(idx)
+            if start_idx > 0:
+                self.logger.info(f"Resuming from video {start_idx + 1}/{len(self.videos)}")
             
-            # Update tracker
-            self.tracker.update_progress(
-                current_video_index=idx + 1,
-                completed_videos=idx + 1
-            )
+            # Process videos with proportional targets
+            for idx in range(start_idx, len(self.videos)):
+                if not self.running:
+                    break
+                
+                video = self.videos[idx]
+                video_path = video['path']
+                
+                # Get target patches for this video from distribution
+                target_patches = distribution.get(video_path, 0)
+                
+                if target_patches == 0:
+                    self.logger.warning(f"No patches allocated for {video['name']}, skipping")
+                    continue
+                
+                self.logger.info(f"Processing {video['name']}: target={target_patches} patches")
+                
+                # Set target for this video (used in process_video method)
+                self._current_video_target = target_patches
+                
+                try:
+                    stats = self.process_video(idx)
+                except Exception as e:
+                    self.logger.error(f"Error processing video {video['name']}: {e}")
+                    self.logger.error("Continuing with next video...")
+                    import traceback
+                    traceback.print_exc()
+                    # Save progress before continuing
+                    self.tracker.save()
+                    continue
+                
+                # Update tracker
+                self.tracker.update_progress(
+                    current_video_index=idx + 1,
+                    completed_videos=idx + 1
+                )
+                
+                for category, count in stats.items():
+                    current = self.tracker.status['category_stats'].get(category, {}).get('images_created', 0)
+                    self.tracker.update_category_stats(category, images_created=current + count)
+                
+                self.tracker.save()
             
-            for category, count in stats.items():
-                current = self.tracker.status['category_stats'].get(category, {}).get('images_created', 0)
-                self.tracker.update_category_stats(category, images_created=current + count)
+            if RICH_AVAILABLE:
+                console.print("\n[bold green]✅ Generation Complete![/bold green]")
             
-            self.tracker.save()
-        
-        if RICH_AVAILABLE:
-            console.print("\n[bold green]✅ Generation Complete![/bold green]")
-        
-        self.logger.info("Generation completed")
+            self.logger.info("Generation completed")
+            
+        except Exception as e:
+            self.logger.error(f"FATAL: Unexpected error in run(): {e}")
+            import traceback
+            traceback.print_exc()
+            raise
 
 
 def main():
