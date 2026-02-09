@@ -11,11 +11,11 @@ FORMATS = {
         'aspect_ratio': '1:1'
     },
     '720_169': {
-        'gt_size': (405, 720),
-        'lr_size': (135, 240),
+        'gt_size': (720, 405),  # (height, width) = 720 tall, 405 wide = 9:16 portrait
+        'lr_size': (240, 135),  # (height, width) = 240 tall, 135 wide = 9:16 portrait
         'output_dir': 'patches/720_169',
         'suffix': '',
-        'aspect_ratio': '16:9'
+        'aspect_ratio': '9:16'  # Portrait: 16 tall, 9 wide
     },
     '720': {
         'gt_size': (720, 720),
@@ -33,11 +33,11 @@ FORMATS = {
         'aspect_ratio': '1:1'
     },
     'medium_169': {
-        'gt_size': (405, 720),
-        'lr_size': (135, 240),
+        'gt_size': (720, 405),  # (height, width) = 720 tall, 405 wide = 9:16 portrait
+        'lr_size': (240, 135),  # (height, width) = 240 tall, 135 wide = 9:16 portrait
         'output_dir': 'patches/720_169',
         'suffix': '',
-        'aspect_ratio': '16:9'
+        'aspect_ratio': '9:16'  # Portrait: 16 tall, 9 wide
     },
     'large_720': {
         'gt_size': (720, 720),
