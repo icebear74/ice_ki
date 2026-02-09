@@ -1,4 +1,8 @@
 {
+  "_comment_usage": "=== ORIGINAL CONFIG - 467 Videos, 4 Categories ===",
+  "_comment_use_with": "make_dataset_v2_uhd.py",
+  "_comment_features": "Priority system, 5-frame + 7-frame support, GUI, multi-category",
+  "_comment_see_also": "README: dataset_generator_v2/README_CONFIGS.md",
   "base_settings": {
     "base_frame_limit": 3000,
     "max_workers": 4,

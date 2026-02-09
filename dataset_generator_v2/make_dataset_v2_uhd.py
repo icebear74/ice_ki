@@ -75,6 +75,11 @@ class DatasetGeneratorV2UHD:
         self.format_config = self.config.get('format_config', {})
         self.category_targets = self.config.get('category_targets', {})
         
+        # Initialize paths (MUST be before logger setup!)
+        self.base_dir = self.settings['output_base_dir']
+        self.temp_dir = self.settings['temp_dir']
+        self.status_file = self.settings['status_file']
+        
         # Initialize logger
         self.logger = self._setup_logger()
         sys.logger = self.logger
@@ -88,11 +93,6 @@ class DatasetGeneratorV2UHD:
             video.pop('_sort_random', None)
         
         self.logger.info(f"Loaded {len(self.videos)} videos from config")
-        
-        # Initialize paths
-        self.base_dir = self.settings['output_base_dir']
-        self.temp_dir = self.settings['temp_dir']
-        self.status_file = self.settings['status_file']
         
         # Initialize progress tracker
         self.tracker = ProgressTracker(self.status_file)

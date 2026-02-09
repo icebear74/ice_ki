@@ -1,4 +1,8 @@
 {
+  "_comment_usage": "=== SIMPLIFIED CONFIG - Auto-scan, 2 Categories ===",
+  "_comment_use_with": "make_dataset_v2_clean.py",
+  "_comment_features": "7-frame only, flat directory structure, state management",
+  "_comment_see_also": "README: dataset_generator_v2/README_CONFIGS.md",
   "dataset_name": "master",
   "root_path": "/mnt/data/training/datasetNeu",
   
