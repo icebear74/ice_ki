@@ -20,10 +20,10 @@
     ]
   },
   "category_targets": {
-    "master": 300000,
-    "universal": 350000,
-    "space": 160000,
-    "toon": 90000
+    "master": 150000,
+    "universal": 50000,
+    "space": 60000,
+    "toon": 50000
   },
   "format_config": {
     "master": {
@@ -36,7 +36,7 @@
           180,
           180
         ],
-        "probability": 0.5
+        "probability": 0.4
       },
       "medium_169": {
         "gt_size": [
@@ -47,7 +47,7 @@
           135,
           240
         ],
-        "probability": 0.35
+        "probability": 0.4
       },
       "large_720": {
         "gt_size": [
@@ -58,7 +58,7 @@
           240,
           240
         ],
-        "probability": 0.15
+        "probability": 0.2
       }
     },
     "universal": {
@@ -71,7 +71,7 @@
           180,
           180
         ],
-        "probability": 0.5
+        "probability": 0.4
       },
       "medium_169": {
         "gt_size": [
@@ -82,7 +82,7 @@
           135,
           240
         ],
-        "probability": 0.35
+        "probability": 0.4
       },
       "large_720": {
         "gt_size": [
@@ -93,7 +93,7 @@
           240,
           240
         ],
-        "probability": 0.15
+        "probability": 0.2
       }
     },
     "space": {
@@ -117,7 +117,7 @@
           135,
           240
         ],
-        "probability": 0.35
+        "probability": 0.4
       },
       "large_720": {
         "gt_size": [
@@ -128,7 +128,7 @@
           240,
           240
         ],
-        "probability": 0.25
+        "probability": 0.2
       }
     },
     "toon": {
@@ -141,7 +141,7 @@
           180,
           180
         ],
-        "probability": 0.65
+        "probability": 0.5
       },
       "medium_169": {
         "gt_size": [
@@ -152,7 +152,7 @@
           135,
           240
         ],
-        "probability": 0.35
+        "probability": 0.5
       }
     }
   },
@@ -233,10 +233,10 @@
       "name": "Avatar",
       "path": "/mnt/data/video/filme/UHD/Avatar (2009)/Avatar (2009).mkv",
       "categories": {
-        "master": 0.2,
+        "master": 0.3,
         "universal": 0.2,
         "space": 0.3,
-        "toon": 0.3
+        "toon": 0.2
       }
     },
     {
@@ -283,8 +283,8 @@
       "name": "Star Wars Episode V - Das Imperium Schl\u00e4gt Zur\u00fcck (The Empire Strikes Back)",
       "path": "/mnt/data/video/filme/UHD/Star Wars Episode V - Das Imperium Schl\u00e4gt Zur\u00fcck (The Empire Strikes Back)/Star Wars Episode V - Das Imperium Schl\u00e4gt Zur\u00fcck (The Empire Strikes Back).mkv",
       "categories": {
-        "master": 0.2,
-        "space": 0.8
+        "master": 0.3,
+        "space": 0.7
       }
     },
     {
@@ -323,8 +323,8 @@
       "name": "Der Grinch",
       "path": "/mnt/data/video/filme/UHD/Der Grinch/Dr. Seuss' How the Grinch Stole Christmas.mkv",
       "categories": {
-        "master": 0.2,
-        "toon": 0.8
+        "master": 0.4,
+        "universal": 0.6
       }
     },
     {
@@ -508,8 +508,8 @@
       "name": "Independence Day- Wiederkehr",
       "path": "/mnt/data/video/filme/UHD/Independence Day- Wiederkehr/Independence Day- Wiederkehr.mkv",
       "categories": {
-        "master": 0.2,
-        "space": 0.8
+        "master": 0.4,
+        "space": 0.6
       }
     },
     {
@@ -524,8 +524,8 @@
       "name": "Schindlers Liste",
       "path": "/mnt/data/video/filme/UHD/Schindlers Liste (1993)/Schindlers Liste (1993) {edition-25th Anniversary Edition}.mkv",
       "categories": {
-        "master": 0.25,
-        "universal": 0.75
+        "master": 0.4,
+        "universal": 0.6
       }
     },
     {
@@ -932,20 +932,10 @@
       "name": "Ready Player One",
       "path": "/mnt/data/video/filme/UHD/Ready Player One/Ready Player One.mkv",
       "categories": {
-        "master": 0.2,
+        "master": 0.3,
         "universal": 0.3,
         "space": 0.2,
-        "toon": 0.3
-      }
-    },
-    {
-      "name": "Ready Player One",
-      "path": "/mnt/data/video/filme/UHD/Ready Player One/Ready Player One {edition-Test}.mkv",
-      "categories": {
-        "master": 0.2,
-        "universal": 0.3,
-        "space": 0.2,
-        "toon": 0.3
+        "toon": 0.2
       }
     },
     {
@@ -1016,9 +1006,9 @@
       "name": "Barbie",
       "path": "/mnt/data/video/filme/UHD/Barbie (2023)/Barbie (2023).mkv",
       "categories": {
-        "master": 0.2,
-        "universal": 0.5,
-        "toon": 0.3
+        "master": 0.4,
+        "universal": 0.4,
+        "toon": 0.2
       }
     },
     {
@@ -1048,9 +1038,10 @@
     {
       "name": "Star Trek VII - Treffen Der Generationen",
       "path": "/mnt/data/video/filme/UHD/Star Trek VII - Treffen Der Generationen (1994)/Star Trek VII - Treffen Der Generationen (1994).mkv",
+      "priority": 0,
       "categories": {
-        "master": 0.2,
-        "space": 0.8
+        "master": 0.5,
+        "space": 0.5
       }
     },
     {
@@ -3870,8 +3861,8 @@
       "path": "/mnt/data/video/SerieUHD/Planet Earth 2 (UHD HDR Referenz)/S01E02 (002) - Die Berge (Mountains).mkv",
       "priority": 0,
       "categories": {
-        "master": 0.25,
-        "universal": 0.75
+        "master": 0.55,
+        "universal": 0.45
       }
     },
     {
@@ -3879,8 +3870,8 @@
       "path": "/mnt/data/video/SerieUHD/Planet Earth 2 (UHD HDR Referenz)/S01E01 (001) - Inseln (Islands).mkv",
       "priority": 0,
       "categories": {
-        "master": 0.25,
-        "universal": 0.75
+        "master": 0.55,
+        "universal": 0.45
       }
     },
     {
@@ -3888,8 +3879,8 @@
       "path": "/mnt/data/video/SerieUHD/Planet Earth 2 (UHD HDR Referenz)/S01E04 (004) - W\u00fcsten (Deserts).mkv",
       "priority": 0,
       "categories": {
-        "master": 0.25,
-        "universal": 0.75
+        "master": 0.55,
+        "universal": 0.45
       }
     },
     {
@@ -3897,8 +3888,8 @@
       "path": "/mnt/data/video/SerieUHD/Planet Earth 2 (UHD HDR Referenz)/S01E05 (005) - Grasland (Grassland).mkv",
       "priority": 0,
       "categories": {
-        "master": 0.25,
-        "universal": 0.75
+        "master": 0.55,
+        "universal": 0.45
       }
     },
     {
@@ -3906,8 +3897,8 @@
       "path": "/mnt/data/video/SerieUHD/Planet Earth 2 (UHD HDR Referenz)/S01E06 (006) - St\u00e4dte (Cities).mkv",
       "priority": 0,
       "categories": {
-        "master": 0.25,
-        "universal": 0.75
+        "master": 0.55,
+        "universal": 0.45
       }
     },
     {
@@ -3915,8 +3906,8 @@
       "path": "/mnt/data/video/SerieUHD/Planet Earth 2 (UHD HDR Referenz)/S01E03 (003) - Dschungel (Jungles).mkv",
       "priority": 0,
       "categories": {
-        "master": 0.25,
-        "universal": 0.75
+        "master": 0.55,
+        "universal": 0.45
       }
     }
   ]
