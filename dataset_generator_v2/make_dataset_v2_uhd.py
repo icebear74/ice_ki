@@ -839,43 +839,45 @@ class DatasetGeneratorV2UHD:
                     self.logger.error(f"Batch extraction failed: {result.stderr.decode()}")
                     return {}
             
-            # Load extracted frames and group by timestamp
-            extracted_frames = {}
+            # Instead of loading all frames into memory, return frame file paths
+            # This prevents OOM when processing thousands of frames
+            frame_paths = {}
             frame_idx = 1
             for ts in timestamps:
-                frames = []
+                paths = []
                 for _ in range(n_frames):
                     frame_path = os.path.join(temp_dir, f"frame_{frame_idx:05d}.png")
                     if not os.path.exists(frame_path):
                         self.logger.warning(f"Missing frame {frame_idx} for timestamp {ts}")
                         break
-                    
-                    frame = cv2.imread(frame_path)
-                    if frame is None:
-                        self.logger.warning(f"Could not read frame {frame_idx} for timestamp {ts}")
-                        break
-                    
-                    frames.append(frame)
+                    paths.append(frame_path)
                     frame_idx += 1
                 
-                if len(frames) == n_frames:
-                    extracted_frames[ts] = frames
+                if len(paths) == n_frames:
+                    frame_paths[ts] = paths
                 else:
                     self.logger.warning(f"Incomplete frame set for timestamp {ts}, skipping")
             
-            self.logger.info(f"Stride extraction complete: {len(extracted_frames)}/{len(timestamps)} timestamps successful")
-            return extracted_frames
+            self.logger.info(f"Stride extraction complete: {len(frame_paths)}/{len(timestamps)} timestamps successful")
+            
+            # Return dictionary mapping timestamp to frame file paths
+            # Frames will be loaded on-demand to avoid OOM
+            return {'frame_paths': frame_paths, 'temp_dir': temp_dir}
         
         except subprocess.TimeoutExpired:
             self.logger.error(f"Batch extraction timed out")
+            # Clean up on error
+            if temp_dir and os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir, ignore_errors=True)
             return {}
         except Exception as e:
             self.logger.error(f"Error in stride extraction: {e}")
-            return {}
-        finally:
-            # Clean up temp directory
+            # Clean up on error
             if temp_dir and os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir, ignore_errors=True)
+            return {}
+        # NOTE: temp_dir is NOT cleaned up here on success
+        # It will be cleaned up after frames are processed to avoid OOM
     
     def _extract_frames_chunked(self, video_path: str, timestamps: List[float],
                                n_frames: int, fps: float, chunk_size: int = 50) -> Dict[float, List[np.ndarray]]:
@@ -1199,18 +1201,21 @@ class DatasetGeneratorV2UHD:
         self.logger.info(f"  Single FFmpeg pass through video...")
         
         batch_start = time.time()
-        all_frames = self.extract_frames_batch_uhd(video_path, timestamps, n_frames, fps)
+        batch_result = self.extract_frames_batch_uhd(video_path, timestamps, n_frames, fps)
         batch_duration = time.time() - batch_start
         
-        if not all_frames:
+        if not batch_result or 'frame_paths' not in batch_result:
             self.logger.error(f"❌ Batch extraction failed! Falling back to individual extraction...")
             return self._extract_patches_multi_format_legacy(
                 video_path, duration, format_distribution, n_frames, video_name
             )
         
+        frame_paths_dict = batch_result['frame_paths']
+        temp_dir = batch_result['temp_dir']
+        
         self.logger.info(f"✓ Batch extraction complete in {batch_duration:.1f}s")
-        self.logger.info(f"  Successfully extracted {len(all_frames)} timestamps")
-        self.logger.info(f"  Success rate: {len(all_frames)}/{len(timestamps)} ({100*len(all_frames)/len(timestamps):.1f}%)")
+        self.logger.info(f"  Successfully extracted {len(frame_paths_dict)} timestamps")
+        self.logger.info(f"  Success rate: {len(frame_paths_dict)}/{len(timestamps)} ({100*len(frame_paths_dict)/len(timestamps):.1f}%)")
         
         # Estimate time saved
         estimated_individual_time = len(timestamps) * 2.0  # ~2 seconds per FFmpeg call
@@ -1232,9 +1237,27 @@ class DatasetGeneratorV2UHD:
         total_created = 0
         processed_count = 0
         
-        # Process each timestamp
-        for ts in sorted(all_frames.keys()):
-            frames = all_frames[ts]
+        # Process each timestamp (load frames on-demand to avoid OOM)
+        for ts in sorted(frame_paths_dict.keys()):
+            frame_file_paths = frame_paths_dict[ts]
+            
+            # Load frames from disk ONLY when needed (prevents OOM)
+            frames = []
+            for frame_path in frame_file_paths:
+                frame = cv2.imread(frame_path)
+                if frame is None:
+                    self.logger.warning(f"Could not read frame {frame_path}")
+                    break
+                frames.append(frame)
+            
+            # Skip if frames couldn't be loaded
+            if len(frames) != n_frames:
+                self.logger.warning(f"Incomplete frames for timestamp {ts}, skipping")
+                # Delete the files even on error
+                for frame_path in frame_file_paths:
+                    if os.path.exists(frame_path):
+                        os.remove(frame_path)
+                continue
             
             # Process for each category-format combination that needs patches
             for category, formats in format_distribution.items():
@@ -1283,6 +1306,19 @@ class DatasetGeneratorV2UHD:
                         total_created += 1
             
             processed_count += 1
+            
+            # IMPORTANT: Delete frame files immediately after processing to free memory
+            # This prevents OOM when processing thousands of frames
+            for frame_path in frame_file_paths:
+                try:
+                    if os.path.exists(frame_path):
+                        os.remove(frame_path)
+                except Exception as e:
+                    self.logger.warning(f"Could not delete frame file {frame_path}: {e}")
+            
+            # Release frames from memory
+            del frames
+            
             if processed_count % 100 == 0:
                 progress_pct = 100 * total_created / total_target
                 self.logger.info(f"  Progress: {total_created}/{total_target} patches ({progress_pct:.1f}%)")
@@ -1315,6 +1351,14 @@ class DatasetGeneratorV2UHD:
             self.logger.info(f"  {category}: {cat_total}/{cat_target} patches")
             for format_name, stats in formats.items():
                 self.logger.info(f"    └─ {format_name}: {stats['created']}/{stats['target']}")
+        
+        # Clean up temp directory (remove any remaining files)
+        if temp_dir and os.path.exists(temp_dir):
+            try:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                self.logger.info(f"✓ Cleaned up temp directory: {temp_dir}")
+            except Exception as e:
+                self.logger.warning(f"Could not clean up temp directory: {e}")
         
         return patches_created
     
