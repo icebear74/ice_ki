@@ -216,8 +216,9 @@ class DatasetGeneratorV2:
             lr = cv2.resize(crop, (lr_w, lr_h), interpolation=cv2.INTER_AREA)
             lr_frames.append(lr)
         
-        # Stack horizontally: 240×1680 for 7 frames of 240×240
-        lr_stacked = np.concatenate(lr_frames, axis=1)
+        # Stack vertically (übereinander): frames underneath each other
+        # For 7 frames of 240×240, this creates 1680×240
+        lr_stacked = np.concatenate(lr_frames, axis=0)
         
         return gt, lr_stacked
     

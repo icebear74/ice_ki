@@ -281,8 +281,8 @@ class DatasetGeneratorV2UHD:
             lr = cv2.resize(crop, (lr_w, lr_h), interpolation=cv2.INTER_AREA)
             lr_frames.append(lr)
         
-        # Stack horizontally
-        lr_stacked = np.concatenate(lr_frames, axis=1)
+        # Stack vertically (übereinander) - axis=0 stacks frames underneath each other
+        lr_stacked = np.concatenate(lr_frames, axis=0)
         
         return gt, lr_stacked
     
