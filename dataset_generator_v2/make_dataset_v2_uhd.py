@@ -426,16 +426,16 @@ class DatasetGeneratorV2UHD:
             self.logger.error(f"Error extracting frames: {e}")
             return None
     
-    def extract_frames_batch_uhd(self, video_path: str, timestamps: List[float], 
+    def extract_frames_batch_uhd(self, video_path: str, timestamps: List[float],
                                  n_frames: int = 7, fps: float = 25.0) -> Dict[float, List[np.ndarray]]:
         """
-        OPTIMIZED: Extract frames at multiple timestamps in a SINGLE FFmpeg pass.
+        OPTIMIZED: Extract frames at multiple timestamps in a SINGLE FFmpeg pass using stride/interval pattern.
         
         This is 10-50x faster than calling extract_frames_uhd() multiple times because:
         - Video file opened only ONCE
         - Single decode pass through video
         - No repeated seek operations
-        - Uses FFmpeg's select filter for efficient frame extraction
+        - Uses FFmpeg's select filter with stride pattern (not listing individual frames)
         
         Args:
             video_path: Path to video file
@@ -450,27 +450,53 @@ class DatasetGeneratorV2UHD:
         if not timestamps:
             return {}
         
+        # Calculate stride pattern between extraction points
+        sorted_ts = sorted(timestamps)
+        frame_numbers = [int(ts * fps) for ts in sorted_ts]
+        
+        # Calculate intervals between extraction points
+        intervals = []
+        for i in range(len(frame_numbers) - 1):
+            # Distance from end of one group to start of next
+            interval = frame_numbers[i+1] - (frame_numbers[i] + n_frames - 1) - 1
+            intervals.append(interval)
+        
+        # Check if we have a uniform stride pattern
+        if len(set(intervals)) <= 2:  # Mostly uniform (allow 1-2 variations)
+            # Can use stride-based extraction
+            stride = max(set(intervals), key=intervals.count) if intervals else 0
+            self.logger.info(f"Detected uniform stride pattern: {stride} frames between groups")
+            return self._extract_frames_with_stride(video_path, sorted_ts, n_frames, fps, stride)
+        else:
+            # Non-uniform pattern, need chunking approach
+            self.logger.info(f"Non-uniform intervals detected, using chunking approach")
+            return self._extract_frames_chunked(video_path, sorted_ts, n_frames, fps)
+    
+    def _extract_frames_with_stride(self, video_path: str, timestamps: List[float],
+                                   n_frames: int, fps: float, stride: int) -> Dict[float, List[np.ndarray]]:
+        """
+        Extract frames using stride pattern: "extract N frames, skip M frames, repeat"
+        
+        Uses FFmpeg select filter with modulo operation for efficiency.
+        Command is much shorter than listing individual frames.
+        """
         try:
             with tempfile.TemporaryDirectory() as temp_dir:
                 output_pattern = os.path.join(temp_dir, "frame_%05d.png")
                 
-                # Build select filter expression for specific timestamps
-                # For each timestamp, we need n_frames consecutive frames
-                # Convert timestamps to frame numbers
-                select_expressions = []
-                timestamp_to_framenum = {}  # Map timestamp to starting frame number
+                # Calculate first frame and total frames needed
+                first_frame = int(timestamps[0] * fps)
+                last_frame = int(timestamps[-1] * fps) + n_frames - 1
+                total_frames_to_extract = len(timestamps) * n_frames
                 
-                for ts in sorted(timestamps):
-                    start_frame = int(ts * fps)
-                    timestamp_to_framenum[ts] = start_frame
-                    
-                    # Select n_frames starting from start_frame
-                    for offset in range(n_frames):
-                        frame_num = start_frame + offset
-                        select_expressions.append(f"eq(n,{frame_num})")
+                # Build select filter using modulo pattern
+                # Extract n_frames, then skip (stride + n_frames - 1) frames
+                cycle_length = n_frames + stride
                 
-                # Combine all expressions with OR ('+' in FFmpeg)
-                select_filter = "+".join(select_expressions)
+                # Select filter: within each cycle, take the first n_frames
+                # Example: if cycle_length=250, n_frames=7:
+                #   Take frames where: (n - first_frame) % 250 < 7
+                select_filter = f"gte(n,{first_frame})*lte(n,{last_frame})*lt(mod(n-{first_frame},{cycle_length}),{n_frames})"
                 
                 # UHD tonemap filter (NO scale!)
                 tonemap_filter = (
@@ -485,20 +511,22 @@ class DatasetGeneratorV2UHD:
                 # Full filter: select specific frames + tonemap
                 full_filter = f"select='{select_filter}',setpts=N/FRAME_RATE/TB,{tonemap_filter}"
                 
-                self.logger.info(f"Batch extracting {len(timestamps)} timestamps ({len(timestamps) * n_frames} frames total)")
-                self.logger.debug(f"Timestamps: {timestamps[:5]}... (showing first 5)")
+                self.logger.info(f"Batch extracting with stride pattern:")
+                self.logger.info(f"  First frame: {first_frame}, Last frame: {last_frame}")
+                self.logger.info(f"  Cycle length: {cycle_length} (extract {n_frames}, skip {stride})")
+                self.logger.info(f"  Expected frames: {total_frames_to_extract}")
                 
                 cmd = [
                     'ffmpeg',
                     '-i', video_path,
                     '-vf', full_filter,
-                    '-vsync', 'vfr',  # Variable frame rate to preserve selected frames
+                    '-vsync', 'vfr',
                     '-y',
                     output_pattern
                 ]
                 
-                timeout = self.config.get('ffmpeg_timeout', 120) * len(timestamps) // 10  # Scale timeout
-                timeout = max(timeout, 300)  # Minimum 5 minutes for batch
+                timeout = self.config.get('ffmpeg_timeout', 120) * len(timestamps) // 10
+                timeout = max(timeout, 300)
                 
                 result = subprocess.run(
                     cmd,
@@ -513,11 +541,8 @@ class DatasetGeneratorV2UHD:
                 
                 # Load extracted frames and group by timestamp
                 extracted_frames = {}
-                
-                # Frames are numbered sequentially 1, 2, 3, ...
-                # We need to map them back to timestamps
                 frame_idx = 1
-                for ts in sorted(timestamps):
+                for ts in timestamps:
                     frames = []
                     for _ in range(n_frames):
                         frame_path = os.path.join(temp_dir, f"frame_{frame_idx:05d}.png")
@@ -533,21 +558,45 @@ class DatasetGeneratorV2UHD:
                         frames.append(frame)
                         frame_idx += 1
                     
-                    # Only include if we got all n_frames
                     if len(frames) == n_frames:
                         extracted_frames[ts] = frames
                     else:
                         self.logger.warning(f"Incomplete frame set for timestamp {ts}, skipping")
                 
-                self.logger.info(f"Batch extraction complete: {len(extracted_frames)}/{len(timestamps)} timestamps successful")
+                self.logger.info(f"Stride extraction complete: {len(extracted_frames)}/{len(timestamps)} timestamps successful")
                 return extracted_frames
         
         except subprocess.TimeoutExpired:
-            self.logger.error(f"Batch extraction timed out after {timeout}s")
+            self.logger.error(f"Batch extraction timed out")
             return {}
         except Exception as e:
-            self.logger.error(f"Error in batch extraction: {e}")
+            self.logger.error(f"Error in stride extraction: {e}")
             return {}
+    
+    def _extract_frames_chunked(self, video_path: str, timestamps: List[float],
+                               n_frames: int, fps: float, chunk_size: int = 50) -> Dict[float, List[np.ndarray]]:
+        """
+        Extract frames in chunks to avoid command line length limits.
+        
+        For non-uniform intervals, process in smaller batches.
+        """
+        self.logger.info(f"Using chunked extraction with chunk size {chunk_size}")
+        
+        all_extracted = {}
+        
+        # Process timestamps in chunks
+        for i in range(0, len(timestamps), chunk_size):
+            chunk = timestamps[i:i+chunk_size]
+            self.logger.info(f"Processing chunk {i//chunk_size + 1}/{(len(timestamps)-1)//chunk_size + 1} ({len(chunk)} timestamps)")
+            
+            # Use legacy extraction for this chunk (safe, no command line issues)
+            for ts in chunk:
+                frames = self.extract_frames_uhd(video_path, ts, n_frames)
+                if frames and len(frames) == n_frames:
+                    all_extracted[ts] = frames
+        
+        self.logger.info(f"Chunked extraction complete: {len(all_extracted)}/{len(timestamps)} timestamps successful")
+        return all_extracted
     
     def create_patch_pair(self, frames: List[np.ndarray], format_name: str, 
                          format_config: dict) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
