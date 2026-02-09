@@ -695,12 +695,15 @@ class DatasetGeneratorV2UHD:
         max_retries = 5
         retry_jump_seconds = 1.0
         black_frame_threshold_kb = 15
+        black_frame_detection_limit_seconds = 10.0  # Only check first 10 seconds
         
         total_target = sum(sum(formats.values()) for formats in format_distribution.values())
         total_created = 0
         black_frames_detected = 0
+        black_frames_skipped = 0  # Count of frames where detection was skipped
         
         self.logger.info(f"Extracting {total_target} patches for {len(format_distribution)} categories")
+        self.logger.info(f"Black frame detection active for first {black_frame_detection_limit_seconds:.1f} seconds only")
         
         # Extract frames and create patches until all targets are met
         while current_time < duration - 1.0 and total_created < total_target:
@@ -748,7 +751,9 @@ class DatasetGeneratorV2UHD:
                         
                         if saved:
                             # Check if GT is a black frame (< 15 KB)
-                            if self._is_black_frame(gt_path, black_frame_threshold_kb):
+                            # Only check during first 10 seconds of video
+                            if retry_time <= black_frame_detection_limit_seconds and \
+                               self._is_black_frame(gt_path, black_frame_threshold_kb):
                                 black_frames_detected += 1
                                 self.logger.warning(
                                     f"Black frame detected at {retry_time:.2f}s "
@@ -791,6 +796,10 @@ class DatasetGeneratorV2UHD:
                                     extraction_successful = True
                             else:
                                 # Valid frame (not black), successfully saved
+                                # Or black frame detection skipped (after 10 seconds)
+                                if retry_time > black_frame_detection_limit_seconds:
+                                    black_frames_skipped += 1
+                                    
                                 patches_targets[category][format_name]['created'] += 1
                                 patches_created[category] += 1
                                 total_created += 1
@@ -812,6 +821,8 @@ class DatasetGeneratorV2UHD:
         self.logger.info(f"Extraction complete for {video_name}: {total_created}/{total_target} patches")
         if black_frames_detected > 0:
             self.logger.info(f"  Black frames detected and handled: {black_frames_detected}")
+        if black_frames_skipped > 0:
+            self.logger.info(f"  Frames saved without black frame check (after {black_frame_detection_limit_seconds}s): {black_frames_skipped}")
         for category, formats in patches_targets.items():
             for format_name, stats in formats.items():
                 created = stats['created']
