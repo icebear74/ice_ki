@@ -1183,37 +1183,56 @@ class DatasetGeneratorV2UHD:
         # Phase 1: Calculate all extraction timestamps
         self.logger.info(f"\n📋 Phase 1: Calculating extraction plan...")
         
+        # Calculate how many SCENES we need to extract
+        # Each scene creates ONE patch per category-format combination
+        # So we need as many scenes as the MAX target in any single format
+        max_patches_in_any_format = 0
+        patches_per_scene = 0
+        for category, formats in format_distribution.items():
+            patches_per_scene += len(formats)  # Count formats across all categories
+            for format_name, target_count in formats.items():
+                max_patches_in_any_format = max(max_patches_in_any_format, target_count)
+        
+        scenes_needed = max_patches_in_any_format
+        
+        self.logger.info(f"✓ Format distribution analysis:")
+        self.logger.info(f"  Total target patches: {total_target}")
+        self.logger.info(f"  Patches per scene: {patches_per_scene} ({len(format_distribution)} categories × formats)")
+        self.logger.info(f"  Maximum patches in any single format: {max_patches_in_any_format}")
+        self.logger.info(f"  Scenes needed: {scenes_needed}")
+        self.logger.info(f"  Expected total patches created: {scenes_needed * patches_per_scene}")
+        
         # Calculate stride to EVENLY DISTRIBUTE across ENTIRE video duration
         # This ensures frames from beginning, middle, AND END of video
         usable_duration = duration - 1.0  # Leave 1 second at end
         
-        if total_target > 0 and usable_duration > 0:
-            # Calculate stride: divide total duration by number of patches needed
-            stride_seconds = usable_duration / total_target
+        if scenes_needed > 0 and usable_duration > 0:
+            # Calculate stride: divide total duration by number of SCENES needed
+            stride_seconds = usable_duration / scenes_needed
             # Minimum stride to avoid extracting too frequently
             stride_seconds = max(stride_seconds, 0.5)
         else:
             stride_seconds = 3.0  # Fallback
         
-        self.logger.info(f"  Video duration: {duration:.1f}s")
-        self.logger.info(f"  Target patches: {total_target}")
+        self.logger.info(f"\n  Video duration: {duration:.1f}s")
         self.logger.info(f"  Calculated stride: {stride_seconds:.2f}s (evenly distributed)")
         
         # Generate timestamps evenly across entire video
         timestamps = []
-        for i in range(total_target):
+        for i in range(scenes_needed):
             timestamp = i * stride_seconds
             if timestamp < usable_duration:
                 timestamps.append(timestamp)
             else:
                 break
         
-        self.logger.info(f"✓ Planned {len(timestamps)} extraction points")
+        self.logger.info(f"\n✓ Planned {len(timestamps)} extraction points (scenes)")
         if timestamps:
             self.logger.info(f"  First timestamp: {timestamps[0]:.2f}s (0.0% of video)")
             self.logger.info(f"  Last timestamp: {timestamps[-1]:.2f}s ({100*timestamps[-1]/duration:.1f}% of video)")
             self.logger.info(f"  Coverage: Entire video from start to end")
         self.logger.info(f"  Total frames to extract: {len(timestamps) * n_frames}")
+        self.logger.info(f"  All {len(timestamps)} scenes will be used (0% waste)")
         
         # Phase 2: Batch extract ALL frames
         self.logger.info(f"\n🎬 Phase 2: Batch extracting frames (this is the FAST part!)...")
@@ -1279,13 +1298,10 @@ class DatasetGeneratorV2UHD:
                         os.remove(frame_path)
                 continue
             
-            # Process for each category-format combination that needs patches
+            # Process for each category-format combination
+            # We process ALL scenes, creating one patch per category-format from each scene
             for category, formats in format_distribution.items():
                 for format_name, target_count in formats.items():
-                    # Check if this format still needs patches
-                    if patches_targets[category][format_name]['created'] >= target_count:
-                        continue
-                    
                     # Get format config
                     format_config = self.format_config[category][format_name]
                     
@@ -1340,24 +1356,26 @@ class DatasetGeneratorV2UHD:
             del frames
             
             if processed_count % 100 == 0:
-                progress_pct = 100 * total_created / total_target
-                self.logger.info(f"  Progress: {total_created}/{total_target} patches ({progress_pct:.1f}%)")
+                scenes_pct = 100 * processed_count / len(frame_paths_dict)
+                self.logger.info(f"  Progress: {processed_count}/{len(frame_paths_dict)} scenes processed ({scenes_pct:.1f}%)")
+                self.logger.info(f"  Patches created so far: {total_created}")
             
-            # Check if all targets met
-            if total_created >= total_target:
-                break
-            
-            # Check if should stop
+            # Check if should stop (user interrupt)
             if not self.running:
+                self.logger.warning("  Interrupted by user")
                 break
         
         # Final statistics
         total_time = time.time() - start_time
+        scenes_extracted = len(frame_paths_dict)
+        scenes_processed = processed_count
         
         self.logger.info(f"\n╔══════════════════════════════════════════════════════════╗")
         self.logger.info(f"║  EXTRACTION COMPLETE                                     ║")
         self.logger.info(f"╚══════════════════════════════════════════════════════════╝")
-        self.logger.info(f"✓ Created {total_created}/{total_target} patches in {total_time:.1f}s")
+        self.logger.info(f"✓ Processed {scenes_processed}/{scenes_extracted} scenes in {total_time:.1f}s")
+        self.logger.info(f"✓ Created {total_created} patches total")
+        self.logger.info(f"  Scene utilization: {100*scenes_processed/scenes_extracted:.1f}% (all extracted scenes used)")
         
         if black_frames_detected > 0:
             self.logger.info(f"  🚫 Black frames detected and removed: {black_frames_detected}")
