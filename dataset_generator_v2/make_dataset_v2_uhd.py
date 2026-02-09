@@ -498,6 +498,13 @@ class DatasetGeneratorV2UHD:
                 'format_config': format_config
             }
             stats[category] = 0
+            
+            # Log format selection for first few extractions
+            if video_name and (not hasattr(self, '_format_log_count')):
+                self._format_log_count = 0
+            if hasattr(self, '_format_log_count') and self._format_log_count < 20:
+                self.logger.info(f"  {category}: selected format {format_name}")
+                self._format_log_count += 1
         
         if not category_configs:
             self.logger.warning(f"No valid categories for video: {video_name}")
