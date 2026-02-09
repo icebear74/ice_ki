@@ -94,6 +94,10 @@ class DatasetGeneratorV2UHD:
         
         self.logger.info(f"Loaded {len(self.videos)} videos from config")
         
+        # Initialize video metadata cache
+        self.metadata_cache_file = os.path.join(self.base_dir, '.video_metadata_cache.json')
+        self.metadata_cache = self._load_metadata_cache()
+        
         # Initialize progress tracker
         self.tracker = ProgressTracker(self.status_file)
         self.tracker.update_progress(total_videos=len(self.videos))
@@ -166,6 +170,28 @@ class DatasetGeneratorV2UHD:
             count = sum(priority_counts[p] for p in remaining)
             console.print(f"   ... and {count} more videos in other priority levels")
     
+    def _load_metadata_cache(self) -> dict:
+        """Load video metadata cache from disk"""
+        if os.path.exists(self.metadata_cache_file):
+            try:
+                with open(self.metadata_cache_file, 'r') as f:
+                    cache = json.load(f)
+                self.logger.info(f"Loaded metadata cache with {len(cache)} videos")
+                return cache
+            except Exception as e:
+                self.logger.warning(f"Could not load metadata cache: {e}")
+        return {}
+    
+    def _save_metadata_cache(self):
+        """Save video metadata cache to disk"""
+        try:
+            os.makedirs(os.path.dirname(self.metadata_cache_file), exist_ok=True)
+            with open(self.metadata_cache_file, 'w') as f:
+                json.dump(self.metadata_cache, f, indent=2)
+            self.logger.debug(f"Saved metadata cache with {len(self.metadata_cache)} videos")
+        except Exception as e:
+            self.logger.warning(f"Could not save metadata cache: {e}")
+    
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals gracefully"""
         self.logger.info(f"Received signal {signum}, shutting down gracefully...")
@@ -221,6 +247,9 @@ class DatasetGeneratorV2UHD:
         if RICH_AVAILABLE:
             console.print(f"\n✓ Scanned {len(durations)} videos")
             console.print(f"✓ Total duration: {total_duration/3600:.1f} hours ({total_duration:.0f} seconds)")
+        
+        # Save metadata cache after scanning
+        self._save_metadata_cache()
         
         self.logger.info(f"Scanned {len(durations)} videos, total duration: {total_duration:.1f}s")
         
@@ -450,8 +479,11 @@ class DatasetGeneratorV2UHD:
         
         duration = metadata['duration']
         
-        # Process for each category distribution
+        # Get all categories and their configurations
         categories = video.get('categories', {})
+        
+        # Prepare category configurations (format selection per category)
+        category_configs = {}
         for category, weight in categories.items():
             if category not in self.format_config:
                 continue
@@ -460,25 +492,119 @@ class DatasetGeneratorV2UHD:
             format_name = select_random_format(category)
             format_config = self.format_config[category][format_name]
             
-            # Determine frame count
-            lr_versions = self.settings.get('lr_versions', ['7frames'])
-            n_frames = 7 if '7frames' in lr_versions else 5
-            
-            # Extract and create patches
-            patches_created = self._extract_patches_from_video(
-                video_path, duration, category, format_name, 
-                format_config, n_frames
-            )
-            
-            if category not in stats:
-                stats[category] = 0
-            stats[category] += patches_created
+            category_configs[category] = {
+                'weight': weight,
+                'format_name': format_name,
+                'format_config': format_config
+            }
+            stats[category] = 0
+        
+        if not category_configs:
+            self.logger.warning(f"No valid categories for video: {video_name}")
+            return {}
+        
+        # Determine frame count
+        lr_versions = self.settings.get('lr_versions', ['7frames'])
+        n_frames = 7 if '7frames' in lr_versions else 5
+        
+        # Extract patches for ALL categories simultaneously (single video scan)
+        patches_created = self._extract_patches_multi_category(
+            video_path, duration, category_configs, n_frames
+        )
+        
+        # Update stats
+        for category, count in patches_created.items():
+            stats[category] = count
         
         return stats
     
+    def _extract_patches_multi_category(self, video_path: str, duration: float,
+                                       category_configs: dict, n_frames: int) -> Dict[str, int]:
+        """
+        Extract patches from video for MULTIPLE categories simultaneously.
+        This avoids opening the video file multiple times.
+        
+        Args:
+            video_path: Path to video file
+            duration: Video duration in seconds
+            category_configs: Dict of {category: {'weight', 'format_name', 'format_config'}}
+            n_frames: Number of frames to extract (5 or 7)
+        
+        Returns:
+            Dict of {category: patches_created_count}
+        """
+        patches_created = {cat: 0 for cat in category_configs.keys()}
+        stride_seconds = 3.0  # Default stride
+        current_time = 0.0
+        
+        self.logger.info(f"Extracting for {len(category_configs)} categories: {list(category_configs.keys())}")
+        
+        while current_time < duration - 1.0:
+            # Extract frames ONCE
+            frames = self.extract_frames_uhd(video_path, current_time, n_frames)
+            
+            if frames is None:
+                current_time += stride_seconds
+                continue
+            
+            # Create and save patches for ALL categories from the same frames
+            for category, config in category_configs.items():
+                format_name = config['format_name']
+                format_config = config['format_config']
+                
+                # Create patch pair for this category/format
+                gt, lr = self.create_patch_pair(frames, format_name, format_config)
+                
+                if gt is None or lr is None:
+                    continue
+                
+                # Save patches for this category
+                saved = self._save_patch_pair(
+                    gt, lr, video_path, current_time,
+                    category, format_name, n_frames
+                )
+                
+                if saved:
+                    patches_created[category] += 1
+            
+            current_time += stride_seconds
+            
+            # Check if should stop
+            if not self.running:
+                break
+        
+        return patches_created
+    
     def _get_video_metadata(self, video_path: str) -> Optional[dict]:
-        """Get video metadata using ffprobe"""
+        """
+        Get video metadata using ffprobe with caching.
+        Cache is based on file size and modification time.
+        """
         try:
+            # Get file stats for cache validation
+            file_stat = os.stat(video_path)
+            file_size = file_stat.st_size
+            file_mtime = file_stat.st_mtime
+            
+            # Create cache key
+            cache_key = video_path
+            
+            # Check if we have valid cached data
+            if cache_key in self.metadata_cache:
+                cached = self.metadata_cache[cache_key]
+                # Validate cache: same file size and modification time
+                if (cached.get('file_size') == file_size and 
+                    cached.get('file_mtime') == file_mtime):
+                    self.logger.debug(f"Using cached metadata for: {os.path.basename(video_path)}")
+                    return {
+                        'duration': cached['duration'],
+                        'fps': cached.get('fps'),
+                        'resolution': cached.get('resolution')
+                    }
+            
+            # Cache miss or invalid - query ffprobe
+            self.logger.debug(f"Scanning video metadata: {os.path.basename(video_path)}")
+            
             cmd = [
                 'ffprobe',
                 '-v', 'quiet',
@@ -497,51 +623,61 @@ class DatasetGeneratorV2UHD:
             data = json.loads(result.stdout)
             duration = float(data.get('format', {}).get('duration', 0))
             
-            return {'duration': duration}
+            # Extract additional metadata
+            video_stream = None
+            for stream in data.get('streams', []):
+                if stream.get('codec_type') == 'video':
+                    video_stream = stream
+                    break
+            
+            fps = None
+            resolution = None
+            if video_stream:
+                # Parse FPS
+                fps_str = video_stream.get('avg_frame_rate', '0/1')
+                if '/' in fps_str:
+                    num, den = fps_str.split('/')
+                    if int(den) > 0:
+                        fps = float(num) / float(den)
+                
+                # Parse resolution
+                width = video_stream.get('width')
+                height = video_stream.get('height')
+                if width and height:
+                    resolution = [width, height]
+            
+            # Cache the metadata
+            self.metadata_cache[cache_key] = {
+                'duration': duration,
+                'fps': fps,
+                'resolution': resolution,
+                'file_size': file_size,
+                'file_mtime': file_mtime
+            }
+            
+            # Save cache periodically (every 10 videos)
+            if len(self.metadata_cache) % 10 == 0:
+                self._save_metadata_cache()
+            
+            return {
+                'duration': duration,
+                'fps': fps,
+                'resolution': resolution
+            }
         
         except Exception as e:
             self.logger.error(f"ffprobe error: {e}")
             return None
     
-    def _extract_patches_from_video(self, video_path: str, duration: float,
-                                   category: str, format_name: str,
-                                   format_config: dict, n_frames: int) -> int:
-        """Extract patches from video for a specific category/format"""
-        patches_created = 0
-        stride_seconds = 3.0  # Default stride
-        current_time = 0.0
-        
-        while current_time < duration - 1.0:
-            # Extract frames
-            frames = self.extract_frames_uhd(video_path, current_time, n_frames)
-            
-            if frames is None:
-                current_time += stride_seconds
-                continue
-            
-            # Create patch pair
-            gt, lr = self.create_patch_pair(frames, format_name, format_config)
-            
-            if gt is None or lr is None:
-                current_time += stride_seconds
-                continue
-            
-            # Save patches
-            saved = self._save_patch_pair(
-                gt, lr, video_path, current_time,
-                category, format_name, n_frames
-            )
-            
-            if saved:
-                patches_created += 1
-            
-            current_time += stride_seconds
-            
-            # Check if should stop
-            if not self.running:
-                break
-        
-        return patches_created
+    # OLD METHOD - DEPRECATED
+    # Replaced by _extract_patches_multi_category which extracts once for all categories
+    # def _extract_patches_from_video(self, video_path: str, duration: float,
+    #                                category: str, format_name: str,
+    #                                format_config: dict, n_frames: int) -> int:
+    #     """Extract patches from video for a specific category/format"""
+    #     # This method has been replaced to avoid multiple video scans
+    #     pass
+    
     
     def _save_patch_pair(self, gt: np.ndarray, lr: np.ndarray,
                         video_path: str, timestamp: float,

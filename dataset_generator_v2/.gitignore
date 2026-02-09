@@ -7,6 +7,8 @@ generate_complete_config.py
 
 # State files (will be generated)
 generation_state.json
+.generator_status.json
+.video_metadata_cache.json
 
 # Temp directories
 temp/
