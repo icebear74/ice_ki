@@ -1182,17 +1182,37 @@ class DatasetGeneratorV2UHD:
         
         # Phase 1: Calculate all extraction timestamps
         self.logger.info(f"\n📋 Phase 1: Calculating extraction plan...")
-        stride_seconds = 3.0
-        timestamps = []
-        current_time = 0.0
         
-        while current_time < duration - 1.0 and len(timestamps) < total_target:
-            timestamps.append(current_time)
-            current_time += stride_seconds
+        # Calculate stride to EVENLY DISTRIBUTE across ENTIRE video duration
+        # This ensures frames from beginning, middle, AND END of video
+        usable_duration = duration - 1.0  # Leave 1 second at end
+        
+        if total_target > 0 and usable_duration > 0:
+            # Calculate stride: divide total duration by number of patches needed
+            stride_seconds = usable_duration / total_target
+            # Minimum stride to avoid extracting too frequently
+            stride_seconds = max(stride_seconds, 0.5)
+        else:
+            stride_seconds = 3.0  # Fallback
+        
+        self.logger.info(f"  Video duration: {duration:.1f}s")
+        self.logger.info(f"  Target patches: {total_target}")
+        self.logger.info(f"  Calculated stride: {stride_seconds:.2f}s (evenly distributed)")
+        
+        # Generate timestamps evenly across entire video
+        timestamps = []
+        for i in range(total_target):
+            timestamp = i * stride_seconds
+            if timestamp < usable_duration:
+                timestamps.append(timestamp)
+            else:
+                break
         
         self.logger.info(f"✓ Planned {len(timestamps)} extraction points")
-        self.logger.info(f"  First timestamp: {timestamps[0]:.2f}s")
-        self.logger.info(f"  Last timestamp: {timestamps[-1]:.2f}s")
+        if timestamps:
+            self.logger.info(f"  First timestamp: {timestamps[0]:.2f}s (0.0% of video)")
+            self.logger.info(f"  Last timestamp: {timestamps[-1]:.2f}s ({100*timestamps[-1]/duration:.1f}% of video)")
+            self.logger.info(f"  Coverage: Entire video from start to end")
         self.logger.info(f"  Total frames to extract: {len(timestamps) * n_frames}")
         
         # Phase 2: Batch extract ALL frames
