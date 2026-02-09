@@ -416,10 +416,12 @@ class DatasetGeneratorV2UHD:
         try:
             lr_version = f"{n_frames}frames"
             
-            # Get output directories
-            gt_dir, lr_dir = get_output_dirs_for_format(
+            # Get output directories (returns a dictionary)
+            output_dirs = get_output_dirs_for_format(
                 self.base_dir, category, format_name, n_frames
             )
+            gt_dir = output_dirs['gt']
+            lr_dir = output_dirs['lr']
             
             # Create directories
             os.makedirs(gt_dir, exist_ok=True)
