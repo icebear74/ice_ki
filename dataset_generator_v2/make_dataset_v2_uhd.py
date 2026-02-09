@@ -771,8 +771,10 @@ class DatasetGeneratorV2UHD:
             
             self.logger.info(f"Batch extracting with stride pattern:")
             self.logger.info(f"  First frame: {first_frame}, Last frame: {last_frame}")
-            self.logger.info(f"  Cycle length: {cycle_length} (extract {n_frames}, skip {stride})")
+            self.logger.info(f"  Cycle length: {cycle_length} frames (extract {n_frames} frames, skip {stride} frames)")
+            self.logger.info(f"  Pattern: Extract frames {first_frame}-{first_frame+n_frames-1}, {first_frame+cycle_length}-{first_frame+cycle_length+n_frames-1}, etc.")
             self.logger.info(f"  Expected frames: {total_frames_to_extract}")
+            self.logger.info(f"  FFmpeg select filter: Extracts frames where (frame_number - {first_frame}) % {cycle_length} < {n_frames}")
             
             cmd = [
                 'ffmpeg',
@@ -1215,7 +1217,9 @@ class DatasetGeneratorV2UHD:
             stride_seconds = 3.0  # Fallback
         
         self.logger.info(f"\n  Video duration: {duration:.1f}s")
-        self.logger.info(f"  Calculated stride: {stride_seconds:.2f}s (evenly distributed)")
+        self.logger.info(f"  Video FPS: {fps:.2f}")
+        self.logger.info(f"  Total frames in video: {int(duration * fps)}")
+        self.logger.info(f"  Calculated stride: {stride_seconds:.2f}s = {int(stride_seconds * fps)} frames")
         
         # Generate timestamps evenly across entire video
         timestamps = []
@@ -1227,6 +1231,8 @@ class DatasetGeneratorV2UHD:
                 break
         
         self.logger.info(f"\n✓ Planned {len(timestamps)} extraction points (scenes)")
+        self.logger.info(f"  Extraction pattern: One scene every {int(stride_seconds * fps)} frames")
+        self.logger.info(f"  Each scene: 7 consecutive frames")
         if timestamps:
             self.logger.info(f"  First timestamp: {timestamps[0]:.2f}s (0.0% of video)")
             self.logger.info(f"  Last timestamp: {timestamps[-1]:.2f}s ({100*timestamps[-1]/duration:.1f}% of video)")
