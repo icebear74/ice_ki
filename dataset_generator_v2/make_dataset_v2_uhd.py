@@ -416,6 +416,8 @@ class DatasetGeneratorV2UHD:
                             total_duration += duration
                             
                             progress.update(task, description=f"Scanned: {video_name[:40]}...", advance=1)
+                            # Log with newline for clean output
+                            print(f"Scanned: {video_name}: {duration:.1f}s")
                             self.logger.debug(f"Scanned {video_name}: {duration:.1f}s")
                         else:
                             self.logger.warning(f"Could not get duration for: {video_name}")
