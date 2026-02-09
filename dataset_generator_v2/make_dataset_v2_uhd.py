@@ -360,6 +360,26 @@ class DatasetGeneratorV2UHD:
         self.logger.info(f"Received signal {signum}, shutting down gracefully...")
         self.running = False
     
+    def _create_temp_dir(self, prefix: str = "extract") -> str:
+        """
+        Create a temporary directory in the configured temp location.
+        
+        Args:
+            prefix: Prefix for temp directory name
+            
+        Returns:
+            Path to created temp directory
+        """
+        # Ensure base temp directory exists
+        os.makedirs(self.temp_dir, exist_ok=True)
+        
+        # Create unique subdirectory
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+        temp_subdir = os.path.join(self.temp_dir, f"{prefix}_{timestamp}")
+        os.makedirs(temp_subdir, exist_ok=True)
+        
+        return temp_subdir
+    
     def extract_frames_uhd(self, video_path: str, start_time: float, n_frames: int = 7) -> Optional[List[np.ndarray]]:
         """
         Extract frames with HDR→SDR tonemap, NO resize (UHD quality)
@@ -372,59 +392,66 @@ class DatasetGeneratorV2UHD:
         Returns:
             List of UHD frames or None
         """
+        temp_dir = None
         try:
-            with tempfile.TemporaryDirectory() as temp_dir:
-                output_pattern = os.path.join(temp_dir, "frame_%04d.png")
-                
-                # UHD tonemap filter (NO scale!)
-                vf_filter = (
-                    "zscale=t=linear:npl=100,"
-                    "format=gbrpf32le,"
-                    "zscale=p=bt709,"
-                    "tonemap=tonemap=mobius:desat=0,"
-                    "zscale=t=bt709:m=bt709:range=limited,"
-                    "format=yuv420p"
-                )
-                
-                cmd = [
-                    'ffmpeg',
-                    '-ss', str(start_time),
-                    '-i', video_path,
-                    '-vf', vf_filter,
-                    '-frames:v', str(n_frames),
-                    '-y',
-                    output_pattern
-                ]
-                
-                timeout = self.config.get('ffmpeg_timeout', 120)
-                result = subprocess.run(
-                    cmd,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=timeout
-                )
-                
-                if result.returncode != 0:
+            # Use configured temp directory
+            temp_dir = self._create_temp_dir("extract_single")
+            output_pattern = os.path.join(temp_dir, "frame_%04d.png")
+            
+            # UHD tonemap filter (NO scale!)
+            vf_filter = (
+                "zscale=t=linear:npl=100,"
+                "format=gbrpf32le,"
+                "zscale=p=bt709,"
+                "tonemap=tonemap=mobius:desat=0,"
+                "zscale=t=bt709:m=bt709:range=limited,"
+                "format=yuv420p"
+            )
+            
+            cmd = [
+                'ffmpeg',
+                '-threads', str(self.workers),  # Add threading support
+                '-ss', str(start_time),
+                '-i', video_path,
+                '-vf', vf_filter,
+                '-frames:v', str(n_frames),
+                '-y',
+                output_pattern
+            ]
+            
+            timeout = self.config.get('ffmpeg_timeout', 120)
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=timeout
+            )
+            
+            if result.returncode != 0:
+                return None
+            
+            # Load frames
+            frames = []
+            for i in range(1, n_frames + 1):
+                frame_path = os.path.join(temp_dir, f"frame_{i:04d}.png")
+                if not os.path.exists(frame_path):
                     return None
                 
-                # Load frames
-                frames = []
-                for i in range(1, n_frames + 1):
-                    frame_path = os.path.join(temp_dir, f"frame_{i:04d}.png")
-                    if not os.path.exists(frame_path):
-                        return None
-                    
-                    frame = cv2.imread(frame_path)
-                    if frame is None:
-                        return None
-                    
-                    frames.append(frame)
+                frame = cv2.imread(frame_path)
+                if frame is None:
+                    return None
                 
-                return frames
+                frames.append(frame)
+            
+            return frames
         
         except Exception as e:
             self.logger.error(f"Error extracting frames: {e}")
             return None
+        finally:
+            # Clean up temp directory
+            if temp_dir and os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir, ignore_errors=True)
     
     def extract_frames_batch_uhd(self, video_path: str, timestamps: List[float],
                                  n_frames: int = 7, fps: float = 25.0) -> Dict[float, List[np.ndarray]]:
@@ -480,91 +507,94 @@ class DatasetGeneratorV2UHD:
         Uses FFmpeg select filter with modulo operation for efficiency.
         Command is much shorter than listing individual frames.
         """
+        temp_dir = None
         try:
-            with tempfile.TemporaryDirectory() as temp_dir:
-                output_pattern = os.path.join(temp_dir, "frame_%05d.png")
-                
-                # Calculate first frame and total frames needed
-                first_frame = int(timestamps[0] * fps)
-                last_frame = int(timestamps[-1] * fps) + n_frames - 1
-                total_frames_to_extract = len(timestamps) * n_frames
-                
-                # Build select filter using modulo pattern
-                # Extract n_frames, then skip (stride + n_frames - 1) frames
-                cycle_length = n_frames + stride
-                
-                # Select filter: within each cycle, take the first n_frames
-                # Example: if cycle_length=250, n_frames=7:
-                #   Take frames where: (n - first_frame) % 250 < 7
-                select_filter = f"gte(n,{first_frame})*lte(n,{last_frame})*lt(mod(n-{first_frame},{cycle_length}),{n_frames})"
-                
-                # UHD tonemap filter (NO scale!)
-                tonemap_filter = (
-                    "zscale=t=linear:npl=100,"
-                    "format=gbrpf32le,"
-                    "zscale=p=bt709,"
-                    "tonemap=tonemap=mobius:desat=0,"
-                    "zscale=t=bt709:m=bt709:range=limited,"
-                    "format=yuv420p"
-                )
-                
-                # Full filter: select specific frames + tonemap
-                full_filter = f"select='{select_filter}',setpts=N/FRAME_RATE/TB,{tonemap_filter}"
-                
-                self.logger.info(f"Batch extracting with stride pattern:")
-                self.logger.info(f"  First frame: {first_frame}, Last frame: {last_frame}")
-                self.logger.info(f"  Cycle length: {cycle_length} (extract {n_frames}, skip {stride})")
-                self.logger.info(f"  Expected frames: {total_frames_to_extract}")
-                
-                cmd = [
-                    'ffmpeg',
-                    '-i', video_path,
-                    '-vf', full_filter,
-                    '-vsync', 'vfr',
-                    '-y',
-                    output_pattern
-                ]
-                
-                timeout = self.config.get('ffmpeg_timeout', 120) * len(timestamps) // 10
-                timeout = max(timeout, 300)
-                
-                result = subprocess.run(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    timeout=timeout
-                )
-                
-                if result.returncode != 0:
-                    self.logger.error(f"Batch extraction failed: {result.stderr.decode()}")
-                    return {}
-                
-                # Load extracted frames and group by timestamp
-                extracted_frames = {}
-                frame_idx = 1
-                for ts in timestamps:
-                    frames = []
-                    for _ in range(n_frames):
-                        frame_path = os.path.join(temp_dir, f"frame_{frame_idx:05d}.png")
-                        if not os.path.exists(frame_path):
-                            self.logger.warning(f"Missing frame {frame_idx} for timestamp {ts}")
-                            break
-                        
-                        frame = cv2.imread(frame_path)
-                        if frame is None:
-                            self.logger.warning(f"Could not read frame {frame_idx} for timestamp {ts}")
-                            break
-                        
-                        frames.append(frame)
-                        frame_idx += 1
+            # Use configured temp directory
+            temp_dir = self._create_temp_dir("batch_stride")
+            output_pattern = os.path.join(temp_dir, "frame_%05d.png")
+            
+            # Calculate first frame and total frames needed
+            first_frame = int(timestamps[0] * fps)
+            last_frame = int(timestamps[-1] * fps) + n_frames - 1
+            total_frames_to_extract = len(timestamps) * n_frames
+            
+            # Build select filter using modulo pattern
+            # Extract n_frames, then skip (stride + n_frames - 1) frames
+            cycle_length = n_frames + stride
+            
+            # Select filter: within each cycle, take the first n_frames
+            # Example: if cycle_length=250, n_frames=7:
+            #   Take frames where: (n - first_frame) % 250 < 7
+            select_filter = f"gte(n,{first_frame})*lte(n,{last_frame})*lt(mod(n-{first_frame},{cycle_length}),{n_frames})"
+            
+            # UHD tonemap filter (NO scale!)
+            tonemap_filter = (
+                "zscale=t=linear:npl=100,"
+                "format=gbrpf32le,"
+                "zscale=p=bt709,"
+                "tonemap=tonemap=mobius:desat=0,"
+                "zscale=t=bt709:m=bt709:range=limited,"
+                "format=yuv420p"
+            )
+            
+            # Full filter: select specific frames + tonemap
+            full_filter = f"select='{select_filter}',setpts=N/FRAME_RATE/TB,{tonemap_filter}"
+            
+            self.logger.info(f"Batch extracting with stride pattern:")
+            self.logger.info(f"  First frame: {first_frame}, Last frame: {last_frame}")
+            self.logger.info(f"  Cycle length: {cycle_length} (extract {n_frames}, skip {stride})")
+            self.logger.info(f"  Expected frames: {total_frames_to_extract}")
+            
+            cmd = [
+                'ffmpeg',
+                '-threads', str(self.workers),  # Add threading support
+                '-i', video_path,
+                '-vf', full_filter,
+                '-vsync', 'vfr',
+                '-y',
+                output_pattern
+            ]
+            
+            timeout = self.config.get('ffmpeg_timeout', 120) * len(timestamps) // 10
+            timeout = max(timeout, 300)
+            
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=timeout
+            )
+            
+            if result.returncode != 0:
+                self.logger.error(f"Batch extraction failed: {result.stderr.decode()}")
+                return {}
+            
+            # Load extracted frames and group by timestamp
+            extracted_frames = {}
+            frame_idx = 1
+            for ts in timestamps:
+                frames = []
+                for _ in range(n_frames):
+                    frame_path = os.path.join(temp_dir, f"frame_{frame_idx:05d}.png")
+                    if not os.path.exists(frame_path):
+                        self.logger.warning(f"Missing frame {frame_idx} for timestamp {ts}")
+                        break
                     
-                    if len(frames) == n_frames:
-                        extracted_frames[ts] = frames
-                    else:
-                        self.logger.warning(f"Incomplete frame set for timestamp {ts}, skipping")
+                    frame = cv2.imread(frame_path)
+                    if frame is None:
+                        self.logger.warning(f"Could not read frame {frame_idx} for timestamp {ts}")
+                        break
+                    
+                    frames.append(frame)
+                    frame_idx += 1
                 
-                self.logger.info(f"Stride extraction complete: {len(extracted_frames)}/{len(timestamps)} timestamps successful")
-                return extracted_frames
+                if len(frames) == n_frames:
+                    extracted_frames[ts] = frames
+                else:
+                    self.logger.warning(f"Incomplete frame set for timestamp {ts}, skipping")
+            
+            self.logger.info(f"Stride extraction complete: {len(extracted_frames)}/{len(timestamps)} timestamps successful")
+            return extracted_frames
         
         except subprocess.TimeoutExpired:
             self.logger.error(f"Batch extraction timed out")
@@ -572,6 +602,10 @@ class DatasetGeneratorV2UHD:
         except Exception as e:
             self.logger.error(f"Error in stride extraction: {e}")
             return {}
+        finally:
+            # Clean up temp directory
+            if temp_dir and os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir, ignore_errors=True)
     
     def _extract_frames_chunked(self, video_path: str, timestamps: List[float],
                                n_frames: int, fps: float, chunk_size: int = 50) -> Dict[float, List[np.ndarray]]:
