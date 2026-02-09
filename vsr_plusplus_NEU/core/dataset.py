@@ -134,9 +134,9 @@ class VSRDataset(Dataset):
         
         # Expected shapes based on size_key
         expected_gt_shapes = {
-            '720': (720, 1280, 3),     # 720p 16:9
-            '540': (540, 960, 3),      # 540p 16:9
-            '720_169': (720, 1280, 3)  # 720p 16:9 (alternative naming)
+            '720': (720, 720, 3),      # 720×720 square patches
+            '540': (540, 540, 3),      # 540×540 square patches
+            '720_169': (405, 720, 3)   # 720×405 (16:9 aspect ratio)
         }
         
         expected_gt_shape = expected_gt_shapes.get(self.size_key)
