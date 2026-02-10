@@ -152,6 +152,10 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             self._deliver_config_json()
         elif self.path == '/config/ui':
             self._deliver_config_page()
+        elif self.path.startswith('/api/size_stats'):
+            self._handle_size_stats()
+        elif self.path.startswith('/api/batch_preview'):
+            self._handle_batch_preview()
         elif self.path.startswith('/monitoring'):
             self._deliver_main_page()
         else:
@@ -161,6 +165,10 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         """POST-Request-Handler"""
         if self.path == '/monitoring/command':
             self._process_user_command()
+        elif self.path == '/api/update_size_distribution':
+            self._handle_update_size_distribution()
+        elif self.path.startswith('/api/update_batch_config'):
+            self._handle_update_batch_config()
         else:
             self.send_error(404)
     
@@ -271,14 +279,170 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         except Exception as e:
             self.send_error(400, str(e))
     
+    def _handle_size_stats(self):
+        """Handle /api/size_stats GET request"""
+        try:
+            # Return placeholder stats for now
+            # In a real implementation, this would get actual dataset statistics
+            stats = {
+                '720': {'train': 0, 'val': 0},
+                '540': {'train': 0, 'val': 0},
+                '720_169': {'train': 0, 'val': 0}
+            }
+            
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Cache-Control', 'no-cache')
+            self.end_headers()
+            self.wfile.write(json.dumps(stats).encode('utf-8'))
+            
+        except Exception as e:
+            self.send_error(500, str(e))
+    
+    def _handle_batch_preview(self):
+        """Handle /api/batch_preview GET request"""
+        try:
+            # Parse query parameters
+            from urllib.parse import urlparse, parse_qs
+            parsed = urlparse(self.path)
+            params = parse_qs(parsed.query)
+            
+            effective_batch = int(params.get('effective_batch', [6])[0])
+            
+            # Return batch preview
+            preview = {
+                'effective_batch': effective_batch,
+                'gpu_batch': min(effective_batch, 3),
+                'accumulation': max(1, effective_batch // 3),
+                'estimated_vram': f'{effective_batch * 0.8:.1f} GB'
+            }
+            
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Cache-Control', 'no-cache')
+            self.end_headers()
+            self.wfile.write(json.dumps(preview).encode('utf-8'))
+            
+        except Exception as e:
+            self.send_error(500, str(e))
+    
+    def _handle_update_size_distribution(self):
+        """Handle /api/update_size_distribution POST request"""
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            request_body = self.rfile.read(content_length)
+            data = json.loads(request_body.decode('utf-8'))
+            
+            # Validate distribution
+            distribution = data.get('distribution', {})
+            total = sum(float(v) for v in distribution.values())
+            
+            if abs(total - 1.0) > 0.01:
+                response = {
+                    'success': False,
+                    'error': f'Distribution must sum to 1.0 (currently {total:.2f})'
+                }
+            else:
+                # Update runtime config if available
+                if hasattr(self, 'runtime_config_manager') and self.runtime_config_manager is not None:
+                    try:
+                        self.runtime_config_manager.set('size_distribution', distribution)
+                        response = {
+                            'success': True,
+                            'message': 'Distribution updated successfully',
+                            'distribution': distribution
+                        }
+                    except Exception as e:
+                        response = {
+                            'success': False,
+                            'error': f'Failed to update config: {str(e)}'
+                        }
+                else:
+                    response = {
+                        'success': False,
+                        'error': 'Runtime config not available'
+                    }
+            
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps(response).encode('utf-8'))
+            
+        except json.JSONDecodeError as e:
+            self.send_error(400, f'Invalid JSON: {str(e)}')
+        except Exception as e:
+            self.send_error(500, str(e))
+    
+    def _handle_update_batch_config(self):
+        """Handle /api/update_batch_config POST request"""
+        try:
+            # Parse query parameters
+            from urllib.parse import urlparse, parse_qs
+            parsed = urlparse(self.path)
+            params = parse_qs(parsed.query)
+            
+            effective_batch = int(params.get('effective_batch', [6])[0])
+            
+            # Update runtime config if available
+            if hasattr(self, 'runtime_config_manager') and self.runtime_config_manager is not None:
+                try:
+                    # Calculate batch_size and accumulation_steps
+                    batch_size = min(effective_batch, 3)
+                    accumulation_steps = max(1, effective_batch // batch_size)
+                    
+                    self.runtime_config_manager.set('batch_size', batch_size)
+                    self.runtime_config_manager.set('accumulation_steps', accumulation_steps)
+                    
+                    response = {
+                        'success': True,
+                        'message': 'Batch configuration updated',
+                        'batch_size': batch_size,
+                        'accumulation_steps': accumulation_steps,
+                        'effective_batch': batch_size * accumulation_steps
+                    }
+                except Exception as e:
+                    response = {
+                        'success': False,
+                        'error': f'Failed to update config: {str(e)}'
+                    }
+            else:
+                response = {
+                    'success': False,
+                    'error': 'Runtime config not available'
+                }
+            
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps(response).encode('utf-8'))
+            
+        except Exception as e:
+            self.send_error(500, str(e))
+    
     def _deliver_main_page(self):
-        """Liefert Haupt-HTML-Seite mit eingebettetem JavaScript"""
-        html_page = self._build_complete_dashboard_html()
+        """Liefert Haupt-HTML-Seite (monitor.html template)"""
+        import os
         
-        self.send_response(200)
-        self.send_header('Content-Type', 'text/html; charset=utf-8')
-        self.end_headers()
-        self.wfile.write(html_page.encode('utf-8'))
+        # Load monitor template
+        template_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            'web', 'templates', 'monitor.html'
+        )
+        
+        try:
+            with open(template_path, 'r', encoding='utf-8') as f:
+                html_content = f.read()
+            
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Cache-Control', 'no-cache')
+            self.end_headers()
+            self.wfile.write(html_content.encode('utf-8'))
+            
+        except FileNotFoundError:
+            self.send_error(404, f'Monitor template not found: {template_path}')
+        except Exception as e:
+            self.send_error(500, f'Error loading monitor template: {str(e)}')
     
     def _build_complete_dashboard_html(self):
         """Baut vollständige Dashboard-HTML mit ALLEN Daten"""
