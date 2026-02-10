@@ -1,5 +1,12 @@
 """
-VSR++ 7-Frame Configuration - Optimized for Tesla P4
+VSR++ 7-Frame Configuration - Example Template
+
+⚠️  IMPORTANT: Copy this file to config.py before using!
+
+    cp config.py.example config.py
+
+The config.py file is in .gitignore and will NOT be committed.
+Edit config.py for your local setup.
 
 This configuration is specifically optimized for 7-frame VSR training on Tesla P4 hardware (8GB VRAM).
 Key parameters:
