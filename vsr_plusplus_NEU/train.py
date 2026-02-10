@@ -442,9 +442,28 @@ def main():
             use_multi_size = False
     
     if not use_multi_size:
-        # Use traditional single-size dataloader
+        # Use traditional single-size dataloader - get config from runtime_config if available
+        if rt_config:
+            data_config = rt_config.get('data', {})
+            data_root = data_config.get('root', DATASET_ROOT)
+            dataset_name = data_config.get('dataset_name', 'master')
+            # Get first enabled size from size_distribution
+            size_dist = rt_config.get('size_distribution', {})
+            size_key = next((k for k, v in size_dist.items() if v > 0), '540')
+        else:
+            # Fallback to defaults
+            data_root = DATASET_ROOT
+            dataset_name = 'master'
+            size_key = '540'
+        
         try:
-            train_dataset = VSRDataset(DATASET_ROOT, mode='Patches', augment=True)
+            train_dataset = VSRDataset(
+                root=data_root,
+                dataset_name=dataset_name,
+                size_key=size_key,
+                mode='train',
+                augment=True
+            )
             
             print(f"✅ Training samples: {len(train_dataset):,}\n")
         except Exception as e:
@@ -460,10 +479,33 @@ def main():
             pin_memory=config['PIN_MEMORY']
         )
     
-    # Load validation dataset (always single-size)
+    # Load validation dataset - use config from runtime_config
+    if rt_config:
+        data_config = rt_config.get('data', {})
+        data_root = data_config.get('root', DATASET_ROOT)
+        dataset_name = data_config.get('dataset_name', 'master')
+        # Get first enabled validation size
+        val_sizes = rt_config.get('validation', {}).get('sizes', [])
+        if not val_sizes:
+            # Fallback to first size from size_distribution
+            size_dist = rt_config.get('size_distribution', {})
+            val_sizes = [k for k, v in size_dist.items() if v > 0]
+        val_size_key = val_sizes[0] if val_sizes else '540'
+    else:
+        # Fallback to defaults
+        data_root = DATASET_ROOT
+        dataset_name = 'master'
+        val_size_key = '540'
+    
     try:
-        val_dataset = VSRDataset(DATASET_ROOT, mode='Val', augment=False)
-        print(f"✅ Validation samples: {len(val_dataset):,}\n")
+        val_dataset = VSRDataset(
+            root=data_root,
+            dataset_name=dataset_name,
+            size_key=val_size_key,
+            mode='val',
+            augment=False
+        )
+        print(f"✅ Validation samples ({val_size_key}): {len(val_dataset):,}\n")
     except Exception as e:
         print(f"❌ Error loading validation dataset: {e}")
         return
