@@ -506,7 +506,13 @@ class VSRTrainer:
         adaptive_status = self.adaptive_system.get_status()
         
         # Number of training images
-        num_images = len(self.train_loader.dataset)
+        # Handle both single-size DataLoader and MultiSizeDataLoader
+        if hasattr(self.train_loader, 'dataset'):
+            # Old single-size DataLoader
+            num_images = len(self.train_loader.dataset)
+        else:
+            # New MultiSizeDataLoader - sum all datasets
+            num_images = sum(len(ds) for ds in self.train_loader.datasets_dict.values())
         
         # Calculate ETAs
         from ..utils.ui_terminal import format_time
