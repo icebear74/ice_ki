@@ -4,8 +4,8 @@ VSRDataset - Video Super-Resolution Dataset Loader
 Loads VSR training data with new dataset structure:
 - Dataset structure: root/dataset_name/patches/{size_key}/GT/ and LR/
 - Validation structure: root/dataset_name/val/{size_key}/GT/ (GT) + patches/{size_key}/LR/ (LR)
-- GT images: Variable size based on size_key (e.g., 720x1280 for '720', 540x960 for '540')
-- LR stack: 7 frames stacked horizontally (e.g., H x W*7 x 3)
+- GT images: Variable size based on size_key (e.g., 720×720 for '720', 540×540 for '540')
+- LR stack: 7 frames stacked vertically (e.g., H*7 x W x 3)
 - Supported size_keys: '720', '540', '720_169' (16:9 aspect ratio variants)
 """
 
@@ -144,11 +144,11 @@ class VSRDataset(Dataset):
             print(f"\n⚠️  Unknown size_key '{self.size_key}', skipping shape validation")
             return
         
-        # LR should be same height, width*7 (7 frames stacked horizontally)
-        expected_lr_height = expected_gt_shape[0] // 3  # 3x downscale
-        # Calculate LR width: (GT_width / scale) * n_frames
-        # Mathematically equivalent: (GT_width * 7) / 3 for precision
-        expected_lr_width = (expected_gt_shape[1] * 7) // 3  # 7 frames stacked horizontally, downscaled 3x
+        # LR should be height*7, same width (7 frames stacked vertically)
+        expected_lr_width = expected_gt_shape[1] // 3  # 3x downscale
+        # Calculate LR height: (GT_height / scale) * n_frames
+        # Mathematically equivalent: (GT_height * 7) / 3 for precision
+        expected_lr_height = (expected_gt_shape[0] * 7) // 3  # 7 frames stacked vertically, downscaled 3x
         expected_lr_shape = (expected_lr_height, expected_lr_width, 3)
         
         for i in range(samples_to_check):
@@ -179,11 +179,11 @@ class VSRDataset(Dataset):
             
             if gt.shape != expected_gt_shape:
                 issues_found.append(f"Invalid GT shape {gt.shape}, expected {expected_gt_shape}: {gt_path}")
-            # Allow ±2px tolerance for LR width to account for rounding in downscaling operations
-            if lr.shape[0] != expected_lr_shape[0] or lr.shape[2] != expected_lr_shape[2]:
+            # Allow ±2px tolerance for LR height to account for rounding in downscaling operations
+            if lr.shape[1] != expected_lr_shape[1] or lr.shape[2] != expected_lr_shape[2]:
                 issues_found.append(f"Invalid LR shape {lr.shape}, expected {expected_lr_shape}: {lr_path}")
-            elif abs(lr.shape[1] - expected_lr_shape[1]) > 2:
-                issues_found.append(f"Invalid LR width {lr.shape[1]}, expected {expected_lr_shape[1]} (±2px): {lr_path}")
+            elif abs(lr.shape[0] - expected_lr_shape[0]) > 2:
+                issues_found.append(f"Invalid LR height {lr.shape[0]}, expected {expected_lr_shape[0]} (±2px): {lr_path}")
         
         # Report issues as warnings instead of errors
         if issues_found:

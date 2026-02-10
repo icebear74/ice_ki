@@ -8,13 +8,13 @@
 │   └── patches/
 │       ├── 540/
 │       │   ├── GT/           (612M - Ground Truth 540×540)
-│       │   └── LR_7frames/   (656M - 7 frames horizontal 180×1260)
+│       │   └── LR_7frames/   (656M - 7 frames vertikal 1260×180)
 │       ├── 720/
 │       │   ├── GT/           (543M - Ground Truth 720×720)
-│       │   └── LR_7frames/   (581M - 7 frames horizontal 240×1680)
+│       │   └── LR_7frames/   (581M - 7 frames vertikal 1680×240)
 │       └── 720_169/
 │           ├── GT/           (608M - Ground Truth 405×720)
-│           └── LR_7frames/   (653M - 7 frames horizontal 135×1680)
+│           └── LR_7frames/   (653M - 7 frames vertikal 945×240)
 │
 ├── universal/
 │   └── patches/
