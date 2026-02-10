@@ -882,6 +882,7 @@ class VSRTrainer:
             
             # Check training dataset
             if hasattr(self.train_loader, 'dataset'):
+                # Standard DataLoader with single dataset
                 train_ds = self.train_loader.dataset
                 train_info = train_ds.get_file_info()
                 train_changes = train_ds.check_for_new_files()
@@ -900,6 +901,38 @@ class VSRTrainer:
                     self.train_logger.log_event(
                         f"New training files: +{train_changes['new_files']} in {train_info['size_key']}"
                     )
+            elif hasattr(self.train_loader, 'datasets_dict'):
+                # MultiSizeDataLoader with multiple datasets
+                # Aggregate counts across all sizes
+                total_count = 0
+                total_new = 0
+                has_any_new = False
+                size_keys = []
+                
+                for size_key, train_ds in self.train_loader.datasets_dict.items():
+                    train_info = train_ds.get_file_info()
+                    train_changes = train_ds.check_for_new_files()
+                    
+                    total_count += train_info['file_count']
+                    total_new += train_changes['new_files']
+                    has_any_new = has_any_new or train_changes['has_new']
+                    size_keys.append(size_key)
+                    
+                    if train_changes['has_new']:
+                        print(f"\n📂 New training files detected for {size_key}: +{train_changes['new_files']} files")
+                        print(f"   Total files in directory: {train_changes['new_gt_count']}")
+                        print(f"   Currently loaded: {train_changes['current_loaded']}")
+                        self.train_logger.log_event(
+                            f"New training files: +{train_changes['new_files']} in {size_key}"
+                        )
+                
+                # Update with aggregated data
+                dataset_info['train'] = {
+                    'size_key': '+'.join(sorted(size_keys)),  # e.g., "540+720+720_169"
+                    'count': total_count,
+                    'has_new': has_any_new,
+                    'new_count': total_new
+                }
             
             # Check validation datasets - try val_loaders first, fallback to val_loader
             val_loaders = getattr(self, 'val_loaders', None)

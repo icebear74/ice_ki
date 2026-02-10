@@ -2056,8 +2056,8 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         }
         
         function openConfigPage() {
-            // Check if config API is available
-            window.open('/config', '_blank');
+            // Open config UI page
+            window.open('/config/ui', '_blank');
         }
         
         function triggerCheckpoint() {
