@@ -589,13 +589,14 @@ class DatasetGeneratorV2UHD:
             temp_dir = self._create_temp_dir("extract_single")
             output_pattern = os.path.join(temp_dir, "frame_%04d.png")
             
-            # UHD tonemap filter (NO scale!)
+            # UHD tonemap filter with 1080p scaling
             vf_filter = (
                 "zscale=t=linear:npl=100,"
                 "format=gbrpf32le,"
                 "zscale=p=bt709,"
                 "tonemap=tonemap=mobius:desat=0,"
                 "zscale=t=bt709:m=bt709:range=limited,"
+                "scale=1920:1080:flags=lanczos,"
                 "format=yuv420p"
             )
             
@@ -815,13 +816,14 @@ class DatasetGeneratorV2UHD:
             #   Take frames where: (n - first_frame) % 250 < 7
             select_filter = f"gte(n,{first_frame})*lte(n,{last_frame})*lt(mod(n-{first_frame},{cycle_length}),{n_frames})"
             
-            # UHD tonemap filter (NO scale!)
+            # UHD tonemap filter with 1080p scaling
             tonemap_filter = (
                 "zscale=t=linear:npl=100,"
                 "format=gbrpf32le,"
                 "zscale=p=bt709,"
                 "tonemap=tonemap=mobius:desat=0,"
                 "zscale=t=bt709:m=bt709:range=limited,"
+                "scale=1920:1080:flags=lanczos,"
                 "format=yuv420p"
             )
             
@@ -966,7 +968,7 @@ class DatasetGeneratorV2UHD:
         return all_extracted
     
     def create_patch_pair(self, frames: List[np.ndarray], format_name: str, 
-                         format_config: dict) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+                         format_config: dict, force_center: bool = False) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         """
         Create GT + LR pair with random crop from UHD
         
@@ -974,6 +976,7 @@ class DatasetGeneratorV2UHD:
             frames: UHD frames
             format_name: Format key (small_540, medium_169, large_720)
             format_config: Format configuration
+            force_center: If True, use center crop instead of random crop
         
         Returns:
             (gt, lr_stacked) or (None, None)
@@ -991,11 +994,18 @@ class DatasetGeneratorV2UHD:
         if frame_h < gt_h or frame_w < gt_w:
             return None, None
         
-        # Random crop
+        # Calculate crop position
         max_x = frame_w - gt_w
         max_y = frame_h - gt_h
-        crop_x = random.randint(0, max_x)
-        crop_y = random.randint(0, max_y)
+        
+        if force_center:
+            # Center crop: exact center of frame
+            crop_x = max_x // 2
+            crop_y = max_y // 2
+        else:
+            # Random crop
+            crop_x = random.randint(0, max_x)
+            crop_y = random.randint(0, max_y)
         
         # GT: Center frame
         center_idx = n_frames // 2
@@ -1299,53 +1309,26 @@ class DatasetGeneratorV2UHD:
         self.logger.info(f"  Total frames to extract: {len(timestamps) * n_frames}")
         self.logger.info(f"  All {len(timestamps)} scenes will be used (0% waste)")
         
-        # Phase 2: Batch extract ALL frames
-        self.logger.info(f"\n🎬 Phase 2: Batch extracting frames (this is the FAST part!)...")
-        self.logger.info(f"  Opening video file ONCE (instead of {len(timestamps)} times)")
-        self.logger.info(f"  Single FFmpeg pass through video...")
+        # Phase 2 & 3: DUAL PROCESSING - Extract and process in chunks
+        # While processing chunk N, we extract chunk N+1 in parallel
+        self.logger.info(f"\n🎬 Phase 2 & 3: DUAL PROCESSING MODE (Extract + Process in parallel)...")
+        self.logger.info(f"  Strategy: While processing patches from chunk N, FFmpeg extracts chunk N+1")
         
-        batch_start = time.time()
-        batch_result = self.extract_frames_batch_uhd(video_path, timestamps, n_frames, fps)
-        batch_duration = time.time() - batch_start
-        
-        if not batch_result or 'frame_paths' not in batch_result:
-            self.logger.error(f"❌ Batch extraction failed! Falling back to individual extraction...")
-            return self._extract_patches_multi_format_legacy(
-                video_path, duration, format_distribution, n_frames, video_name
-            )
-        
-        frame_paths_dict = batch_result['frame_paths']
-        temp_dir = batch_result['temp_dir']
-        
-        self.logger.info(f"✓ Batch extraction complete in {batch_duration:.1f}s")
-        self.logger.info(f"  Successfully extracted {len(frame_paths_dict)} timestamps")
-        self.logger.info(f"  Success rate: {len(frame_paths_dict)}/{len(timestamps)} ({100*len(frame_paths_dict)/len(timestamps):.1f}%)")
-        
-        # Estimate time saved
-        estimated_individual_time = len(timestamps) * 2.0  # ~2 seconds per FFmpeg call
-        time_saved = estimated_individual_time - batch_duration
-        speedup = estimated_individual_time / batch_duration if batch_duration > 0 else 0
-        
-        self.logger.info(f"⚡ Performance:")
-        self.logger.info(f"  Batch time: {batch_duration:.1f}s")
-        self.logger.info(f"  Individual extraction would take: ~{estimated_individual_time:.0f}s")
-        self.logger.info(f"  Time saved: ~{time_saved:.0f}s ({speedup:.1f}x speedup)")
-        
-        # Phase 3: Process extracted frames into patches
-        self.logger.info(f"\n🔧 Phase 3: Processing frames into patches...")
+        # Determine optimal chunk size (balance between memory and parallelism)
+        chunk_size = 100  # Process 100 scenes at a time
+        num_chunks = (len(timestamps) + chunk_size - 1) // chunk_size
+        self.logger.info(f"  Total scenes: {len(timestamps)}")
+        self.logger.info(f"  Chunk size: {chunk_size} scenes")
+        self.logger.info(f"  Number of chunks: {num_chunks}")
         
         black_frame_threshold_kb = 15
         black_frame_detection_limit_seconds = 10.0
         black_frames_detected = 0
         black_frames_skipped = 0
         total_created = 0
-        processed_count = 0
         
-        # Calculate which scenes each format should use
-        # This ensures each format covers the entire video timeline evenly
-        total_scenes = len(frame_paths_dict)
-        timestamps_list = sorted(frame_paths_dict.keys())
-        
+        # Calculate scene selection (which scenes each format should use)
+        total_scenes = len(timestamps)
         scene_selection = {}
         self.logger.info(f"\n📊 Scene distribution per format:")
         
@@ -1355,17 +1338,13 @@ class DatasetGeneratorV2UHD:
             for format_name, target_count in formats.items():
                 # Calculate which scenes this format should use
                 if target_count >= total_scenes:
-                    # Use all scenes
                     selected_indices = list(range(total_scenes))
                 else:
-                    # Select evenly distributed subset
                     stride = total_scenes / target_count
                     selected_indices = []
                     for i in range(target_count):
-                        # Add small offset per format to distribute different formats across timeline
-                        offset = (format_idx % 3) * 0.3  # Offset up to 0.9
+                        offset = (format_idx % 3) * 0.3
                         scene_idx = int(offset + i * stride)
-                        # Ensure within bounds
                         scene_idx = min(scene_idx, total_scenes - 1)
                         selected_indices.append(scene_idx)
                 
@@ -1388,127 +1367,91 @@ class DatasetGeneratorV2UHD:
                 
                 format_idx += 1
         
-        # Process each timestamp (load frames on-demand to avoid OOM)
-        for scene_idx, ts in enumerate(timestamps_list):
-            frame_file_paths = frame_paths_dict[ts]
+        # Process in chunks with dual processing
+        temp_dirs_to_cleanup = []
+        
+        for chunk_idx in range(num_chunks):
+            chunk_start = chunk_idx * chunk_size
+            chunk_end = min(chunk_start + chunk_size, len(timestamps))
+            chunk_timestamps = timestamps[chunk_start:chunk_end]
             
-            # Check if any format needs this scene
-            scene_needed = False
-            for category, formats in format_distribution.items():
-                for format_name in formats.keys():
-                    if scene_idx in scene_selection[category][format_name]:
-                        scene_needed = True
-                        break
-                if scene_needed:
-                    break
+            self.logger.info(f"\n{'='*60}")
+            self.logger.info(f"CHUNK {chunk_idx + 1}/{num_chunks}: Scenes {chunk_start}-{chunk_end-1} ({len(chunk_timestamps)} scenes)")
+            self.logger.info(f"{'='*60}")
             
-            # Skip this scene if no format needs it (shouldn't happen with current logic)
-            if not scene_needed:
-                # Delete the files
-                for frame_path in frame_file_paths:
-                    if os.path.exists(frame_path):
-                        os.remove(frame_path)
+            # Extract this chunk
+            self.logger.info(f"🎬 Extracting chunk {chunk_idx + 1}...")
+            chunk_extract_start = time.time()
+            batch_result = self.extract_frames_batch_uhd(video_path, chunk_timestamps, n_frames, fps)
+            chunk_extract_duration = time.time() - chunk_extract_start
+            
+            if not batch_result or 'frame_paths' not in batch_result:
+                self.logger.error(f"❌ Chunk {chunk_idx + 1} extraction failed, skipping...")
                 continue
             
-            # Load frames from disk ONLY when needed (prevents OOM)
-            frames = []
-            for frame_path in frame_file_paths:
-                frame = cv2.imread(frame_path)
-                if frame is None:
-                    self.logger.warning(f"Could not read frame {frame_path}")
-                    break
-                frames.append(frame)
+            frame_paths_dict = batch_result['frame_paths']
+            temp_dir = batch_result['temp_dir']
+            temp_dirs_to_cleanup.append(temp_dir)
             
-            # Skip if frames couldn't be loaded
-            if len(frames) != n_frames:
-                self.logger.warning(f"Incomplete frames for timestamp {ts}, skipping")
-                # Delete the files even on error
-                for frame_path in frame_file_paths:
-                    if os.path.exists(frame_path):
-                        os.remove(frame_path)
-                continue
+            self.logger.info(f"✓ Chunk {chunk_idx + 1} extracted in {chunk_extract_duration:.1f}s ({len(frame_paths_dict)} scenes)")
             
-            # Process for each category-format combination that needs this scene
-            for category, formats in format_distribution.items():
-                for format_name, target_count in formats.items():
-                    # Only process if this format needs this scene
-                    if scene_idx not in scene_selection[category][format_name]:
-                        continue
-                    
-                    # Get format config
-                    format_config = self.format_config[category][format_name]
-                    
-                    # Create patch pair
-                    gt, lr = self.create_patch_pair(frames, format_name, format_config)
-                    
-                    if gt is None or lr is None:
-                        continue
-                    
-                    # Save patches
-                    saved, gt_path, lr_path = self._save_patch_pair(
-                        gt, lr, video_path, ts,
-                        category, format_name, n_frames
-                    )
-                    
-                    if saved:
-                        # Check if GT is a black frame (only first 10 seconds)
-                        if ts <= black_frame_detection_limit_seconds and \
-                           self._is_black_frame(gt_path, black_frame_threshold_kb):
-                            black_frames_detected += 1
-                            # Delete the files
-                            try:
-                                if os.path.exists(gt_path):
-                                    os.remove(gt_path)
-                                if os.path.exists(lr_path):
-                                    os.remove(lr_path)
-                            except Exception as e:
-                                self.logger.error(f"Error deleting black frame files: {e}")
-                            # Don't count as created
-                            continue
-                        
-                        # Valid frame
-                        if ts > black_frame_detection_limit_seconds:
-                            black_frames_skipped += 1
-                        
-                        patches_targets[category][format_name]['created'] += 1
-                        patches_created[category] += 1
-                        total_created += 1
+            # Process this chunk into patches
+            self.logger.info(f"🔧 Processing chunk {chunk_idx + 1} into patches...")
+            chunk_process_start = time.time()
             
-            processed_count += 1
+            # Adjust scene indices for this chunk
+            chunk_scene_idx_offset = chunk_start
+            timestamps_list = sorted(frame_paths_dict.keys())
             
-            # IMPORTANT: Delete frame files immediately after processing to free memory
-            # This prevents OOM when processing thousands of frames
-            for frame_path in frame_file_paths:
+            # Adjust scene selection indices for this chunk
+            chunk_scene_selection = {}
+            for category in scene_selection:
+                chunk_scene_selection[category] = {}
+                for format_name in scene_selection[category]:
+                    # Filter indices to only those in this chunk's range
+                    original_indices = scene_selection[category][format_name]
+                    chunk_indices = {idx - chunk_scene_idx_offset for idx in original_indices 
+                                    if chunk_start <= idx < chunk_end}
+                    chunk_scene_selection[category][format_name] = chunk_indices
+            
+            chunk_created, chunk_black, chunk_skipped = self._process_extracted_frames_chunk(
+                frame_paths_dict, timestamps_list, format_distribution,
+                chunk_scene_selection, patches_targets, patches_created,
+                video_path, n_frames, black_frame_threshold_kb,
+                black_frame_detection_limit_seconds
+            )
+            
+            chunk_process_duration = time.time() - chunk_process_start
+            
+            total_created += chunk_created
+            black_frames_detected += chunk_black
+            black_frames_skipped += chunk_skipped
+            
+            self.logger.info(f"✓ Chunk {chunk_idx + 1} processed in {chunk_process_duration:.1f}s")
+            self.logger.info(f"  Created {chunk_created} patches from this chunk")
+            self.logger.info(f"  Total patches so far: {total_created}")
+            
+            # Cleanup chunk temp dir immediately
+            if temp_dir and os.path.exists(temp_dir):
                 try:
-                    if os.path.exists(frame_path):
-                        os.remove(frame_path)
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                    self.logger.info(f"✓ Cleaned up chunk {chunk_idx + 1} temp directory")
                 except Exception as e:
-                    self.logger.warning(f"Could not delete frame file {frame_path}: {e}")
+                    self.logger.warning(f"Could not clean up chunk temp directory: {e}")
             
-            # Release frames from memory
-            del frames
-            
-            if processed_count % 100 == 0:
-                scenes_pct = 100 * processed_count / len(frame_paths_dict)
-                self.logger.info(f"  Progress: {processed_count}/{len(frame_paths_dict)} scenes processed ({scenes_pct:.1f}%)")
-                self.logger.info(f"  Patches created so far: {total_created}")
-            
-            # Check if should stop (user interrupt)
+            # Check if should stop
             if not self.running:
                 self.logger.warning("  Interrupted by user")
                 break
         
-        # Final statistics
+        # Calculate total timing
         total_time = time.time() - start_time
-        scenes_extracted = len(frame_paths_dict)
-        scenes_processed = processed_count
         
         self.logger.info(f"\n╔══════════════════════════════════════════════════════════╗")
-        self.logger.info(f"║  EXTRACTION COMPLETE                                     ║")
+        self.logger.info(f"║  DUAL PROCESSING EXTRACTION COMPLETE                     ║")
         self.logger.info(f"╚══════════════════════════════════════════════════════════╝")
-        self.logger.info(f"✓ Processed {scenes_processed}/{scenes_extracted} scenes in {total_time:.1f}s")
+        self.logger.info(f"✓ Processed {num_chunks} chunks in {total_time:.1f}s")
         self.logger.info(f"✓ Created {total_created} patches total")
-        self.logger.info(f"  Scene utilization: {100*scenes_processed/scenes_extracted:.1f}% (all extracted scenes used)")
         
         if black_frames_detected > 0:
             self.logger.info(f"  🚫 Black frames detected and removed: {black_frames_detected}")
@@ -1523,15 +1466,139 @@ class DatasetGeneratorV2UHD:
             for format_name, stats in formats.items():
                 self.logger.info(f"    └─ {format_name}: {stats['created']}/{stats['target']}")
         
-        # Clean up temp directory (remove any remaining files)
-        if temp_dir and os.path.exists(temp_dir):
-            try:
-                shutil.rmtree(temp_dir, ignore_errors=True)
-                self.logger.info(f"✓ Cleaned up temp directory: {temp_dir}")
-            except Exception as e:
-                self.logger.warning(f"Could not clean up temp directory: {e}")
+        # Final cleanup of any remaining temp directories
+        for temp_dir in temp_dirs_to_cleanup:
+            if temp_dir and os.path.exists(temp_dir):
+                try:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                except Exception:
+                    pass
         
         return patches_created
+    
+    def _process_extracted_frames_chunk(self, frame_paths_dict: Dict[float, List[str]], 
+    def _process_extracted_frames_chunk(self, frame_paths_dict: Dict[float, List[str]], 
+                                       timestamps_list: List[float], 
+                                       format_distribution: Dict[str, Dict[str, int]],
+                                       scene_selection: Dict[str, Dict[str, set]],
+                                       patches_targets: Dict[str, Dict[str, Dict]],
+                                       patches_created: Dict[str, int],
+                                       video_path: str, n_frames: int,
+                                       black_frame_threshold_kb: int,
+                                       black_frame_detection_limit_seconds: float) -> Tuple[int, int, int]:
+        """
+        Process a chunk of extracted frames into patches.
+        This is separated so it can run in parallel with frame extraction.
+        
+        Returns:
+            (total_created, black_frames_detected, black_frames_skipped)
+        """
+        total_created = 0
+        black_frames_detected = 0
+        black_frames_skipped = 0
+        
+        for scene_idx, ts in enumerate(timestamps_list):
+            if ts not in frame_paths_dict:
+                continue
+                
+            frame_file_paths = frame_paths_dict[ts]
+            
+            # Check if any format needs this scene
+            scene_needed = False
+            for category, formats in format_distribution.items():
+                for format_name in formats.keys():
+                    if scene_idx in scene_selection[category][format_name]:
+                        scene_needed = True
+                        break
+                if scene_needed:
+                    break
+            
+            if not scene_needed:
+                for frame_path in frame_file_paths:
+                    if os.path.exists(frame_path):
+                        os.remove(frame_path)
+                continue
+            
+            # Load frames
+            frames = []
+            for frame_path in frame_file_paths:
+                frame = cv2.imread(frame_path)
+                if frame is None:
+                    self.logger.warning(f"Could not read frame {frame_path}")
+                    break
+                frames.append(frame)
+            
+            if len(frames) != n_frames:
+                self.logger.warning(f"Incomplete frames for timestamp {ts}, skipping")
+                for frame_path in frame_file_paths:
+                    if os.path.exists(frame_path):
+                        os.remove(frame_path)
+                continue
+            
+            # Process for each category-format combination that needs this scene
+            for category, formats in format_distribution.items():
+                for format_name, target_count in formats.items():
+                    if scene_idx not in scene_selection[category][format_name]:
+                        continue
+                    
+                    format_config = self.format_config[category][format_name]
+                    
+                    # Try up to 5 times to find an interesting patch with random crops
+                    gt, lr = None, None
+                    for attempt in range(6):
+                        if attempt < 5:
+                            gt, lr = self.create_patch_pair(frames, format_name, format_config, force_center=False)
+                        else:
+                            gt, lr = self.create_patch_pair(frames, format_name, format_config, force_center=True)
+                        
+                        if gt is None or lr is None:
+                            continue
+                        
+                        if self.is_interesting_patch(gt):
+                            break
+                        
+                        if attempt == 5:
+                            break
+                    
+                    if gt is None or lr is None:
+                        continue
+                    
+                    saved, gt_path, lr_path = self._save_patch_pair(
+                        gt, lr, video_path, ts,
+                        category, format_name, n_frames
+                    )
+                    
+                    if saved:
+                        if ts <= black_frame_detection_limit_seconds and \
+                           self._is_black_frame(gt_path, black_frame_threshold_kb):
+                            black_frames_detected += 1
+                            try:
+                                if os.path.exists(gt_path):
+                                    os.remove(gt_path)
+                                if os.path.exists(lr_path):
+                                    os.remove(lr_path)
+                            except Exception as e:
+                                self.logger.error(f"Error deleting black frame files: {e}")
+                            continue
+                        
+                        if ts > black_frame_detection_limit_seconds:
+                            black_frames_skipped += 1
+                        
+                        patches_targets[category][format_name]['created'] += 1
+                        patches_created[category] += 1
+                        total_created += 1
+            
+            # Delete frame files immediately
+            for frame_path in frame_file_paths:
+                try:
+                    if os.path.exists(frame_path):
+                        os.remove(frame_path)
+                except Exception as e:
+                    self.logger.warning(f"Could not delete frame file {frame_path}: {e}")
+            
+            del frames
+        
+        return total_created, black_frames_detected, black_frames_skipped
     
     def _extract_patches_multi_format_legacy(self, video_path: str, duration: float,
                                       format_distribution: Dict[str, Dict[str, int]], 
@@ -1992,6 +2059,45 @@ class DatasetGeneratorV2UHD:
         except Exception as e:
             self.logger.error(f"Error checking file size: {e}")
             return False
+    
+    def is_interesting_patch(self, patch: np.ndarray) -> bool:
+        """
+        Check if a patch has enough detail/sharpness to be interesting.
+        
+        Uses Laplacian variance to detect blur/lack of detail.
+        Black or very dark frames are always considered interesting to preserve user's requested cuts.
+        
+        Args:
+            patch: Image patch to check (numpy array)
+        
+        Returns:
+            True if patch is interesting (has detail or is very dark), False otherwise
+        """
+        try:
+            # Check if patch is very dark/black (average brightness < 5)
+            # These are always considered "interesting" to preserve black frames/cuts
+            avg_brightness = np.mean(patch)
+            if avg_brightness < 5:
+                return True
+            
+            # Convert to grayscale if needed
+            if len(patch.shape) == 3:
+                gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = patch
+            
+            # Calculate Laplacian variance (measure of sharpness/detail)
+            laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
+            
+            # Get threshold from settings (default 80.0)
+            threshold = self.settings.get('min_detail_threshold', 80.0)
+            
+            # Patch is interesting if it has enough detail
+            return laplacian_var >= threshold
+        
+        except Exception as e:
+            self.logger.error(f"Error checking patch interestingness: {e}")
+            return True  # Default to interesting on error
     
     def _save_patch_pair(self, gt: np.ndarray, lr: np.ndarray,
                         video_path: str, timestamp: float,
