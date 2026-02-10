@@ -333,8 +333,24 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             request_body = self.rfile.read(content_length)
             data = json.loads(request_body.decode('utf-8'))
             
+            # Get distribution - handle both formats
+            if 'distribution' in data:
+                # New format: {'distribution': {'720': 0.4, '540': 0.3, '720_169': 0.3}}
+                distribution = data['distribution']
+            else:
+                # Old format from config template: {'small_540': 0.3, 'medium_169': 0.3, 'large_720': 0.4}
+                # Map to correct keys
+                key_mapping = {
+                    'small_540': '540',
+                    'medium_169': '720_169',
+                    'large_720': '720'
+                }
+                distribution = {}
+                for old_key, value in data.items():
+                    new_key = key_mapping.get(old_key, old_key)
+                    distribution[new_key] = value
+            
             # Validate distribution
-            distribution = data.get('distribution', {})
             total = sum(float(v) for v in distribution.values())
             
             if abs(total - 1.0) > 0.01:
@@ -420,29 +436,13 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             self.send_error(500, str(e))
     
     def _deliver_main_page(self):
-        """Liefert Haupt-HTML-Seite (monitor.html template)"""
-        import os
+        """Liefert Haupt-HTML-Seite mit eingebettetem JavaScript"""
+        html_page = self._build_complete_dashboard_html()
         
-        # Load monitor template
-        template_path = os.path.join(
-            os.path.dirname(os.path.dirname(__file__)),
-            'web', 'templates', 'monitor.html'
-        )
-        
-        try:
-            with open(template_path, 'r', encoding='utf-8') as f:
-                html_content = f.read()
-            
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/html; charset=utf-8')
-            self.send_header('Cache-Control', 'no-cache')
-            self.end_headers()
-            self.wfile.write(html_content.encode('utf-8'))
-            
-        except FileNotFoundError:
-            self.send_error(404, f'Monitor template not found: {template_path}')
-        except Exception as e:
-            self.send_error(500, f'Error loading monitor template: {str(e)}')
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
+        self.end_headers()
+        self.wfile.write(html_page.encode('utf-8'))
     
     def _build_complete_dashboard_html(self):
         """Baut vollständige Dashboard-HTML mit ALLEN Daten"""
@@ -1332,6 +1332,52 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             </div>
         </div>
         
+        <div class="section-header">📂 Dataset Files</div>
+        
+        <div class="layer-activity-container">
+            <div style="margin-bottom: 20px;">
+                <h3 style="color: var(--accent-blue); margin-bottom: 10px; font-size: 1.1em;">Training Dataset</h3>
+                <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border-color);">
+                    <span style="color: var(--text-secondary);" id="trainSizeKey">Size: -</span>
+                    <span style="color: var(--text-primary); font-weight: bold;" id="trainCount">0</span>
+                </div>
+                <div id="trainNewFiles" style="display: none; margin-top: 8px; padding: 8px; background: rgba(34, 197, 94, 0.1); border-left: 3px solid #22c55e; border-radius: 4px; font-size: 0.9em;">
+                    <span style="color: #22c55e;">✨ New files detected: <strong id="trainNewCount">0</strong></span>
+                </div>
+            </div>
+            
+            <div>
+                <h3 style="color: var(--accent-green); margin-bottom: 10px; font-size: 1.1em;">Validation Datasets</h3>
+                <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border-color);">
+                    <span style="color: var(--text-secondary);">720×720</span>
+                    <span style="color: var(--text-primary); font-weight: bold;" id="val720Count">0</span>
+                </div>
+                <div id="val720NewFiles" style="display: none; margin-top: 5px; margin-bottom: 8px; padding: 6px; background: rgba(34, 197, 94, 0.1); border-left: 3px solid #22c55e; border-radius: 4px; font-size: 0.85em;">
+                    <span style="color: #22c55e;">✨ +<strong id="val720NewCount">0</strong></span>
+                </div>
+                
+                <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border-color);">
+                    <span style="color: var(--text-secondary);">540×540</span>
+                    <span style="color: var(--text-primary); font-weight: bold;" id="val540Count">0</span>
+                </div>
+                <div id="val540NewFiles" style="display: none; margin-top: 5px; margin-bottom: 8px; padding: 6px; background: rgba(34, 197, 94, 0.1); border-left: 3px solid #22c55e; border-radius: 4px; font-size: 0.85em;">
+                    <span style="color: #22c55e;">✨ +<strong id="val540NewCount">0</strong></span>
+                </div>
+                
+                <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border-color);">
+                    <span style="color: var(--text-secondary);">720×405 (16:9)</span>
+                    <span style="color: var(--text-primary); font-weight: bold;" id="val720_169Count">0</span>
+                </div>
+                <div id="val720_169NewFiles" style="display: none; margin-top: 5px; margin-bottom: 8px; padding: 6px; background: rgba(34, 197, 94, 0.1); border-left: 3px solid #22c55e; border-radius: 4px; font-size: 0.85em;">
+                    <span style="color: #22c55e;">✨ +<strong id="val720_169NewCount">0</strong></span>
+                </div>
+            </div>
+            
+            <div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-color); font-size: 0.85em; color: var(--text-secondary);">
+                Last check: Step <span id="datasetLastCheck">0</span>
+            </div>
+        </div>
+        
         <div class="section-header">🎮 Steuerung</div>
         
         <div class="controls-section">
@@ -1502,6 +1548,9 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             
             // Layer activities with grouping
             updateLayerActivities(data.layer_activity_map);
+            
+            // Dataset files
+            updateDatasetFiles(data);
             
             // TensorBoard link
             const tbLink = document.getElementById('tensorboardLink');
@@ -1912,6 +1961,58 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             .catch(error => {
                 alert('❌ Verbindungsfehler: ' + error);
             });
+        }
+        
+        function updateDatasetFiles(data) {
+            const dsFiles = data.dataset_files || {};
+            
+            // Update training dataset
+            const train = dsFiles.train || {};
+            document.getElementById('trainSizeKey').textContent = `Size: ${train.size_key || '-'}`;
+            document.getElementById('trainCount').textContent = train.count || 0;
+            
+            if (train.has_new && train.new_count > 0) {
+                document.getElementById('trainNewFiles').style.display = 'block';
+                document.getElementById('trainNewCount').textContent = train.new_count;
+            } else {
+                document.getElementById('trainNewFiles').style.display = 'none';
+            }
+            
+            // Update validation datasets
+            const val = dsFiles.val || {};
+            
+            // 720
+            const val720 = val['720'] || {};
+            document.getElementById('val720Count').textContent = val720.count || 0;
+            if (val720.has_new && val720.new_count > 0) {
+                document.getElementById('val720NewFiles').style.display = 'block';
+                document.getElementById('val720NewCount').textContent = val720.new_count;
+            } else {
+                document.getElementById('val720NewFiles').style.display = 'none';
+            }
+            
+            // 540
+            const val540 = val['540'] || {};
+            document.getElementById('val540Count').textContent = val540.count || 0;
+            if (val540.has_new && val540.new_count > 0) {
+                document.getElementById('val540NewFiles').style.display = 'block';
+                document.getElementById('val540NewCount').textContent = val540.new_count;
+            } else {
+                document.getElementById('val540NewFiles').style.display = 'none';
+            }
+            
+            // 720_169
+            const val720_169 = val['720_169'] || {};
+            document.getElementById('val720_169Count').textContent = val720_169.count || 0;
+            if (val720_169.has_new && val720_169.new_count > 0) {
+                document.getElementById('val720_169NewFiles').style.display = 'block';
+                document.getElementById('val720_169NewCount').textContent = val720_169.new_count;
+            } else {
+                document.getElementById('val720_169NewFiles').style.display = 'none';
+            }
+            
+            // Last check
+            document.getElementById('datasetLastCheck').textContent = dsFiles.last_check || 0;
         }
         
         function downloadDataAsJSON() {
