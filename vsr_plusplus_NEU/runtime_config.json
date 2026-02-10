@@ -1,4 +1,6 @@
 {
+  "_IMPORTANT_NOTE": "Dataset configuration (size_distribution, data paths) requires RESTART to take effect. Only training parameters (LR, weights) can be changed live during training.",
+  
   "data": {
     "root": "/mnt/data/training/datasetNeu",
     "dataset_name": "master"
@@ -21,6 +23,7 @@
   },
   
   "size_distribution": {
+    "_NOTE": "Changing this requires RESTART. Data loaders are created at startup only.",
     "720": 0.4,
     "540": 0.4,
     "720_169": 0.2

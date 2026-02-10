@@ -428,12 +428,38 @@ class EnhancedRuntimeConfigManager:
             
             if current_mtime > self.last_modified:
                 print("🔄 Runtime config file changed externally, reloading...")
+                
+                # Store old config to detect startup-only parameter changes
+                old_config = self.config.copy() if self.config else {}
+                
                 self.load()
+                
+                # Warn about startup-only parameter changes
+                self._warn_startup_only_changes(old_config, self.config)
+                
                 return True
         except Exception as e:
             print(f"⚠️  Error checking for config updates: {e}")
         
         return False
+    
+    def _warn_startup_only_changes(self, old_config: dict, new_config: dict):
+        """Warn user if they changed parameters that require restart"""
+        startup_only_keys = [
+            ('size_distribution', 'Size distribution (which dataset sizes to use)'),
+            ('data', 'Data paths'),
+            ('model', 'Model architecture'),
+        ]
+        
+        for key, description in startup_only_keys:
+            old_val = old_config.get(key)
+            new_val = new_config.get(key)
+            
+            if old_val != new_val and old_val is not None:
+                print(f"\n⚠️  WARNING: {description} was changed in runtime_config.json")
+                print(f"   {key}: {old_val} → {new_val}")
+                print(f"   ⚠️  This change requires TRAINING RESTART to take effect!")
+                print(f"   ⚠️  Current training session is using the old configuration.\n")
     
     def save_snapshot(self, step: int) -> str:
         """Save configuration snapshot for a specific step"""
