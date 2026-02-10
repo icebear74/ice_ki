@@ -110,14 +110,18 @@ PIN_MEMORY = True
 # PATHS (Match dataset_generator_v2 output structure)
 # ============================================================================
 
-# Training data root directory - matches generator_config.json output_base_dir
-# Generator creates: datasetNeu/Master/MasterModel/Learn/Patches/GT, Patches/LR, etc.
-# VSRDataset expects: dataset_root/Patches/GT and dataset_root/Patches/LR
-# (dataset_strucure.txt shows structure BELOW Master/ level)
-DATA_ROOT = "/mnt/data/training/datasetNeu/Master/MasterModel/Learn"
-
-# Dataset root directory (for checkpoints and logs)
+# Dataset root directory - base directory for all datasets
+# This matches runtime_config.json "data.root"
 DATASET_ROOT = "/mnt/data/training/datasetNeu"
+
+# Default dataset name (category) - used if runtime_config.json not found
+# Options: 'master', 'universal', 'space', 'toon' (lowercase)
+DEFAULT_DATASET_NAME = "master"
+
+# For backward compatibility - will be overridden by runtime_config.json
+# New structure: DATASET_ROOT/dataset_name/patches/{size_key}/GT
+# Old structure (deprecated): DATASET_ROOT/Master/MasterModel/Learn/Patches/GT
+DATA_ROOT = f"{DATASET_ROOT}/{DEFAULT_DATASET_NAME}"
 
 
 # ============================================================================
@@ -243,13 +247,52 @@ def print_config():
     print(f"  Pin Memory:             {PIN_MEMORY}")
     
     print("\nDATASET PATHS:")
-    print(f"  Data Root:              {DATA_ROOT}")
     print(f"  Dataset Root:           {DATASET_ROOT}")
-    print(f"  Expected Structure (from dataset_strucure.txt):")
-    print(f"    {DATA_ROOT}/Patches/GT/")
-    print(f"    {DATA_ROOT}/Patches/LR/")
-    print(f"    {DATA_ROOT}/Patches/LR_7frames/")
-    print(f"    {DATA_ROOT}/Val/GT/")
+    print(f"  Category (dataset_name): {DEFAULT_DATASET_NAME}")
+    
+    # Try to load runtime_config.json to show actual configuration
+    import os
+    import json
+    runtime_config_file = os.path.join(os.path.dirname(__file__), "runtime_config.json")
+    
+    if os.path.exists(runtime_config_file):
+        try:
+            with open(runtime_config_file, 'r') as f:
+                rt_config = json.load(f)
+            dataset_root = rt_config.get('data', {}).get('root', DATASET_ROOT)
+            dataset_name = rt_config.get('data', {}).get('dataset_name', DEFAULT_DATASET_NAME)
+            
+            print(f"\n  ✓ runtime_config.json found:")
+            print(f"    Root:                 {dataset_root}")
+            print(f"    Dataset Name:         {dataset_name}")
+            
+            # Show expected structure for each size_key
+            size_dist = rt_config.get('size_distribution', {})
+            enabled_sizes = [k for k, v in size_dist.items() if v > 0]
+            
+            if enabled_sizes:
+                print(f"\n  Expected Structure (NEW - size-specific):")
+                for size_key in enabled_sizes:
+                    print(f"    Training {size_key}:")
+                    print(f"      {dataset_root}/{dataset_name}/patches/{size_key}/GT/")
+                    print(f"      {dataset_root}/{dataset_name}/patches/{size_key}/LR_7frames/")
+                
+                # Show validation structure
+                val_sizes = rt_config.get('validation', {}).get('sizes', enabled_sizes)
+                if val_sizes:
+                    print(f"\n    Validation:")
+                    for size_key in val_sizes:
+                        print(f"      {dataset_root}/{dataset_name}/val/{size_key}/GT/")
+                        print(f"      (LR auto-found in patches/{size_key}/LR_7frames/)")
+        except Exception as e:
+            print(f"\n  ⚠ Could not parse runtime_config.json: {e}")
+            print(f"  Using default paths (backward compatible)")
+    else:
+        print(f"\n  ⚠ runtime_config.json not found")
+        print(f"  Expected at: {runtime_config_file}")
+        print(f"  Using default single-size structure:")
+        print(f"    {DATA_ROOT}/patches/540/GT/")
+        print(f"    {DATA_ROOT}/patches/540/LR_7frames/")
     
     print("\nADAPTIVE SYSTEM:")
     print(f"  Adaptive Loss Weights:  {ADAPTIVE_LOSS_WEIGHTS}")
@@ -262,10 +305,10 @@ def print_config():
     print("\n" + "="*80)
     print("CONFIGURATION NOTES:")
     print("  - 7-frame model with 72 features and 26 blocks")
-    print("  - Batch=1 for VRAM safety (tested at ~3.77 GB)")
-    print("  - Dataset paths match dataset_generator_v2 output")
-    print("  - Generator creates: Master/MasterModel/Learn/Patches/...")
-    print("  - dataset_strucure.txt shows relative structure below Master/")
+    print("  - Dataset structure matches dataset_generator_v2 output")
+    print("  - Lowercase category names (master, universal, space, toon)")
+    print("  - Size-specific directories: patches/{size_key}/ and val/{size_key}/")
+    print("  - Validation LR files auto-found in patches/{size_key}/LR_7frames/")
     print("  - VGG perceptual loss enabled for quality")
     print("  - Gradient accumulation for effective batch size 6")
     print("="*80 + "\n")
