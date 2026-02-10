@@ -40,18 +40,18 @@ class VSRDataset(Dataset):
         dataset_path = os.path.join(root, dataset_name)
         
         if mode == 'train':
-            # Training: root/dataset_name/patches/size_key/GT and LR
+            # Training: root/dataset_name/patches/size_key/GT and LR_7frames
             patches_path = os.path.join(dataset_path, 'patches', size_key)
             self.gt_dir = os.path.join(patches_path, 'GT')
-            self.lr_dir = os.path.join(patches_path, 'LR')
+            self.lr_dir = os.path.join(patches_path, 'LR_7frames')
             self.patch_lr_dir = None  # Not needed for training
         elif mode == 'val':
-            # Validation: GT from val/size_key/GT, LR from patches/size_key/LR
+            # Validation: GT from val/size_key/GT, LR from patches/size_key/LR_7frames
             val_path = os.path.join(dataset_path, 'val', size_key)
             self.gt_dir = os.path.join(val_path, 'GT')
-            self.lr_dir = os.path.join(val_path, 'LR')  # Try val/LR first
-            # Fallback to patches/LR for validation
-            self.patch_lr_dir = os.path.join(dataset_path, 'patches', size_key, 'LR')
+            self.lr_dir = os.path.join(val_path, 'LR_7frames')  # Try val/LR_7frames first
+            # Fallback to patches/LR_7frames for validation
+            self.patch_lr_dir = os.path.join(dataset_path, 'patches', size_key, 'LR_7frames')
         else:
             raise ValueError(f"Invalid mode: {mode}. Must be 'train' or 'val'")
         
