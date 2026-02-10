@@ -5,32 +5,40 @@
     "root": "/mnt/data/training/datasetNeu",
     "dataset_name": "master"
   },
-  
   "model": {
     "n_frames": 7,
     "n_feats": 72,
-    "n_blocks": 26,
+    "n_blocks": 28,
     "precision": "float32"
   },
-  
   "training": {
     "effective_batch_size": 6,
     "adaptive_batch": {
-      "720": {"batch": 1, "accum": 6},
-      "540": {"batch": 1, "accum": 6},
-      "720_169": {"batch": 1, "accum": 6}
+      "720": {
+        "batch": 1,
+        "accum": 6
+      },
+      "540": {
+        "batch": 1,
+        "accum": 6
+      },
+      "720_169": {
+        "batch": 1,
+        "accum": 6
+      }
     }
   },
-  
   "size_distribution": {
     "_NOTE": "Changing this requires RESTART. Data loaders are created at startup only.",
     "720": 0.4,
     "540": 0.4,
     "720_169": 0.2
   },
-  
   "validation": {
-    "sizes": ["720", "720_169"],
+    "sizes": [
+      "720",
+      "720_169"
+    ],
     "batch_size": 1,
     "accum_steps": 6
   }
