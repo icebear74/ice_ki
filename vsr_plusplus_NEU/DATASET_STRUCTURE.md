@@ -94,29 +94,31 @@ Die **Validation (VAL)** Daten müssen wie folgt strukturiert sein:
 ```
 /mnt/data/training/datasetNeu/master/val/
 ├── 540/
-│   ├── GT/              ← Hier Ground Truth Bilder für 540×540 reinlegen
-│   └── LR_7frames/      ← Optional: LR Versionen (sonst wird patches/540/LR_7frames genutzt)
+│   └── GT/              ← Hier Ground Truth Bilder für 540×540 reinlegen
 ├── 720/
-│   ├── GT/              ← Hier Ground Truth Bilder für 720×720 reinlegen
-│   └── LR_7frames/      ← Optional
+│   └── GT/              ← Hier Ground Truth Bilder für 720×720 reinlegen
 └── 720_169/
-    ├── GT/              ← Hier Ground Truth Bilder für 720×405 (16:9) reinlegen
-    └── LR_7frames/      ← Optional
+    └── GT/              ← Hier Ground Truth Bilder für 720×405 (16:9) reinlegen
 ```
 
-**Beispiel für val/540/GT:**
-```
-val/540/GT/
-├── val_image_001.png    (540×540 Pixel)
-├── val_image_002.png    (540×540 Pixel)
-├── val_image_003.png    (540×540 Pixel)
-└── ...
+**Workflow für Validation-Daten:**
+1. **GT kopieren**: Validation Ground Truth Bilder manuell nach `val/{size_key}/GT/` kopieren
+2. **LR automatisch**: Das Training findet automatisch die entsprechenden LR Bilder in `patches/{size_key}/LR_7frames/`
+
+**Beispiel:**
+```bash
+# Sie kopieren nur GT:
+cp some_image.png /mnt/data/training/datasetNeu/master/val/540/GT/
+
+# Training findet automatisch das LR hier:
+# /mnt/data/training/datasetNeu/master/patches/540/LR_7frames/some_image.png
 ```
 
 **Wichtig:**
+- Sie müssen **nur GT-Bilder** nach `val/{size_key}/GT/` kopieren
+- LR-Bilder werden automatisch aus `patches/{size_key}/LR_7frames/` geladen
+- Die GT- und LR-Dateinamen müssen **identisch** sein (z.B. beide `image001.png`)
 - Jede size_key hat ihr eigenes Validierungs-Verzeichnis
-- GT-Bilder müssen die korrekte Größe haben (540×540 für '540', 720×720 für '720', etc.)
-- LR_7frames ist optional - wenn nicht vorhanden, wird automatisch auf `patches/{size_key}/LR_7frames` zurückgegriffen
 
 ### Warum dieser Pfad?
 
@@ -154,7 +156,23 @@ In `dataset_generator_v2/generator_config.json`:
 ```
 
 **Hinweis**: Der Generator erstellt nur `Val/GT/` (flat), aber das Training benötigt `val/{size_key}/GT/`.
-Die Validation-Dateien müssen manuell in die korrekte Struktur kopiert werden.
+
+**Validation Setup (Beispiel):**
+```bash
+# 1. Erstellen Sie die Verzeichnisse
+mkdir -p /mnt/data/training/datasetNeu/master/val/540/GT
+mkdir -p /mnt/data/training/datasetNeu/master/val/720/GT
+mkdir -p /mnt/data/training/datasetNeu/master/val/720_169/GT
+
+# 2. Kopieren Sie Validation GT-Bilder aus den Training-Patches
+# (wählen Sie gute, repräsentative Bilder aus)
+cp /mnt/data/training/datasetNeu/master/patches/540/GT/some_good_image.png \
+   /mnt/data/training/datasetNeu/master/val/540/GT/
+
+# 3. LR-Bilder werden automatisch gefunden!
+# Training findet automatisch:
+# /mnt/data/training/datasetNeu/master/patches/540/LR_7frames/some_good_image.png
+```
 
 ### Format-Verteilung
 
