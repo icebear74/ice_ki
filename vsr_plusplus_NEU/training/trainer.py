@@ -398,7 +398,7 @@ class VSRTrainer:
                     # Auto-continue timer for manual validation
                     if self.do_manual_val:
                         import select
-                        from vsr_plus_plus.utils.ui_terminal import C_CYAN, C_BOLD, C_GREEN, C_RESET, C_YELLOW
+                        from vsr_plusplus_NEU.utils.ui_terminal import C_CYAN, C_BOLD, C_GREEN, C_RESET, C_YELLOW
                         
                         # Show results
                         val_duration = time.time() - self.last_val_time if hasattr(self, 'last_val_time') else 0

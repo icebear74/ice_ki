@@ -26,16 +26,16 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Add current directory to path for local config.py
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from vsr_plus_plus.core.model import VSRBidirectional_3x
-from vsr_plus_plus.core.loss import HybridLoss
-from vsr_plusplus_NEU.core.dataset import VSRDataset  # Use NEW dataset API
-from vsr_plus_plus.training.trainer import VSRTrainer
-from vsr_plus_plus.training.validator import VSRValidator
-from vsr_plus_plus.training.lr_scheduler import AdaptiveLRScheduler
-from vsr_plus_plus.systems.checkpoint_manager import CheckpointManager
-from vsr_plus_plus.systems.logger import TrainingLogger, TensorBoardLogger
-from vsr_plus_plus.systems.adaptive_system import AdaptiveSystem
-from vsr_plus_plus.systems.runtime_config import RuntimeConfigManager
+from vsr_plusplus_NEU.core.model import VSRBidirectional_3x
+from vsr_plusplus_NEU.core.loss import HybridLoss
+from vsr_plusplus_NEU.core.dataset import VSRDataset
+from vsr_plusplus_NEU.training.trainer import VSRTrainer
+from vsr_plusplus_NEU.training.validator import VSRValidator
+from vsr_plusplus_NEU.training.lr_scheduler import AdaptiveLRScheduler
+from vsr_plusplus_NEU.systems.checkpoint_manager import CheckpointManager
+from vsr_plusplus_NEU.systems.logger import TrainingLogger, TensorBoardLogger
+from vsr_plusplus_NEU.systems.adaptive_system import AdaptiveSystem
+from vsr_plusplus_NEU.systems.runtime_config import RuntimeConfigManager
 
 # Import manual configuration
 # Import from local directory (config.py is not in repo due to .gitignore)
