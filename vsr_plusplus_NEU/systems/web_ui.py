@@ -150,6 +150,8 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             self._deliver_json_snapshot()
         elif self.path == '/monitoring/config' or self.path == '/config':
             self._deliver_config_json()
+        elif self.path == '/config/ui':
+            self._deliver_config_page()
         elif self.path.startswith('/monitoring'):
             self._deliver_main_page()
         else:
@@ -206,6 +208,31 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         self.end_headers()
         
         self.wfile.write(json.dumps(config, indent=2).encode('utf-8'))
+    
+    def _deliver_config_page(self):
+        """Liefert Config-HTML-Seite (config_7frame.html template)"""
+        import os
+        
+        # Load config template
+        template_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            'web', 'templates', 'config_7frame.html'
+        )
+        
+        try:
+            with open(template_path, 'r', encoding='utf-8') as f:
+                html_content = f.read()
+            
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Cache-Control', 'no-cache')
+            self.end_headers()
+            self.wfile.write(html_content.encode('utf-8'))
+            
+        except FileNotFoundError:
+            self.send_error(404, f'Config template not found: {template_path}')
+        except Exception as e:
+            self.send_error(500, f'Error loading config template: {str(e)}')
     
     def _process_user_command(self):
         """Verarbeitet Befehle vom Benutzer"""
