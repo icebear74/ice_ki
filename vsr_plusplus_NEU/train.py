@@ -626,6 +626,11 @@ def main():
     # Set start step
     trainer.set_start_step(start_step)
     
+    # Initialize dataset file monitoring with current counts
+    print(f"\n{C_CYAN}Initializing dataset file monitoring...{C_RESET}")
+    trainer._check_dataset_files()
+    print(f"{C_GREEN}✓ Dataset file counts initialized{C_RESET}\n")
+    
     # Start training
     print("="*80)
     print("🚀 Starting training...")

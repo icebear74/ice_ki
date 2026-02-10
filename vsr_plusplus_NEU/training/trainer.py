@@ -457,8 +457,12 @@ class VSRTrainer:
                     
                     # Schedule JSON save for 2 steps later (so web_monitor gets updated with fresh loss data)
                     self.pending_json_save_step = self.global_step + 2
-                    
-                    # Auto-continue timer for manual validation
+                
+                # Check dataset files every 100 steps
+                if self.global_step % 100 == 0:
+                    self._check_dataset_files()
+                
+                # Auto-continue timer for manual validation
                     if self.do_manual_val:
                         import select
                         from vsr_plusplus_NEU.utils.ui_terminal import C_CYAN, C_BOLD, C_GREEN, C_RESET, C_YELLOW
@@ -853,6 +857,99 @@ class VSRTrainer:
         )
         
         self.model.train()  # Back to training mode
+    
+    def _check_dataset_files(self):
+        """
+        Check for new files in training and validation datasets
+        
+        Updates web monitor with current file counts per size
+        """
+        try:
+            dataset_info = {
+                'train': {
+                    'size_key': '',
+                    'count': 0,
+                    'has_new': False,
+                    'new_count': 0
+                },
+                'val': {
+                    '720': {'count': 0, 'has_new': False, 'new_count': 0},
+                    '540': {'count': 0, 'has_new': False, 'new_count': 0},
+                    '720_169': {'count': 0, 'has_new': False, 'new_count': 0}
+                },
+                'last_check': self.global_step
+            }
+            
+            # Check training dataset
+            if hasattr(self.train_loader, 'dataset'):
+                train_ds = self.train_loader.dataset
+                train_info = train_ds.get_file_info()
+                train_changes = train_ds.check_for_new_files()
+                
+                dataset_info['train'] = {
+                    'size_key': train_info['size_key'],
+                    'count': train_info['file_count'],
+                    'has_new': train_changes['has_new'],
+                    'new_count': train_changes['new_files']
+                }
+                
+                if train_changes['has_new']:
+                    print(f"\n📂 New training files detected for {train_info['size_key']}: +{train_changes['new_files']} files")
+                    print(f"   Total files in directory: {train_changes['new_gt_count']}")
+                    print(f"   Currently loaded: {train_changes['current_loaded']}")
+                    self.train_logger.log_event(
+                        f"New training files: +{train_changes['new_files']} in {train_info['size_key']}"
+                    )
+            
+            # Check validation datasets - try val_loaders first, fallback to val_loader
+            val_loaders = getattr(self, 'val_loaders', None)
+            if val_loaders and isinstance(val_loaders, list):
+                # Multi-size validation
+                for size_key, val_loader in val_loaders:
+                    if hasattr(val_loader, 'dataset'):
+                        val_ds = val_loader.dataset
+                        val_info = val_ds.get_file_info()
+                        val_changes = val_ds.check_for_new_files()
+                        
+                        dataset_info['val'][size_key] = {
+                            'count': val_info['file_count'],
+                            'has_new': val_changes['has_new'],
+                            'new_count': val_changes['new_files']
+                        }
+                        
+                        if val_changes['has_new']:
+                            print(f"\n📂 New validation files detected for {size_key}: +{val_changes['new_files']} files")
+                            print(f"   Total files in directory: {val_changes['new_gt_count']}")
+                            print(f"   Currently loaded: {val_changes['current_loaded']}")
+                            self.train_logger.log_event(
+                                f"New validation files: +{val_changes['new_files']} in {size_key}"
+                            )
+            elif hasattr(self, 'val_loader') and hasattr(self.val_loader, 'dataset'):
+                # Single validation loader - try to determine size_key
+                val_ds = self.val_loader.dataset
+                val_info = val_ds.get_file_info()
+                val_changes = val_ds.check_for_new_files()
+                
+                size_key = val_info.get('size_key', '540')  # Default to 540 if not found
+                dataset_info['val'][size_key] = {
+                    'count': val_info['file_count'],
+                    'has_new': val_changes['has_new'],
+                    'new_count': val_changes['new_files']
+                }
+                
+                if val_changes['has_new']:
+                    print(f"\n📂 New validation files detected for {size_key}: +{val_changes['new_files']} files")
+                    self.train_logger.log_event(
+                        f"New validation files: +{val_changes['new_files']} in {size_key}"
+                    )
+            
+            # Update web monitor
+            self.web_monitor.data_store.update_all_metrics(dataset_files=dataset_info)
+            
+        except Exception as e:
+            print(f"⚠️  Error checking dataset files: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _save_statistics_json(self, step):
         """

@@ -209,6 +209,54 @@ class VSRDataset(Dataset):
     def __len__(self):
         return len(self.gt_files)
     
+    def get_file_info(self):
+        """
+        Get information about dataset files
+        
+        Returns:
+            dict with file counts and paths
+        """
+        return {
+            'mode': self.mode,
+            'size_key': self.size_key,
+            'dataset_name': self.dataset_name,
+            'file_count': len(self.gt_files),
+            'gt_dir': self.gt_dir,
+            'lr_dir': self.lr_dir if self.lr_dir else self.patch_lr_dir
+        }
+    
+    def check_for_new_files(self):
+        """
+        Check if new files have been added to the dataset directories
+        
+        Returns:
+            dict with:
+                - has_changes: bool
+                - new_gt_count: int (total GT files in directory now)
+                - current_loaded: int (files currently loaded)
+                - new_files: int (difference)
+        """
+        if not os.path.exists(self.gt_dir):
+            return {
+                'has_changes': False,
+                'new_gt_count': 0,
+                'current_loaded': len(self.gt_files),
+                'new_files': 0
+            }
+        
+        # Count all GT files in directory
+        all_gt_files = sorted([f for f in os.listdir(self.gt_dir) if f.endswith('.png')])
+        new_gt_count = len(all_gt_files)
+        current_loaded = len(self.gt_files)
+        new_files = new_gt_count - current_loaded
+        
+        return {
+            'has_changes': new_files > 0,
+            'new_gt_count': new_gt_count,
+            'current_loaded': current_loaded,
+            'new_files': new_files
+        }
+    
     def __getitem__(self, idx):
         """
         Load and process a single sample

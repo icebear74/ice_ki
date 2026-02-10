@@ -91,6 +91,22 @@ class CompleteTrainingDataStore:
             # Layer-Aktivitäten (dict: layer_name -> percentage)
             'layer_activity_map': {},
             
+            # Dataset File Information (NEW)
+            'dataset_files': {
+                'train': {
+                    'size_key': '',
+                    'count': 0,
+                    'has_new': False,
+                    'new_count': 0
+                },
+                'val': {
+                    '720': {'count': 0, 'has_new': False, 'new_count': 0},
+                    '540': {'count': 0, 'has_new': False, 'new_count': 0},
+                    '720_169': {'count': 0, 'has_new': False, 'new_count': 0}
+                },
+                'last_check': 0
+            },
+            
             # Statusflags
             'training_active': True,
             'validation_running': False,

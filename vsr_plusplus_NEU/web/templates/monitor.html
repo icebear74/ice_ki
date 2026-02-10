@@ -446,6 +446,59 @@
             </div>
         </div>
         
+        <!-- Dataset Files -->
+        <div class="card">
+            <div class="card-title">📂 Dataset Files</div>
+            
+            <!-- Training Dataset -->
+            <div style="margin-bottom: 20px;">
+                <div style="font-size: 0.9em; color: #94a3b8; margin-bottom: 8px;">
+                    <strong>Training Dataset</strong>
+                </div>
+                <div class="metric-row">
+                    <span class="metric-label" id="trainSizeKey">Size: -</span>
+                    <span class="metric-value" id="trainCount">0</span>
+                </div>
+                <div id="trainNewFiles" style="display: none; margin-top: 5px; padding: 8px; background: rgba(34, 197, 94, 0.1); border-left: 3px solid #22c55e; border-radius: 4px; font-size: 0.85em;">
+                    <span style="color: #22c55e;">✨ New files detected: <strong id="trainNewCount">0</strong></span>
+                </div>
+            </div>
+            
+            <!-- Validation Datasets -->
+            <div>
+                <div style="font-size: 0.9em; color: #94a3b8; margin-bottom: 8px;">
+                    <strong>Validation Datasets</strong>
+                </div>
+                <div class="metric-row">
+                    <span class="metric-label">720×720</span>
+                    <span class="metric-value" id="val720Count">0</span>
+                </div>
+                <div id="val720NewFiles" style="display: none; margin-top: 5px; margin-bottom: 8px; padding: 6px; background: rgba(34, 197, 94, 0.1); border-left: 3px solid #22c55e; border-radius: 4px; font-size: 0.8em;">
+                    <span style="color: #22c55e;">✨ +<strong id="val720NewCount">0</strong></span>
+                </div>
+                
+                <div class="metric-row">
+                    <span class="metric-label">540×540</span>
+                    <span class="metric-value" id="val540Count">0</span>
+                </div>
+                <div id="val540NewFiles" style="display: none; margin-top: 5px; margin-bottom: 8px; padding: 6px; background: rgba(34, 197, 94, 0.1); border-left: 3px solid #22c55e; border-radius: 4px; font-size: 0.8em;">
+                    <span style="color: #22c55e;">✨ +<strong id="val540NewCount">0</strong></span>
+                </div>
+                
+                <div class="metric-row">
+                    <span class="metric-label">720×405 (16:9)</span>
+                    <span class="metric-value" id="val720_169Count">0</span>
+                </div>
+                <div id="val720_169NewFiles" style="display: none; margin-top: 5px; margin-bottom: 8px; padding: 6px; background: rgba(34, 197, 94, 0.1); border-left: 3px solid #22c55e; border-radius: 4px; font-size: 0.8em;">
+                    <span style="color: #22c55e;">✨ +<strong id="val720_169NewCount">0</strong></span>
+                </div>
+            </div>
+            
+            <div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid rgba(255, 255, 255, 0.1); font-size: 0.8em; color: #64748b;">
+                Last check: Step <span id="datasetLastCheck">0</span>
+            </div>
+        </div>
+        
         <!-- Manual Controls -->
         <div class="card">
             <div class="card-title">🎮 Manual Controls</div>
@@ -471,6 +524,9 @@
                 // Update peak activity
                 updatePeakActivity(data);
                 
+                // Update dataset files
+                updateDatasetFiles(data);
+                
                 // Update training progress
                 document.getElementById('stepCurrent').textContent = data.step_current || 0;
                 document.getElementById('learningRate').textContent = (data.learning_rate_value || 0).toExponential(4);
@@ -486,6 +542,58 @@
             } catch (error) {
                 console.error('Error fetching data:', error);
             }
+        }
+        
+        function updateDatasetFiles(data) {
+            const dsFiles = data.dataset_files || {};
+            
+            // Update training dataset
+            const train = dsFiles.train || {};
+            document.getElementById('trainSizeKey').textContent = `Size: ${train.size_key || '-'}`;
+            document.getElementById('trainCount').textContent = train.count || 0;
+            
+            if (train.has_new && train.new_count > 0) {
+                document.getElementById('trainNewFiles').style.display = 'block';
+                document.getElementById('trainNewCount').textContent = train.new_count;
+            } else {
+                document.getElementById('trainNewFiles').style.display = 'none';
+            }
+            
+            // Update validation datasets
+            const val = dsFiles.val || {};
+            
+            // 720
+            const val720 = val['720'] || {};
+            document.getElementById('val720Count').textContent = val720.count || 0;
+            if (val720.has_new && val720.new_count > 0) {
+                document.getElementById('val720NewFiles').style.display = 'block';
+                document.getElementById('val720NewCount').textContent = val720.new_count;
+            } else {
+                document.getElementById('val720NewFiles').style.display = 'none';
+            }
+            
+            // 540
+            const val540 = val['540'] || {};
+            document.getElementById('val540Count').textContent = val540.count || 0;
+            if (val540.has_new && val540.new_count > 0) {
+                document.getElementById('val540NewFiles').style.display = 'block';
+                document.getElementById('val540NewCount').textContent = val540.new_count;
+            } else {
+                document.getElementById('val540NewFiles').style.display = 'none';
+            }
+            
+            // 720_169
+            const val720_169 = val['720_169'] || {};
+            document.getElementById('val720_169Count').textContent = val720_169.count || 0;
+            if (val720_169.has_new && val720_169.new_count > 0) {
+                document.getElementById('val720_169NewFiles').style.display = 'block';
+                document.getElementById('val720_169NewCount').textContent = val720_169.new_count;
+            } else {
+                document.getElementById('val720_169NewFiles').style.display = 'none';
+            }
+            
+            // Last check
+            document.getElementById('datasetLastCheck').textContent = dsFiles.last_check || 0;
         }
         
         function updateLossDistribution(data) {
