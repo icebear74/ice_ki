@@ -235,14 +235,15 @@ class VSRDataset(Dataset):
         gt = cv2.cvtColor(gt, cv2.COLOR_BGR2RGB)
         lr = cv2.cvtColor(lr, cv2.COLOR_BGR2RGB)
         
-        # Split LR into 7 frames (stacked horizontally: W_total = W_frame * 7)
-        lr_height = lr.shape[0]
-        lr_width_total = lr.shape[1]
-        lr_width_per_frame = lr_width_total // 7
+        # Split LR into 7 frames (stacked vertically: H_total = H_frame * 7)
+        lr_height_total = lr.shape[0]
+        lr_width = lr.shape[1]
+        lr_height_per_frame = lr_height_total // 7
         
         lr_frames = []
         for i in range(7):
-            frame = lr[:, i*lr_width_per_frame:(i+1)*lr_width_per_frame, :]
+            # Slice vertically (by height dimension)
+            frame = lr[i*lr_height_per_frame:(i+1)*lr_height_per_frame, :, :]
             lr_frames.append(frame)
         
         # Apply augmentations (only for training)
