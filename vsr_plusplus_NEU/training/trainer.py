@@ -877,79 +877,164 @@ class VSRTrainer:
             
             # Get current distribution from runtime config
             if self.runtime_config is not None:
-                size_dist = self.runtime_config.get('size_distribution', {})
-                if size_dist:
-                    dataset_info['distribution'] = size_dist
+                try:
+                    size_dist = self.runtime_config.get('size_distribution', {})
+                    if size_dist:
+                        dataset_info['distribution'] = size_dist
+                except Exception as e:
+                    print(f"⚠️  Warning: Could not read size_distribution from runtime_config: {e}")
             
             # Check training dataset
             if hasattr(self.train_loader, 'dataset'):
                 # Standard DataLoader with single dataset
-                train_ds = self.train_loader.dataset
-                train_info = train_ds.get_file_info()
-                train_changes = train_ds.check_for_new_files()
-                
-                size_key = train_info['size_key']
-                dataset_info['train_per_size'][size_key] = {
-                    'count': train_info['file_count'],
-                    'has_new': train_changes['has_new'],
-                    'new_count': train_changes['new_files']
-                }
-                
-                if train_changes['has_new']:
-                    print(f"\n📂 New training files detected for {size_key}: +{train_changes['new_files']} files")
-                    print(f"   Total files in directory: {train_changes['new_gt_count']}")
-                    print(f"   Currently loaded: {train_changes['current_loaded']}")
-                    print(f"   🔄 Reloading dataset...")
+                try:
+                    train_ds = self.train_loader.dataset
                     
-                    reload_result = train_ds.reload_files()
-                    if reload_result['success']:
-                        print(f"   ✅ Reload successful: {reload_result['files_before']} → {reload_result['files_after']} files")
-                        dataset_info['train_per_size'][size_key]['count'] = reload_result['files_after']
-                        self.train_logger.log_event(
-                            f"Reloaded {size_key} training: +{reload_result['new_files_loaded']} files"
-                        )
+                    # Verify dataset has required methods
+                    if not hasattr(train_ds, 'get_file_info') or not hasattr(train_ds, 'check_for_new_files'):
+                        print(f"⚠️  Warning: Training dataset missing file monitoring methods")
                     else:
-                        print(f"   ❌ Reload failed: {reload_result.get('error', 'Unknown error')}")
+                        train_info = train_ds.get_file_info()
+                        train_changes = train_ds.check_for_new_files()
+                        
+                        size_key = train_info['size_key']
+                        dataset_info['train_per_size'][size_key] = {
+                            'count': train_info['file_count'],
+                            'has_new': train_changes['has_new'],
+                            'new_count': train_changes['new_files']
+                        }
+                        
+                        if train_changes['has_new']:
+                            print(f"\n📂 New training files detected for {size_key}: +{train_changes['new_files']} files")
+                            print(f"   Total files in directory: {train_changes['new_gt_count']}")
+                            print(f"   Currently loaded: {train_changes['current_loaded']}")
+                            print(f"   🔄 Reloading dataset...")
+                            
+                            if hasattr(train_ds, 'reload_files'):
+                                reload_result = train_ds.reload_files()
+                                if reload_result['success']:
+                                    print(f"   ✅ Reload successful: {reload_result['files_before']} → {reload_result['files_after']} files")
+                                    dataset_info['train_per_size'][size_key]['count'] = reload_result['files_after']
+                                    if hasattr(self, 'train_logger') and self.train_logger:
+                                        self.train_logger.log_event(
+                                            f"Reloaded {size_key} training: +{reload_result['new_files_loaded']} files"
+                                        )
+                                else:
+                                    print(f"   ❌ Reload failed: {reload_result.get('error', 'Unknown error')}")
+                            else:
+                                print(f"   ⚠️  Dataset does not support reload_files()")
+                except Exception as e:
+                    print(f"⚠️  Error checking training dataset: {e}")
+                    import traceback
+                    traceback.print_exc()
                         
             elif hasattr(self.train_loader, 'datasets_dict'):
                 # MultiSizeDataLoader with multiple datasets
                 # Check and reload each size separately
-                for size_key, train_ds in self.train_loader.datasets_dict.items():
-                    train_info = train_ds.get_file_info()
-                    train_changes = train_ds.check_for_new_files()
-                    
-                    dataset_info['train_per_size'][size_key] = {
-                        'count': train_info['file_count'],
-                        'has_new': train_changes['has_new'],
-                        'new_count': train_changes['new_files']
-                    }
-                    
-                    if train_changes['has_new']:
-                        print(f"\n📂 New training files detected for {size_key}: +{train_changes['new_files']} files")
-                        print(f"   Total files in directory: {train_changes['new_gt_count']}")
-                        print(f"   Currently loaded: {train_changes['current_loaded']}")
-                        print(f"   🔄 Reloading {size_key} dataset...")
-                        
-                        reload_result = train_ds.reload_files()
-                        if reload_result['success']:
-                            print(f"   ✅ Reload successful: {reload_result['files_before']} → {reload_result['files_after']} files")
-                            dataset_info['train_per_size'][size_key]['count'] = reload_result['files_after']
-                            self.train_logger.log_event(
-                                f"Reloaded {size_key} training: +{reload_result['new_files_loaded']} files"
-                            )
-                        else:
-                            print(f"   ❌ Reload failed: {reload_result.get('error', 'Unknown error')}")
+                try:
+                    for size_key, train_ds in self.train_loader.datasets_dict.items():
+                        try:
+                            # Verify dataset has required methods
+                            if not hasattr(train_ds, 'get_file_info') or not hasattr(train_ds, 'check_for_new_files'):
+                                print(f"⚠️  Warning: Training dataset {size_key} missing file monitoring methods")
+                                continue
+                                
+                            train_info = train_ds.get_file_info()
+                            train_changes = train_ds.check_for_new_files()
+                            
+                            dataset_info['train_per_size'][size_key] = {
+                                'count': train_info['file_count'],
+                                'has_new': train_changes['has_new'],
+                                'new_count': train_changes['new_files']
+                            }
+                            
+                            if train_changes['has_new']:
+                                print(f"\n📂 New training files detected for {size_key}: +{train_changes['new_files']} files")
+                                print(f"   Total files in directory: {train_changes['new_gt_count']}")
+                                print(f"   Currently loaded: {train_changes['current_loaded']}")
+                                print(f"   🔄 Reloading {size_key} dataset...")
+                                
+                                if hasattr(train_ds, 'reload_files'):
+                                    reload_result = train_ds.reload_files()
+                                    if reload_result['success']:
+                                        print(f"   ✅ Reload successful: {reload_result['files_before']} → {reload_result['files_after']} files")
+                                        dataset_info['train_per_size'][size_key]['count'] = reload_result['files_after']
+                                        if hasattr(self, 'train_logger') and self.train_logger:
+                                            self.train_logger.log_event(
+                                                f"Reloaded {size_key} training: +{reload_result['new_files_loaded']} files"
+                                            )
+                                    else:
+                                        print(f"   ❌ Reload failed: {reload_result.get('error', 'Unknown error')}")
+                                else:
+                                    print(f"   ⚠️  Dataset {size_key} does not support reload_files()")
+                        except Exception as e:
+                            print(f"⚠️  Error checking training dataset {size_key}: {e}")
+                except Exception as e:
+                    print(f"⚠️  Error iterating training datasets: {e}")
+                    import traceback
+                    traceback.print_exc()
             
             # Check validation datasets
             val_loaders = getattr(self, 'val_loaders', None)
             if val_loaders and isinstance(val_loaders, list):
                 # Multi-size validation
-                for size_key, val_loader in val_loaders:
-                    if hasattr(val_loader, 'dataset'):
-                        val_ds = val_loader.dataset
+                try:
+                    for size_key, val_loader in val_loaders:
+                        try:
+                            if hasattr(val_loader, 'dataset'):
+                                val_ds = val_loader.dataset
+                                
+                                # Verify dataset has required methods
+                                if not hasattr(val_ds, 'get_file_info') or not hasattr(val_ds, 'check_for_new_files'):
+                                    print(f"⚠️  Warning: Validation dataset {size_key} missing file monitoring methods")
+                                    continue
+                                    
+                                val_info = val_ds.get_file_info()
+                                val_changes = val_ds.check_for_new_files()
+                                
+                                dataset_info['val'][size_key] = {
+                                    'count': val_info['file_count'],
+                                    'has_new': val_changes['has_new'],
+                                    'new_count': val_changes['new_files']
+                                }
+                                
+                                if val_changes['has_new']:
+                                    print(f"\n📂 New validation files detected for {size_key}: +{val_changes['new_files']} files")
+                                    print(f"   🔄 Reloading {size_key} validation dataset...")
+                                    
+                                    if hasattr(val_ds, 'reload_files'):
+                                        reload_result = val_ds.reload_files()
+                                        if reload_result['success']:
+                                            print(f"   ✅ Reload successful: {reload_result['files_before']} → {reload_result['files_after']} files")
+                                            dataset_info['val'][size_key]['count'] = reload_result['files_after']
+                                            if hasattr(self, 'train_logger') and self.train_logger:
+                                                self.train_logger.log_event(
+                                                    f"Reloaded {size_key} validation: +{reload_result['new_files_loaded']} files"
+                                                )
+                                        else:
+                                            print(f"   ❌ Reload failed: {reload_result.get('error', 'Unknown error')}")
+                                    else:
+                                        print(f"   ⚠️  Validation dataset {size_key} does not support reload_files()")
+                        except Exception as e:
+                            print(f"⚠️  Error checking validation dataset {size_key}: {e}")
+                except Exception as e:
+                    print(f"⚠️  Error iterating validation datasets: {e}")
+                    import traceback
+                    traceback.print_exc()
+                                
+            elif hasattr(self, 'val_loader') and hasattr(self.val_loader, 'dataset'):
+                # Single validation loader
+                try:
+                    val_ds = self.val_loader.dataset
+                    
+                    # Verify dataset has required methods
+                    if not hasattr(val_ds, 'get_file_info') or not hasattr(val_ds, 'check_for_new_files'):
+                        print(f"⚠️  Warning: Validation dataset missing file monitoring methods")
+                    else:
                         val_info = val_ds.get_file_info()
                         val_changes = val_ds.check_for_new_files()
                         
+                        size_key = val_info.get('size_key', '540')
                         dataset_info['val'][size_key] = {
                             'count': val_info['file_count'],
                             'has_new': val_changes['has_new'],
@@ -958,47 +1043,32 @@ class VSRTrainer:
                         
                         if val_changes['has_new']:
                             print(f"\n📂 New validation files detected for {size_key}: +{val_changes['new_files']} files")
-                            print(f"   🔄 Reloading {size_key} validation dataset...")
+                            print(f"   🔄 Reloading validation dataset...")
                             
-                            reload_result = val_ds.reload_files()
-                            if reload_result['success']:
-                                print(f"   ✅ Reload successful: {reload_result['files_before']} → {reload_result['files_after']} files")
-                                dataset_info['val'][size_key]['count'] = reload_result['files_after']
-                                self.train_logger.log_event(
-                                    f"Reloaded {size_key} validation: +{reload_result['new_files_loaded']} files"
-                                )
+                            if hasattr(val_ds, 'reload_files'):
+                                reload_result = val_ds.reload_files()
+                                if reload_result['success']:
+                                    print(f"   ✅ Reload successful: {reload_result['files_before']} → {reload_result['files_after']} files")
+                                    dataset_info['val'][size_key]['count'] = reload_result['files_after']
+                                    if hasattr(self, 'train_logger') and self.train_logger:
+                                        self.train_logger.log_event(
+                                            f"Reloaded validation: +{reload_result['new_files_loaded']} files"
+                                        )
+                                else:
+                                    print(f"   ❌ Reload failed: {reload_result.get('error', 'Unknown error')}")
                             else:
-                                print(f"   ❌ Reload failed: {reload_result.get('error', 'Unknown error')}")
-                                
-            elif hasattr(self, 'val_loader') and hasattr(self.val_loader, 'dataset'):
-                # Single validation loader
-                val_ds = self.val_loader.dataset
-                val_info = val_ds.get_file_info()
-                val_changes = val_ds.check_for_new_files()
-                
-                size_key = val_info.get('size_key', '540')
-                dataset_info['val'][size_key] = {
-                    'count': val_info['file_count'],
-                    'has_new': val_changes['has_new'],
-                    'new_count': val_changes['new_files']
-                }
-                
-                if val_changes['has_new']:
-                    print(f"\n📂 New validation files detected for {size_key}: +{val_changes['new_files']} files")
-                    print(f"   🔄 Reloading validation dataset...")
-                    
-                    reload_result = val_ds.reload_files()
-                    if reload_result['success']:
-                        print(f"   ✅ Reload successful: {reload_result['files_before']} → {reload_result['files_after']} files")
-                        dataset_info['val'][size_key]['count'] = reload_result['files_after']
-                        self.train_logger.log_event(
-                            f"Reloaded validation: +{reload_result['new_files_loaded']} files"
-                        )
-                    else:
-                        print(f"   ❌ Reload failed: {reload_result.get('error', 'Unknown error')}")
+                                print(f"   ⚠️  Validation dataset does not support reload_files()")
+                except Exception as e:
+                    print(f"⚠️  Error checking validation dataset: {e}")
+                    import traceback
+                    traceback.print_exc()
             
             # Update web monitor
-            self.web_monitor.data_store.update_all_metrics(dataset_files=dataset_info)
+            if hasattr(self, 'web_monitor') and self.web_monitor:
+                try:
+                    self.web_monitor.data_store.update_all_metrics(dataset_files=dataset_info)
+                except Exception as e:
+                    print(f"⚠️  Error updating web monitor: {e}")
             
         except Exception as e:
             print(f"⚠️  Error checking dataset files: {e}")
