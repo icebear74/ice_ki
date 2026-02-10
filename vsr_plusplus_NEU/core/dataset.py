@@ -46,10 +46,11 @@ class VSRDataset(Dataset):
             self.lr_dir = os.path.join(patches_path, 'LR_7frames')
             self.patch_lr_dir = None  # Not needed for training
         elif mode == 'val':
-            # Validation: GT from val/size_key/GT, LR from patches/size_key/LR_7frames
-            val_path = os.path.join(dataset_path, 'val', size_key)
-            self.gt_dir = os.path.join(val_path, 'GT')
-            self.lr_dir = os.path.join(val_path, 'LR_7frames')  # Try val/LR_7frames first
+            # Validation: GT from val/GT/size_key, LR from patches/size_key/LR_7frames
+            val_gt_path = os.path.join(dataset_path, 'val', 'GT', size_key)
+            self.gt_dir = val_gt_path
+            # LR always comes from patches (no separate val LR directory)
+            self.lr_dir = None  # Will use patch_lr_dir
             # Fallback to patches/LR_7frames for validation
             self.patch_lr_dir = os.path.join(dataset_path, 'patches', size_key, 'LR_7frames')
         else:
@@ -73,14 +74,27 @@ class VSRDataset(Dataset):
         matched_patches_lr = 0
         
         for gt_file in all_gt_files:
-            lr_path = os.path.join(self.lr_dir, gt_file)
-            
-            if os.path.exists(lr_path):
-                self.gt_files.append(gt_file)
-                self.lr_paths[gt_file] = self.lr_dir
-                matched_val_lr += 1
+            # For training, check lr_dir. For validation, always use patch_lr_dir
+            if self.lr_dir:
+                lr_path = os.path.join(self.lr_dir, gt_file)
+                
+                if os.path.exists(lr_path):
+                    self.gt_files.append(gt_file)
+                    self.lr_paths[gt_file] = self.lr_dir
+                    matched_val_lr += 1
+                elif mode == 'val' and self.patch_lr_dir:
+                    # For validation, fallback to patches/LR
+                    patch_lr_path = os.path.join(self.patch_lr_dir, gt_file)
+                    if os.path.exists(patch_lr_path):
+                        self.gt_files.append(gt_file)
+                        self.lr_paths[gt_file] = self.patch_lr_dir
+                        matched_patches_lr += 1
+                    else:
+                        skipped_files.append(gt_file)
+                else:
+                    skipped_files.append(gt_file)
             elif mode == 'val' and self.patch_lr_dir:
-                # For validation, fallback to patches/LR
+                # For validation with no val LR dir, always use patches
                 patch_lr_path = os.path.join(self.patch_lr_dir, gt_file)
                 if os.path.exists(patch_lr_path):
                     self.gt_files.append(gt_file)

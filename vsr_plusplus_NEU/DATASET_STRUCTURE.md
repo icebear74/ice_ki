@@ -53,15 +53,18 @@ dataset_root/              # = root Parameter in VSRDataset
     │   ├── GT/            # Training Ground Truth
     │   └── LR_7frames/    # Training Low Resolution (7-frame stack)
     │
-    └── val/540/           # Validation für size_key '540'
-        ├── GT/            # Validation Ground Truth
-        └── LR_7frames/    # Optional: Validation LR (falls back to patches/540/LR_7frames)
+    └── val/               # Validation
+        └── GT/            # Validation Ground Truth (organisiert nach size)
+            ├── 540/       # GT für 540×540 Patches
+            ├── 720/       # GT für 720×720 Patches
+            └── 720_169/   # GT für 720×405 (16:9) Patches
 ```
 
-**Wichtig**: Die Validation-Struktur muss jetzt **size-spezifisch** sein:
-- `val/540/GT/` für 540×540 Patches (mit `val/540/LR_7frames/` optional)
-- `val/720/GT/` für 720×720 Patches (mit `val/720/LR_7frames/` optional)
-- `val/720_169/GT/` für 720×405 (16:9) Patches (mit `val/720_169/LR_7frames/` optional)
+**Wichtig**: Die neue Validation-Struktur organisiert GT-Bilder unter `val/GT/{size_key}/`:
+- `val/GT/540/` für 540×540 Validation Patches
+- `val/GT/720/` für 720×720 Validation Patches
+- `val/GT/720_169/` für 720×405 (16:9) Validation Patches
+- LR-Bilder werden **immer** aus `patches/{size_key}/LR_7frames/` geladen
 
 ### Richtige Konfiguration
 
@@ -86,8 +89,8 @@ val_dataset = VSRDataset(
 # Dies erwartet folgende Struktur:
 # /mnt/data/training/datasetNeu/master/patches/540/GT/
 # /mnt/data/training/datasetNeu/master/patches/540/LR_7frames/
-# /mnt/data/training/datasetNeu/master/val/540/GT/
-# /mnt/data/training/datasetNeu/master/val/540/LR_7frames/ (optional)
+# /mnt/data/training/datasetNeu/master/val/GT/540/
+# (LR wird automatisch aus patches/540/LR_7frames/ geladen)
 ```
 
 ### VAL Datenstruktur Übersicht
@@ -96,32 +99,30 @@ Die **Validation (VAL)** Daten müssen wie folgt strukturiert sein:
 
 ```
 /mnt/data/training/datasetNeu/master/val/
-├── 540/
-│   └── GT/              ← Hier Ground Truth Bilder für 540×540 reinlegen
-├── 720/
-│   └── GT/              ← Hier Ground Truth Bilder für 720×720 reinlegen
-└── 720_169/
-    └── GT/              ← Hier Ground Truth Bilder für 720×405 (16:9) reinlegen
+└── GT/                    ← Validation Ground Truth Verzeichnis
+    ├── 540/               ← Hier Ground Truth Bilder für 540×540 reinlegen
+    ├── 720/               ← Hier Ground Truth Bilder für 720×720 reinlegen
+    └── 720_169/           ← Hier Ground Truth Bilder für 720×405 (16:9) reinlegen
 ```
 
 **Workflow für Validation-Daten:**
-1. **GT kopieren**: Validation Ground Truth Bilder manuell nach `val/{size_key}/GT/` kopieren
+1. **GT kopieren**: Validation Ground Truth Bilder manuell nach `val/GT/{size_key}/` kopieren
 2. **LR automatisch**: Das Training findet automatisch die entsprechenden LR Bilder in `patches/{size_key}/LR_7frames/`
 
 **Beispiel:**
 ```bash
 # Sie kopieren nur GT:
-cp some_image.png /mnt/data/training/datasetNeu/master/val/540/GT/
+cp some_image.png /mnt/data/training/datasetNeu/master/val/GT/540/
 
 # Training findet automatisch das LR hier:
 # /mnt/data/training/datasetNeu/master/patches/540/LR_7frames/some_image.png
 ```
 
 **Wichtig:**
-- Sie müssen **nur GT-Bilder** nach `val/{size_key}/GT/` kopieren
+- Sie müssen **nur GT-Bilder** nach `val/GT/{size_key}/` kopieren
 - LR-Bilder werden automatisch aus `patches/{size_key}/LR_7frames/` geladen
 - Die GT- und LR-Dateinamen müssen **identisch** sein (z.B. beide `image001.png`)
-- Jede size_key hat ihr eigenes Validierungs-Verzeichnis
+- Alle size_keys sind unter `val/GT/` organisiert
 
 ### Warum dieser Pfad?
 
