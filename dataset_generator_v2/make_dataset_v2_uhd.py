@@ -1449,20 +1449,23 @@ class DatasetGeneratorV2UHD:
                     format_config = self.format_config[category][format_name]
                     
                     # Try up to 5 times to find an interesting patch with random crops
+                    # Then use center crop as guaranteed fallback
+                    MAX_RANDOM_ATTEMPTS = 5
                     gt, lr = None, None
-                    for attempt in range(6):
-                        if attempt < 5:
+                    
+                    for attempt in range(MAX_RANDOM_ATTEMPTS + 1):
+                        if attempt < MAX_RANDOM_ATTEMPTS:
+                            # Attempts 1-5: Random crop
                             gt, lr = self.create_patch_pair(frames, format_name, format_config, force_center=False)
                         else:
+                            # Final attempt: Center crop as fallback
                             gt, lr = self.create_patch_pair(frames, format_name, format_config, force_center=True)
                         
                         if gt is None or lr is None:
                             continue
                         
-                        if self.is_interesting_patch(gt):
-                            break
-                        
-                        if attempt == 5:
+                        # Check if patch is interesting, or accept it if this is the final attempt
+                        if self.is_interesting_patch(gt) or attempt >= MAX_RANDOM_ATTEMPTS:
                             break
                     
                     if gt is None or lr is None:
@@ -2013,6 +2016,11 @@ class DatasetGeneratorV2UHD:
         
         Uses Laplacian variance to detect blur/lack of detail.
         Black or very dark frames are always considered interesting to preserve user's requested cuts.
+        
+        Typical threshold values:
+        - < 50: Very permissive, accepts most patches
+        - 80 (default): Good balance, filters out very blurry/uniform patches
+        - > 150: Strict, only accepts very sharp patches
         
         Args:
             patch: Image patch to check (numpy array)
