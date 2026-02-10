@@ -30,7 +30,7 @@ Der `dataset_generator_v2` erstellt folgende Struktur (nur 7-frame Version):
 - 540×540 GT → 1260×180 LR_7frames (Höhe: (540/3)×7=180×7=1260, Breite: 540/3=180)
 - 720×720 GT → 1680×240 LR_7frames (Höhe: (720/3)×7=240×7=1680, Breite: 720/3=240)
 - 405×720 GT → 945×240 LR_7frames (Höhe: (405/3)×7=135×7=945, Breite: 720/3=240)
-- Der Generator erstellt `Val/GT/` (mit großem V), aber das Training erwartet `val/{size_key}/GT/` (lowercase)
+- Der Generator erstellt `val/GT/` (mit großem V), aber das Training erwartet `val/{size_key}/GT/` (lowercase)
 - Validation-Dateien werden **manuell** in die korrekte Struktur kopiert (siehe unten)
 
 ### Andere Kategorien
@@ -53,17 +53,17 @@ dataset_root/              # = root Parameter in VSRDataset
     │   ├── GT/            # Training Ground Truth
     │   └── LR_7frames/    # Training Low Resolution (7-frame stack)
     │
-    └── Val/               # Validation (capital V)
+    └── val/               # Validation (lowercase)
         └── GT/            # Validation Ground Truth (organisiert nach size)
             ├── 540/       # GT für 540×540 Patches
             ├── 720/       # GT für 720×720 Patches
             └── 720_169/   # GT für 720×405 (16:9) Patches
 ```
 
-**Wichtig**: Die Validation-Struktur organisiert GT-Bilder unter `Val/GT/{size_key}/` (capital V):
-- `Val/GT/540/` für 540×540 Validation Patches
-- `Val/GT/720/` für 720×720 Validation Patches
-- `Val/GT/720_169/` für 720×405 (16:9) Validation Patches
+**Wichtig**: Die Validation-Struktur organisiert GT-Bilder unter `val/GT/{size_key}/` (lowercase val):
+- `val/GT/540/` für 540×540 Validation Patches
+- `val/GT/720/` für 720×720 Validation Patches
+- `val/GT/720_169/` für 720×405 (16:9) Validation Patches
 - LR-Bilder werden **immer** aus `patches/{size_key}/LR_7frames/` geladen
 
 ### Richtige Konfiguration
@@ -89,7 +89,7 @@ val_dataset = VSRDataset(
 # Dies erwartet folgende Struktur:
 # /mnt/data/training/datasetNeu/master/patches/540/GT/
 # /mnt/data/training/datasetNeu/master/patches/540/LR_7frames/
-# /mnt/data/training/datasetNeu/master/Val/GT/540/
+# /mnt/data/training/datasetNeu/master/val/GT/540/
 # (LR wird automatisch aus patches/540/LR_7frames/ geladen)
 ```
 
@@ -106,28 +106,28 @@ Die **Validation (VAL)** Daten müssen wie folgt strukturiert sein:
 ```
 
 **Workflow für Validation-Daten:**
-1. **GT kopieren**: Validation Ground Truth Bilder manuell nach `Val/GT/{size_key}/` kopieren
+1. **GT kopieren**: Validation Ground Truth Bilder manuell nach `val/GT/{size_key}/` kopieren
 2. **LR automatisch**: Das Training findet automatisch die entsprechenden LR Bilder in `patches/{size_key}/LR_7frames/`
 
 **Beispiel:**
 ```bash
 # Sie kopieren nur GT:
-cp some_image.png /mnt/data/training/datasetNeu/master/Val/GT/540/
+cp some_image.png /mnt/data/training/datasetNeu/master/val/GT/540/
 
 # Training findet automatisch das LR hier:
 # /mnt/data/training/datasetNeu/master/patches/540/LR_7frames/some_image.png
 ```
 
 **Wichtig:**
-- Sie müssen **nur GT-Bilder** nach `Val/GT/{size_key}/` kopieren (capital V)
+- Sie müssen **nur GT-Bilder** nach `val/GT/{size_key}/` kopieren (capital V)
 - LR-Bilder werden automatisch aus `patches/{size_key}/LR_7frames/` geladen
 - Die GT- und LR-Dateinamen müssen **identisch** sein (z.B. beide `image001.png`)
-- Alle size_keys sind unter `Val/GT/` organisiert
+- Alle size_keys sind unter `val/GT/` organisiert
 
 ### Warum dieser Pfad?
 
-1. **Generator V2** erstellt: `datasetNeu/master/patches/540/GT/` und `datasetNeu/master/Val/GT/` (flat)
-2. **VSRDataset** erwartet: `root/dataset_name/patches/size_key/GT/` und `root/dataset_name/Val/GT/size_key/`
+1. **Generator V2** erstellt: `datasetNeu/master/patches/540/GT/` und `datasetNeu/master/val/GT/` (flat)
+2. **VSRDataset** erwartet: `root/dataset_name/patches/size_key/GT/` und `root/dataset_name/val/GT/size_key/`
 3. **Lösung**: Validation-Dateien müssen manuell in die size-spezifischen Verzeichnisse kopiert werden
 
 ### Verifikation
@@ -159,7 +159,7 @@ In `dataset_generator_v2/generator_config.json`:
 }
 ```
 
-**Hinweis**: Der Generator erstellt nur `Val/GT/` (flat), aber das Training benötigt `val/{size_key}/GT/`.
+**Hinweis**: Der Generator erstellt nur `val/GT/` (flat), aber das Training benötigt `val/{size_key}/GT/`.
 
 **Validation Setup (Beispiel):**
 ```bash
@@ -209,7 +209,7 @@ Für die **master** Kategorie (siehe `utils/format_definitions.py`):
 ### Wichtige Hinweise
 
 - **5-frame vs 7-frame**: Standard Training nutzt 5-frame (`LR/`), 7-frame ist optional (`LR_7frames/`)
-- **Validation**: Generator erstellt Validation-Daten in `Val/GT/` und `Val/LR/`
+- **Validation**: Generator erstellt Validation-Daten in `val/GT/` und `Val/LR/`
 - **Mehrere Formate**: Generator kann gleichzeitig verschiedene Patch-Größen erstellen
 
 ### Fehlersuche

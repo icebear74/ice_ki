@@ -40,23 +40,23 @@
 
 ```bash
 # Für master category
-mkdir -p /mnt/data/training/datasetNeu/master/Val/GT/540
-mkdir -p /mnt/data/training/datasetNeu/master/Val/GT/720
-mkdir -p /mnt/data/training/datasetNeu/master/Val/GT/720_169
+mkdir -p /mnt/data/training/datasetNeu/master/val/GT/540
+mkdir -p /mnt/data/training/datasetNeu/master/val/GT/720
+mkdir -p /mnt/data/training/datasetNeu/master/val/GT/720_169
 
 # Für universal category
-mkdir -p /mnt/data/training/datasetNeu/universal/Val/GT/540
-mkdir -p /mnt/data/training/datasetNeu/universal/Val/GT/720
-mkdir -p /mnt/data/training/datasetNeu/universal/Val/GT/720_169
+mkdir -p /mnt/data/training/datasetNeu/universal/val/GT/540
+mkdir -p /mnt/data/training/datasetNeu/universal/val/GT/720
+mkdir -p /mnt/data/training/datasetNeu/universal/val/GT/720_169
 
 # Für space category
-mkdir -p /mnt/data/training/datasetNeu/space/Val/GT/540
-mkdir -p /mnt/data/training/datasetNeu/space/Val/GT/720
-mkdir -p /mnt/data/training/datasetNeu/space/Val/GT/720_169
+mkdir -p /mnt/data/training/datasetNeu/space/val/GT/540
+mkdir -p /mnt/data/training/datasetNeu/space/val/GT/720
+mkdir -p /mnt/data/training/datasetNeu/space/val/GT/720_169
 
 # Für toon category
-mkdir -p /mnt/data/training/datasetNeu/toon/Val/GT/540
-mkdir -p /mnt/data/training/datasetNeu/toon/Val/GT/720_169
+mkdir -p /mnt/data/training/datasetNeu/toon/val/GT/540
+mkdir -p /mnt/data/training/datasetNeu/toon/val/GT/720_169
 ```
 
 ### Schritt 2: GT-Bilder auswählen und kopieren
@@ -70,9 +70,9 @@ cd /mnt/data/training/datasetNeu/master/patches/540/GT/
 # Zufällig 10 Bilder auswählen
 ls *.png | shuf -n 10 > /tmp/val_images_540.txt
 
-# Diese kopieren nach Val/GT/540/
+# Diese kopieren nach val/GT/540/
 while read img; do
-    cp "$img" /mnt/data/training/datasetNeu/master/Val/GT/540/
+    cp "$img" /mnt/data/training/datasetNeu/master/val/GT/540/
 done < /tmp/val_images_540.txt
 ```
 
@@ -80,10 +80,10 @@ done < /tmp/val_images_540.txt
 
 ```bash
 # Prüfen, dass GT-Bilder vorhanden sind
-ls -lh /mnt/data/training/datasetNeu/master/Val/GT/540/
+ls -lh /mnt/data/training/datasetNeu/master/val/GT/540/
 
 # Prüfen, dass entsprechende LR-Bilder in patches existieren
-cd /mnt/data/training/datasetNeu/master/Val/GT/540/
+cd /mnt/data/training/datasetNeu/master/val/GT/540/
 for img in *.png; do
     if [ ! -f "../../../patches/540/LR_7frames/$img" ]; then
         echo "WARNUNG: Kein LR für $img gefunden!"
@@ -116,7 +116,7 @@ val_dataset = VSRDataset(
 )
 ```
 **Lädt:**
-- GT von: `/mnt/data/training/datasetNeu/master/Val/GT/540/`
+- GT von: `/mnt/data/training/datasetNeu/master/val/GT/540/`
 - LR von: `/mnt/data/training/datasetNeu/master/patches/540/LR_7frames/` ← automatisch!
 
 **Wichtig**: Sie müssen nur GT-Bilder kopieren. Die LR-Bilder werden automatisch gefunden!
@@ -136,7 +136,7 @@ val_dataset = VSRDataset(
 │       ├── GT/
 │       └── LR_7frames/
 │
-└── Val/                  ← NEU: Manuell erstellt (capital V)
+└── val/                  ← NEU: Manuell erstellt (lowercase)
     └── GT/               ← Validation GT Verzeichnis
         ├── 540/          ← ~10-50 ausgewählte GT-Bilder für 540
         ├── 720/          ← ~10-50 ausgewählte GT-Bilder für 720
@@ -147,30 +147,30 @@ val_dataset = VSRDataset(
 
 ### 1. Verzeichnisse erstellen
 ```bash
-mkdir -p /mnt/data/training/datasetNeu/master/Val/GT/{540,720,720_169}
+mkdir -p /mnt/data/training/datasetNeu/master/val/GT/{540,720,720_169}
 ```
 
 ### 2. Je 20 Validation-Bilder pro Format auswählen
 ```bash
 # Für 540×540
 cd /mnt/data/training/datasetNeu/master/patches/540/GT
-ls *.png | shuf -n 20 | xargs -I {} cp {} ../../Val/GT/540/
+ls *.png | shuf -n 20 | xargs -I {} cp {} ../../val/GT/540/
 
 # Für 720×720
 cd /mnt/data/training/datasetNeu/master/patches/720/GT
-ls *.png | shuf -n 20 | xargs -I {} cp {} ../../Val/GT/720/
+ls *.png | shuf -n 20 | xargs -I {} cp {} ../../val/GT/720/
 
 # Für 720_169 (16:9)
 cd /mnt/data/training/datasetNeu/master/patches/720_169/GT
-ls *.png | shuf -n 20 | xargs -I {} cp {} ../../Val/GT/720_169/
+ls *.png | shuf -n 20 | xargs -I {} cp {} ../../val/GT/720_169/
 ```
 
 ### 3. Überprüfung
 ```bash
 # Anzahl der Validation-Bilder
-echo "540: $(ls /mnt/data/training/datasetNeu/master/Val/GT/540/*.png 2>/dev/null | wc -l)"
-echo "720: $(ls /mnt/data/training/datasetNeu/master/Val/GT/720/*.png 2>/dev/null | wc -l)"
-echo "720_169: $(ls /mnt/data/training/datasetNeu/master/Val/GT/720_169/*.png 2>/dev/null | wc -l)"
+echo "540: $(ls /mnt/data/training/datasetNeu/master/val/GT/540/*.png 2>/dev/null | wc -l)"
+echo "720: $(ls /mnt/data/training/datasetNeu/master/val/GT/720/*.png 2>/dev/null | wc -l)"
+echo "720_169: $(ls /mnt/data/training/datasetNeu/master/val/GT/720_169/*.png 2>/dev/null | wc -l)"
 
 # Gesamtstruktur anzeigen
 du -h -d 4 /mnt/data/training/datasetNeu/master/
@@ -187,23 +187,23 @@ python3 train.py
 
 Das Training wird automatisch:
 1. Training-Daten aus `patches/{size_key}/GT` und `patches/{size_key}/LR_7frames` laden
-2. Validation-Daten aus `Val/GT/{size_key}` laden
+2. Validation-Daten aus `val/GT/{size_key}` laden
 3. Entsprechende LR automatisch in `patches/{size_key}/LR_7frames` finden
 
 ## Fehlerbehebung
 
-### "No PNG files found in .../Val/GT/540"
+### "No PNG files found in .../val/GT/540"
 ```bash
 # Verzeichnis existiert nicht oder ist leer
-ls -la /mnt/data/training/datasetNeu/master/Val/GT/540/
+ls -la /mnt/data/training/datasetNeu/master/val/GT/540/
 
 # Lösung: GT-Bilder kopieren (siehe oben)
 ```
 
 ### "No valid GT-LR pairs found"
 ```bash
-# Die GT-Dateinamen in Val/GT/540/ stimmen nicht mit denen in patches/540/LR_7frames/ überein
-cd /mnt/data/training/datasetNeu/master/Val/GT/540/
+# Die GT-Dateinamen in val/GT/540/ stimmen nicht mit denen in patches/540/LR_7frames/ überein
+cd /mnt/data/training/datasetNeu/master/val/GT/540/
 for img in *.png; do
     if [ ! -f "../../../patches/540/LR_7frames/$img" ]; then
         echo "Kein LR für: $img"

@@ -46,8 +46,8 @@ class VSRDataset(Dataset):
             self.lr_dir = os.path.join(patches_path, 'LR_7frames')
             self.patch_lr_dir = None  # Not needed for training
         elif mode == 'val':
-            # Validation: GT from Val/GT/size_key, LR from patches/size_key/LR_7frames
-            val_gt_path = os.path.join(dataset_path, 'Val', 'GT', size_key)
+            # Validation: GT from val/GT/size_key, LR from patches/size_key/LR_7frames
+            val_gt_path = os.path.join(dataset_path, 'val', 'GT', size_key)
             self.gt_dir = val_gt_path
             # LR always comes from patches (no separate val LR directory)
             self.lr_dir = None  # Will use patch_lr_dir
