@@ -77,22 +77,35 @@ class VSRDataset(Dataset):
         matched_val_lr = 0
         matched_patches_lr = 0
         
+        # Expected shapes for validation
+        expected_gt_shapes = {
+            '720': (720, 720, 3),
+            '540': (540, 540, 3),
+            '720_169': (405, 720, 3)
+        }
+        expected_gt_shape = expected_gt_shapes.get(self.size_key)
+        
+        invalid_dimension_files = []
+        
         for gt_file in all_gt_files:
             # For training, check lr_dir. For validation, always use patch_lr_dir
             if self.lr_dir:
                 lr_path = os.path.join(self.lr_dir, gt_file)
                 
                 if os.path.exists(lr_path):
-                    self.gt_files.append(gt_file)
-                    self.lr_paths[gt_file] = self.lr_dir
-                    matched_val_lr += 1
+                    # Validate file dimensions before adding
+                    if self._validate_file_dimensions(gt_file, self.gt_dir, self.lr_dir, expected_gt_shape, invalid_dimension_files):
+                        self.gt_files.append(gt_file)
+                        self.lr_paths[gt_file] = self.lr_dir
+                        matched_val_lr += 1
                 elif mode == 'val' and self.patch_lr_dir:
                     # For validation, fallback to patches/LR
                     patch_lr_path = os.path.join(self.patch_lr_dir, gt_file)
                     if os.path.exists(patch_lr_path):
-                        self.gt_files.append(gt_file)
-                        self.lr_paths[gt_file] = self.patch_lr_dir
-                        matched_patches_lr += 1
+                        if self._validate_file_dimensions(gt_file, self.gt_dir, self.patch_lr_dir, expected_gt_shape, invalid_dimension_files):
+                            self.gt_files.append(gt_file)
+                            self.lr_paths[gt_file] = self.patch_lr_dir
+                            matched_patches_lr += 1
                     else:
                         skipped_files.append(gt_file)
                 else:
@@ -101,9 +114,10 @@ class VSRDataset(Dataset):
                 # For validation with no val LR dir, always use patches
                 patch_lr_path = os.path.join(self.patch_lr_dir, gt_file)
                 if os.path.exists(patch_lr_path):
-                    self.gt_files.append(gt_file)
-                    self.lr_paths[gt_file] = self.patch_lr_dir
-                    matched_patches_lr += 1
+                    if self._validate_file_dimensions(gt_file, self.gt_dir, self.patch_lr_dir, expected_gt_shape, invalid_dimension_files):
+                        self.gt_files.append(gt_file)
+                        self.lr_paths[gt_file] = self.patch_lr_dir
+                        matched_patches_lr += 1
                 else:
                     skipped_files.append(gt_file)
             else:
@@ -119,8 +133,20 @@ class VSRDataset(Dataset):
             print(f"  Matched in patches/LR:    {matched_patches_lr}")
             print(f"  ───────────────────────────────────")
             print(f"  Skipped (no LR):          {len(skipped_files)}")
+            print(f"  Skipped (invalid dims):   {len(invalid_dimension_files)}")
             print(f"  Final samples loaded:     {len(self.gt_files)}")
             print("="*60)
+            
+            if invalid_dimension_files:
+                print(f"\n⚠️  {len(invalid_dimension_files)} files skipped due to invalid dimensions:")
+                for i, (f, reason) in enumerate(invalid_dimension_files[:5]):  # Show first 5
+                    print(f"  - {f}: {reason}")
+                if len(invalid_dimension_files) > 5:
+                    print(f"  ... and {len(invalid_dimension_files) - 5} more")
+                print(f"\n💡 Expected dimensions for size_key '{size_key}':")
+                if expected_gt_shape:
+                    print(f"   GT: {expected_gt_shape}")
+                print()
             
             if skipped_files:
                 print(f"\n⚠️  {len(skipped_files)} GT files skipped (no matching LR file):")
@@ -133,7 +159,7 @@ class VSRDataset(Dataset):
                 if self.patch_lr_dir:
                     print(f"  OR {self.patch_lr_dir}")
                 print()
-        elif skipped_files:
+        elif skipped_files or invalid_dimension_files:
             # For training mode, just show count
             print(f"\n⚠️  Skipped {len(skipped_files)} GT files without matching LR files in {mode}")
             print()
@@ -141,8 +167,66 @@ class VSRDataset(Dataset):
         if not self.gt_files:
             raise ValueError(f"No valid GT-LR pairs found in {self.gt_dir} and {self.lr_dir}")
         
+        # Report invalid dimension files for training mode too
+        if invalid_dimension_files and mode == 'train':
+            print(f"\n⚠️  Skipped {len(invalid_dimension_files)} files with invalid dimensions in {mode} (size_key={size_key})")
+            if len(invalid_dimension_files) <= 3:
+                for f, reason in invalid_dimension_files:
+                    print(f"  - {f}: {reason}")
+            print()
+        
         # Validate a few samples
         self._validate_samples()
+    
+    def _validate_file_dimensions(self, gt_file, gt_dir, lr_dir, expected_gt_shape, invalid_list):
+        """
+        Validate that a GT/LR file pair has correct dimensions
+        
+        Args:
+            gt_file: Filename to validate
+            gt_dir: GT directory path
+            lr_dir: LR directory path
+            expected_gt_shape: Expected GT shape tuple (H, W, C) or None to skip
+            invalid_list: List to append (filename, reason) tuples for invalid files
+            
+        Returns:
+            bool: True if valid, False if invalid
+        """
+        if not expected_gt_shape:
+            # No validation if shape unknown
+            return True
+        
+        try:
+            gt_path = os.path.join(gt_dir, gt_file)
+            lr_path = os.path.join(lr_dir, gt_file)
+            
+            # Quick dimension check without loading full image
+            gt = cv2.imread(gt_path)
+            lr = cv2.imread(lr_path)
+            
+            if gt is None:
+                invalid_list.append((gt_file, "GT image failed to load"))
+                return False
+            
+            if lr is None:
+                invalid_list.append((gt_file, "LR image failed to load"))
+                return False
+            
+            # Validate GT dimensions
+            if gt.shape != expected_gt_shape:
+                invalid_list.append((gt_file, f"GT shape {gt.shape} != expected {expected_gt_shape}"))
+                return False
+            
+            # Validate LR can be split into 7 frames
+            if lr.shape[0] % 7 != 0:
+                invalid_list.append((gt_file, f"LR height {lr.shape[0]} not divisible by 7"))
+                return False
+            
+            return True
+            
+        except Exception as e:
+            invalid_list.append((gt_file, f"Validation error: {str(e)}"))
+            return False
     
     def _validate_samples(self):
         """Validate dataset integrity by checking a few samples"""
@@ -300,7 +384,16 @@ class VSRDataset(Dataset):
                         'error': 'No PNG files found'
                     }
                 
-                # Build new file lists
+                # Expected shapes for validation
+                expected_gt_shapes = {
+                    '720': (720, 720, 3),
+                    '540': (540, 540, 3),
+                    '720_169': (405, 720, 3)
+                }
+                expected_gt_shape = expected_gt_shapes.get(self.size_key)
+                invalid_dimension_files = []
+                
+                # Build new file lists with validation
                 new_gt_files = []
                 new_lr_paths = {}
                 
@@ -310,20 +403,31 @@ class VSRDataset(Dataset):
                         lr_path = os.path.join(self.lr_dir, gt_file)
                         
                         if os.path.exists(lr_path):
-                            new_gt_files.append(gt_file)
-                            new_lr_paths[gt_file] = self.lr_dir
+                            # Validate dimensions before adding
+                            if self._validate_file_dimensions(gt_file, self.gt_dir, self.lr_dir, expected_gt_shape, invalid_dimension_files):
+                                new_gt_files.append(gt_file)
+                                new_lr_paths[gt_file] = self.lr_dir
                         elif self.mode == 'val' and self.patch_lr_dir:
                             # For validation, fallback to patches/LR
                             patch_lr_path = os.path.join(self.patch_lr_dir, gt_file)
                             if os.path.exists(patch_lr_path):
-                                new_gt_files.append(gt_file)
-                                new_lr_paths[gt_file] = self.patch_lr_dir
+                                if self._validate_file_dimensions(gt_file, self.gt_dir, self.patch_lr_dir, expected_gt_shape, invalid_dimension_files):
+                                    new_gt_files.append(gt_file)
+                                    new_lr_paths[gt_file] = self.patch_lr_dir
                     elif self.mode == 'val' and self.patch_lr_dir:
                         # For validation with no val LR dir, always use patches
                         patch_lr_path = os.path.join(self.patch_lr_dir, gt_file)
                         if os.path.exists(patch_lr_path):
-                            new_gt_files.append(gt_file)
-                            new_lr_paths[gt_file] = self.patch_lr_dir
+                            if self._validate_file_dimensions(gt_file, self.gt_dir, self.patch_lr_dir, expected_gt_shape, invalid_dimension_files):
+                                new_gt_files.append(gt_file)
+                                new_lr_paths[gt_file] = self.patch_lr_dir
+                
+                # Report any invalid files found during reload
+                if invalid_dimension_files:
+                    print(f"\n⚠️  Reload: Skipped {len(invalid_dimension_files)} files with invalid dimensions ({self.mode}, size_key={self.size_key})")
+                    if len(invalid_dimension_files) <= 3:
+                        for f, reason in invalid_dimension_files:
+                            print(f"  - {f}: {reason}")
                 
                 # Update the dataset atomically
                 self.gt_files = new_gt_files
@@ -356,58 +460,98 @@ class VSRDataset(Dataset):
             lr_stack: [7, 3, H, W] - 7 LR frames
             gt: [3, H*3, W*3] - GT frame (3x upscale)
         """
-        gt_file = self.gt_files[idx]
-        gt_path = os.path.join(self.gt_dir, gt_file)
-        # Use the correct LR directory from lr_paths mapping
-        lr_dir = self.lr_paths[gt_file]
-        lr_path = os.path.join(lr_dir, gt_file)
+        # Try to load the current index, but handle errors gracefully
+        max_attempts = 3  # Try current index, then 2 random fallbacks
         
-        # Load images
-        gt = cv2.imread(gt_path)
-        lr = cv2.imread(lr_path)
+        for attempt in range(max_attempts):
+            try:
+                # Use current index on first attempt, random on subsequent attempts
+                current_idx = idx if attempt == 0 else random.randint(0, len(self.gt_files) - 1)
+                
+                gt_file = self.gt_files[current_idx]
+                gt_path = os.path.join(self.gt_dir, gt_file)
+                # Use the correct LR directory from lr_paths mapping
+                lr_dir = self.lr_paths[gt_file]
+                lr_path = os.path.join(lr_dir, gt_file)
+                
+                # Load images
+                gt = cv2.imread(gt_path)
+                lr = cv2.imread(lr_path)
+                
+                # Validate
+                if gt is None or lr is None:
+                    raise ValueError(f"Failed to load images: GT={gt_path}, LR={lr_path}")
+                
+                # Validate dimensions match expected size_key
+                expected_gt_shapes = {
+                    '720': (720, 720, 3),
+                    '540': (540, 540, 3),
+                    '720_169': (405, 720, 3)
+                }
+                expected_gt_shape = expected_gt_shapes.get(self.size_key)
+                
+                if expected_gt_shape and gt.shape != expected_gt_shape:
+                    raise ValueError(f"Invalid GT dimensions {gt.shape}, expected {expected_gt_shape} for size_key '{self.size_key}': {gt_file}")
+                
+                # Validate LR can be split into 7 frames
+                if lr.shape[0] % 7 != 0:
+                    raise ValueError(f"LR height {lr.shape[0]} not divisible by 7: {gt_file}")
+                
+                # Convert BGR to RGB
+                gt = cv2.cvtColor(gt, cv2.COLOR_BGR2RGB)
+                lr = cv2.cvtColor(lr, cv2.COLOR_BGR2RGB)
+                
+                # Split LR into 7 frames (stacked vertically: H_total = H_frame * 7)
+                lr_height_total = lr.shape[0]
+                lr_width = lr.shape[1]
+                lr_height_per_frame = lr_height_total // 7
+                
+                lr_frames = []
+                for i in range(7):
+                    # Slice vertically (by height dimension)
+                    frame = lr[i*lr_height_per_frame:(i+1)*lr_height_per_frame, :, :]
+                    lr_frames.append(frame)
+                
+                # Apply augmentations (only for training)
+                if self.augment:
+                    # Random horizontal flip
+                    if random.random() > 0.5:
+                        gt = np.flip(gt, axis=1).copy()
+                        lr_frames = [np.flip(f, axis=1).copy() for f in lr_frames]
+                    
+                    # Random vertical flip
+                    if random.random() > 0.5:
+                        gt = np.flip(gt, axis=0).copy()
+                        lr_frames = [np.flip(f, axis=0).copy() for f in lr_frames]
+                    
+                    # Random rotation (0, 90, 180, 270)
+                    k = random.randint(0, 3)
+                    if k > 0:
+                        gt = np.rot90(gt, k).copy()
+                        lr_frames = [np.rot90(f, k).copy() for f in lr_frames]
+                
+                # Convert to tensors and normalize to [0, 1]
+                gt = torch.from_numpy(gt).permute(2, 0, 1).float() / 255.0
+                lr_stack = torch.stack([
+                    torch.from_numpy(f).permute(2, 0, 1).float() / 255.0
+                    for f in lr_frames
+                ])
+                
+                return lr_stack, gt
+                
+            except Exception as e:
+                # Log the error but try to recover
+                if attempt == 0:
+                    print(f"\n⚠️  ERROR loading sample {idx} ({gt_file}): {str(e)}")
+                    print(f"   Attempting to use random fallback sample...")
+                elif attempt < max_attempts - 1:
+                    print(f"   Fallback attempt {attempt} failed, trying another...")
+                else:
+                    # Last attempt failed - this is critical
+                    print(f"\n❌ CRITICAL: All {max_attempts} attempts to load a valid sample failed!")
+                    print(f"   Last error: {str(e)}")
+                    print(f"   Dataset may have serious issues. Please check your data!")
+                    raise RuntimeError(f"Failed to load any valid sample after {max_attempts} attempts. Last file: {gt_file}")
         
-        # Validate
-        if gt is None or lr is None:
-            raise ValueError(f"Failed to load images for index {idx}")
-        
-        # Convert BGR to RGB
-        gt = cv2.cvtColor(gt, cv2.COLOR_BGR2RGB)
-        lr = cv2.cvtColor(lr, cv2.COLOR_BGR2RGB)
-        
-        # Split LR into 7 frames (stacked vertically: H_total = H_frame * 7)
-        lr_height_total = lr.shape[0]
-        lr_width = lr.shape[1]
-        lr_height_per_frame = lr_height_total // 7
-        
-        lr_frames = []
-        for i in range(7):
-            # Slice vertically (by height dimension)
-            frame = lr[i*lr_height_per_frame:(i+1)*lr_height_per_frame, :, :]
-            lr_frames.append(frame)
-        
-        # Apply augmentations (only for training)
-        if self.augment:
-            # Random horizontal flip
-            if random.random() > 0.5:
-                gt = np.flip(gt, axis=1).copy()
-                lr_frames = [np.flip(f, axis=1).copy() for f in lr_frames]
-            
-            # Random vertical flip
-            if random.random() > 0.5:
-                gt = np.flip(gt, axis=0).copy()
-                lr_frames = [np.flip(f, axis=0).copy() for f in lr_frames]
-            
-            # Random rotation (0, 90, 180, 270)
-            k = random.randint(0, 3)
-            if k > 0:
-                gt = np.rot90(gt, k).copy()
-                lr_frames = [np.rot90(f, k).copy() for f in lr_frames]
-        
-        # Convert to tensors and normalize to [0, 1]
-        gt = torch.from_numpy(gt).permute(2, 0, 1).float() / 255.0
-        lr_stack = torch.stack([
-            torch.from_numpy(f).permute(2, 0, 1).float() / 255.0
-            for f in lr_frames
-        ])
-        
-        return lr_stack, gt
+        # Should never reach here due to raise above, but just in case
+        raise RuntimeError(f"Unexpected error in __getitem__ for index {idx}")
