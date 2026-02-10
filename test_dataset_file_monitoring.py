@@ -30,7 +30,7 @@ def test_dataset_methods():
     assert "'mode':" in content, "get_file_info should return mode"
     assert "'size_key':" in content, "get_file_info should return size_key"
     assert "'file_count':" in content, "get_file_info should return file_count"
-    assert "'has_changes':" in content, "check_for_new_files should return has_changes"
+    assert "'has_new':" in content, "check_for_new_files should return has_new"
     assert "'new_files':" in content, "check_for_new_files should return new_files"
     
     print("  ✓ Return structures documented correctly")

@@ -231,14 +231,14 @@ class VSRDataset(Dataset):
         
         Returns:
             dict with:
-                - has_changes: bool
+                - has_new: bool
                 - new_gt_count: int (total GT files in directory now)
                 - current_loaded: int (files currently loaded)
                 - new_files: int (difference)
         """
         if not os.path.exists(self.gt_dir):
             return {
-                'has_changes': False,
+                'has_new': False,
                 'new_gt_count': 0,
                 'current_loaded': len(self.gt_files),
                 'new_files': 0
@@ -251,7 +251,7 @@ class VSRDataset(Dataset):
         new_files = new_gt_count - current_loaded
         
         return {
-            'has_changes': new_files > 0,
+            'has_new': new_files > 0,
             'new_gt_count': new_gt_count,
             'current_loaded': current_loaded,
             'new_files': new_files

@@ -515,7 +515,7 @@
         // Update function to fetch and display data
         async function updateData() {
             try {
-                const response = await fetch('/api/data');
+                const response = await fetch('/monitoring/data');
                 const data = await response.json();
                 
                 // Update loss distribution
