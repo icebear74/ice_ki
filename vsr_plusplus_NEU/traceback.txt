@@ -1,0 +1,30 @@
+============================================================
+📂 VALIDATION DATASET LOADING (720)
+============================================================
+  GT files found:           4
+  Matched in val/LR:        0
+  Matched in patches/LR:    4
+  ───────────────────────────────────
+  Skipped (no LR):          0
+  Final samples loaded:     4
+============================================================
+✅ Validation samples (720): 4
+
+🌐 Web-Monitor aktiv:
+   • Lokal: http://localhost:5050/monitoring
+   • Netzwerk: http://192.168.188.8:5050/monitoring
+================================================================================
+🚀 Starting training...
+================================================================================
+
+Traceback (most recent call last):
+  File "/mnt/data/ice_ki/vsr_plusplus_NEU/train.py", line 598, in <module>
+    main()
+  File "/mnt/data/ice_ki/vsr_plusplus_NEU/train.py", line 590, in main
+    trainer.run()
+  File "/mnt/data/ice_ki/vsr_plus_plus/training/trainer.py", line 950, in run
+    self.train_epoch(epoch)
+  File "/mnt/data/ice_ki/vsr_plus_plus/training/trainer.py", line 150, in train_epoch
+    current_l1 = torch.abs(output - gt).mean().item()
+                           ~~~~~~~^~~~
+RuntimeError: The size of tensor a (2835) must match the size of tensor b (405) at non-singleton dimension 3
