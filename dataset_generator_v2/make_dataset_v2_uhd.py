@@ -1309,17 +1309,40 @@ class DatasetGeneratorV2UHD:
         self.logger.info(f"  Total frames to extract: {len(timestamps) * n_frames}")
         self.logger.info(f"  All {len(timestamps)} scenes will be used (0% waste)")
         
-        # Phase 2 & 3: DUAL PROCESSING - Extract and process in chunks
-        # While processing chunk N, we extract chunk N+1 in parallel
-        self.logger.info(f"\n🎬 Phase 2 & 3: DUAL PROCESSING MODE (Extract + Process in parallel)...")
-        self.logger.info(f"  Strategy: While processing patches from chunk N, FFmpeg extracts chunk N+1")
+        # Phase 2: Batch extract ALL frames with ONE FFmpeg call
+        self.logger.info(f"\n🎬 Phase 2: Batch extracting frames (ONE FFmpeg call)...")
+        self.logger.info(f"  Opening video file ONCE (instead of {len(timestamps)} times)")
+        self.logger.info(f"  Single FFmpeg pass through entire video...")
         
-        # Determine optimal chunk size (balance between memory and parallelism)
-        chunk_size = 100  # Process 100 scenes at a time
-        num_chunks = (len(timestamps) + chunk_size - 1) // chunk_size
-        self.logger.info(f"  Total scenes: {len(timestamps)}")
-        self.logger.info(f"  Chunk size: {chunk_size} scenes")
-        self.logger.info(f"  Number of chunks: {num_chunks}")
+        batch_start = time.time()
+        batch_result = self.extract_frames_batch_uhd(video_path, timestamps, n_frames, fps)
+        batch_duration = time.time() - batch_start
+        
+        if not batch_result or 'frame_paths' not in batch_result:
+            self.logger.error(f"❌ Batch extraction failed! Falling back to individual extraction...")
+            return self._extract_patches_multi_format_legacy(
+                video_path, duration, format_distribution, n_frames, video_name
+            )
+        
+        frame_paths_dict = batch_result['frame_paths']
+        temp_dir = batch_result['temp_dir']
+        
+        self.logger.info(f"✓ Batch extraction complete in {batch_duration:.1f}s")
+        self.logger.info(f"  Successfully extracted {len(frame_paths_dict)} timestamps")
+        self.logger.info(f"  Success rate: {len(frame_paths_dict)}/{len(timestamps)} ({100*len(frame_paths_dict)/len(timestamps):.1f}%)")
+        
+        # Estimate time saved
+        estimated_individual_time = len(timestamps) * 2.0  # ~2 seconds per FFmpeg call
+        time_saved = estimated_individual_time - batch_duration
+        speedup = estimated_individual_time / batch_duration if batch_duration > 0 else 0
+        
+        self.logger.info(f"⚡ Performance:")
+        self.logger.info(f"  Batch time: {batch_duration:.1f}s")
+        self.logger.info(f"  Individual extraction would take: ~{estimated_individual_time:.0f}s")
+        self.logger.info(f"  Time saved: ~{time_saved:.0f}s ({speedup:.1f}x speedup)")
+        
+        # Phase 3: Process extracted frames into patches
+        self.logger.info(f"\n🔧 Phase 3: Processing frames into patches...")
         
         black_frame_threshold_kb = 15
         black_frame_detection_limit_seconds = 10.0
@@ -1327,8 +1350,13 @@ class DatasetGeneratorV2UHD:
         black_frames_skipped = 0
         total_created = 0
         
-        # Calculate scene selection (which scenes each format should use)
+        # IMPORTANT: Calculate scene selection based on ORIGINAL timestamps list
+        # This ensures the distribution logic remains correct even if some extractions failed
         total_scenes = len(timestamps)
+        
+        # Create mapping from original timestamp index to actual timestamp
+        timestamp_to_original_idx = {ts: idx for idx, ts in enumerate(timestamps)}
+        
         scene_selection = {}
         self.logger.info(f"\n📊 Scene distribution per format:")
         
@@ -1336,7 +1364,7 @@ class DatasetGeneratorV2UHD:
             scene_selection[category] = {}
             format_idx = 0
             for format_name, target_count in formats.items():
-                # Calculate which scenes this format should use
+                # Calculate which scenes this format should use (based on ORIGINAL scene count)
                 if target_count >= total_scenes:
                     selected_indices = list(range(total_scenes))
                 else:
@@ -1367,140 +1395,17 @@ class DatasetGeneratorV2UHD:
                 
                 format_idx += 1
         
-        # Process in chunks with dual processing
-        temp_dirs_to_cleanup = []
+        # Process extracted frames into patches
+        processed_count = 0
         
-        for chunk_idx in range(num_chunks):
-            chunk_start = chunk_idx * chunk_size
-            chunk_end = min(chunk_start + chunk_size, len(timestamps))
-            chunk_timestamps = timestamps[chunk_start:chunk_end]
-            
-            self.logger.info(f"\n{'='*60}")
-            self.logger.info(f"CHUNK {chunk_idx + 1}/{num_chunks}: Scenes {chunk_start}-{chunk_end-1} ({len(chunk_timestamps)} scenes)")
-            self.logger.info(f"{'='*60}")
-            
-            # Extract this chunk
-            self.logger.info(f"🎬 Extracting chunk {chunk_idx + 1}...")
-            chunk_extract_start = time.time()
-            batch_result = self.extract_frames_batch_uhd(video_path, chunk_timestamps, n_frames, fps)
-            chunk_extract_duration = time.time() - chunk_extract_start
-            
-            if not batch_result or 'frame_paths' not in batch_result:
-                self.logger.error(f"❌ Chunk {chunk_idx + 1} extraction failed, skipping...")
+        for ts in sorted(frame_paths_dict.keys()):
+            # Get the original scene index from the timestamp
+            scene_idx = timestamp_to_original_idx.get(ts)
+            if scene_idx is None:
+                # This shouldn't happen, but skip if timestamp not in original list
+                self.logger.warning(f"Timestamp {ts} not in original list, skipping")
                 continue
             
-            frame_paths_dict = batch_result['frame_paths']
-            temp_dir = batch_result['temp_dir']
-            temp_dirs_to_cleanup.append(temp_dir)
-            
-            self.logger.info(f"✓ Chunk {chunk_idx + 1} extracted in {chunk_extract_duration:.1f}s ({len(frame_paths_dict)} scenes)")
-            
-            # Process this chunk into patches
-            self.logger.info(f"🔧 Processing chunk {chunk_idx + 1} into patches...")
-            chunk_process_start = time.time()
-            
-            # Adjust scene indices for this chunk
-            chunk_scene_idx_offset = chunk_start
-            timestamps_list = sorted(frame_paths_dict.keys())
-            
-            # Adjust scene selection indices for this chunk
-            chunk_scene_selection = {}
-            for category in scene_selection:
-                chunk_scene_selection[category] = {}
-                for format_name in scene_selection[category]:
-                    # Filter indices to only those in this chunk's range
-                    original_indices = scene_selection[category][format_name]
-                    chunk_indices = {idx - chunk_scene_idx_offset for idx in original_indices 
-                                    if chunk_start <= idx < chunk_end}
-                    chunk_scene_selection[category][format_name] = chunk_indices
-            
-            chunk_created, chunk_black, chunk_skipped = self._process_extracted_frames_chunk(
-                frame_paths_dict, timestamps_list, format_distribution,
-                chunk_scene_selection, patches_targets, patches_created,
-                video_path, n_frames, black_frame_threshold_kb,
-                black_frame_detection_limit_seconds
-            )
-            
-            chunk_process_duration = time.time() - chunk_process_start
-            
-            total_created += chunk_created
-            black_frames_detected += chunk_black
-            black_frames_skipped += chunk_skipped
-            
-            self.logger.info(f"✓ Chunk {chunk_idx + 1} processed in {chunk_process_duration:.1f}s")
-            self.logger.info(f"  Created {chunk_created} patches from this chunk")
-            self.logger.info(f"  Total patches so far: {total_created}")
-            
-            # Cleanup chunk temp dir immediately
-            if temp_dir and os.path.exists(temp_dir):
-                try:
-                    shutil.rmtree(temp_dir, ignore_errors=True)
-                    self.logger.info(f"✓ Cleaned up chunk {chunk_idx + 1} temp directory")
-                except Exception as e:
-                    self.logger.warning(f"Could not clean up chunk temp directory: {e}")
-            
-            # Check if should stop
-            if not self.running:
-                self.logger.warning("  Interrupted by user")
-                break
-        
-        # Calculate total timing
-        total_time = time.time() - start_time
-        
-        self.logger.info(f"\n╔══════════════════════════════════════════════════════════╗")
-        self.logger.info(f"║  DUAL PROCESSING EXTRACTION COMPLETE                     ║")
-        self.logger.info(f"╚══════════════════════════════════════════════════════════╝")
-        self.logger.info(f"✓ Processed {num_chunks} chunks in {total_time:.1f}s")
-        self.logger.info(f"✓ Created {total_created} patches total")
-        
-        if black_frames_detected > 0:
-            self.logger.info(f"  🚫 Black frames detected and removed: {black_frames_detected}")
-        if black_frames_skipped > 0:
-            self.logger.info(f"  ⏭️  Frames saved without check (after 10s): {black_frames_skipped}")
-        
-        self.logger.info(f"\n📊 Per-category breakdown:")
-        for category, formats in patches_targets.items():
-            cat_total = sum(stats['created'] for stats in formats.values())
-            cat_target = sum(stats['target'] for stats in formats.values())
-            self.logger.info(f"  {category}: {cat_total}/{cat_target} patches")
-            for format_name, stats in formats.items():
-                self.logger.info(f"    └─ {format_name}: {stats['created']}/{stats['target']}")
-        
-        # Final cleanup of any remaining temp directories
-        for temp_dir in temp_dirs_to_cleanup:
-            if temp_dir and os.path.exists(temp_dir):
-                try:
-                    shutil.rmtree(temp_dir, ignore_errors=True)
-                except Exception:
-                    pass
-        
-        return patches_created
-    
-    def _process_extracted_frames_chunk(self, frame_paths_dict: Dict[float, List[str]], 
-    def _process_extracted_frames_chunk(self, frame_paths_dict: Dict[float, List[str]], 
-                                       timestamps_list: List[float], 
-                                       format_distribution: Dict[str, Dict[str, int]],
-                                       scene_selection: Dict[str, Dict[str, set]],
-                                       patches_targets: Dict[str, Dict[str, Dict]],
-                                       patches_created: Dict[str, int],
-                                       video_path: str, n_frames: int,
-                                       black_frame_threshold_kb: int,
-                                       black_frame_detection_limit_seconds: float) -> Tuple[int, int, int]:
-        """
-        Process a chunk of extracted frames into patches.
-        This is separated so it can run in parallel with frame extraction.
-        
-        Returns:
-            (total_created, black_frames_detected, black_frames_skipped)
-        """
-        total_created = 0
-        black_frames_detected = 0
-        black_frames_skipped = 0
-        
-        for scene_idx, ts in enumerate(timestamps_list):
-            if ts not in frame_paths_dict:
-                continue
-                
             frame_file_paths = frame_paths_dict[ts]
             
             # Check if any format needs this scene
@@ -1588,6 +1493,8 @@ class DatasetGeneratorV2UHD:
                         patches_created[category] += 1
                         total_created += 1
             
+            processed_count += 1
+            
             # Delete frame files immediately
             for frame_path in frame_file_paths:
                 try:
@@ -1597,8 +1504,48 @@ class DatasetGeneratorV2UHD:
                     self.logger.warning(f"Could not delete frame file {frame_path}: {e}")
             
             del frames
+            
+            if processed_count % 100 == 0:
+                scenes_pct = 100 * processed_count / len(frame_paths_dict)
+                self.logger.info(f"  Progress: {processed_count}/{len(frame_paths_dict)} scenes processed ({scenes_pct:.1f}%)")
+                self.logger.info(f"  Patches created so far: {total_created}")
+            
+            if not self.running:
+                self.logger.warning("  Interrupted by user")
+                break
         
-        return total_created, black_frames_detected, black_frames_skipped
+        # Final statistics
+        total_time = time.time() - start_time
+        
+        self.logger.info(f"\n╔══════════════════════════════════════════════════════════╗")
+        self.logger.info(f"║  EXTRACTION COMPLETE                                     ║")
+        self.logger.info(f"╚══════════════════════════════════════════════════════════╝")
+        self.logger.info(f"✓ Processed {processed_count}/{len(frame_paths_dict)} scenes in {total_time:.1f}s")
+        self.logger.info(f"✓ Created {total_created} patches total")
+        self.logger.info(f"  Scene utilization: {100*processed_count/len(frame_paths_dict):.1f}% (all extracted scenes used)")
+        
+        if black_frames_detected > 0:
+            self.logger.info(f"  🚫 Black frames detected and removed: {black_frames_detected}")
+        if black_frames_skipped > 0:
+            self.logger.info(f"  ⏭️  Frames saved without check (after 10s): {black_frames_skipped}")
+        
+        self.logger.info(f"\n📊 Per-category breakdown:")
+        for category, formats in patches_targets.items():
+            cat_total = sum(stats['created'] for stats in formats.values())
+            cat_target = sum(stats['target'] for stats in formats.values())
+            self.logger.info(f"  {category}: {cat_total}/{cat_target} patches")
+            for format_name, stats in formats.items():
+                self.logger.info(f"    └─ {format_name}: {stats['created']}/{stats['target']}")
+        
+        # Clean up temp directory
+        if temp_dir and os.path.exists(temp_dir):
+            try:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                self.logger.info(f"✓ Cleaned up temp directory: {temp_dir}")
+            except Exception as e:
+                self.logger.warning(f"Could not clean up temp directory: {e}")
+        
+        return patches_created
     
     def _extract_patches_multi_format_legacy(self, video_path: str, duration: float,
                                       format_distribution: Dict[str, Dict[str, int]], 
