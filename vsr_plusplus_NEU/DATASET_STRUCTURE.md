@@ -11,22 +11,25 @@ Der `dataset_generator_v2` erstellt folgende Struktur (nur 7-frame Version):
 └── master/                              ← Kategorie (flat lowercase)
     ├── patches/540/                     ← small_540 Format (size_key: 540)
     │   ├── GT/                          ← 540×540 Ground Truth
-    │   └── LR_7frames/                  ← 180×1260 (7 frames gestackt vertikal)
+    │   └── LR_7frames/                  ← 180×1260 (7 frames gestackt horizontal)
     │
     ├── patches/720_169/                 ← medium_169 Format (size_key: 720_169)
     │   ├── GT/                          ← 405×720 Ground Truth (16:9)
-    │   └── LR_7frames/                  ← 135×2352 (7 frames gestackt vertikal)
+    │   └── LR_7frames/                  ← 135×1680 (7 frames gestackt horizontal)
     │
     ├── patches/720/                     ← large_720 Format (size_key: 720)
     │   ├── GT/                          ← 720×720 Ground Truth
-    │   └── LR_7frames/                  ← 240×1680 (7 frames gestackt vertikal)
+    │   └── LR_7frames/                  ← 240×1680 (7 frames gestackt horizontal)
     │
     └── Val/                             ← Validation (flat, vom Generator erstellt)
         └── GT/                          ← Mixed sizes (nicht genutzt)
 ```
 
 **Wichtig**: 
-- Alle LR-Daten sind 7-frame Versionen (vertikal gestackt)
+- Alle LR-Daten sind 7-frame Versionen (horizontal gestackt: Breite = einzelne_Breite × 7)
+- 540×540 GT → 180×1260 LR_7frames (Höhe: 540/3=180, Breite: 180×7=1260)
+- 720×720 GT → 240×1680 LR_7frames (Höhe: 720/3=240, Breite: 240×7=1680)
+- 405×720 GT → 135×1680 LR_7frames (Höhe: 405/3=135, Breite: 240×7=1680)
 - Der Generator erstellt `Val/GT/` (flat, mit großem V), aber das Training nutzt eine andere Struktur
 - Validation-Dateien werden **manuell** in die korrekte Struktur kopiert (siehe unten)
 
