@@ -1,0 +1,20 @@
+please ensure, that only files from THIS directory are used .. 
+Dont modify anything in the old vsr_plus_plus directory !
+Check all modules for consistency
+!!
+
+
+
+Traceback (most recent call last):
+  File "/mnt/data/ice_ki/vsr_plusplus_NEU/train.py", line 598, in <module>
+    main()
+  File "/mnt/data/ice_ki/vsr_plusplus_NEU/train.py", line 590, in main
+    trainer.run()
+  File "/mnt/data/ice_ki/vsr_plus_plus/training/trainer.py", line 950, in run
+    self.train_epoch(epoch)
+  File "/mnt/data/ice_ki/vsr_plus_plus/training/trainer.py", line 238, in train_epoch
+    self._update_gui(epoch, smoothed_loss_dict, avg_time, steps_per_epoch, current_epoch_step, adam_momentum=adam_momentum)
+  File "/mnt/data/ice_ki/vsr_plus_plus/training/trainer.py", line 509, in _update_gui
+    num_images = len(self.train_loader.dataset)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'MultiSizeDataLoader' object has no attribute 'dataset'
