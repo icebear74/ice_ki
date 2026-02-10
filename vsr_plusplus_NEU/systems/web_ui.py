@@ -1335,25 +1335,63 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         <div class="section-header">📂 Dataset Files</div>
         
         <div class="layer-activity-container">
-            <div style="margin-bottom: 20px;">
-                <h3 style="color: var(--accent-blue); margin-bottom: 10px; font-size: 1.1em;">Training Dataset</h3>
-                <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border-color);">
-                    <span style="color: var(--text-secondary);" id="trainSizeKey">Size: -</span>
-                    <span style="color: var(--text-primary); font-weight: bold;" id="trainCount">0</span>
-                </div>
-                <div id="trainNewFiles" style="display: none; margin-top: 8px; padding: 8px; background: rgba(34, 197, 94, 0.1); border-left: 3px solid #22c55e; border-radius: 4px; font-size: 0.9em;">
-                    <span style="color: #22c55e;">✨ New files detected: <strong id="trainNewCount">0</strong></span>
+            <!-- Distribution Info -->
+            <div style="margin-bottom: 20px; padding: 12px; background: rgba(96, 165, 250, 0.05); border-radius: 6px; border: 1px solid rgba(96, 165, 250, 0.2);">
+                <h3 style="color: var(--accent-blue); margin-bottom: 10px; font-size: 1.1em;">📊 Distribution (Config)</h3>
+                <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;">
+                    <div style="text-align: center;">
+                        <div style="color: var(--text-secondary); font-size: 0.85em; margin-bottom: 4px;">720</div>
+                        <div style="color: var(--text-primary); font-weight: bold; font-size: 1.1em;" id="dist720">0%</div>
+                    </div>
+                    <div style="text-align: center;">
+                        <div style="color: var(--text-secondary); font-size: 0.85em; margin-bottom: 4px;">540</div>
+                        <div style="color: var(--text-primary); font-weight: bold; font-size: 1.1em;" id="dist540">0%</div>
+                    </div>
+                    <div style="text-align: center;">
+                        <div style="color: var(--text-secondary); font-size: 0.85em; margin-bottom: 4px;">720_169</div>
+                        <div style="color: var(--text-primary); font-weight: bold; font-size: 1.1em;" id="dist720_169">0%</div>
+                    </div>
                 </div>
             </div>
             
+            <!-- Training Datasets -->
+            <div style="margin-bottom: 20px;">
+                <h3 style="color: var(--accent-blue); margin-bottom: 10px; font-size: 1.1em;">🎯 Training Datasets</h3>
+                
+                <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border-color);">
+                    <span style="color: var(--text-secondary);">720×720</span>
+                    <span style="color: var(--text-primary); font-weight: bold;" id="train720Count">0</span>
+                </div>
+                <div id="train720NewFiles" style="display: none; margin-top: 5px; margin-bottom: 8px; padding: 6px; background: rgba(34, 197, 94, 0.1); border-left: 3px solid #22c55e; border-radius: 4px; font-size: 0.85em;">
+                    <span style="color: #22c55e;">✨ +<strong id="train720NewCount">0</strong> reloaded</span>
+                </div>
+                
+                <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border-color);">
+                    <span style="color: var(--text-secondary);">540×540</span>
+                    <span style="color: var(--text-primary); font-weight: bold;" id="train540Count">0</span>
+                </div>
+                <div id="train540NewFiles" style="display: none; margin-top: 5px; margin-bottom: 8px; padding: 6px; background: rgba(34, 197, 94, 0.1); border-left: 3px solid #22c55e; border-radius: 4px; font-size: 0.85em;">
+                    <span style="color: #22c55e;">✨ +<strong id="train540NewCount">0</strong> reloaded</span>
+                </div>
+                
+                <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border-color);">
+                    <span style="color: var(--text-secondary);">720×405 (16:9)</span>
+                    <span style="color: var(--text-primary); font-weight: bold;" id="train720_169Count">0</span>
+                </div>
+                <div id="train720_169NewFiles" style="display: none; margin-top: 5px; margin-bottom: 8px; padding: 6px; background: rgba(34, 197, 94, 0.1); border-left: 3px solid #22c55e; border-radius: 4px; font-size: 0.85em;">
+                    <span style="color: #22c55e;">✨ +<strong id="train720_169NewCount">0</strong> reloaded</span>
+                </div>
+            </div>
+            
+            <!-- Validation Datasets -->
             <div>
-                <h3 style="color: var(--accent-green); margin-bottom: 10px; font-size: 1.1em;">Validation Datasets</h3>
+                <h3 style="color: var(--accent-green); margin-bottom: 10px; font-size: 1.1em;">✅ Validation Datasets</h3>
                 <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border-color);">
                     <span style="color: var(--text-secondary);">720×720</span>
                     <span style="color: var(--text-primary); font-weight: bold;" id="val720Count">0</span>
                 </div>
                 <div id="val720NewFiles" style="display: none; margin-top: 5px; margin-bottom: 8px; padding: 6px; background: rgba(34, 197, 94, 0.1); border-left: 3px solid #22c55e; border-radius: 4px; font-size: 0.85em;">
-                    <span style="color: #22c55e;">✨ +<strong id="val720NewCount">0</strong></span>
+                    <span style="color: #22c55e;">✨ +<strong id="val720NewCount">0</strong> reloaded</span>
                 </div>
                 
                 <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border-color);">
@@ -1361,7 +1399,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                     <span style="color: var(--text-primary); font-weight: bold;" id="val540Count">0</span>
                 </div>
                 <div id="val540NewFiles" style="display: none; margin-top: 5px; margin-bottom: 8px; padding: 6px; background: rgba(34, 197, 94, 0.1); border-left: 3px solid #22c55e; border-radius: 4px; font-size: 0.85em;">
-                    <span style="color: #22c55e;">✨ +<strong id="val540NewCount">0</strong></span>
+                    <span style="color: #22c55e;">✨ +<strong id="val540NewCount">0</strong> reloaded</span>
                 </div>
                 
                 <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border-color);">
@@ -1369,7 +1407,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                     <span style="color: var(--text-primary); font-weight: bold;" id="val720_169Count">0</span>
                 </div>
                 <div id="val720_169NewFiles" style="display: none; margin-top: 5px; margin-bottom: 8px; padding: 6px; background: rgba(34, 197, 94, 0.1); border-left: 3px solid #22c55e; border-radius: 4px; font-size: 0.85em;">
-                    <span style="color: #22c55e;">✨ +<strong id="val720_169NewCount">0</strong></span>
+                    <span style="color: #22c55e;">✨ +<strong id="val720_169NewCount">0</strong> reloaded</span>
                 </div>
             </div>
             
@@ -1966,16 +2004,43 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         function updateDatasetFiles(data) {
             const dsFiles = data.dataset_files || {};
             
-            // Update training dataset
-            const train = dsFiles.train || {};
-            document.getElementById('trainSizeKey').textContent = `Size: ${train.size_key || '-'}`;
-            document.getElementById('trainCount').textContent = train.count || 0;
+            // Update distribution
+            const dist = dsFiles.distribution || {};
+            document.getElementById('dist720').textContent = dist['720'] !== undefined ? `${(dist['720'] * 100).toFixed(0)}%` : '0%';
+            document.getElementById('dist540').textContent = dist['540'] !== undefined ? `${(dist['540'] * 100).toFixed(0)}%` : '0%';
+            document.getElementById('dist720_169').textContent = dist['720_169'] !== undefined ? `${(dist['720_169'] * 100).toFixed(0)}%` : '0%';
             
-            if (train.has_new && train.new_count > 0) {
-                document.getElementById('trainNewFiles').style.display = 'block';
-                document.getElementById('trainNewCount').textContent = train.new_count;
+            // Update training datasets (per-size)
+            const trainPerSize = dsFiles.train_per_size || {};
+            
+            // 720 training
+            const train720 = trainPerSize['720'] || {};
+            document.getElementById('train720Count').textContent = train720.count || 0;
+            if (train720.has_new && train720.new_count > 0) {
+                document.getElementById('train720NewFiles').style.display = 'block';
+                document.getElementById('train720NewCount').textContent = train720.new_count;
             } else {
-                document.getElementById('trainNewFiles').style.display = 'none';
+                document.getElementById('train720NewFiles').style.display = 'none';
+            }
+            
+            // 540 training
+            const train540 = trainPerSize['540'] || {};
+            document.getElementById('train540Count').textContent = train540.count || 0;
+            if (train540.has_new && train540.new_count > 0) {
+                document.getElementById('train540NewFiles').style.display = 'block';
+                document.getElementById('train540NewCount').textContent = train540.new_count;
+            } else {
+                document.getElementById('train540NewFiles').style.display = 'none';
+            }
+            
+            // 720_169 training
+            const train720_169 = trainPerSize['720_169'] || {};
+            document.getElementById('train720_169Count').textContent = train720_169.count || 0;
+            if (train720_169.has_new && train720_169.new_count > 0) {
+                document.getElementById('train720_169NewFiles').style.display = 'block';
+                document.getElementById('train720_169NewCount').textContent = train720_169.new_count;
+            } else {
+                document.getElementById('train720_169NewFiles').style.display = 'none';
             }
             
             // Update validation datasets

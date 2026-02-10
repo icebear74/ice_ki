@@ -14,6 +14,7 @@ import cv2
 import torch
 import random
 import numpy as np
+import threading
 from torch.utils.data import Dataset
 
 
@@ -35,6 +36,9 @@ class VSRDataset(Dataset):
         self.size_key = size_key
         self.mode = mode
         self.augment = augment and (mode == 'train')
+        
+        # Thread lock for safe reloading during training
+        self.reload_lock = threading.Lock()
         
         # Build paths based on mode
         dataset_path = os.path.join(root, dataset_name)
@@ -256,6 +260,93 @@ class VSRDataset(Dataset):
             'current_loaded': current_loaded,
             'new_files': new_files
         }
+    
+    def reload_files(self):
+        """
+        Reload dataset files from disk - picks up new files added during training
+        
+        This method is called when new files are detected in the dataset directories.
+        It safely reloads the file list while training is running.
+        
+        Returns:
+            dict with:
+                - success: bool
+                - files_before: int
+                - files_after: int
+                - new_files_loaded: int
+        """
+        with self.reload_lock:
+            files_before = len(self.gt_files)
+            
+            try:
+                if not os.path.exists(self.gt_dir):
+                    return {
+                        'success': False,
+                        'files_before': files_before,
+                        'files_after': files_before,
+                        'new_files_loaded': 0,
+                        'error': 'GT directory not found'
+                    }
+                
+                # Get all GT files
+                all_gt_files = sorted([f for f in os.listdir(self.gt_dir) if f.endswith('.png')])
+                
+                if not all_gt_files:
+                    return {
+                        'success': False,
+                        'files_before': files_before,
+                        'files_after': files_before,
+                        'new_files_loaded': 0,
+                        'error': 'No PNG files found'
+                    }
+                
+                # Build new file lists
+                new_gt_files = []
+                new_lr_paths = {}
+                
+                for gt_file in all_gt_files:
+                    # For training, check lr_dir. For validation, use patch_lr_dir
+                    if self.lr_dir:
+                        lr_path = os.path.join(self.lr_dir, gt_file)
+                        
+                        if os.path.exists(lr_path):
+                            new_gt_files.append(gt_file)
+                            new_lr_paths[gt_file] = self.lr_dir
+                        elif self.mode == 'val' and self.patch_lr_dir:
+                            # For validation, fallback to patches/LR
+                            patch_lr_path = os.path.join(self.patch_lr_dir, gt_file)
+                            if os.path.exists(patch_lr_path):
+                                new_gt_files.append(gt_file)
+                                new_lr_paths[gt_file] = self.patch_lr_dir
+                    elif self.mode == 'val' and self.patch_lr_dir:
+                        # For validation with no val LR dir, always use patches
+                        patch_lr_path = os.path.join(self.patch_lr_dir, gt_file)
+                        if os.path.exists(patch_lr_path):
+                            new_gt_files.append(gt_file)
+                            new_lr_paths[gt_file] = self.patch_lr_dir
+                
+                # Update the dataset atomically
+                self.gt_files = new_gt_files
+                self.lr_paths = new_lr_paths
+                
+                files_after = len(self.gt_files)
+                new_files_loaded = files_after - files_before
+                
+                return {
+                    'success': True,
+                    'files_before': files_before,
+                    'files_after': files_after,
+                    'new_files_loaded': new_files_loaded
+                }
+                
+            except Exception as e:
+                return {
+                    'success': False,
+                    'files_before': files_before,
+                    'files_after': files_before,
+                    'new_files_loaded': 0,
+                    'error': str(e)
+                }
     
     def __getitem__(self, idx):
         """
