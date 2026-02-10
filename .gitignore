@@ -55,11 +55,6 @@ runs/
 train_config.json
 activate.sh
 vsr_plus_plus/config.py
+vsr_plusplus_NEU/config.py
 
 # Temporary files
-*.tmp
-*.log
-tmp/
-temp/
-*.backup
-vsr_plusplus_NEU/config.py

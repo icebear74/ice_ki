@@ -1,35 +1,46 @@
 """
-VSR++ Manual Configuration
+VSR++ 7-Frame Configuration - Example Template
 
-This file contains all important parameters for training.
-Edit these values directly to configure your training run.
+⚠️  IMPORTANT: Copy this file to config.py before using!
+
+    cp config.py.example config.py
+
+The config.py file is in .gitignore and will NOT be committed.
+Edit config.py for your local setup.
+
+This configuration is specifically optimized for 7-frame VSR training on Tesla P4 hardware (8GB VRAM).
+Key parameters:
+- 72 feature channels (optimized for 7-frame model)
+- 26 residual blocks (balanced depth for quality)
+- Gradient accumulation for effective batch size
+- Matches dataset_generator_v2 output structure
 """
 
 # ============================================================================
-# MODEL ARCHITECTURE PARAMETERS
+# MODEL ARCHITECTURE PARAMETERS (7-Frame Optimized)
 # ============================================================================
 
-# Number of feature channels (64, 96, 128, 160, 192, 256)
-# Higher = more capacity but slower and more VRAM
-N_FEATS = 128
+# Number of feature channels - Optimized for 7-frame model
+# 72 features provides good capacity while staying within VRAM limits
+N_FEATS = 72
 
-# Total number of residual blocks (20, 24, 28, 32)
-# Higher = more capacity but slower
-N_BLOCKS = 32
+# Total number of residual blocks - Optimized for quality
+# 26 blocks provides excellent capacity for 7-frame processing
+N_BLOCKS = 26
 
 
 # ============================================================================
-# TRAINING BATCH PARAMETERS
+# TRAINING BATCH PARAMETERS (Optimized for 7-Frame Model)
 # ============================================================================
 
-# Batch size per iteration (1, 2, 3, 4, 6, 8)
-# Higher = faster training but more VRAM
-BATCH_SIZE = 4
+# Batch size per iteration
+# Keep at 1 for safety with 7-frame model (VRAM tested: ~3.77 GB @ batch=1)
+BATCH_SIZE = 1
 
-# Gradient accumulation steps (1, 2, 3, 4)
-# Effective batch = BATCH_SIZE * ACCUMULATION_STEPS
-# Use accumulation if you need larger effective batch but have limited VRAM
-ACCUMULATION_STEPS = 1
+# Gradient accumulation steps
+# Effective batch = BATCH_SIZE * ACCUMULATION_STEPS = 1 * 6 = 6
+# This provides stable gradients without excessive VRAM usage
+ACCUMULATION_STEPS = 6
 
 
 # ============================================================================
@@ -37,32 +48,38 @@ ACCUMULATION_STEPS = 1
 # ============================================================================
 
 # Initial learning rate as exponent (e.g., -5 means 1e-5 = 0.00001)
-# Typical range: -6 to -4
 LR_EXPONENT = -5
 
 # Weight decay for AdamW optimizer (regularization)
-# Typical range: 0.0001 to 0.01
 WEIGHT_DECAY = 0.001
 
 # Warmup steps (linear increase from 0 to max LR)
 WARMUP_STEPS = 1000
 
 # Maximum learning rate after warmup
-MAX_LR = 1e-4
+MAX_LR = 1.5e-4
 
 # Minimum learning rate at end of training
-MIN_LR = 1e-6
+MIN_LR = 1e-7
 
 
 # ============================================================================
-# LOSS FUNCTION WEIGHTS
+# LOSS FUNCTION WEIGHTS (Optimized for VGG Perceptual Loss)
 # ============================================================================
 
-# Initial loss component weights (should sum to ~1.0)
-L1_WEIGHT = 0.6      # L1 pixel loss
-MS_WEIGHT = 0.2      # Multi-scale loss
-GRAD_WEIGHT = 0.2    # Gradient loss
-PERCEPTUAL_WEIGHT = 0.0  # Custom self-learned perceptual loss (0.1-0.2 recommended, 0 to disable)
+# L1 pixel loss - PRIMARY loss component
+L1_WEIGHT = 0.55
+
+# Multi-scale loss - DISABLED (redundant with perceptual)
+MS_WEIGHT = 0.20
+
+# Gradient loss - DISABLED (redundant with perceptual)
+GRAD_WEIGHT = 0.20
+
+# VGG-based perceptual loss - ENABLED for sharpness feedback
+# This uses pretrained VGG16 weights, providing REAL perceptual guidance
+# (unlike the previous untrained custom loss that caused stagnation)
+PERCEPTUAL_WEIGHT = 0.05
 
 
 # ============================================================================
@@ -92,35 +109,49 @@ HIST_STEP_EVERY = 500
 # Number of worker threads for data loading
 NUM_WORKERS = 4
 
-# Pin memory for faster GPU transfer (True/False)
+# Pin memory for faster GPU transfer
 PIN_MEMORY = True
 
 
 # ============================================================================
-# PATHS
+# PATHS (Match dataset_generator_v2 output structure)
 # ============================================================================
 
-# Training data root directory
-DATA_ROOT = "/mnt/data/training/Universal/Mastermodell/Learn"
+# Dataset root directory - base directory for all datasets
+# This matches runtime_config.json "data.root"
+DATASET_ROOT = "/mnt/data/training/datasetNeu"
 
-# Dataset root directory
-DATASET_ROOT = "/mnt/data/training/Dataset/Universal/Mastermodell"
+# Default dataset name (category) - used if runtime_config.json not found
+# Options: 'master', 'universal', 'space', 'toon' (lowercase)
+DEFAULT_DATASET_NAME = "master"
+
+# For backward compatibility - will be overridden by runtime_config.json
+# New structure: DATASET_ROOT/dataset_name/patches/{size_key}/GT
+# Old structure (deprecated): DATASET_ROOT/Master/MasterModel/Learn/Patches/GT
+DATA_ROOT = f"{DATASET_ROOT}/{DEFAULT_DATASET_NAME}"
 
 
 # ============================================================================
-# ADAPTIVE SYSTEM (OPTIONAL)
+# ADAPTIVE SYSTEM
 # ============================================================================
 
-# Enable adaptive loss weights (True/False)
-# If True, loss weights will adjust automatically during training
+# Enable adaptive loss weights
 ADAPTIVE_LOSS_WEIGHTS = True
 
-# Enable adaptive gradient clipping (True/False)
-# If True, gradient clip value will adjust automatically
+# Enable adaptive gradient clipping
 ADAPTIVE_GRAD_CLIP = True
 
 # Initial gradient clip value
 INITIAL_GRAD_CLIP = 1.5
+
+
+# ============================================================================
+# MIXED PRECISION TRAINING (AMP)
+# ============================================================================
+
+# Enable Automatic Mixed Precision for faster training on Tesla P4
+# Tesla P4 supports FP16, which can significantly speed up training
+USE_AMP = True
 
 
 # ============================================================================
@@ -132,7 +163,7 @@ def get_config():
     Returns configuration as a dictionary.
     This is used by the training system.
     """
-    return {
+    config = {
         # Model
         'N_FEATS': N_FEATS,
         'N_BLOCKS': N_BLOCKS,
@@ -174,22 +205,29 @@ def get_config():
         'ADAPTIVE_GRAD_CLIP': ADAPTIVE_GRAD_CLIP,
         'INITIAL_GRAD_CLIP': INITIAL_GRAD_CLIP,
     }
+    
+    # Add AMP if enabled
+    if USE_AMP:
+        config['USE_AMP'] = USE_AMP
+    
+    return config
 
 
 def print_config():
     """Print current configuration in a readable format."""
     print("\n" + "="*80)
-    print("CURRENT CONFIGURATION")
+    print("7-FRAME VSR CONFIGURATION (Tesla P4 Optimized)")
     print("="*80)
     
-    print("\nMODEL ARCHITECTURE:")
+    print("\nMODEL ARCHITECTURE (7-Frame Optimized):")
     print(f"  Features (n_feats):     {N_FEATS}")
     print(f"  Blocks (n_blocks):      {N_BLOCKS}")
     
-    print("\nBATCH SETTINGS:")
+    print("\nBATCH SETTINGS (VRAM-Safe):")
     print(f"  Batch Size:             {BATCH_SIZE}")
     print(f"  Accumulation Steps:     {ACCUMULATION_STEPS}")
     print(f"  Effective Batch Size:   {BATCH_SIZE * ACCUMULATION_STEPS}")
+    print(f"  Estimated VRAM:         ~3.77 GB @ batch=1")
     
     print("\nLEARNING RATE:")
     print(f"  Initial LR:             {10**LR_EXPONENT:.2e} (10^{LR_EXPONENT})")
@@ -198,11 +236,11 @@ def print_config():
     print(f"  Weight Decay:           {WEIGHT_DECAY}")
     print(f"  Warmup Steps:           {WARMUP_STEPS:,}")
     
-    print("\nLOSS WEIGHTS:")
-    print(f"  L1 Weight:              {L1_WEIGHT}")
+    print("\nLOSS WEIGHTS (VGG Perceptual Enabled):")
+    print(f"  L1 Weight:              {L1_WEIGHT} (primary)")
     print(f"  MS Weight:              {MS_WEIGHT}")
     print(f"  Grad Weight:            {GRAD_WEIGHT}")
-    print(f"  Perceptual Weight:      {PERCEPTUAL_WEIGHT}")
+    print(f"  Perceptual Weight:      {PERCEPTUAL_WEIGHT} (VGG16-based)")
     print(f"  Total:                  {L1_WEIGHT + MS_WEIGHT + GRAD_WEIGHT + PERCEPTUAL_WEIGHT}")
     
     print("\nTRAINING SCHEDULE:")
@@ -215,12 +253,72 @@ def print_config():
     print(f"  Workers:                {NUM_WORKERS}")
     print(f"  Pin Memory:             {PIN_MEMORY}")
     
+    print("\nDATASET PATHS:")
+    print(f"  Dataset Root:           {DATASET_ROOT}")
+    print(f"  Category (dataset_name): {DEFAULT_DATASET_NAME}")
+    
+    # Try to load runtime_config.json to show actual configuration
+    import os
+    import json
+    runtime_config_file = os.path.join(os.path.dirname(__file__), "runtime_config.json")
+    
+    if os.path.exists(runtime_config_file):
+        try:
+            with open(runtime_config_file, 'r') as f:
+                rt_config = json.load(f)
+            dataset_root = rt_config.get('data', {}).get('root', DATASET_ROOT)
+            dataset_name = rt_config.get('data', {}).get('dataset_name', DEFAULT_DATASET_NAME)
+            
+            print(f"\n  ✓ runtime_config.json found:")
+            print(f"    Root:                 {dataset_root}")
+            print(f"    Dataset Name:         {dataset_name}")
+            
+            # Show expected structure for each size_key
+            size_dist = rt_config.get('size_distribution', {})
+            enabled_sizes = [k for k, v in size_dist.items() if v > 0]
+            
+            if enabled_sizes:
+                print(f"\n  Expected Structure (NEW - size-specific):")
+                for size_key in enabled_sizes:
+                    print(f"    Training {size_key}:")
+                    print(f"      {dataset_root}/{dataset_name}/patches/{size_key}/GT/")
+                    print(f"      {dataset_root}/{dataset_name}/patches/{size_key}/LR_7frames/")
+                
+                # Show validation structure
+                val_sizes = rt_config.get('validation', {}).get('sizes', enabled_sizes)
+                if val_sizes:
+                    print(f"\n    Validation:")
+                    for size_key in val_sizes:
+                        print(f"      {dataset_root}/{dataset_name}/val/{size_key}/GT/")
+                        print(f"      (LR auto-found in patches/{size_key}/LR_7frames/)")
+        except Exception as e:
+            print(f"\n  ⚠ Could not parse runtime_config.json: {e}")
+            print(f"  Using default paths (backward compatible)")
+    else:
+        print(f"\n  ⚠ runtime_config.json not found")
+        print(f"  Expected at: {runtime_config_file}")
+        print(f"  Using default single-size structure:")
+        print(f"    {DATA_ROOT}/patches/540/GT/")
+        print(f"    {DATA_ROOT}/patches/540/LR_7frames/")
+    
     print("\nADAPTIVE SYSTEM:")
     print(f"  Adaptive Loss Weights:  {ADAPTIVE_LOSS_WEIGHTS}")
     print(f"  Adaptive Grad Clip:     {ADAPTIVE_GRAD_CLIP}")
     print(f"  Initial Grad Clip:      {INITIAL_GRAD_CLIP}")
     
-    print("\n" + "="*80 + "\n")
+    print("\nPERFORMANCE:")
+    print(f"  Mixed Precision (AMP):  {USE_AMP}")
+    
+    print("\n" + "="*80)
+    print("CONFIGURATION NOTES:")
+    print("  - 7-frame model with 72 features and 26 blocks")
+    print("  - Dataset structure matches dataset_generator_v2 output")
+    print("  - Lowercase category names (master, universal, space, toon)")
+    print("  - Size-specific directories: patches/{size_key}/ and val/{size_key}/")
+    print("  - Validation LR files auto-found in patches/{size_key}/LR_7frames/")
+    print("  - VGG perceptual loss enabled for quality")
+    print("  - Gradient accumulation for effective batch size 6")
+    print("="*80 + "\n")
 
 
 if __name__ == '__main__':

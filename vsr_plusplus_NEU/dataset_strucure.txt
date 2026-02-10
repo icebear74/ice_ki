@@ -1,17 +1,40 @@
-20K     ./MasterModel/Learn/Val/GT
-20K     ./MasterModel/Learn/Val/LR
-60K     ./MasterModel/Learn/Val
-803M    ./MasterModel/Learn/Patches_Medium169/GT
-599M    ./MasterModel/Learn/Patches_Medium169/LR
-831M    ./MasterModel/Learn/Patches_Medium169/LR_7frames
-2,2G    ./MasterModel/Learn/Patches_Medium169
-1,2G    ./MasterModel/Learn/Patches/GT
-1,2G    ./MasterModel/Learn/Patches/LR_7frames
-885M    ./MasterModel/Learn/Patches/LR
-3,3G    ./MasterModel/Learn/Patches
-602M    ./MasterModel/Learn/Patches_Large/LR_7frames
-583M    ./MasterModel/Learn/Patches_Large/GT
-437M    ./MasterModel/Learn/Patches_Large/LR
-1,6G    ./MasterModel/Learn/Patches_Large
-7,0G    ./MasterModel/Learn
-7,0G    ./MasterModel
+# NEW Dataset Structure (dataset_generator_v2)
+# Base: /mnt/data/training/datasetNeu
+
+# Categories (lowercase): master, universal, space, toon
+# Each category has size-specific subdirectories
+
+# Example for 'master' category:
+/mnt/data/training/datasetNeu/master/
+├── patches/
+│   ├── 540/
+│   │   ├── GT/           # 540×540 Ground Truth
+│   │   └── LR_7frames/   # 180×1260 (7 frames horizontal)
+│   ├── 720/
+│   │   ├── GT/           # 720×720 Ground Truth
+│   │   └── LR_7frames/   # 240×1680 (7 frames horizontal)
+│   └── 720_169/
+│       ├── GT/           # 405×720 Ground Truth (16:9)
+│       └── LR_7frames/   # 135×1680 (7 frames horizontal)
+│
+└── val/                  # Validation (manual setup)
+    ├── 540/
+    │   └── GT/           # Only GT needed (LR auto-found in patches)
+    ├── 720/
+    │   └── GT/
+    └── 720_169/
+        └── GT/
+
+# Actual disk usage (example):
+# master/patches/540:      1.3G (612M GT + 656M LR_7frames)
+# master/patches/720:      1.1G (543M GT + 581M LR_7frames)
+# master/patches/720_169:  1.3G (608M GT + 653M LR_7frames)
+# Total master:            ~3.6G
+
+# universal: ~7.5G
+# space:     ~914M
+# toon:      ~248M
+
+# NOTE: Validation LR files are automatically found in patches/{size_key}/LR_7frames/
+# You only need to copy GT files to val/{size_key}/GT/
+

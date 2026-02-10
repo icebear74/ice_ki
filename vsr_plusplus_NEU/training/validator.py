@@ -10,8 +10,8 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 import cv2
-from vsr_plus_plus.utils.metrics import calculate_psnr, calculate_ssim, quality_to_percent
-from vsr_plus_plus.utils.ui_terminal import C_GREEN, C_GRAY, C_CYAN, C_RESET
+from vsr_plusplus_NEU.utils.metrics import calculate_psnr, calculate_ssim, quality_to_percent
+from vsr_plusplus_NEU.utils.ui_terminal import C_GREEN, C_GRAY, C_CYAN, C_RESET
 
 
 class VSRValidator:

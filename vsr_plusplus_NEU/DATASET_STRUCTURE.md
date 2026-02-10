@@ -4,85 +4,143 @@
 
 ### Dataset Generator V2 Ausgabe-Struktur
 
-Der `dataset_generator_v2` erstellt folgende Struktur:
+Der `dataset_generator_v2` erstellt folgende Struktur (nur 7-frame Version):
 
 ```
 /mnt/data/training/datasetNeu/          ← output_base_dir (generator_config.json)
-└── Master/                              ← Kategorie
-    └── MasterModel/
-        └── Learn/
-            ├── Patches/                 ← small_540 Format
-            │   ├── GT/                  ← 540×540 Ground Truth
-            │   ├── LR/                  ← 180×900 (5 frames gestackt)
-            │   └── LR_7frames/          ← 180×1260 (7 frames gestackt)
-            │
-            ├── Patches_Medium169/       ← medium_169 Format
-            │   ├── GT/                  ← 720×405 Ground Truth
-            │   ├── LR/                  ← 240×135 (5 frames)
-            │   └── LR_7frames/          ← 240×135 (7 frames)
-            │
-            ├── Patches_Large/           ← large_720 Format
-            │   ├── GT/                  ← 720×720 Ground Truth
-            │   ├── LR/                  ← 240×240 (5 frames)
-            │   └── LR_7frames/          ← 240×240 (7 frames)
-            │
-            └── Val/                     ← Validation
-                ├── GT/
-                └── LR/
+└── master/                              ← Kategorie (flat lowercase)
+    ├── patches/540/                     ← small_540 Format (size_key: 540)
+    │   ├── GT/                          ← 540×540 Ground Truth
+    │   └── LR_7frames/                  ← 1260×180 (7 frames gestackt vertikal)
+    │
+    ├── patches/720_169/                 ← medium_169 Format (size_key: 720_169)
+    │   ├── GT/                          ← 405×720 Ground Truth (16:9)
+    │   └── LR_7frames/                  ← 945×240 (7 frames gestackt vertikal)
+    │
+    ├── patches/720/                     ← large_720 Format (size_key: 720)
+    │   ├── GT/                          ← 720×720 Ground Truth
+    │   └── LR_7frames/                  ← 1680×240 (7 frames gestackt vertikal)
+    │
+    └── Val/                             ← Validation (flat, vom Generator erstellt)
+        └── GT/                          ← Mixed sizes (nicht genutzt)
 ```
+
+**Wichtig**: 
+- Alle LR-Daten sind 7-frame Versionen (vertikal gestackt: Höhe = einzelne_Höhe × 7)
+- 540×540 GT → 1260×180 LR_7frames (Höhe: (540/3)×7=180×7=1260, Breite: 540/3=180)
+- 720×720 GT → 1680×240 LR_7frames (Höhe: (720/3)×7=240×7=1680, Breite: 720/3=240)
+- 405×720 GT → 945×240 LR_7frames (Höhe: (405/3)×7=135×7=945, Breite: 720/3=240)
+- Der Generator erstellt `val/GT/` (mit großem V), aber das Training erwartet `val/{size_key}/GT/` (lowercase)
+- Validation-Dateien werden **manuell** in die korrekte Struktur kopiert (siehe unten)
 
 ### Andere Kategorien
 
 Generator V2 unterstützt mehrere Kategorien (siehe `utils/format_definitions.py`):
 
-- **master**: `Master/MasterModel/Learn/`
-- **universal**: `Universal/UniversalModel/Learn/`
-- **space**: `Space/SpaceModel/Learn/`
-- **toon**: `Toon/ToonModel/Learn/`
+- **master**: `master/` (flat, lowercase)
+- **universal**: `universal/` (flat, lowercase)
+- **space**: `space/` (flat, lowercase)
+- **toon**: `toon/` (flat, lowercase)
 
 ### VSR Training System Erwartung
 
 Das `VSRDataset` (in `vsr_plus_plus/core/dataset.py`) erwartet:
 
 ```python
-dataset_root/              # = DATA_ROOT in config
-├── Patches/
-│   ├── GT/               # Training Ground Truth
-│   └── LR/               # Training Low Resolution (5-frame stack)
-└── Val/
-    ├── GT/               # Validation Ground Truth
-    └── LR/               # Validation Low Resolution
+dataset_root/              # = root Parameter in VSRDataset
+└── master/                # = dataset_name Parameter (lowercase)
+    ├── patches/540/       # = size_key Parameter (z.B. '540', '720', '720_169')
+    │   ├── GT/            # Training Ground Truth
+    │   └── LR_7frames/    # Training Low Resolution (7-frame stack)
+    │
+    └── val/               # Validation (lowercase)
+        └── GT/            # Validation Ground Truth (organisiert nach size)
+            ├── 540/       # GT für 540×540 Patches
+            ├── 720/       # GT für 720×720 Patches
+            └── 720_169/   # GT für 720×405 (16:9) Patches
 ```
+
+**Wichtig**: Die Validation-Struktur organisiert GT-Bilder unter `val/GT/{size_key}/` (lowercase val):
+- `val/GT/540/` für 540×540 Validation Patches
+- `val/GT/720/` für 720×720 Validation Patches
+- `val/GT/720_169/` für 720×405 (16:9) Validation Patches
+- LR-Bilder werden **immer** aus `patches/{size_key}/LR_7frames/` geladen
 
 ### Richtige Konfiguration
 
-In `config_p4_optimized.py` (und Ihrer lokalen `config.py`):
+In `runtime_config.json` oder beim Initialisieren von VSRDataset:
 
 ```python
 # RICHTIG ✅
-DATA_ROOT = "/mnt/data/training/datasetNeu/Master/MasterModel/Learn"
-DATASET_ROOT = "/mnt/data/training/datasetNeu"
+dataset = VSRDataset(
+    root="/mnt/data/training/datasetNeu",
+    dataset_name="master",      # lowercase
+    size_key="540",             # oder '720', '720_169'
+    mode="train"
+)
 
-# FALSCH ❌
-# DATA_ROOT = "/mnt/data/training/datasetNeu/master"
+val_dataset = VSRDataset(
+    root="/mnt/data/training/datasetNeu",
+    dataset_name="master",
+    size_key="540",
+    mode="val"
+)
+
+# Dies erwartet folgende Struktur:
+# /mnt/data/training/datasetNeu/master/patches/540/GT/
+# /mnt/data/training/datasetNeu/master/patches/540/LR_7frames/
+# /mnt/data/training/datasetNeu/master/val/GT/540/
+# (LR wird automatisch aus patches/540/LR_7frames/ geladen)
 ```
+
+### VAL Datenstruktur Übersicht
+
+Die **Validation (VAL)** Daten müssen wie folgt strukturiert sein:
+
+```
+/mnt/data/training/datasetNeu/master/Val/
+└── GT/                    ← Validation Ground Truth Verzeichnis
+    ├── 540/               ← Hier Ground Truth Bilder für 540×540 reinlegen
+    ├── 720/               ← Hier Ground Truth Bilder für 720×720 reinlegen
+    └── 720_169/           ← Hier Ground Truth Bilder für 720×405 (16:9) reinlegen
+```
+
+**Workflow für Validation-Daten:**
+1. **GT kopieren**: Validation Ground Truth Bilder manuell nach `val/GT/{size_key}/` kopieren
+2. **LR automatisch**: Das Training findet automatisch die entsprechenden LR Bilder in `patches/{size_key}/LR_7frames/`
+
+**Beispiel:**
+```bash
+# Sie kopieren nur GT:
+cp some_image.png /mnt/data/training/datasetNeu/master/val/GT/540/
+
+# Training findet automatisch das LR hier:
+# /mnt/data/training/datasetNeu/master/patches/540/LR_7frames/some_image.png
+```
+
+**Wichtig:**
+- Sie müssen **nur GT-Bilder** nach `val/GT/{size_key}/` kopieren (capital V)
+- LR-Bilder werden automatisch aus `patches/{size_key}/LR_7frames/` geladen
+- Die GT- und LR-Dateinamen müssen **identisch** sein (z.B. beide `image001.png`)
+- Alle size_keys sind unter `val/GT/` organisiert
 
 ### Warum dieser Pfad?
 
-1. **Generator V2** erstellt: `datasetNeu/Master/MasterModel/Learn/Patches/GT/`
-2. **VSRDataset** sucht nach: `DATA_ROOT/Patches/GT/`
-3. **Lösung**: `DATA_ROOT` muss auf `.../Master/MasterModel/Learn` zeigen
+1. **Generator V2** erstellt: `datasetNeu/master/patches/540/GT/` und `datasetNeu/master/val/GT/` (flat)
+2. **VSRDataset** erwartet: `root/dataset_name/patches/size_key/GT/` und `root/dataset_name/val/GT/size_key/`
+3. **Lösung**: Validation-Dateien müssen manuell in die size-spezifischen Verzeichnisse kopiert werden
 
 ### Verifikation
 
 Überprüfen Sie die Struktur:
 
 ```bash
-# Sollte Dateien zeigen:
-ls /mnt/data/training/datasetNeu/Master/MasterModel/Learn/Patches/GT/
+# Training-Daten (vom Generator erstellt):
+ls /mnt/data/training/datasetNeu/master/patches/540/GT/
+ls /mnt/data/training/datasetNeu/master/patches/540/LR_7frames/
 
-# Sollte Dateien zeigen:
-ls /mnt/data/training/datasetNeu/Master/MasterModel/Learn/Patches/LR/
+# Validation-Daten (manuell erstellt):
+ls /mnt/data/training/datasetNeu/master/val/540/GT/
 ```
 
 ### Generator Konfiguration
@@ -93,12 +151,31 @@ In `dataset_generator_v2/generator_config.json`:
 {
   "base_settings": {
     "output_base_dir": "/mnt/data/training/datasetNeu",
-    "lr_versions": ["5frames", "7frames"]
+    "lr_versions": ["7frames"]
   },
   "category_targets": {
     "master": 300000
   }
 }
+```
+
+**Hinweis**: Der Generator erstellt nur `val/GT/` (flat), aber das Training benötigt `val/{size_key}/GT/`.
+
+**Validation Setup (Beispiel):**
+```bash
+# 1. Erstellen Sie die Verzeichnisse
+mkdir -p /mnt/data/training/datasetNeu/master/val/540/GT
+mkdir -p /mnt/data/training/datasetNeu/master/val/720/GT
+mkdir -p /mnt/data/training/datasetNeu/master/val/720_169/GT
+
+# 2. Kopieren Sie Validation GT-Bilder aus den Training-Patches
+# (wählen Sie gute, repräsentative Bilder aus)
+cp /mnt/data/training/datasetNeu/master/patches/540/GT/some_good_image.png \
+   /mnt/data/training/datasetNeu/master/val/540/GT/
+
+# 3. LR-Bilder werden automatisch gefunden!
+# Training findet automatisch:
+# /mnt/data/training/datasetNeu/master/patches/540/LR_7frames/some_good_image.png
 ```
 
 ### Format-Verteilung
@@ -132,7 +209,7 @@ Für die **master** Kategorie (siehe `utils/format_definitions.py`):
 ### Wichtige Hinweise
 
 - **5-frame vs 7-frame**: Standard Training nutzt 5-frame (`LR/`), 7-frame ist optional (`LR_7frames/`)
-- **Validation**: Generator erstellt Validation-Daten in `Val/GT/` und `Val/LR/`
+- **Validation**: Generator erstellt Validation-Daten in `val/GT/` und `Val/LR/`
 - **Mehrere Formate**: Generator kann gleichzeitig verschiedene Patch-Größen erstellen
 
 ### Fehlersuche
