@@ -17,17 +17,24 @@ class SizeGroupedSampler(Sampler):
     """
     Sampler that yields batches grouped by size key.
     
-    Samples from different size groups based on distribution weights,
-    then yields batch indices for each selected group.
+    Samples from different size groups proportionally to their file counts.
+    
+    IMPORTANT: Dataset extraction is pre-weighted, so files on disk already reflect
+    the desired distribution. This sampler simply samples proportionally to the
+    number of files in each size category (no additional weighting needed).
     
     Args:
         datasets_dict: Dict mapping size_key to dataset
                       Example: {'720': dataset1, '540': dataset2, '720_169': dataset3}
         size_distribution: Dict mapping size_key to probability weight
-                          Example: {'720': 0.0, '540': 0.65, '720_169': 0.35}
+                          (ONLY used to determine which sizes to load, NOT for sampling)
+                          Example: {'720': 0.4, '540': 0.4, '720_169': 0.2}
         batch_sizes: Dict mapping size_key to batch size
                     Example: {'720': 1, '540': 1, '720_169': 1}
         shuffle: Whether to shuffle indices within each size group
+    
+    Note: size_distribution is now only used to filter active sizes.
+          Actual sampling is proportional to file counts (files are pre-weighted during extraction).
     """
     
     def __init__(self, datasets_dict, size_distribution, batch_sizes, shuffle=True):
@@ -42,17 +49,11 @@ class SizeGroupedSampler(Sampler):
         if not self.active_sizes:
             raise ValueError("No active sizes (all distributions are 0)")
         
-        # Normalize distribution to sum to 1.0
-        total_weight = sum(size_distribution[k] for k in self.active_sizes)
-        if total_weight == 0:
-            raise ValueError("Total distribution weight is 0")
+        # NOTE: We NO LONGER normalize/weight by distribution!
+        # Files are already pre-weighted during dataset generation.
+        # We simply sample proportionally to actual file counts.
         
-        self.normalized_dist = {
-            k: size_distribution[k] / total_weight 
-            for k in self.active_sizes
-        }
-        
-        # Pre-compute total batches per size
+        # Pre-compute total batches per size (based on actual file counts, not distribution)
         self.num_batches_per_size = {
             size_key: len(datasets_dict[size_key]) // batch_sizes[size_key]
             for size_key in self.active_sizes
@@ -67,8 +68,10 @@ class SizeGroupedSampler(Sampler):
         
         Each iteration:
         1. Shuffles indices for each size group (if shuffle=True)
-        2. Creates batch schedule based on distribution
+        2. Creates batch schedule proportional to file counts (NOT distribution weights)
         3. Yields batches in random order
+        
+        Note: Sampling is now purely based on actual file counts, not distribution config.
         """
         # Create shuffled indices for each size group
         indices_per_size = {}
@@ -81,7 +84,8 @@ class SizeGroupedSampler(Sampler):
             
             indices_per_size[size_key] = indices
         
-        # Create batch schedule: list of (size_key, batch_idx) based on distribution
+        # Create batch schedule: list of (size_key, batch_idx) based on file counts
+        # (NO distribution weighting - files are already pre-weighted!)
         batch_schedule = []
         for size_key in self.active_sizes:
             num_batches = self.num_batches_per_size[size_key]
@@ -164,16 +168,22 @@ def create_train_loader(config):
     """
     Create multi-size training dataloader from config.
     
+    IMPORTANT: Dataset files are pre-weighted during extraction!
+    The 'distribution' values are ONLY used to determine which sizes to load.
+    Actual training samples ALL files proportionally (no additional weighting).
+    
     Args:
         config: Dict containing:
             - 'data_root': Root directory for datasets
             - 'dataset_name': Name of dataset (default: 'master')
             - 'sizes': Dict with size configs, e.g.:
                 {
-                    '720': {'enabled': True, 'distribution': 0.0, 'batch_size': 1},
-                    '540': {'enabled': True, 'distribution': 0.65, 'batch_size': 1},
-                    '720_169': {'enabled': True, 'distribution': 0.35, 'batch_size': 1}
+                    '720': {'enabled': True, 'distribution': 0.4, 'batch_size': 1},
+                    '540': {'enabled': True, 'distribution': 0.4, 'batch_size': 1},
+                    '720_169': {'enabled': True, 'distribution': 0.2, 'batch_size': 1}
                 }
+                Note: 'distribution' > 0 means "load this size", the value itself
+                      is only informational (files on disk determine actual ratio)
             - 'augment': Whether to use augmentations (default: True)
             - 'shuffle': Whether to shuffle batches (default: True)
     
