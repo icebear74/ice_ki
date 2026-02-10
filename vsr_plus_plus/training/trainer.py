@@ -112,7 +112,16 @@ class VSRTrainer:
         # Initialize loop timing
         loop_start_time = time.time()
         
-        for batch_idx, (lr_stack, gt) in enumerate(self.train_loader):
+        for batch_idx, batch_data in enumerate(self.train_loader):
+            # Handle both old tuple format and new dict format from multi-size dataloader
+            if isinstance(batch_data, dict):
+                # New multi-size dataloader returns dict with 'lr', 'gt', 'size_key', 'filenames'
+                lr_stack = batch_data['lr']
+                gt = batch_data['gt']
+            else:
+                # Old single-size dataloader returns tuple (lr_stack, gt)
+                lr_stack, gt = batch_data
+            
             # Handle pause state
             while self.paused:
                 self._update_gui(epoch, {}, 0.1, steps_per_epoch, current_epoch_step, paused=True)
