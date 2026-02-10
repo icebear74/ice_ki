@@ -53,17 +53,17 @@ dataset_root/              # = root Parameter in VSRDataset
     │   ├── GT/            # Training Ground Truth
     │   └── LR_7frames/    # Training Low Resolution (7-frame stack)
     │
-    └── val/               # Validation
+    └── Val/               # Validation (capital V)
         └── GT/            # Validation Ground Truth (organisiert nach size)
             ├── 540/       # GT für 540×540 Patches
             ├── 720/       # GT für 720×720 Patches
             └── 720_169/   # GT für 720×405 (16:9) Patches
 ```
 
-**Wichtig**: Die neue Validation-Struktur organisiert GT-Bilder unter `val/GT/{size_key}/`:
-- `val/GT/540/` für 540×540 Validation Patches
-- `val/GT/720/` für 720×720 Validation Patches
-- `val/GT/720_169/` für 720×405 (16:9) Validation Patches
+**Wichtig**: Die Validation-Struktur organisiert GT-Bilder unter `Val/GT/{size_key}/` (capital V):
+- `Val/GT/540/` für 540×540 Validation Patches
+- `Val/GT/720/` für 720×720 Validation Patches
+- `Val/GT/720_169/` für 720×405 (16:9) Validation Patches
 - LR-Bilder werden **immer** aus `patches/{size_key}/LR_7frames/` geladen
 
 ### Richtige Konfiguration
@@ -89,7 +89,7 @@ val_dataset = VSRDataset(
 # Dies erwartet folgende Struktur:
 # /mnt/data/training/datasetNeu/master/patches/540/GT/
 # /mnt/data/training/datasetNeu/master/patches/540/LR_7frames/
-# /mnt/data/training/datasetNeu/master/val/GT/540/
+# /mnt/data/training/datasetNeu/master/Val/GT/540/
 # (LR wird automatisch aus patches/540/LR_7frames/ geladen)
 ```
 
@@ -98,7 +98,7 @@ val_dataset = VSRDataset(
 Die **Validation (VAL)** Daten müssen wie folgt strukturiert sein:
 
 ```
-/mnt/data/training/datasetNeu/master/val/
+/mnt/data/training/datasetNeu/master/Val/
 └── GT/                    ← Validation Ground Truth Verzeichnis
     ├── 540/               ← Hier Ground Truth Bilder für 540×540 reinlegen
     ├── 720/               ← Hier Ground Truth Bilder für 720×720 reinlegen
@@ -106,28 +106,28 @@ Die **Validation (VAL)** Daten müssen wie folgt strukturiert sein:
 ```
 
 **Workflow für Validation-Daten:**
-1. **GT kopieren**: Validation Ground Truth Bilder manuell nach `val/GT/{size_key}/` kopieren
+1. **GT kopieren**: Validation Ground Truth Bilder manuell nach `Val/GT/{size_key}/` kopieren
 2. **LR automatisch**: Das Training findet automatisch die entsprechenden LR Bilder in `patches/{size_key}/LR_7frames/`
 
 **Beispiel:**
 ```bash
 # Sie kopieren nur GT:
-cp some_image.png /mnt/data/training/datasetNeu/master/val/GT/540/
+cp some_image.png /mnt/data/training/datasetNeu/master/Val/GT/540/
 
 # Training findet automatisch das LR hier:
 # /mnt/data/training/datasetNeu/master/patches/540/LR_7frames/some_image.png
 ```
 
 **Wichtig:**
-- Sie müssen **nur GT-Bilder** nach `val/GT/{size_key}/` kopieren
+- Sie müssen **nur GT-Bilder** nach `Val/GT/{size_key}/` kopieren (capital V)
 - LR-Bilder werden automatisch aus `patches/{size_key}/LR_7frames/` geladen
 - Die GT- und LR-Dateinamen müssen **identisch** sein (z.B. beide `image001.png`)
-- Alle size_keys sind unter `val/GT/` organisiert
+- Alle size_keys sind unter `Val/GT/` organisiert
 
 ### Warum dieser Pfad?
 
 1. **Generator V2** erstellt: `datasetNeu/master/patches/540/GT/` und `datasetNeu/master/Val/GT/` (flat)
-2. **VSRDataset** erwartet: `root/dataset_name/patches/size_key/GT/` und `root/dataset_name/val/size_key/GT/`
+2. **VSRDataset** erwartet: `root/dataset_name/patches/size_key/GT/` und `root/dataset_name/Val/GT/size_key/`
 3. **Lösung**: Validation-Dateien müssen manuell in die size-spezifischen Verzeichnisse kopiert werden
 
 ### Verifikation
