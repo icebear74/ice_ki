@@ -162,6 +162,25 @@ def main():
     DATA_ROOT = config.get('DATA_ROOT', "/mnt/data/training/Universal/Mastermodell/Learn")
     DATASET_ROOT = config.get('DATASET_ROOT', "/mnt/data/training/Dataset/Universal/Mastermodell")
     
+    # Load runtime_config early to get dataset-specific paths
+    runtime_config_path = os.path.join(os.path.dirname(__file__), "runtime_config.json")
+    rt_config = None
+    dataset_name = 'master'  # Default
+    
+    if os.path.exists(runtime_config_path):
+        try:
+            with open(runtime_config_path, 'r') as f:
+                rt_config = json.load(f)
+            data_config = rt_config.get('data', {})
+            DATASET_ROOT = data_config.get('root', DATASET_ROOT)
+            dataset_name = data_config.get('dataset_name', 'master')
+        except Exception as e:
+            print(f"{C_YELLOW}⚠ Failed to load runtime_config.json: {e}{C_RESET}")
+    
+    # Use dataset-specific paths for checkpoints and logs
+    # E.g., /mnt/data/training/datasetNeu/master/ (not DATA_ROOT)
+    DATASET_SPECIFIC_ROOT = os.path.join(DATASET_ROOT, dataset_name)
+    
     print("\n" + "="*80)
     print("VSR++ Training System - Manual Configuration")
     print("="*80 + "\n")
@@ -174,7 +193,7 @@ def main():
     
     start_step = 0
     selected_checkpoint_path = None
-    checkpoint_mgr = CheckpointManager(DATA_ROOT)
+    checkpoint_mgr = CheckpointManager(DATASET_SPECIFIC_ROOT)
     
     if choice == 'l':
         # Safety confirmation to prevent accidental data loss
@@ -192,7 +211,7 @@ def main():
             print(f"{C_CYAN}Sichere .pth Dateien...{C_RESET}")
             
             # Cleanup everything for fresh start (now includes backup)
-            log_dir = os.path.join(DATA_ROOT, "logs")
+            log_dir = os.path.join(DATASET_SPECIFIC_ROOT, "logs")
             backed_up = checkpoint_mgr.cleanup_all_for_fresh_start(log_dir)
             
             if backed_up > 0:
@@ -260,9 +279,10 @@ def main():
             
             print()
     
-    # Start TensorBoard
-    log_dir = os.path.join(DATA_ROOT, "logs")
+    # Start TensorBoard with dataset-specific log directory
+    log_dir = os.path.join(DATASET_SPECIFIC_ROOT, "logs")
     print(f"\n{C_CYAN}Checking TensorBoard...{C_RESET}")
+    print(f"{C_CYAN}Log directory: {log_dir}{C_RESET}")
     if not is_tensorboard_running():
         print(f"{C_YELLOW}Starting TensorBoard...{C_RESET}")
         start_tensorboard(log_dir)
@@ -479,47 +499,68 @@ def main():
             pin_memory=config['PIN_MEMORY']
         )
     
-    # Load validation dataset - use config from runtime_config
+    # Load validation datasets - use ALL configured sizes from runtime_config
+    val_loaders = []  # List of (size_key, loader) tuples
+    
     if rt_config:
         data_config = rt_config.get('data', {})
         data_root = data_config.get('root', DATASET_ROOT)
         dataset_name = data_config.get('dataset_name', 'master')
-        # Get first enabled validation size
+        # Get ALL enabled validation sizes
         val_sizes = rt_config.get('validation', {}).get('sizes', [])
         if not val_sizes:
-            # Fallback to first size from size_distribution
+            # Fallback to all sizes from size_distribution
             size_dist = rt_config.get('size_distribution', {})
             val_sizes = [k for k, v in size_dist.items() if v > 0]
-        val_size_key = val_sizes[0] if val_sizes else '540'
+        if not val_sizes:
+            val_sizes = ['540']  # Ultimate fallback
     else:
         # Fallback to defaults
         data_root = DATASET_ROOT
         dataset_name = 'master'
-        val_size_key = '540'
+        val_sizes = ['540']
     
-    try:
-        val_dataset = VSRDataset(
-            root=data_root,
-            dataset_name=dataset_name,
-            size_key=val_size_key,
-            mode='val',
-            augment=False
-        )
-        print(f"✅ Validation samples ({val_size_key}): {len(val_dataset):,}\n")
-    except Exception as e:
-        print(f"❌ Error loading validation dataset: {e}")
+    # Create validation dataset and loader for EACH size
+    print(f"{C_CYAN}Creating validation datasets for sizes: {', '.join(val_sizes)}{C_RESET}")
+    total_val_samples = 0
+    
+    for size_key in val_sizes:
+        try:
+            val_dataset = VSRDataset(
+                root=data_root,
+                dataset_name=dataset_name,
+                size_key=size_key,
+                mode='val',
+                augment=False
+            )
+            
+            val_loader = DataLoader(
+                val_dataset,
+                batch_size=config.get('VAL_BATCH_SIZE', 1),
+                shuffle=False,
+                num_workers=2,
+                pin_memory=False  # Disable for validation (saves VRAM)
+            )
+            
+            val_loaders.append((size_key, val_loader))
+            total_val_samples += len(val_dataset)
+            print(f"  ✓ {size_key}: {len(val_dataset):,} samples")
+            
+        except Exception as e:
+            print(f"  ⚠️  Warning: Could not load validation for {size_key}: {e}")
+    
+    if not val_loaders:
+        print(f"❌ Error: No validation datasets loaded!")
         return
     
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=config.get('VAL_BATCH_SIZE', 1),
-        shuffle=False,
-        num_workers=2,
-        pin_memory=False  # Disable for validation (saves VRAM)
-    )
+    print(f"{C_GREEN}✅ Total validation samples: {total_val_samples:,} across {len(val_loaders)} sizes{C_RESET}\n")
     
-    # Create checkpoint manager
-    checkpoint_mgr = CheckpointManager(DATA_ROOT)
+    # For backward compatibility, use first loader as primary val_loader
+    # (trainer will iterate through all in val_loaders list)
+    val_loader = val_loaders[0][1]  # Primary loader for validator initialization
+    
+    # Create checkpoint manager (use dataset-specific root)
+    checkpoint_mgr = CheckpointManager(DATASET_SPECIFIC_ROOT)
     
     # Create runtime config manager (reuse runtime_config_path defined earlier)
     runtime_config = RuntimeConfigManager(
@@ -527,9 +568,9 @@ def main():
         base_config=config
     )
     
-    # Create loggers
-    log_dir = os.path.join(DATA_ROOT, "logs")
-    train_logger = TrainingLogger(DATA_ROOT)
+    # Create loggers (use dataset-specific paths)
+    log_dir = os.path.join(DATASET_SPECIFIC_ROOT, "logs")
+    train_logger = TrainingLogger(DATASET_SPECIFIC_ROOT)
     tb_logger = TensorBoardLogger(log_dir)
     
     # Create validator
@@ -578,6 +619,9 @@ def main():
         device=device,
         runtime_config=runtime_config
     )
+    
+    # Pass all validation loaders to trainer for multi-size validation
+    trainer.val_loaders = val_loaders
     
     # Set start step
     trainer.set_start_step(start_step)
