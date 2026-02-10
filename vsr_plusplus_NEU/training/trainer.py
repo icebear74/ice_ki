@@ -96,6 +96,69 @@ class VSRTrainer:
         self.start_step = step
         self.global_step = step
     
+    def _run_multi_size_validation(self):
+        """
+        Run validation on all configured sizes
+        Returns combined metrics averaging across all sizes
+        """
+        if not hasattr(self, 'val_loaders') or not self.val_loaders:
+            # Fallback to single-size validation
+            return self.validator.validate(self.global_step)
+        
+        print(f"\n{C_CYAN}Running multi-size validation on {len(self.val_loaders)} sizes...{C_RESET}")
+        
+        # Run validation on each size
+        all_metrics = []
+        all_labeled_images = []
+        
+        for size_key, val_loader in self.val_loaders:
+            print(f"  Validating {size_key}...")
+            
+            # Temporarily swap loader
+            original_loader = self.validator.val_loader
+            self.validator.val_loader = val_loader
+            
+            # Run validation
+            metrics = self.validator.validate(self.global_step)
+            
+            # Restore original loader
+            self.validator.val_loader = original_loader
+            
+            # Collect labeled images with size prefix
+            if 'labeled_images' in metrics and metrics['labeled_images'] is not None:
+                # Add size prefix to image tags
+                for img in metrics['labeled_images']:
+                    all_labeled_images.append((size_key, img))
+            
+            # Store metrics
+            all_metrics.append((size_key, metrics))
+            print(f"    ✓ {size_key}: KI Quality {metrics['ki_quality']*100:.1f}%, PSNR {metrics['ki_psnr']:.2f}dB")
+        
+        # Combine metrics by averaging
+        combined_metrics = {
+            'val_loss': sum(m['val_loss'] for _, m in all_metrics) / len(all_metrics),
+            'lr_quality': sum(m['lr_quality'] for _, m in all_metrics) / len(all_metrics),
+            'ki_quality': sum(m['ki_quality'] for _, m in all_metrics) / len(all_metrics),
+            'improvement': sum(m['improvement'] for _, m in all_metrics) / len(all_metrics),
+            'lr_psnr': sum(m['lr_psnr'] for _, m in all_metrics) / len(all_metrics),
+            'lr_ssim': sum(m['lr_ssim'] for _, m in all_metrics) / len(all_metrics),
+            'ki_psnr': sum(m['ki_psnr'] for _, m in all_metrics) / len(all_metrics),
+            'ki_ssim': sum(m['ki_ssim'] for _, m in all_metrics) / len(all_metrics),
+            'ki_to_gt': sum(m.get('ki_to_gt', 0) for _, m in all_metrics) / len(all_metrics),
+            'lr_to_gt': sum(m.get('lr_to_gt', 0) for _, m in all_metrics) / len(all_metrics),
+        }
+        
+        # Include all labeled images from all sizes
+        if all_labeled_images:
+            combined_metrics['labeled_images'] = [img for _, img in all_labeled_images]
+        
+        # Store per-size metrics for detailed logging
+        combined_metrics['per_size_metrics'] = {size_key: m for size_key, m in all_metrics}
+        
+        print(f"{C_GREEN}✅ Multi-size validation complete - Average KI Quality: {combined_metrics['ki_quality']*100:.1f}%{C_RESET}\n")
+        
+        return combined_metrics
+    
     def train_epoch(self, epoch):
         """
         Train one epoch
@@ -298,7 +361,7 @@ class VSRTrainer:
                 if self.global_step % self.config.get('VAL_STEP_EVERY', 500) == 0:
                     self.train_logger.log_event(f"Running validation at step {self.global_step}")
                     
-                    metrics = self.validator.validate(self.global_step)
+                    metrics = self._run_multi_size_validation()
                     self.last_metrics = metrics
                     
                     # Pass improvement to adaptive system for logging
@@ -740,7 +803,7 @@ class VSRTrainer:
         """Run validation immediately"""
         self.train_logger.log_event(f"Manual validation triggered at step {self.global_step}")
         
-        metrics = self.validator.validate(self.global_step)
+        metrics = self._run_multi_size_validation()
         
         # Log to TensorBoard
         self.tb_logger.log_quality(self.global_step, metrics)
@@ -848,8 +911,8 @@ class VSRTrainer:
         Returns:
             Validation results dict
         """
-        # Run validation
-        val_results = self.validator.validate(self.model, self.val_loader)
+        # Run validation (use multi-size if available)
+        val_results = self._run_multi_size_validation()
         
         # Capture current state
         state = self.get_current_state()
