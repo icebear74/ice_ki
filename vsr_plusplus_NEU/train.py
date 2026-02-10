@@ -39,28 +39,7 @@ from vsr_plus_plus.systems.runtime_config import RuntimeConfigManager
 
 # Import manual configuration
 # Import from local directory (config.py is not in repo due to .gitignore)
-try:
-    import config as cfg
-except ImportError as e:
-    print("\n" + "="*80)
-    print("❌ ERROR: config.py not found!")
-    print("="*80)
-    print("\nYou need to create config.py before running training.")
-    print("\nQuick fix:")
-    print("  cd vsr_plusplus_NEU")
-    print("  cp config.py.example config.py")
-    print("\nThen run train.py again.")
-    print("\nSee CONFIG_SETUP.md for details.")
-    print("="*80 + "\n")
-    sys.exit(1)
-except Exception as e:
-    print("\n" + "="*80)
-    print(f"❌ ERROR loading config.py: {e}")
-    print("="*80)
-    print("\nThere may be a syntax error in your config.py file.")
-    print("Try comparing it with config.py.example")
-    print("="*80 + "\n")
-    sys.exit(1)
+import config as cfg
 
 # ANSI colors
 C_GREEN = "\033[92m"
