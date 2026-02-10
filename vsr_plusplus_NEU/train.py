@@ -365,34 +365,62 @@ def main():
     print("Loading datasets...")
     
     # Check for runtime_config.json to enable multi-size training
-    runtime_config_path = os.path.join(DATA_ROOT, "runtime_config.json")
+    # Look in vsr_plusplus_NEU directory first, then in DATA_ROOT
+    runtime_config_path = os.path.join(os.path.dirname(__file__), "runtime_config.json")
+    if not os.path.exists(runtime_config_path):
+        runtime_config_path = os.path.join(DATA_ROOT, "runtime_config.json")
+    
     use_multi_size = False
+    rt_config = None
     
     if os.path.exists(runtime_config_path):
         try:
             with open(runtime_config_path, 'r') as f:
                 rt_config = json.load(f)
             
-            # Check if multi-size is configured
-            if 'sizes' in rt_config and any(
-                size_cfg.get('enabled', False) and size_cfg.get('distribution', 0.0) > 0
-                for size_cfg in rt_config['sizes'].values()
-            ):
+            # New runtime_config.json structure:
+            # {
+            #   "data": {"root": "...", "dataset_name": "master"},
+            #   "size_distribution": {"540": 0.65, "720_169": 0.35, ...},
+            #   "training": {"adaptive_batch": {"540": {"batch": 1, "accum": 6}, ...}}
+            # }
+            
+            # Check if multi-size is configured via size_distribution
+            size_dist = rt_config.get('size_distribution', {})
+            if size_dist and any(v > 0 for v in size_dist.values()):
                 use_multi_size = True
-                print(f"{C_CYAN}✓ Multi-size training enabled (runtime_config.json found){C_RESET}")
+                print(f"{C_CYAN}✓ Multi-size training enabled (runtime_config.json found at {runtime_config_path}){C_RESET}")
         except Exception as e:
-            print(f"{C_YELLOW}⚠ Failed to load runtime_config.json, using single-size: {e}{C_RESET}")
+            print(f"{C_YELLOW}⚠ Failed to load runtime_config.json: {e}{C_RESET}")
+            print(f"{C_YELLOW}Using single-size training{C_RESET}")
     
     if use_multi_size:
         # Use multi-size dataloader
         try:
             from vsr_plusplus_NEU.core.dataloader import create_train_loader
             
+            # Extract data from new runtime_config.json structure
+            data_config = rt_config.get('data', {})
+            data_root = data_config.get('root', DATASET_ROOT)
+            dataset_name = data_config.get('dataset_name', 'master')
+            size_dist = rt_config.get('size_distribution', {})
+            adaptive_batch = rt_config.get('training', {}).get('adaptive_batch', {})
+            
+            # Convert to dataloader format: sizes dict with enabled/distribution/batch_size
+            sizes_config = {}
+            for size_key, distribution in size_dist.items():
+                batch_info = adaptive_batch.get(size_key, {})
+                sizes_config[size_key] = {
+                    'enabled': distribution > 0,
+                    'distribution': distribution,
+                    'batch_size': batch_info.get('batch', 1)
+                }
+            
             # Prepare config for multi-size loader
             loader_config = {
-                'data_root': DATASET_ROOT,
-                'dataset_name': rt_config.get('dataset_name', 'master'),
-                'sizes': rt_config.get('sizes', {}),
+                'data_root': data_root,
+                'dataset_name': dataset_name,
+                'sizes': sizes_config,
                 'augment': True,
                 'shuffle': True
             }
@@ -403,11 +431,13 @@ def main():
             total_samples = sum(len(ds) for ds in train_loader.datasets_dict.values())
             print(f"✅ Multi-size training samples: {total_samples:,}")
             for size_key, dataset in train_loader.datasets_dict.items():
-                dist = rt_config['sizes'][size_key].get('distribution', 0.0)
+                dist = size_dist.get(size_key, 0.0)
                 print(f"  • {size_key}: {len(dataset):,} samples ({dist*100:.1f}%)")
             print()
         except Exception as e:
+            import traceback
             print(f"{C_RED}❌ Error creating multi-size dataloader: {e}{C_RESET}")
+            traceback.print_exc()
             print(f"{C_YELLOW}Falling back to single-size training{C_RESET}")
             use_multi_size = False
     

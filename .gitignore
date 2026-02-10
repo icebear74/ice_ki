@@ -57,9 +57,3 @@ activate.sh
 vsr_plus_plus/config.py
 
 # Temporary files
-*.tmp
-*.log
-tmp/
-temp/
-*.backup
-vsr_plusplus_NEU/config.py
