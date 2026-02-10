@@ -28,7 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from vsr_plus_plus.core.model import VSRBidirectional_3x
 from vsr_plus_plus.core.loss import HybridLoss
-from vsr_plus_plus.core.dataset import VSRDataset
+from vsr_plusplus_NEU.core.dataset import VSRDataset  # Use NEW dataset API
 from vsr_plus_plus.training.trainer import VSRTrainer
 from vsr_plus_plus.training.validator import VSRValidator
 from vsr_plus_plus.training.lr_scheduler import AdaptiveLRScheduler
