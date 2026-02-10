@@ -29,8 +29,8 @@ Der `dataset_generator_v2` erstellt folgende Struktur (nur 7-frame Version):
 - Alle LR-Daten sind 7-frame Versionen (horizontal gestackt: Breite = einzelne_Breite × 7)
 - 540×540 GT → 180×1260 LR_7frames (Höhe: 540/3=180, Breite: 180×7=1260)
 - 720×720 GT → 240×1680 LR_7frames (Höhe: 720/3=240, Breite: 240×7=1680)
-- 405×720 GT → 135×1680 LR_7frames (Höhe: 405/3=135, Breite: 240×7=1680)
-- Der Generator erstellt `Val/GT/` (flat, mit großem V), aber das Training nutzt eine andere Struktur
+- 405×720 GT → 135×1680 LR_7frames (Höhe: 405/3=135, Breite: (720/3)×7=240×7=1680)
+- Der Generator erstellt `Val/GT/` (mit großem V), aber das Training erwartet `val/{size_key}/GT/` (lowercase)
 - Validation-Dateien werden **manuell** in die korrekte Struktur kopiert (siehe unten)
 
 ### Andere Kategorien
