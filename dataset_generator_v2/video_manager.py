@@ -65,8 +65,18 @@ class VideoManager:
         
     def save(self, backup=True):
         """Save configuration to JSON."""
-        # Sort videos by name before saving (case-insensitive)
-        self.videos.sort(key=lambda v: v.get('name', '').lower())
+        # Sort videos by categories first, then by name (case-insensitive)
+        # This ensures videos in the same category are grouped together
+        # Categories are sorted alphabetically, so 'master' comes before other categories
+        def sort_key(video):
+            cats = get_video_categories(video)
+            # Primary sort: first category alphabetically (empty categories last)
+            primary = cats[0] if cats else 'zzz_no_category'
+            # Secondary sort: video name
+            secondary = video.get('name', '').lower()
+            return (primary, secondary)
+        
+        self.videos.sort(key=sort_key)
         self.config['videos'] = self.videos
         
         if backup:
@@ -78,7 +88,7 @@ class VideoManager:
         with open(self.config_path, 'w', encoding='utf-8') as f:
             json.dump(self.config, f, indent=2, ensure_ascii=False)
         
-        print(f"✓ Saved to {self.config_path} (videos sorted by title)")
+        print(f"✓ Saved to {self.config_path} (videos sorted by category, then title)")
         self.modified = False
         
     def list_videos(self, filter_pattern: Optional[str] = None, 
