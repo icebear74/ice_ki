@@ -168,8 +168,7 @@ class VideoManager:
     
     def interactive_select_videos(self, initial_filter: Optional[str] = None):
         """
-        Interactive video selection with simple terminal interface.
-        Users can toggle videos with their ID and confirm with 'done'.
+        Interactive video selection with curses-based UI (arrow keys, space bar).
         
         Args:
             initial_filter: Optional filter to pre-filter videos
@@ -187,95 +186,42 @@ class VideoManager:
             print("No videos found.")
             return None
         
-        selected = set()
-        
-        print("\n" + "="*80)
-        print("INTERACTIVE VIDEO SELECTION")
-        print("="*80)
-        print("Commands:")
-        print("  [ID]      - Toggle video selection (e.g., '5' or '5,7,9')")
-        print("  all       - Select all videos")
-        print("  none      - Deselect all videos")
-        print("  show      - Show current selection")
-        print("  done      - Confirm selection")
-        print("  cancel    - Cancel and return")
-        print("="*80)
-        
-        while True:
-            # Show videos with selection status
-            print(f"\n{len(videos)} videos available, {len(selected)} selected")
-            print(f"\n{'Sel':<5} {'ID':<6} {'Name':<50} {'Categories':<30}")
-            print("-" * 95)
+        # Use curses-based interactive selector
+        try:
+            # Extract just the video objects for display
+            video_list = [v for _, v in videos]
             
-            # Show first 20 and selected videos
-            shown = 0
-            for idx, (i, video) in enumerate(videos):
-                if shown < 20 or i in selected:
-                    sel_marker = "[X]" if i in selected else "[ ]"
-                    name = video['name'][:48]
-                    cats = video.get('categories', [])
-                    cat_str = format_categories_display(cats)[:28] if cats else ""
-                    print(f"{sel_marker:<5} {i:<6} {name:<50} {cat_str:<30}")
-                    shown += 1
+            # Create display with video ID in details
+            def get_video_label(video):
+                return video['name']
             
-            if len(videos) > 20:
-                remaining = len(videos) - 20
-                print(f"... and {remaining} more (use filter or select by ID)")
+            def get_video_details(video):
+                # Find the video ID
+                video_id = next((i for i, v in videos if v == video), None)
+                cats = video.get('categories', [])
+                cat_str = format_categories_display(cats)
+                if video_id is not None:
+                    return f"[{video_id}] {cat_str}"
+                return cat_str
             
-            # Get command
-            cmd = input(f"\nCommand (selected: {len(selected)}): ").strip().lower()
+            selected_indices = select_items(
+                items=video_list,
+                title=f"Select Videos - {len(video_list)} available (↑↓ navigate, Space toggle, Enter done, Esc cancel)",
+                get_label=get_video_label,
+                get_details=get_video_details
+            )
             
-            if not cmd:
-                continue
-            
-            if cmd == 'done':
-                if not selected:
-                    print("No videos selected.")
-                    continue
-                return list(selected)
-            
-            elif cmd == 'cancel':
+            if selected_indices is None:
                 return None
             
-            elif cmd == 'all':
-                selected = {i for i, v in videos}
-                print(f"✓ Selected all {len(selected)} videos")
+            # Convert from list indices to video IDs
+            video_ids = [videos[i][0] for i in selected_indices]
+            return video_ids
             
-            elif cmd == 'none':
-                selected.clear()
-                print("✓ Cleared selection")
-            
-            elif cmd == 'show':
-                if not selected:
-                    print("No videos selected.")
-                else:
-                    print(f"\nSelected {len(selected)} videos:")
-                    for i, video in enumerate(self.videos):
-                        if i in selected:
-                            print(f"  {i:<6} {video['name']}")
-            
-            else:
-                # Try to parse as ID(s)
-                try:
-                    # Support comma-separated IDs
-                    ids = [int(x.strip()) for x in cmd.split(',')]
-                    for vid_id in ids:
-                        # Validate ID
-                        if vid_id < 0 or vid_id >= len(self.videos):
-                            print(f"❌ Invalid ID: {vid_id}")
-                            continue
-                        
-                        # Toggle selection
-                        if vid_id in selected:
-                            selected.remove(vid_id)
-                            print(f"  Deselected: {self.videos[vid_id]['name']}")
-                        else:
-                            selected.add(vid_id)
-                            print(f"  Selected: {self.videos[vid_id]['name']}")
-                
-                except ValueError:
-                    print(f"❌ Invalid command: {cmd}")
-                    print("   Use ID numbers, 'all', 'none', 'show', 'done', or 'cancel'")
+        except Exception as e:
+            print(f"⚠️  Curses UI failed: {e}")
+            print("Please try using menu option 5 instead")
+            return None
     
     def remove_from_category(self, video_indices: List[int], category: str):
         """Remove videos from a specific category."""
@@ -552,9 +498,10 @@ def main():
                 
                 if selected_ids:
                     print(f"\n✓ Selected {len(selected_ids)} videos")
-                    weights = get_category_weights(manager)
-                    if weights:
-                        manager.assign_videos(selected_ids, weights)
+                    # Select categories interactively
+                    categories = get_categories_interactive(manager)
+                    if categories:
+                        manager.assign_videos(selected_ids, categories)
                 else:
                     print("Selection cancelled")
             
@@ -578,10 +525,11 @@ def main():
                 if confirm != 'y':
                     continue
                 
-                weights = get_category_weights(manager)
-                if weights:
+                # Select categories interactively
+                categories = get_categories_interactive(manager)
+                if categories:
                     ids = [i for i, v in videos]
-                    manager.assign_videos(ids, weights)
+                    manager.assign_videos(ids, categories)
             
             elif choice == '8':
                 # Remove from category
