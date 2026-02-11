@@ -65,16 +65,19 @@ class VideoManager:
         
     def save(self, backup=True):
         """Save configuration to JSON."""
-        # Sort videos by categories first, then by name (case-insensitive)
-        # This ensures videos in the same category are grouped together
-        # Categories are sorted alphabetically, so 'master' comes before other categories
+        # Sort videos with priority to multi-category videos
+        # Order: (1) number of categories DESC, (2) first category ASC, (3) name ASC
+        # This ensures videos in multiple categories come first, with master at the top
         def sort_key(video):
             cats = get_video_categories(video)
-            # Primary sort: first category alphabetically (empty categories last)
-            primary = cats[0] if cats else 'zzz_no_category'
-            # Secondary sort: video name
-            secondary = video.get('name', '').lower()
-            return (primary, secondary)
+            # Primary sort: number of categories (descending - negative for reverse)
+            # Videos in multiple categories (e.g., master+space) come before single category
+            num_cats = -len(cats) if cats else 999
+            # Secondary sort: first category alphabetically (master comes first)
+            first_cat = cats[0] if cats else 'zzz_no_category'
+            # Tertiary sort: video name
+            name = video.get('name', '').lower()
+            return (num_cats, first_cat, name)
         
         self.videos.sort(key=sort_key)
         self.config['videos'] = self.videos
@@ -88,7 +91,7 @@ class VideoManager:
         with open(self.config_path, 'w', encoding='utf-8') as f:
             json.dump(self.config, f, indent=2, ensure_ascii=False)
         
-        print(f"✓ Saved to {self.config_path} (videos sorted by category, then title)")
+        print(f"✓ Saved to {self.config_path} (videos sorted by: multi-category priority, category, then title)")
         self.modified = False
         
     def list_videos(self, filter_pattern: Optional[str] = None, 

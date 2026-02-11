@@ -96,15 +96,11 @@ class DatasetGeneratorV2UHD:
         self.cuda_available = False
         self.cuda_decoder = None
         
-        # Sort videos by priority (0 first, 255 last)
-        random.seed(42)  # Reproducible
-        for i, video in enumerate(self.videos):
-            video['_sort_random'] = random.random()
-        self.videos.sort(key=lambda v: (v.get('priority', 255), v['_sort_random']))
-        for video in self.videos:
-            video.pop('_sort_random', None)
+        # Videos are already sorted in JSON by multi-category priority
+        # Process them in exact JSON order (no additional sorting)
+        # This ensures videos with multiple categories are processed first
         
-        self.logger.info(f"Loaded {len(self.videos)} videos from config")
+        self.logger.info(f"Loaded {len(self.videos)} videos from config (processing in JSON order)")
         
         # Extract format probabilities from format_config
         self.format_probabilities = self._extract_format_probabilities()
@@ -2266,6 +2262,10 @@ class DatasetGeneratorV2UHD:
                                         patches_created=stats.get('patches_created', 0)
                                     )
                                     self.logger.info(f"[PROCESSING] Complete: {video['name']} - {stats.get('patches_created', 0)} patches created")
+                                
+                                # Log category progress after each video
+                                progress_info = self.tracker.get_all_category_progress()
+                                self.logger.info(f"\n{progress_info}\n")
                                 
                                 self.tracker.save()
                                 
