@@ -2021,19 +2021,30 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         }
         
         function updateDatasetFiles(data) {
+            console.log('🔍 JS DEBUG: updateDatasetFiles called');
+            console.log('  data:', data);
+            console.log('  data.dataset_files:', data.dataset_files);
+            
             const dsFiles = data.dataset_files || {};
+            console.log('  dsFiles:', dsFiles);
+            console.log('  dsFiles.train_per_size:', dsFiles.train_per_size);
+            console.log('  dsFiles.val:', dsFiles.val);
+            console.log('  dsFiles.distribution:', dsFiles.distribution);
             
             // Update distribution
             const dist = dsFiles.distribution || {};
+            console.log('  dist:', dist);
             document.getElementById('dist720').textContent = dist['720'] !== undefined ? `${(dist['720'] * 100).toFixed(0)}%` : '0%';
             document.getElementById('dist540').textContent = dist['540'] !== undefined ? `${(dist['540'] * 100).toFixed(0)}%` : '0%';
             document.getElementById('dist720_169').textContent = dist['720_169'] !== undefined ? `${(dist['720_169'] * 100).toFixed(0)}%` : '0%';
             
             // Update training datasets (per-size)
             const trainPerSize = dsFiles.train_per_size || {};
+            console.log('  trainPerSize:', trainPerSize);
             
             // 720 training
             const train720 = trainPerSize['720'] || {};
+            console.log('  train720:', train720, 'count:', train720.count);
             document.getElementById('train720Count').textContent = train720.count || 0;
             if (train720.has_new && train720.new_count > 0) {
                 document.getElementById('train720NewFiles').style.display = 'block';
@@ -2044,6 +2055,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             
             // 540 training
             const train540 = trainPerSize['540'] || {};
+            console.log('  train540:', train540, 'count:', train540.count);
             document.getElementById('train540Count').textContent = train540.count || 0;
             if (train540.has_new && train540.new_count > 0) {
                 document.getElementById('train540NewFiles').style.display = 'block';
