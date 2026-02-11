@@ -93,16 +93,20 @@ class CompleteTrainingDataStore:
             
             # Dataset File Information (NEW)
             'dataset_files': {
-                'train': {
-                    'size_key': '',
-                    'count': 0,
-                    'has_new': False,
-                    'new_count': 0
+                'train_per_size': {
+                    '720': {'count': 0, 'has_new': False, 'new_count': 0},
+                    '540': {'count': 0, 'has_new': False, 'new_count': 0},
+                    '720_169': {'count': 0, 'has_new': False, 'new_count': 0}
                 },
                 'val': {
                     '720': {'count': 0, 'has_new': False, 'new_count': 0},
                     '540': {'count': 0, 'has_new': False, 'new_count': 0},
                     '720_169': {'count': 0, 'has_new': False, 'new_count': 0}
+                },
+                'distribution': {
+                    '720': 0.0,
+                    '540': 0.0,
+                    '720_169': 0.0
                 },
                 'last_check': 0
             },
