@@ -35,6 +35,7 @@ from utils.format_definitions import (
     select_random_format, get_output_dirs_for_format
 )
 from utils.progress_tracker import ProgressTracker
+from category_utils import get_video_categories, normalize_categories
 
 try:
     from rich.console import Console
