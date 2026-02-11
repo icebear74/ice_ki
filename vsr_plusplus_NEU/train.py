@@ -409,12 +409,12 @@ def main():
             data_root = data_config.get('root', DATASET_ROOT)
             dataset_name = data_config.get('dataset_name', 'master')
             
-            print(f"{C_CYAN}Checking for dataset sizes in: {os.path.join(data_root, dataset_name, 'train')}{C_RESET}")
+            print(f"{C_CYAN}Checking for dataset sizes in: {os.path.join(data_root, dataset_name, 'patches')}{C_RESET}")
             
             # Check which size directories exist and have files
             available_sizes = []
             for size_key in ['540', '720', '720_169']:
-                train_dir = os.path.join(data_root, dataset_name, 'train', size_key, 'GT')
+                train_dir = os.path.join(data_root, dataset_name, 'patches', size_key, 'GT')
                 print(f"{C_CYAN}  Checking {size_key}: {train_dir}{C_RESET}")
                 
                 if os.path.exists(train_dir):
@@ -443,10 +443,10 @@ def main():
     def detect_available_sizes(data_root, dataset_name):
         """Detect which dataset sizes are available by checking directories."""
         available = []
-        print(f"{C_CYAN}Detecting available sizes in: {os.path.join(data_root, dataset_name, 'train')}{C_RESET}")
+        print(f"{C_CYAN}Detecting available sizes in: {os.path.join(data_root, dataset_name, 'patches')}{C_RESET}")
         
         for size_key in ['540', '720', '720_169']:
-            train_dir = os.path.join(data_root, dataset_name, 'train', size_key, 'GT')
+            train_dir = os.path.join(data_root, dataset_name, 'patches', size_key, 'GT')
             print(f"{C_CYAN}  Checking {size_key}: {train_dir}{C_RESET}")
             
             if os.path.exists(train_dir):
