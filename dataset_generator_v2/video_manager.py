@@ -50,6 +50,9 @@ class VideoManager:
         self.videos = self.config.get('videos', [])
         self.category_targets = self.config.get('category_targets', {})
         
+        # Sort videos by name (case-insensitive)
+        self.videos.sort(key=lambda v: v.get('name', '').lower())
+        
         # Extract unique categories (handle both formats)
         self.categories = set()
         for video in self.videos:
@@ -57,11 +60,15 @@ class VideoManager:
             self.categories.update(cats)
         self.categories = sorted(list(self.categories))
         
-        print(f"✓ Loaded {len(self.videos)} videos")
+        print(f"✓ Loaded {len(self.videos)} videos (sorted by title)")
         print(f"✓ Categories: {', '.join(self.categories)}")
         
     def save(self, backup=True):
         """Save configuration to JSON."""
+        # Sort videos by name before saving (case-insensitive)
+        self.videos.sort(key=lambda v: v.get('name', '').lower())
+        self.config['videos'] = self.videos
+        
         if backup:
             backup_path = self.config_path + '.backup'
             with open(backup_path, 'w', encoding='utf-8') as f:
@@ -71,7 +78,7 @@ class VideoManager:
         with open(self.config_path, 'w', encoding='utf-8') as f:
             json.dump(self.config, f, indent=2, ensure_ascii=False)
         
-        print(f"✓ Saved to {self.config_path}")
+        print(f"✓ Saved to {self.config_path} (videos sorted by title)")
         self.modified = False
         
     def list_videos(self, filter_pattern: Optional[str] = None, 
@@ -137,7 +144,11 @@ class VideoManager:
             
             name = video['name'][:48]
             cats = video.get('categories', [])
-            cat_str = format_categories_display(cats)
+            # Format categories in brackets
+            if cats:
+                cat_str = "[" + ", ".join(cats) + "]"
+            else:
+                cat_str = "[no categories]"
             
             print(f"{i:<6} {name:<50} {cat_str:<40}")
     
@@ -155,16 +166,65 @@ class VideoManager:
         print(f"✓ Reset {len(self.videos)} videos")
     
     def assign_videos(self, video_indices: List[int], 
-                     categories: List[str]):
-        """Assign categories to videos (NO WEIGHTS - simple list)."""
+                     categories: List[str],
+                     mode: str = 'ask'):
+        """
+        Assign categories to videos (NO WEIGHTS - simple list).
+        
+        Args:
+            video_indices: List of video indices to assign
+            categories: List of category names to assign
+            mode: 'ask' (prompt user), 'add' (append to existing), 'replace' (replace all)
+        """
+        if not video_indices:
+            return
+        
+        # Check if any videos already have categories
+        has_existing_categories = False
+        for idx in video_indices:
+            if 0 <= idx < len(self.videos):
+                existing = get_video_categories(self.videos[idx])
+                if existing:
+                    has_existing_categories = True
+                    break
+        
+        # Determine the actual mode to use
+        actual_mode = mode
+        if mode == 'ask' and has_existing_categories:
+            print("\n⚠️  Some videos already have categories assigned.")
+            print("Options:")
+            print("  1. ADD to existing categories (keep old + add new)")
+            print("  2. REPLACE all categories (remove old, set new)")
+            choice = input("Choose (1/2) [default: 1]: ").strip()
+            
+            if choice == '2':
+                actual_mode = 'replace'
+            else:
+                actual_mode = 'add'
+        elif mode == 'ask':
+            # No existing categories, just assign
+            actual_mode = 'replace'
+        
+        # Apply the assignment
         count = 0
         for idx in video_indices:
             if 0 <= idx < len(self.videos):
-                self.videos[idx]['categories'] = categories
+                if actual_mode == 'add':
+                    # Get existing categories and add new ones
+                    existing = get_video_categories(self.videos[idx])
+                    # Merge and remove duplicates while preserving order
+                    combined = existing.copy()
+                    for cat in categories:
+                        if cat not in combined:
+                            combined.append(cat)
+                    self.videos[idx]['categories'] = combined
+                else:  # replace
+                    self.videos[idx]['categories'] = categories
                 count += 1
         
         self.modified = True
-        print(f"✓ Assigned {count} videos to categories: {categories}")
+        mode_text = "Added to" if actual_mode == 'add' else "Replaced with"
+        print(f"✓ {mode_text} {count} videos: {categories}")
     
     def interactive_select_videos(self, initial_filter: Optional[str] = None):
         """
