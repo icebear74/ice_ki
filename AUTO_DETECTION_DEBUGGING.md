@@ -16,18 +16,48 @@ This guide will help you debug the issue.
 
 ---
 
+## Correct Directory Structure
+
+The training system expects this structure:
+
+```
+/mnt/data/training/datasetNeu/master/
+├── patches/
+│   ├── 720/
+│   │   ├── GT/           # 720×720 ground truth images
+│   │   └── LR_7frames/   # 720×720 LR input (7 frames stacked)
+│   ├── 540/
+│   │   ├── GT/           # 540×540 ground truth images
+│   │   └── LR_7frames/   # 540×540 LR input (7 frames stacked)
+│   └── 720_169/
+│       ├── GT/           # 720×405 (16:9) ground truth images
+│       └── LR_7frames/   # 720×405 (16:9) LR input (7 frames stacked)
+└── val/
+    └── GT/
+        ├── 720/          # Validation GT for 720×720
+        ├── 540/          # Validation GT for 540×540
+        └── 720_169/      # Validation GT for 720×405
+```
+
+**Important:**
+- Training uses: `patches/{size}/GT/` and `patches/{size}/LR_7frames/`
+- Validation GT uses: `val/GT/{size}/`
+- Validation LR uses: `patches/{size}/LR_7frames/` (same as training)
+
+---
+
 ## Diagnostic Output
 
 With the new verbose logging, you'll see exactly what's being checked:
 
 ```
-Checking for dataset sizes in: /mnt/data/training/datasetNeu/master/train
-  Checking 540: /mnt/data/training/datasetNeu/master/train/540/GT
+Checking for dataset sizes in: /mnt/data/training/datasetNeu/master/patches
+  Checking 540: /mnt/data/training/datasetNeu/master/patches/540/GT
     ✓ Found 1456 files for size 540
-  Checking 720: /mnt/data/training/datasetNeu/master/train/720/GT
-    ⚠ Directory does not exist
-  Checking 720_169: /mnt/data/training/datasetNeu/master/train/720_169/GT
-    ⚠ Directory exists but no .png files found
+  Checking 720: /mnt/data/training/datasetNeu/master/patches/720/GT
+    ✓ Found 1234 files for size 720
+  Checking 720_169: /mnt/data/training/datasetNeu/master/patches/720_169/GT
+    ✓ Found 753 files for size 720_169
 ```
 
 ---
@@ -38,7 +68,7 @@ Checking for dataset sizes in: /mnt/data/training/datasetNeu/master/train
 
 **Message:**
 ```
-  Checking 720: /mnt/data/training/datasetNeu/master/train/720/GT
+  Checking 720: /mnt/data/training/datasetNeu/master/patches/720/GT
     ⚠ Directory does not exist
 ```
 
@@ -47,29 +77,29 @@ Checking for dataset sizes in: /mnt/data/training/datasetNeu/master/train
 **Solution:**
 1. Check if the directory exists:
    ```bash
-   ls -la /mnt/data/training/datasetNeu/master/train/
+   ls -la /mnt/data/training/datasetNeu/master/patches/
    ```
 
 2. Expected structure:
    ```
-   train/
+   patches/
    ├── 540/
    │   ├── GT/         # Ground truth (high-res) images
-   │   └── LR/         # Low-res input images
+   │   └── LR_7frames/ # Low-res input images (7 frames stacked)
    ├── 720/
    │   ├── GT/
-   │   └── LR/
+   │   └── LR_7frames/
    └── 720_169/
        ├── GT/
-       └── LR/
+       └── LR_7frames/
    ```
 
 3. Create missing directories:
    ```bash
-   mkdir -p /mnt/data/training/datasetNeu/master/train/720/GT
-   mkdir -p /mnt/data/training/datasetNeu/master/train/720/LR
-   mkdir -p /mnt/data/training/datasetNeu/master/train/720_169/GT
-   mkdir -p /mnt/data/training/datasetNeu/master/train/720_169/LR
+   mkdir -p /mnt/data/training/datasetNeu/master/patches/720/GT
+   mkdir -p /mnt/data/training/datasetNeu/master/patches/720/LR_7frames
+   mkdir -p /mnt/data/training/datasetNeu/master/patches/720_169/GT
+   mkdir -p /mnt/data/training/datasetNeu/master/patches/720_169/LR_7frames
    ```
 
 4. Run dataset extraction to populate the directories
@@ -80,7 +110,7 @@ Checking for dataset sizes in: /mnt/data/training/datasetNeu/master/train
 
 **Message:**
 ```
-  Checking 720_169: /mnt/data/training/datasetNeu/master/train/720_169/GT
+  Checking 720_169: /mnt/data/training/datasetNeu/master/patches/720_169/GT
     ⚠ Directory exists but no .png files found
 ```
 
@@ -89,7 +119,7 @@ Checking for dataset sizes in: /mnt/data/training/datasetNeu/master/train
 **Solution:**
 1. Check directory contents:
    ```bash
-   ls /mnt/data/training/datasetNeu/master/train/720_169/GT/
+   ls /mnt/data/training/datasetNeu/master/patches/720_169/GT/
    ```
 
 2. If empty, run dataset extraction for this size:
@@ -101,8 +131,8 @@ Checking for dataset sizes in: /mnt/data/training/datasetNeu/master/train
 3. If files exist but with different extension:
    ```bash
    # Check for other extensions
-   ls /mnt/data/training/datasetNeu/master/train/720_169/GT/*.jpg
-   ls /mnt/data/training/datasetNeu/master/train/720_169/GT/*.PNG  # uppercase
+   ls /mnt/data/training/datasetNeu/master/patches/720_169/GT/*.jpg
+   ls /mnt/data/training/datasetNeu/master/patches/720_169/GT/*.PNG  # uppercase
    ```
 
 4. Convert if needed:
@@ -117,10 +147,10 @@ Checking for dataset sizes in: /mnt/data/training/datasetNeu/master/train
 
 **Message:**
 ```
-Checking for dataset sizes in: /wrong/path/master/train
-  Checking 540: /wrong/path/master/train/540/GT
+Checking for dataset sizes in: /wrong/path/master/patches
+  Checking 540: /wrong/path/master/patches/540/GT
     ⚠ Directory does not exist
-  Checking 720: /wrong/path/master/train/720/GT
+  Checking 720: /wrong/path/master/patches/720/GT
     ⚠ Directory does not exist
 ```
 
@@ -139,7 +169,7 @@ Checking for dataset sizes in: /wrong/path/master/train
 
 2. Verify the path exists:
    ```bash
-   ls -la /mnt/data/training/datasetNeu/master/train/
+   ls -la /mnt/data/training/datasetNeu/master/patches/
    ```
 
 3. Update `runtime_config.json` with correct paths
@@ -155,7 +185,7 @@ Checking for dataset sizes in: /wrong/path/master/train
 **What You'll See:**
 ```
 # Initial startup:
-  Checking 720: .../train/720/GT
+  Checking 720: .../patches/720/GT
     ⚠ Directory exists but no .png files found
 
 # Later (after extraction completes):
@@ -175,30 +205,30 @@ Use this checklist to verify your setup:
 ### 1. Check Directory Structure
 ```bash
 # Should show 540, 720, 720_169 directories
-ls -la /mnt/data/training/datasetNeu/master/train/
+ls -la /mnt/data/training/datasetNeu/master/patches/
 ```
 
 ### 2. Check GT Files Exist
 ```bash
 # Each should show PNG files
-ls /mnt/data/training/datasetNeu/master/train/540/GT/*.png | head
-ls /mnt/data/training/datasetNeu/master/train/720/GT/*.png | head
-ls /mnt/data/training/datasetNeu/master/train/720_169/GT/*.png | head
+ls /mnt/data/training/datasetNeu/master/patches/540/GT/*.png | head
+ls /mnt/data/training/datasetNeu/master/patches/720/GT/*.png | head
+ls /mnt/data/training/datasetNeu/master/patches/720_169/GT/*.png | head
 ```
 
 ### 3. Check LR Files Exist
 ```bash
 # Each should show PNG files
-ls /mnt/data/training/datasetNeu/master/train/540/LR/*.png | head
-ls /mnt/data/training/datasetNeu/master/train/720/LR/*.png | head
-ls /mnt/data/training/datasetNeu/master/train/720_169/LR/*.png | head
+ls /mnt/data/training/datasetNeu/master/patches/540/LR_7frames/*.png | head
+ls /mnt/data/training/datasetNeu/master/patches/720/LR_7frames/*.png | head
+ls /mnt/data/training/datasetNeu/master/patches/720_169/LR_7frames/*.png | head
 ```
 
 ### 4. Count Files Per Size
 ```bash
-echo "540 GT files: $(ls /mnt/data/training/datasetNeu/master/train/540/GT/*.png 2>/dev/null | wc -l)"
-echo "720 GT files: $(ls /mnt/data/training/datasetNeu/master/train/720/GT/*.png 2>/dev/null | wc -l)"
-echo "720_169 GT files: $(ls /mnt/data/training/datasetNeu/master/train/720_169/GT/*.png 2>/dev/null | wc -l)"
+echo "540 GT files: $(ls /mnt/data/training/datasetNeu/master/patches/540/GT/*.png 2>/dev/null | wc -l)"
+echo "720 GT files: $(ls /mnt/data/training/datasetNeu/master/patches/720/GT/*.png 2>/dev/null | wc -l)"
+echo "720_169 GT files: $(ls /mnt/data/training/datasetNeu/master/patches/720_169/GT/*.png 2>/dev/null | wc -l)"
 ```
 
 ### 5. Check Configuration
@@ -214,17 +244,14 @@ cat vsr_plusplus_NEU/runtime_config.json | grep -A 3 '"data"'
 When auto-detection finds all sizes correctly:
 
 ```
-Checking for dataset sizes in: /mnt/data/training/datasetNeu/master/train
-  Checking 540: /mnt/data/training/datasetNeu/master/train/540/GT
+Checking for dataset sizes in: /mnt/data/training/datasetNeu/master/patches
+  Checking 540: /mnt/data/training/datasetNeu/master/patches/540/GT
     ✓ Found 1456 files for size 540
-  Checking 720: /mnt/data/training/datasetNeu/master/train/720/GT
+  Checking 720: /mnt/data/training/datasetNeu/master/patches/720/GT
     ✓ Found 1234 files for size 720
-  Checking 720_169: /mnt/data/training/datasetNeu/master/train/720_169/GT
+  Checking 720_169: /mnt/data/training/datasetNeu/master/patches/720_169/GT
     ✓ Found 753 files for size 720_169
 ✓ Multi-size training enabled: 540, 720, 720_169
-
-📊 Distribution (Automatic from file counts):
-   540: 42.3%  |  720: 35.8%  |  720_169: 21.9%
 ```
 
 ---
@@ -241,7 +268,7 @@ If you still have issues after checking the above:
 2. **Manually verify paths:**
    ```bash
    # Copy the exact path from the log output and check it
-   ls -la /mnt/data/training/datasetNeu/master/train/720/GT/
+   ls -la /mnt/data/training/datasetNeu/master/patches/720/GT/
    ```
 
 3. **Check permissions:**
@@ -253,7 +280,7 @@ If you still have issues after checking the above:
 4. **Check for symbolic links:**
    ```bash
    # Follow symlinks to verify they point to valid locations
-   ls -laL /mnt/data/training/datasetNeu/master/train/
+   ls -laL /mnt/data/training/datasetNeu/master/patches/
    ```
 
 5. **Try absolute paths in config:**
@@ -275,7 +302,9 @@ If you've checked everything above and still only see one size being loaded:
 1. **Share the complete output** from training startup
 2. **Share the output** of:
    ```bash
-   tree -L 3 /mnt/data/training/datasetNeu/master/train/
+   tree -L 3 /mnt/data/training/datasetNeu/master/patches/
+   # or
+   du -h -d 4 /mnt/data/training/datasetNeu/master/
    ```
 3. **Share your runtime_config.json** (data section)
 
