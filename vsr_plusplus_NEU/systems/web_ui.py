@@ -1412,21 +1412,47 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         <div class="section-header">📦 Current Batch</div>
         
         <div class="layer-activity-container">
-            <!-- Files used counter -->
-            <div style="display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid var(--border-color); margin-bottom: 12px;">
-                <span style="color: var(--text-secondary); font-size: 1.05em;">Files Used</span>
+            <!-- Files used counter - Total -->
+            <div style="display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid var(--border-color); margin-bottom: 8px;">
+                <span style="color: var(--text-secondary); font-size: 1.05em;">Total Files (Accumulation)</span>
                 <span style="color: var(--accent-blue); font-weight: bold; font-family: 'Courier New', monospace; font-size: 1.05em;" id="batchFilesUsed">0 / 0</span>
+            </div>
+            
+            <!-- Files per size -->
+            <div style="margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--border-color);">
+                <h3 style="color: var(--text-secondary); margin-bottom: 8px; font-size: 0.95em;">Files per Size:</h3>
+                
+                <div style="display: flex; justify-content: space-between; padding: 4px 0;">
+                    <span style="color: var(--text-secondary); font-size: 0.9em;">720×720</span>
+                    <span style="color: var(--accent-green); font-weight: bold; font-family: 'Courier New', monospace; font-size: 0.9em;" id="batchFiles720">0</span>
+                </div>
+                
+                <div style="display: flex; justify-content: space-between; padding: 4px 0;">
+                    <span style="color: var(--text-secondary); font-size: 0.9em;">540×540</span>
+                    <span style="color: var(--accent-green); font-weight: bold; font-family: 'Courier New', monospace; font-size: 0.9em;" id="batchFiles540">0</span>
+                </div>
+                
+                <div style="display: flex; justify-content: space-between; padding: 4px 0;">
+                    <span style="color: var(--text-secondary); font-size: 0.9em;">720×405 (16:9)</span>
+                    <span style="color: var(--accent-green); font-weight: bold; font-family: 'Courier New', monospace; font-size: 0.9em;" id="batchFiles720_169">0</span>
+                </div>
+            </div>
+            
+            <!-- Accumulation steps info -->
+            <div style="display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid var(--border-color); margin-bottom: 12px;">
+                <span style="color: var(--text-secondary); font-size: 1.05em;">Accumulation Steps</span>
+                <span style="color: var(--accent-orange); font-weight: bold; font-size: 1.05em;" id="batchAccumulationSteps">1</span>
             </div>
             
             <!-- Current batch size -->
             <div style="display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid var(--border-color); margin-bottom: 12px;">
-                <span style="color: var(--text-secondary); font-size: 1.05em;">Batch Size</span>
+                <span style="color: var(--text-secondary); font-size: 1.05em;">Current Batch Size</span>
                 <span style="color: var(--accent-green); font-weight: bold; font-size: 1.05em;" id="batchSizeKey">-</span>
             </div>
             
             <!-- Batch files list -->
             <div style="margin-top: 8px;">
-                <h3 style="color: var(--accent-orange); margin-bottom: 8px; font-size: 1.05em;">Files in Batch:</h3>
+                <h3 style="color: var(--accent-orange); margin-bottom: 8px; font-size: 1.05em;">Files in Accumulation Window:</h3>
                 <textarea id="batchFilesList" readonly style="
                     width: 100%;
                     height: 120px;
@@ -2108,10 +2134,20 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         function updateBatchFiles(data) {
             const batch = data.current_batch || {};
             
-            // Update files used counter
+            // Update total files counter
             const filesUsed = batch.files_used_in_epoch || 0;
             const totalFiles = batch.total_files_in_epoch || 0;
             document.getElementById('batchFilesUsed').textContent = `${filesUsed} / ${totalFiles}`;
+            
+            // Update files per size
+            const filesPerSize = batch.files_per_size || {'720': 0, '540': 0, '720_169': 0};
+            document.getElementById('batchFiles720').textContent = filesPerSize['720'] || 0;
+            document.getElementById('batchFiles540').textContent = filesPerSize['540'] || 0;
+            document.getElementById('batchFiles720_169').textContent = filesPerSize['720_169'] || 0;
+            
+            // Update accumulation steps
+            const accumulationSteps = batch.accumulation_steps || 1;
+            document.getElementById('batchAccumulationSteps').textContent = accumulationSteps;
             
             // Update batch size key
             const sizeKey = batch.size_key || '-';

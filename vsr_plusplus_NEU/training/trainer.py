@@ -172,6 +172,9 @@ class VSRTrainer:
         steps_per_epoch = len(self.train_loader) // accumulation_steps
         current_epoch_step = 0
         
+        # Buffer for accumulation window files
+        accumulation_buffer = []
+        
         # Initialize loop timing
         loop_start_time = time.time()
         
@@ -212,7 +215,25 @@ class VSRTrainer:
                 # Format filenames as "size_key/filename.png"
                 formatted_files = [f"{size_key}/{fn}" for fn in batch_filenames]
                 
-                # Calculate files used in epoch (based on batch_idx and batch size)
+                # Add to accumulation buffer
+                accumulation_buffer.append({
+                    'files': formatted_files,
+                    'size_key': size_key
+                })
+                
+                # Keep only last accumulation_steps batches
+                if len(accumulation_buffer) > accumulation_steps:
+                    accumulation_buffer.pop(0)
+                
+                # Collect all files in accumulation window
+                all_accumulated_files = []
+                files_per_size = {'720': 0, '540': 0, '720_169': 0}
+                for buffer_item in accumulation_buffer:
+                    all_accumulated_files.extend(buffer_item['files'])
+                    # Count files per size
+                    files_per_size[buffer_item['size_key']] += len(buffer_item['files'])
+                
+                # Calculate total files used in epoch (based on batch_idx and batch size)
                 batch_size = lr_stack.size(0)
                 files_used_in_epoch = (batch_idx + 1) * batch_size
                 
@@ -222,10 +243,12 @@ class VSRTrainer:
                 # Update web_monitor with current batch info
                 self.web_monitor.data_store.update_all_metrics(
                     current_batch={
-                        'files': formatted_files,
+                        'files': all_accumulated_files,
                         'size_key': size_key,
                         'files_used_in_epoch': files_used_in_epoch,
-                        'total_files_in_epoch': total_files_in_epoch
+                        'total_files_in_epoch': total_files_in_epoch,
+                        'files_per_size': files_per_size,
+                        'accumulation_steps': accumulation_steps
                     }
                 )
             
