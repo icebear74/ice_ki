@@ -1437,6 +1437,60 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         
         <div class="section-header">🎮 Steuerung</div>
         
+        <!-- Dataset Files Card -->
+        <div class="card" style="margin: 10px; padding: 15px;">
+            <h3 style="margin: 0 0 15px 0;">📂 Dataset Files</h3>
+            
+            <div style="margin: 15px 0; padding: 10px; background: #f5f5f5; border-radius: 4px;">
+                <strong>📊 Distribution (From File Counts)</strong>
+                <div id="distributionText" style="margin: 5px 0; font-family: monospace; color: #333;">
+                    Loading...
+                </div>
+            </div>
+            
+            <div style="margin: 15px 0;">
+                <strong>🎯 Training Datasets</strong>
+                <div style="margin: 5px 0;">
+                    <span>720×720:</span>
+                    <span id="train720Count" style="font-weight: bold; color: #2196F3;">0</span> files
+                    <span id="train720New" style="color: #4CAF50; margin-left: 10px;"></span>
+                </div>
+                <div style="margin: 5px 0;">
+                    <span>540×540:</span>
+                    <span id="train540Count" style="font-weight: bold; color: #2196F3;">0</span> files
+                    <span id="train540New" style="color: #4CAF50; margin-left: 10px;"></span>
+                </div>
+                <div style="margin: 5px 0;">
+                    <span>720×405 (16:9):</span>
+                    <span id="train720_169Count" style="font-weight: bold; color: #2196F3;">0</span> files
+                    <span id="train720_169New" style="color: #4CAF50; margin-left: 10px;"></span>
+                </div>
+            </div>
+            
+            <div style="margin: 15px 0;">
+                <strong>✅ Validation Datasets</strong>
+                <div style="margin: 5px 0;">
+                    <span>720×720:</span>
+                    <span id="val720Count" style="font-weight: bold; color: #9C27B0;">0</span> files
+                    <span id="val720New" style="color: #4CAF50; margin-left: 10px;"></span>
+                </div>
+                <div style="margin: 5px 0;">
+                    <span>540×540:</span>
+                    <span id="val540Count" style="font-weight: bold; color: #9C27B0;">0</span> files
+                    <span id="val540New" style="color: #4CAF50; margin-left: 10px;"></span>
+                </div>
+                <div style="margin: 5px 0;">
+                    <span>720×405 (16:9):</span>
+                    <span id="val720_169Count" style="font-weight: bold; color: #9C27B0;">0</span> files
+                    <span id="val720_169New" style="color: #4CAF50; margin-left: 10px;"></span>
+                </div>
+            </div>
+            
+            <div style="margin: 10px 0; padding-top: 10px; border-top: 1px solid #ddd; color: #666; font-size: 0.9em;">
+                Last check: Step <span id="lastCheckStep" style="font-weight: bold;">0</span>
+            </div>
+        </div>
+        
         <div class="controls-section">
             <button class="btn btn-primary" onclick="triggerValidation()">
                 🔍 Validation starten
