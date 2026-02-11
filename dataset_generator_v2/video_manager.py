@@ -25,7 +25,7 @@ from category_utils import (
     get_video_categories,
     is_video_in_category,
     format_categories_display,
-    convert_config_to_new_format
+    convert_config_to_list_format
 )
 from interactive_selector import select_items, select_categories
 
