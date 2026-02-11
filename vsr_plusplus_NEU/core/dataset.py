@@ -35,12 +35,13 @@ class VSRDataset(Dataset):
             - val_lr: Pattern for validation LR (default: 'patches/{size_key}/LR_7frames')
     """
     
-    def __init__(self, root, dataset_name='master', size_key='720', mode='train', augment=True, paths_config=None):
+    def __init__(self, root, dataset_name='master', size_key='720', mode='train', augment=True, paths_config=None, validate_upfront=False):
         self.root = root
         self.dataset_name = dataset_name
         self.size_key = size_key
         self.mode = mode
         self.augment = augment and (mode == 'train')
+        self.validate_upfront = validate_upfront
         
         # Thread lock for safe reloading during training
         self.reload_lock = threading.Lock()
@@ -102,14 +103,30 @@ class VSRDataset(Dataset):
         
         invalid_dimension_files = []
         
+        # Progress tracking for validation
+        total_files = len(all_gt_files)
+        validated_count = 0
+        if self.validate_upfront and total_files > 100:
+            print(f"   Validating {total_files} files... (this may take a moment)")
+        
         for gt_file in all_gt_files:
+            # Show progress every 100 files when validating
+            if self.validate_upfront and total_files > 100:
+                validated_count += 1
+                if validated_count % 100 == 0:
+                    print(f"   Progress: {validated_count}/{total_files} files validated...")
+            
             # For training, check lr_dir. For validation, always use patch_lr_dir
             if self.lr_dir:
                 lr_path = os.path.join(self.lr_dir, gt_file)
                 
                 if os.path.exists(lr_path):
-                    # Validate file dimensions before adding
-                    if self._validate_file_dimensions(gt_file, self.gt_dir, self.lr_dir, expected_gt_shape, invalid_dimension_files):
+                    # Validate file dimensions before adding (optional, controlled by validate_upfront)
+                    if self.validate_upfront and not self._validate_file_dimensions(gt_file, self.gt_dir, self.lr_dir, expected_gt_shape, invalid_dimension_files):
+                        # File invalid, skip it
+                        pass
+                    else:
+                        # File valid or validation skipped - add it
                         self.gt_files.append(gt_file)
                         self.lr_paths[gt_file] = self.lr_dir
                         matched_val_lr += 1
@@ -117,7 +134,11 @@ class VSRDataset(Dataset):
                     # For validation, fallback to patches/LR
                     patch_lr_path = os.path.join(self.patch_lr_dir, gt_file)
                     if os.path.exists(patch_lr_path):
-                        if self._validate_file_dimensions(gt_file, self.gt_dir, self.patch_lr_dir, expected_gt_shape, invalid_dimension_files):
+                        if self.validate_upfront and not self._validate_file_dimensions(gt_file, self.gt_dir, self.patch_lr_dir, expected_gt_shape, invalid_dimension_files):
+                            # File invalid, skip it
+                            pass
+                        else:
+                            # File valid or validation skipped - add it
                             self.gt_files.append(gt_file)
                             self.lr_paths[gt_file] = self.patch_lr_dir
                             matched_patches_lr += 1
@@ -129,7 +150,11 @@ class VSRDataset(Dataset):
                 # For validation with no val LR dir, always use patches
                 patch_lr_path = os.path.join(self.patch_lr_dir, gt_file)
                 if os.path.exists(patch_lr_path):
-                    if self._validate_file_dimensions(gt_file, self.gt_dir, self.patch_lr_dir, expected_gt_shape, invalid_dimension_files):
+                    if self.validate_upfront and not self._validate_file_dimensions(gt_file, self.gt_dir, self.patch_lr_dir, expected_gt_shape, invalid_dimension_files):
+                        # File invalid, skip it
+                        pass
+                    else:
+                        # File valid or validation skipped - add it
                         self.gt_files.append(gt_file)
                         self.lr_paths[gt_file] = self.patch_lr_dir
                         matched_patches_lr += 1
@@ -148,11 +173,14 @@ class VSRDataset(Dataset):
             print(f"  Matched in patches/LR:    {matched_patches_lr}")
             print(f"  ───────────────────────────────────")
             print(f"  Skipped (no LR):          {len(skipped_files)}")
-            print(f"  Skipped (invalid dims):   {len(invalid_dimension_files)}")
+            if self.validate_upfront:
+                print(f"  Skipped (invalid dims):   {len(invalid_dimension_files)}")
+            else:
+                print(f"  Upfront validation:       SKIPPED (faster startup)")
             print(f"  Final samples loaded:     {len(self.gt_files)}")
             print("="*60)
             
-            if invalid_dimension_files:
+            if invalid_dimension_files and self.validate_upfront:
                 print(f"\n⚠️  {len(invalid_dimension_files)} files skipped due to invalid dimensions:")
                 for i, (f, reason) in enumerate(invalid_dimension_files[:5]):  # Show first 5
                     print(f"  - {f}: {reason}")
@@ -176,19 +204,25 @@ class VSRDataset(Dataset):
                 print()
         elif skipped_files or invalid_dimension_files:
             # For training mode, just show count
-            print(f"\n⚠️  Skipped {len(skipped_files)} GT files without matching LR files in {mode}")
+            if skipped_files:
+                print(f"\n⚠️  Skipped {len(skipped_files)} GT files without matching LR files in {mode}")
+            if invalid_dimension_files and self.validate_upfront:
+                print(f"⚠️  Skipped {len(invalid_dimension_files)} files with invalid dimensions in {mode} (size_key={size_key})")
             print()
         
         if not self.gt_files:
             raise ValueError(f"No valid GT-LR pairs found in {self.gt_dir} and {self.lr_dir}")
         
         # Report invalid dimension files for training mode too
-        if invalid_dimension_files and mode == 'train':
+        if invalid_dimension_files and mode == 'train' and self.validate_upfront:
             print(f"\n⚠️  Skipped {len(invalid_dimension_files)} files with invalid dimensions in {mode} (size_key={size_key})")
             if len(invalid_dimension_files) <= 3:
                 for f, reason in invalid_dimension_files:
                     print(f"  - {f}: {reason}")
             print()
+        elif mode == 'train' and not self.validate_upfront:
+            print(f"\n💡 Upfront validation SKIPPED for faster startup (runtime validation active)")
+            print(f"   Loaded {len(self.gt_files)} files for {mode} ({size_key})\n")
         
         # Validate a few samples
         self._validate_samples()
