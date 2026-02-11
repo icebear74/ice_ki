@@ -78,6 +78,34 @@ def test_strict_stride_detection():
     
     return True
 
+def test_file_based_frame_list():
+    """Test that file-based frame list is used"""
+    print("\nTesting file-based frame list...")
+    
+    with open('make_dataset_v2_uhd.py', 'r') as f:
+        content = f.read()
+    
+    # Check for sendcmd usage
+    if 'sendcmd=f=' in content:
+        print("✓ File-based sendcmd approach found")
+    else:
+        print("✗ sendcmd not found")
+        return False
+    
+    # Check for commands file creation
+    if 'frame_select_commands.txt' in content or 'commands.txt' in content:
+        print("✓ Commands file creation found")
+    else:
+        print("⚠️  Commands file name not found")
+    
+    # Check for writing frame selections to file
+    if "f.write(f\"0 select 'eq(n,{frame_num})'" in content or "write" in content and "eq(n," in content:
+        print("✓ Frame selections written to file")
+    else:
+        print("⚠️  Frame writing logic not found")
+    
+    return True
+
 def test_explicit_frame_list():
     """Test that explicit frame list is used instead of modulo"""
     print("\nTesting explicit frame list extraction...")
@@ -85,16 +113,17 @@ def test_explicit_frame_list():
     with open('make_dataset_v2_uhd.py', 'r') as f:
         content = f.read()
     
-    # Check for explicit frame number approach
-    if "eq(n,{frame})" in content or 'eq(n,' in content:
-        print("✓ Explicit frame list approach found (eq(n,FRAME))")
+    # Check for explicit frame number approach (now in file)
+    if "eq(n,{frame_num})" in content or "eq(n," in content:
+        print("✓ Explicit frame selection approach found")
     else:
         print("⚠️  Explicit frame approach not found")
     
-    # Check that old modulo approach is gone/replaced
-    if 'lt(mod(n-{first_frame},{cycle_length}),{n_frames})' in content:
-        print("⚠️  Old modulo-based approach still present")
-        # Not necessarily wrong, just check it's fixed
+    # Check that file-based approach is used
+    if 'sendcmd' in content:
+        print("✓ Using sendcmd (avoids command line length issues)")
+    else:
+        print("⚠️  sendcmd not found")
     
     return True
 
@@ -149,7 +178,8 @@ def main():
         ("Thread Count (6 threads)", test_thread_count),
         ("Nice Priority (nice -n 19)", test_nice_priority),
         ("Strict Stride Detection", test_strict_stride_detection),
-        ("Explicit Frame List", test_explicit_frame_list),
+        ("File-Based Frame List", test_file_based_frame_list),
+        ("Explicit Frame Selection", test_explicit_frame_list),
         ("Frame Validation", test_frame_validation),
         ("CPU-Only Mode", test_cpu_only_mode),
     ]

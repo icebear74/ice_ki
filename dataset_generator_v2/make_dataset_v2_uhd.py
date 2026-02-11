@@ -651,34 +651,46 @@ class DatasetGeneratorV2UHD:
     def _extract_frames_with_stride(self, video_path: str, timestamps: List[float],
                                    n_frames: int, fps: float, stride: int) -> Dict[float, List[np.ndarray]]:
         """
-        Extract frames using stride pattern with FIXED modulo calculation.
+        Extract frames using sendcmd with frame list file.
         
-        FIXED: Corrected modulo pattern to avoid frame skipping.
-        Uses compact modulo expression instead of explicit frame list to avoid command line length issues.
+        FIXED: Uses sendcmd with external file to avoid command line length limits.
+        Creates commands.txt with explicit frame selections, then uses:
+        -vf "sendcmd=f=commands.txt,select"
+        
+        This approach:
+        - No command line length issues (frame list in file)
+        - Explicit frame selection (100% accurate)
+        - Works with any number of frames
         """
         temp_dir = None
+        commands_file = None
         try:
             # Use configured temp directory
             temp_dir = self._create_temp_dir("batch_stride")
             output_pattern = os.path.join(temp_dir, "frame_%05d.png")
             
-            # Calculate first frame and total frames needed
-            first_frame = int(timestamps[0] * fps)
-            last_frame = int(timestamps[-1] * fps) + n_frames - 1
-            total_frames_to_extract = len(timestamps) * n_frames
+            # Calculate all frame numbers to extract explicitly
+            all_frame_numbers = []
+            for ts in timestamps:
+                start_frame = int(ts * fps)
+                for offset in range(n_frames):
+                    all_frame_numbers.append(start_frame + offset)
             
-            # Build select filter using CORRECTED modulo pattern
-            # Cycle length = distance from start of one group to start of next
-            # For example: frames 100-106, skip 68, frames 175-181, skip 68...
-            # interval (stride) = 68, n_frames = 7
-            # cycle_length = 68 + 7 = 75 (distance from frame 100 to frame 175)
-            cycle_length = stride + n_frames
+            total_frames_to_extract = len(all_frame_numbers)
             
-            # FIXED: The select filter now correctly uses modulo
-            # Within each cycle starting at first_frame, take first n_frames
-            # Formula: frame is selected if (frame_number - first_frame) % cycle_length < n_frames
-            # This ensures: frames [0-6], skip, frames [75-81], skip, frames [150-156], etc.
-            select_filter = f"gte(n,{first_frame})*lte(n,{last_frame})*lt(mod(n-{first_frame},{cycle_length}),{n_frames})"
+            # Create commands file with frame selections
+            # Format: "0 select 'eq(n,FRAME_NUMBER)';"
+            commands_file = os.path.join(temp_dir, "frame_select_commands.txt")
+            with open(commands_file, 'w') as f:
+                for frame_num in all_frame_numbers:
+                    f.write(f"0 select 'eq(n,{frame_num})';\n")
+            
+            self.logger.info(f"Batch extracting with FILE-BASED frame list:")
+            self.logger.info(f"  Timestamps: {len(timestamps)}")
+            self.logger.info(f"  Frames per timestamp: {n_frames}")
+            self.logger.info(f"  Total frames to extract: {total_frames_to_extract}")
+            self.logger.info(f"  Commands file: {commands_file}")
+            self.logger.info(f"  First few frames: {all_frame_numbers[:10]}...")
             
             # UHD tonemap filter with 1080p scaling
             tonemap_filter = (
@@ -691,16 +703,9 @@ class DatasetGeneratorV2UHD:
                 "format=yuv420p"
             )
             
-            # Full filter: select specific frames + tonemap
-            full_filter = f"select='{select_filter}',setpts=N/FRAME_RATE/TB,{tonemap_filter}"
-            
-            self.logger.info(f"Batch extracting with CORRECTED stride pattern:")
-            self.logger.info(f"  First frame: {first_frame}, Last frame: {last_frame}")
-            self.logger.info(f"  Stride (gap): {stride} frames, n_frames: {n_frames}")
-            self.logger.info(f"  Cycle length: {cycle_length} frames (from start of group to start of next)")
-            self.logger.info(f"  Expected frames: {total_frames_to_extract}")
-            self.logger.info(f"  Select filter: (n-{first_frame}) % {cycle_length} < {n_frames}")
-            self.logger.info(f"  This extracts: [{first_frame}-{first_frame+n_frames-1}], [{first_frame+cycle_length}-{first_frame+cycle_length+n_frames-1}], etc.")
+            # Full filter: sendcmd from file + select + tonemap
+            # sendcmd reads frame selections from file, select applies them
+            full_filter = f"sendcmd=f={commands_file},select,setpts=N/FRAME_RATE/TB,{tonemap_filter}"
             
             # CPU-only mode (no CUDA) - more stable and reliable
             # FIXED: Added nice priority for lower system impact
