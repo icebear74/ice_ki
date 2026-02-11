@@ -111,6 +111,14 @@ class CompleteTrainingDataStore:
                 'last_check': 0
             },
             
+            # Current Batch Information (NEW)
+            'current_batch': {
+                'files': [],  # List of "size_key/filename.png" strings
+                'size_key': '',  # Current batch size key
+                'files_used_in_epoch': 0,  # How many files have been processed in current epoch
+                'total_files_in_epoch': 0  # Total files in this epoch
+            },
+            
             # Statusflags
             'training_active': True,
             'validation_running': False,

@@ -503,6 +503,43 @@
             </div>
         </div>
         
+        <!-- Current Batch Files -->
+        <div class="card">
+            <div class="card-title">📦 Current Batch</div>
+            
+            <!-- Files used counter -->
+            <div class="metric-row" style="margin-bottom: 12px;">
+                <span class="metric-label">Files Used</span>
+                <span class="metric-value" id="batchFilesUsed" style="font-family: 'Courier New', monospace;">0 / 0</span>
+            </div>
+            
+            <!-- Current batch size -->
+            <div class="metric-row" style="margin-bottom: 12px;">
+                <span class="metric-label">Batch Size</span>
+                <span class="metric-value" id="batchSizeKey">-</span>
+            </div>
+            
+            <!-- Batch files list -->
+            <div style="margin-top: 8px;">
+                <div style="font-size: 0.85em; color: #94a3b8; margin-bottom: 6px;">
+                    <strong>Files in Batch:</strong>
+                </div>
+                <textarea id="batchFilesList" readonly style="
+                    width: 100%;
+                    height: 120px;
+                    background: rgba(15, 23, 42, 0.6);
+                    border: 1px solid rgba(100, 116, 139, 0.3);
+                    border-radius: 6px;
+                    color: #e2e8f0;
+                    padding: 8px;
+                    font-size: 0.75em;
+                    font-family: 'Courier New', monospace;
+                    resize: vertical;
+                    line-height: 1.4;
+                "></textarea>
+            </div>
+        </div>
+        
         <!-- Manual Controls -->
         <div class="card">
             <div class="card-title">🎮 Manual Controls</div>
@@ -530,6 +567,9 @@
                 
                 // Update dataset files
                 updateDatasetFiles(data);
+                
+                // Update current batch files
+                updateBatchFiles(data);
                 
                 // Update training progress
                 document.getElementById('stepCurrent').textContent = data.step_current || 0;
@@ -598,6 +638,24 @@
             
             // Last check
             document.getElementById('datasetLastCheck').textContent = dsFiles.last_check || 0;
+        }
+        
+        function updateBatchFiles(data) {
+            const batch = data.current_batch || {};
+            
+            // Update files used counter
+            const filesUsed = batch.files_used_in_epoch || 0;
+            const totalFiles = batch.total_files_in_epoch || 0;
+            document.getElementById('batchFilesUsed').textContent = `${filesUsed} / ${totalFiles}`;
+            
+            // Update batch size key
+            const sizeKey = batch.size_key || '-';
+            document.getElementById('batchSizeKey').textContent = sizeKey;
+            
+            // Update batch files list
+            const files = batch.files || [];
+            const filesList = files.join('\n');
+            document.getElementById('batchFilesList').value = filesList;
         }
         
         function updateLossDistribution(data) {

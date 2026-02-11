@@ -198,12 +198,36 @@ class VSRTrainer:
                 lr_stack = batch['lr'].to(self.device)
                 gt = batch['gt'].to(self.device)
                 size_key = batch.get('size_key', 'unknown')
+                batch_filenames = batch.get('filenames', [])
             else:
                 # Traditional single-size batch (tuple)
                 lr_stack, gt = batch
                 lr_stack = lr_stack.to(self.device)
                 gt = gt.to(self.device)
                 size_key = 'default'
+                batch_filenames = []
+            
+            # Track batch files for WebUI display
+            if batch_filenames and hasattr(self, 'web_monitor') and self.web_monitor:
+                # Format filenames as "size_key/filename.png"
+                formatted_files = [f"{size_key}/{fn}" for fn in batch_filenames]
+                
+                # Calculate files used in epoch (based on batch_idx and batch size)
+                batch_size = lr_stack.size(0)
+                files_used_in_epoch = (batch_idx + 1) * batch_size
+                
+                # Get total files in epoch
+                total_files_in_epoch = len(self.train_loader.sampler) if hasattr(self.train_loader, 'sampler') else steps_per_epoch
+                
+                # Update web_monitor with current batch info
+                self.web_monitor.data_store.update_all_metrics(
+                    current_batch={
+                        'files': formatted_files,
+                        'size_key': size_key,
+                        'files_used_in_epoch': files_used_in_epoch,
+                        'total_files_in_epoch': total_files_in_epoch
+                    }
+                )
             
             # Forward pass
             output = self.model(lr_stack)
