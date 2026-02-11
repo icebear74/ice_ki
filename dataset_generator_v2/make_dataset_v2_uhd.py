@@ -510,6 +510,9 @@ class DatasetGeneratorV2UHD:
                 output_pattern
             ]
             
+            # LOG THE FFMPEG COMMAND (for debugging)
+            self.logger.debug(f"Single frame extraction command: {' '.join(cmd)}")
+            
             timeout = self.config.get('ffmpeg_timeout', 120)
             result = subprocess.run(
                 cmd,
@@ -635,15 +638,18 @@ class DatasetGeneratorV2UHD:
     def _extract_frames_with_file(self, video_path: str, timestamps: List[float],
                                    n_frames: int, fps: float) -> Dict[float, List[np.ndarray]]:
         """
-        Extract frames using sendcmd with frame list file.
+        Extract frames using sendcmd with TIME-BASED selection file.
         
         Uses sendcmd with external file to avoid command line length limits.
-        Creates commands.txt with explicit frame selections, then uses:
+        Creates commands.txt with TIME-BASED selections (not frame numbers!), then uses:
         -vf "sendcmd=f=commands.txt,select"
+        
+        IMPORTANT: Uses TIME-BASED selection (between(t,...)) instead of frame numbers (eq(n,...))
+        because -discard nokey breaks frame numbering but time-based selection works correctly.
         
         This approach:
         - No command line length issues (frame list in file)
-        - Explicit frame selection (100% accurate)
+        - TIME-BASED selection (works with -discard nokey)
         - Works with ANY timestamp pattern (uniform or non-uniform)
         - Fast seeking with -discard nokey
         """
@@ -654,28 +660,28 @@ class DatasetGeneratorV2UHD:
             temp_dir = self._create_temp_dir("batch_stride")
             output_pattern = os.path.join(temp_dir, "frame_%05d.png")
             
-            # Calculate all frame numbers to extract explicitly
-            all_frame_numbers = []
-            for ts in timestamps:
-                start_frame = int(ts * fps)
-                for offset in range(n_frames):
-                    all_frame_numbers.append(start_frame + offset)
+            total_frames_to_extract = len(timestamps) * n_frames
             
-            total_frames_to_extract = len(all_frame_numbers)
-            
-            # Create commands file with frame selections
-            # Format: "0 select 'eq(n,FRAME_NUMBER)';"
+            # Create commands file with TIME-BASED selections
+            # Format: "0 select 'between(t,START_TIME,END_TIME)';"
+            # This works correctly with -discard nokey (unlike frame numbers)
             commands_file = os.path.join(temp_dir, "frame_select_commands.txt")
             with open(commands_file, 'w') as f:
-                for frame_num in all_frame_numbers:
-                    f.write(f"0 select 'eq(n,{frame_num})';\n")
+                for ts in timestamps:
+                    # Calculate time range for n_frames at given fps
+                    start_t = ts
+                    duration = n_frames / fps
+                    end_t = ts + duration
+                    # Use between(t,...) for time-based selection
+                    # This is compatible with -discard nokey
+                    f.write(f"0 select 'between(t,{start_t:.6f},{end_t:.6f})';\n")
             
-            self.logger.info(f"Batch extracting with FILE-BASED frame list:")
+            self.logger.info(f"Batch extracting with TIME-BASED frame selection:")
             self.logger.info(f"  Timestamps: {len(timestamps)}")
             self.logger.info(f"  Frames per timestamp: {n_frames}")
             self.logger.info(f"  Total frames to extract: {total_frames_to_extract}")
             self.logger.info(f"  Commands file: {commands_file}")
-            self.logger.info(f"  First few frames: {all_frame_numbers[:10]}...")
+            self.logger.info(f"  First few timestamps: {timestamps[:3]}...")
             
             # UHD tonemap filter with 1080p scaling
             tonemap_filter = (
@@ -689,12 +695,12 @@ class DatasetGeneratorV2UHD:
             )
             
             # Full filter: sendcmd from file + select + tonemap
-            # sendcmd reads frame selections from file, select applies them
+            # sendcmd reads TIME-BASED selections from file, select applies them
             full_filter = f"sendcmd=f={commands_file},select,setpts=N/FRAME_RATE/TB,{tonemap_filter}"
             
             # CPU-only mode (no CUDA) - more stable and reliable
             # ADDED: -discard nokey for faster seeking (user suggestion)
-            # Since we extract 7 consecutive frames, exact seek position doesn't matter
+            # TIME-BASED selection (between(t,...)) works correctly with -discard nokey
             cmd = [
                 'nice', '-n', '19',  # Lowest priority to not interfere with other processes
                 'ffmpeg',
@@ -706,6 +712,9 @@ class DatasetGeneratorV2UHD:
                 '-y',
                 output_pattern
             ]
+            
+            # LOG THE FFMPEG COMMAND (user requested)
+            self.logger.info(f"FFmpeg command: {' '.join(cmd)}")
             
             timeout = self.config.get('ffmpeg_timeout', 120) * len(timestamps) // 10
             timeout = max(timeout, 300)
