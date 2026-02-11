@@ -43,13 +43,12 @@ class SizeGroupedSampler(Sampler):
         self.batch_sizes = batch_sizes
         self.shuffle = shuffle
         
-        # Filter to only active size keys (those with non-zero distribution)
-        # Skip documentation keys (starting with _) and non-numeric values
-        self.active_sizes = [k for k, v in size_distribution.items() 
-                           if not k.startswith('_') and isinstance(v, (int, float)) and v > 0]
+        # Use all sizes from datasets_dict (size_distribution no longer filters)
+        # All datasets in datasets_dict are already enabled/detected
+        self.active_sizes = list(datasets_dict.keys())
         
         if not self.active_sizes:
-            raise ValueError("No active sizes (all distributions are 0)")
+            raise ValueError("No datasets provided")
         
         # NOTE: We NO LONGER normalize/weight by distribution!
         # Files are already pre-weighted during dataset generation.

@@ -76,10 +76,8 @@ DEFAULT_CONFIG = {
             "720": {"batch": 1, "accum": 6}
         }
     },
-    "size_distribution": {
-        "540": 0.65,
-        "720_169": 0.35,
-        "720": 0.00
+    "validation": {
+        "sizes": ["540", "720_169"]
     }
 }
 
@@ -193,16 +191,8 @@ class EnhancedRuntimeConfigManager:
         
         # Validate new structure
         if self.use_new_structure:
-            # Check size distribution sum (skip documentation keys starting with _)
-            if 'size_distribution' in config:
-                # Filter out documentation keys and non-numeric values
-                numeric_dist = {k: v for k, v in config['size_distribution'].items() 
-                              if not k.startswith('_') and isinstance(v, (int, float))}
-                total = sum(numeric_dist.values())
-                if not (1.0 - DISTRIBUTION_SUM_TOLERANCE <= total <= 1.0 + DISTRIBUTION_SUM_TOLERANCE):
-                    errors.append(
-                        f"Size distribution sum is {total:.4f}, must be 1.0 (±{DISTRIBUTION_SUM_TOLERANCE})"
-                    )
+            # Note: size_distribution removed - training auto-detects available sizes
+            # No need to validate distribution sum anymore
             
             # Check VRAM limits for adaptive batch configs
             if 'training' in config and 'adaptive_batch' in config['training']:

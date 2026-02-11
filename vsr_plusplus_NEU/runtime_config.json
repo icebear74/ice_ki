@@ -12,6 +12,7 @@
     "precision": "float32"
   },
   "training": {
+    "_NOTE": "Training automatically uses ALL available dataset sizes found on disk. File counts determine the training ratio (pre-weighted during extraction).",
     "effective_batch_size": 6,
     "adaptive_batch": {
       "720": {
@@ -28,14 +29,8 @@
       }
     }
   },
-  "size_distribution": {
-    "_NOTE": "WICHTIG: Diese Werte bestimmen nur WELCHE Sizes geladen werden (>0 = laden). Die tatsächliche Gewichtung im Training erfolgt automatisch durch die Anzahl der Dateien auf der Festplatte! Dataset-Extraktion hat die Dateien bereits gewichtet. Änderungen erfordern NEUSTART.",
-    "_EXPLANATION": "If 720=0.4, 540=0.4, 720_169=0.2, the dataset extraction should create files in roughly that ratio. Training then samples ALL files proportionally - no additional weighting!",
-    "720": 0.4,
-    "540": 0.4,
-    "720_169": 0.2
-  },
   "validation": {
+    "_NOTE": "Specify which sizes to use for validation. Training will auto-detect available sizes from disk.",
     "sizes": [
       "720",
       "720_169"

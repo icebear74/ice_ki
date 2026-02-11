@@ -398,30 +398,49 @@ def main():
             with open(runtime_config_path, 'r') as f:
                 rt_config = json.load(f)
             
-            # New runtime_config.json structure:
+            # New runtime_config.json structure (no longer uses size_distribution):
             # {
             #   "data": {"root": "...", "dataset_name": "master"},
-            #   "size_distribution": {"540": 0.65, "720_169": 0.35, ...},
             #   "training": {"adaptive_batch": {"540": {"batch": 1, "accum": 6}, ...}}
             # }
             
-            # Check if multi-size is configured via size_distribution
-            size_dist = rt_config.get('size_distribution', {})
-            # Filter out documentation keys (those starting with _) and non-numeric values
-            numeric_dist = {k: v for k, v in size_dist.items() 
-                           if not k.startswith('_') and isinstance(v, (int, float))}
-            if numeric_dist and any(v > 0 for v in numeric_dist.values()):
+            # Auto-detect which sizes are available by checking for directories
+            data_config = rt_config.get('data', {})
+            data_root = data_config.get('root', DATASET_ROOT)
+            dataset_name = data_config.get('dataset_name', 'master')
+            
+            # Check which size directories exist and have files
+            available_sizes = []
+            for size_key in ['540', '720', '720_169']:
+                train_dir = os.path.join(data_root, dataset_name, 'train', size_key, 'GT')
+                if os.path.exists(train_dir):
+                    files = [f for f in os.listdir(train_dir) if f.endswith('.png')]
+                    if files:
+                        available_sizes.append(size_key)
+                        print(f"{C_CYAN}  Found {len(files)} files for size {size_key}{C_RESET}")
+            
+            if len(available_sizes) > 1:
                 use_multi_size = True
-                print(f"{C_CYAN}✓ Multi-size training enabled (runtime_config.json found at {runtime_config_path}){C_RESET}")
+                print(f"{C_CYAN}✓ Multi-size training enabled: {', '.join(available_sizes)}{C_RESET}")
+            elif len(available_sizes) == 1:
+                print(f"{C_CYAN}✓ Single-size training: {available_sizes[0]}{C_RESET}")
+            else:
+                print(f"{C_YELLOW}⚠ No training data found, falling back to defaults{C_RESET}")
         except Exception as e:
             print(f"{C_YELLOW}⚠ Failed to load runtime_config.json: {e}{C_RESET}")
             print(f"{C_YELLOW}Using single-size training{C_RESET}")
     
-    # Helper function to filter size_distribution values (skip underscore-prefixed docs)
-    def get_numeric_distribution(size_dist):
-        """Extract numeric values from size_distribution, skipping documentation keys."""
-        return {k: v for k, v in size_dist.items() 
-                if not k.startswith('_') and isinstance(v, (int, float))}
+    # Helper function to auto-detect available sizes
+    def detect_available_sizes(data_root, dataset_name):
+        """Detect which dataset sizes are available by checking directories."""
+        available = []
+        for size_key in ['540', '720', '720_169']:
+            train_dir = os.path.join(data_root, dataset_name, 'train', size_key, 'GT')
+            if os.path.exists(train_dir):
+                files = [f for f in os.listdir(train_dir) if f.endswith('.png')]
+                if files:
+                    available.append((size_key, len(files)))
+        return available
     
     if use_multi_size:
         # Use multi-size dataloader
@@ -432,19 +451,17 @@ def main():
             data_config = rt_config.get('data', {})
             data_root = data_config.get('root', DATASET_ROOT)
             dataset_name = data_config.get('dataset_name', 'master')
-            size_dist = rt_config.get('size_distribution', {})
             adaptive_batch = rt_config.get('training', {}).get('adaptive_batch', {})
             
-            # Convert to dataloader format: sizes dict with enabled/distribution/batch_size
+            # Auto-detect available sizes and create config
             sizes_config = {}
-            # Filter out documentation keys (those starting with _) and non-numeric values
-            numeric_dist = {k: v for k, v in size_dist.items() 
-                           if not k.startswith('_') and isinstance(v, (int, float))}
-            for size_key, distribution in numeric_dist.items():
+            available = detect_available_sizes(data_root, dataset_name)
+            
+            for size_key, file_count in available:
                 batch_info = adaptive_batch.get(size_key, {})
                 sizes_config[size_key] = {
-                    'enabled': distribution > 0,
-                    'distribution': distribution,
+                    'enabled': True,  # All detected sizes are enabled
+                    'distribution': 1.0 / len(available),  # Equal distribution (not used for weighting)
                     'batch_size': batch_info.get('batch', 1)
                 }
             
@@ -483,10 +500,9 @@ def main():
             data_config = rt_config.get('data', {})
             data_root = data_config.get('root', DATASET_ROOT)
             dataset_name = data_config.get('dataset_name', 'master')
-            # Get first enabled size from size_distribution (filter out documentation keys)
-            size_dist = rt_config.get('size_distribution', {})
-            size_key = next((k for k, v in size_dist.items() 
-                           if not k.startswith('_') and isinstance(v, (int, float)) and v > 0), '540')
+            # Auto-detect first available size
+            available = detect_available_sizes(data_root, dataset_name)
+            size_key = available[0][0] if available else '540'
         else:
             # Fallback to defaults
             data_root = DATASET_ROOT
@@ -523,15 +539,12 @@ def main():
         data_config = rt_config.get('data', {})
         data_root = data_config.get('root', DATASET_ROOT)
         dataset_name = data_config.get('dataset_name', 'master')
-        # Get ALL enabled validation sizes
+        # Get validation sizes from config
         val_sizes = rt_config.get('validation', {}).get('sizes', [])
         if not val_sizes:
-            # Fallback to all sizes from size_distribution (filter out documentation keys)
-            size_dist = rt_config.get('size_distribution', {})
-            val_sizes = [k for k, v in size_dist.items() 
-                        if not k.startswith('_') and isinstance(v, (int, float)) and v > 0]
-        if not val_sizes:
-            val_sizes = ['540']  # Ultimate fallback
+            # Fallback to auto-detected training sizes
+            available = detect_available_sizes(data_root, dataset_name)
+            val_sizes = [size_key for size_key, _ in available] if available else ['540']
     else:
         # Fallback to defaults
         data_root = DATASET_ROOT
