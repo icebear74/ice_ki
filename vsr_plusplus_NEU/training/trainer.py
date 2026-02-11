@@ -875,14 +875,8 @@ class VSRTrainer:
                 'last_check': self.global_step
             }
             
-            # Get current distribution from runtime config
-            if self.runtime_config is not None:
-                try:
-                    size_dist = self.runtime_config.get('size_distribution', {})
-                    if size_dist:
-                        dataset_info['distribution'] = size_dist
-                except Exception as e:
-                    print(f"⚠️  Warning: Could not read size_distribution from runtime_config: {e}")
+            # Distribution will be calculated from actual file counts after gathering data
+            # (No longer using size_distribution from config)
             
             # Check training dataset
             if hasattr(self.train_loader, 'dataset'):
@@ -1062,6 +1056,12 @@ class VSRTrainer:
                     print(f"⚠️  Error checking validation dataset: {e}")
                     import traceback
                     traceback.print_exc()
+            
+            # Calculate distribution from actual file counts
+            total_train_files = sum(info['count'] for info in dataset_info['train_per_size'].values())
+            if total_train_files > 0:
+                for size_key, info in dataset_info['train_per_size'].items():
+                    dataset_info['distribution'][size_key] = info['count'] / total_train_files
             
             # Update web monitor
             if hasattr(self, 'web_monitor') and self.web_monitor:
