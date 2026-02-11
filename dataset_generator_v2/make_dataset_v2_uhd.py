@@ -87,14 +87,10 @@ class DatasetGeneratorV2UHD:
         self.logger = self._setup_logger()
         sys.logger = self.logger
         
-        # CUDA configuration
-        self.use_cuda = self.settings.get('use_cuda', None)  # None = auto-detect
-        self.cuda_device = self.settings.get('cuda_device', 0)
-        self.cuda_fallback = self.settings.get('cuda_fallback', True)
-        
-        # Detect CUDA availability (will be done per video for codec detection)
-        self.cuda_available = False
-        self.cuda_decoder = None
+        # CUDA/GPU disabled - using CPU-only mode for better stability
+        # CPU extraction is reliable and seeking is the bottleneck anyway
+        self.use_cuda = False
+        self.logger.info("🖥️  CPU-only mode enabled (CUDA/GPU disabled for stability)")
         
         # Videos are already sorted in JSON by multi-category priority
         # Process them in exact JSON order (no additional sorting)
@@ -225,23 +221,6 @@ class DatasetGeneratorV2UHD:
                 self.logger.warning("⚠️  WARNING: RAM usage >90%! Risk of OOM kill!")
             elif mem.percent > 80:
                 self.logger.warning("⚠️  WARNING: RAM usage >80%! Monitor carefully!")
-            
-            # Try to get GPU memory if CUDA is available
-            if self.cuda_available:
-                try:
-                    result = subprocess.run(['nvidia-smi', '--query-gpu=memory.used,memory.total', '--format=csv,noheader,nounits'],
-                                          capture_output=True, text=True, timeout=5)
-                    if result.returncode == 0:
-                        lines = result.stdout.strip().split('\n')
-                        if lines:
-                            used, total = map(int, lines[0].split(','))
-                            gpu_percent = (used / total * 100) if total > 0 else 0
-                            self.logger.info(f"  GPU Memory: {used}MB / {total}MB ({gpu_percent:.1f}% used)")
-                            
-                            if gpu_percent > 90:
-                                self.logger.warning("⚠️  WARNING: GPU memory >90%! Risk of CUDA OOM!")
-                except Exception as e:
-                    self.logger.debug(f"Could not get GPU memory: {e}")
         except Exception as e:
             self.logger.debug(f"Could not log system resources: {e}")
     
@@ -268,88 +247,7 @@ class DatasetGeneratorV2UHD:
         self.logger.debug(f"Extracted format probabilities: {probabilities}")
         return probabilities
     
-    def _detect_cuda_support(self, video_path: str) -> tuple:
-        """
-        Detect CUDA availability and appropriate hardware decoder for the video.
-        
-        Args:
-            video_path: Path to video file to detect codec
-            
-        Returns:
-            Tuple of (has_cuda: bool, decoder: str or None)
-        """
-        # Check if CUDA is disabled in config
-        if self.use_cuda is False:
-            self.logger.info("CUDA disabled in configuration")
-            return (False, None)
-        
-        # Check for NVIDIA GPU
-        try:
-            result = subprocess.run(
-                ['nvidia-smi', '-L'],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            if result.returncode != 0:
-                self.logger.info("CUDA Status: No NVIDIA GPU detected")
-                return (False, None)
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            self.logger.info("CUDA Status: nvidia-smi not found or timeout")
-            return (False, None)
-        
-        # Check FFmpeg CUDA support
-        try:
-            result = subprocess.run(
-                ['ffmpeg', '-decoders'],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            has_h264_cuvid = 'h264_cuvid' in result.stdout
-            has_hevc_cuvid = 'hevc_cuvid' in result.stdout
-            
-            if not (has_h264_cuvid or has_hevc_cuvid):
-                self.logger.info("CUDA Status: FFmpeg not compiled with CUDA support")
-                return (False, None)
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            self.logger.warning("Could not check FFmpeg CUDA support")
-            return (False, None)
-        
-        # Detect video codec
-        decoder = None
-        if os.path.exists(video_path):
-            try:
-                result = subprocess.run(
-                    ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
-                     '-show_entries', 'stream=codec_name', '-of', 'default=noprint_wrappers=1:nokey=1',
-                     video_path],
-                    capture_output=True,
-                    text=True,
-                    timeout=10
-                )
-                codec = result.stdout.strip().lower()
-                
-                if codec in ['h264', 'avc'] and has_h264_cuvid:
-                    decoder = 'h264_cuvid'
-                elif codec in ['hevc', 'h265'] and has_hevc_cuvid:
-                    decoder = 'hevc_cuvid'
-                else:
-                    self.logger.info(f"CUDA Status: Codec '{codec}' not supported by CUDA decoders")
-                    return (False, None)
-            except Exception as e:
-                self.logger.warning(f"Could not detect video codec: {e}")
-                return (False, None)
-        
-        if decoder:
-            self.logger.info(f"✓ CUDA Status:")
-            self.logger.info(f"  CUDA available: Yes")
-            self.logger.info(f"  FFmpeg CUDA support: Yes")
-            self.logger.info(f"  GPU device: {self.cuda_device}")
-            self.logger.info(f"  Hardware decoder: {decoder}")
-            return (True, decoder)
-        else:
-            return (False, None)
+    # CUDA support removed - using CPU-only mode for better stability
     
     def scan_video_durations(self) -> Dict[str, float]:
         """
@@ -597,26 +495,9 @@ class DatasetGeneratorV2UHD:
                 "format=yuv420p"
             )
             
+            # CPU-only mode (no CUDA) - more stable and reliable
             cmd = [
                 'ffmpeg',
-            ]
-            
-            # Add CUDA hardware acceleration if available
-            use_cuda_for_this = False
-            if self.use_cuda is not False:  # None (auto) or True
-                # Detect CUDA support for this video
-                if not self.cuda_available or self.cuda_decoder is None:
-                    self.cuda_available, self.cuda_decoder = self._detect_cuda_support(video_path)
-                
-                if self.cuda_available and self.cuda_decoder:
-                    cmd.extend([
-                        '-hwaccel', 'cuda',
-                        '-hwaccel_device', str(self.cuda_device),
-                        '-c:v', self.cuda_decoder
-                    ])
-                    use_cuda_for_this = True
-            
-            cmd.extend([
                 '-threads', str(self.workers),  # Add threading support
                 '-ss', str(start_time),
                 '-i', video_path,
@@ -624,7 +505,7 @@ class DatasetGeneratorV2UHD:
                 '-frames:v', str(n_frames),
                 '-y',
                 output_pattern
-            ])
+            ]
             
             timeout = self.config.get('ffmpeg_timeout', 120)
             result = subprocess.run(
@@ -635,30 +516,7 @@ class DatasetGeneratorV2UHD:
             )
             
             if result.returncode != 0:
-                # If CUDA was used and failed, try CPU fallback
-                if use_cuda_for_this and self.cuda_fallback:
-                    self.logger.warning("CUDA extraction failed, retrying with CPU")
-                    # Rebuild command without CUDA
-                    cmd = [
-                        'ffmpeg',
-                        '-threads', str(self.workers),
-                        '-ss', str(start_time),
-                        '-i', video_path,
-                        '-vf', vf_filter,
-                        '-frames:v', str(n_frames),
-                        '-y',
-                        output_pattern
-                    ]
-                    result = subprocess.run(
-                        cmd,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        timeout=timeout
-                    )
-                    if result.returncode != 0:
-                        return None
-                else:
-                    return None
+                return None
             
             # Load frames
             frames = []
@@ -834,33 +692,16 @@ class DatasetGeneratorV2UHD:
             self.logger.info(f"  Expected frames: {total_frames_to_extract}")
             self.logger.info(f"  FFmpeg select filter: Extracts frames where (frame_number - {first_frame}) % {cycle_length} < {n_frames}")
             
+            # CPU-only mode (no CUDA) - more stable and reliable
             cmd = [
                 'ffmpeg',
-            ]
-            
-            # Add CUDA hardware acceleration if available
-            use_cuda_for_this = False
-            if self.use_cuda is not False:  # None (auto) or True
-                # Detect CUDA support for this video if not already done
-                if not self.cuda_available or self.cuda_decoder is None:
-                    self.cuda_available, self.cuda_decoder = self._detect_cuda_support(video_path)
-                
-                if self.cuda_available and self.cuda_decoder:
-                    cmd.extend([
-                        '-hwaccel', 'cuda',
-                        '-hwaccel_device', str(self.cuda_device),
-                        '-c:v', self.cuda_decoder
-                    ])
-                    use_cuda_for_this = True
-            
-            cmd.extend([
                 '-threads', str(self.workers),  # Add threading support
                 '-i', video_path,
                 '-vf', full_filter,
                 '-vsync', 'vfr',
                 '-y',
                 output_pattern
-            ])
+            ]
             
             timeout = self.config.get('ffmpeg_timeout', 120) * len(timestamps) // 10
             timeout = max(timeout, 300)
@@ -874,30 +715,8 @@ class DatasetGeneratorV2UHD:
             )
             
             if returncode != 0:
-                # If CUDA was used and failed, try CPU fallback
-                if use_cuda_for_this and self.cuda_fallback:
-                    self.logger.warning("CUDA batch extraction failed, retrying with CPU")
-                    # Rebuild command without CUDA
-                    cmd = [
-                        'ffmpeg',
-                        '-threads', str(self.workers),
-                        '-i', video_path,
-                        '-vf', full_filter,
-                        '-vsync', 'vfr',
-                        '-y',
-                        output_pattern
-                    ]
-                    returncode = self._run_ffmpeg_with_progress(
-                        cmd,
-                        description=f"🔄 Retrying with CPU: {video_name[:40]}",
-                        timeout=timeout
-                    )
-                    if returncode != 0:
-                        self.logger.error(f"Batch extraction failed (CPU fallback)")
-                        return {}
-                else:
-                    self.logger.error(f"Batch extraction failed")
-                    return {}
+                self.logger.error(f"Batch extraction failed")
+                return {}
             
             # Instead of loading all frames into memory, return frame file paths
             # This prevents OOM when processing thousands of frames
