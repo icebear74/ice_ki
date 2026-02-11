@@ -127,47 +127,13 @@ class CompleteTrainingDataStore:
     def update_all_metrics(self, **updates):
         """Aktualisiert beliebige Metriken atomar"""
         with self._data_lock:
-            # Debug logging for dataset_files updates
-            if 'dataset_files' in updates:
-                print(f"\n🔍 DEBUG update_all_metrics: Received dataset_files update")
-                print(f"   train_per_size keys: {list(updates['dataset_files'].get('train_per_size', {}).keys())}")
-                print(f"   val keys: {list(updates['dataset_files'].get('val', {}).keys())}")
-                for size_key in ['540', '720', '720_169']:
-                    train_count = updates['dataset_files'].get('train_per_size', {}).get(size_key, {}).get('count', 'MISSING')
-                    val_count = updates['dataset_files'].get('val', {}).get(size_key, {}).get('count', 'MISSING')
-                    print(f"   {size_key}: train={train_count}, val={val_count}")
-            
             self._full_state.update(updates)
             self._full_state['last_update_time'] = time.time()
-            
-            # Debug: verify it was stored
-            if 'dataset_files' in updates:
-                print(f"\n🔍 DEBUG after update: Checking _full_state['dataset_files']")
-                stored_df = self._full_state.get('dataset_files', {})
-                print(f"   train_per_size keys: {list(stored_df.get('train_per_size', {}).keys())}")
-                print(f"   val keys: {list(stored_df.get('val', {}).keys())}")
-                for size_key in ['540', '720', '720_169']:
-                    train_count = stored_df.get('train_per_size', {}).get(size_key, {}).get('count', 'MISSING')
-                    val_count = stored_df.get('val', {}).get(size_key, {}).get('count', 'MISSING')
-                    print(f"   {size_key}: train={train_count}, val={val_count}")
     
     def get_complete_snapshot(self):
         """Liefert vollständige Kopie aller Daten"""
         with self._data_lock:
-            snapshot = self._full_state.copy()
-            
-            # Debug: Check dataset_files in snapshot
-            if 'dataset_files' in snapshot:
-                df = snapshot['dataset_files']
-                print(f"\n🔍 DEBUG get_complete_snapshot: Returning dataset_files")
-                print(f"   train_per_size keys: {list(df.get('train_per_size', {}).keys())}")
-                print(f"   val keys: {list(df.get('val', {}).keys())}")
-                for size_key in ['540', '720', '720_169']:
-                    train_count = df.get('train_per_size', {}).get(size_key, {}).get('count', 'MISSING')
-                    val_count = df.get('val', {}).get(size_key, {}).get('count', 'MISSING')
-                    print(f"   {size_key}: train={train_count}, val={val_count}")
-            
-            return snapshot
+            return self._full_state.copy()
 
 
 class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
@@ -2021,23 +1987,13 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         }
         
         function updateDatasetFiles(data) {
-            console.log('🔍 JS DEBUG: updateDatasetFiles called');
-            console.log('  data:', data);
-            console.log('  data.dataset_files:', data.dataset_files);
-            
             const dsFiles = data.dataset_files || {};
-            console.log('  dsFiles:', dsFiles);
-            console.log('  dsFiles.train_per_size:', dsFiles.train_per_size);
-            console.log('  dsFiles.val:', dsFiles.val);
-            console.log('  dsFiles.distribution:', dsFiles.distribution);
             
             // Update training datasets (per-size)
             const trainPerSize = dsFiles.train_per_size || {};
-            console.log('  trainPerSize:', trainPerSize);
             
             // 720 training
             const train720 = trainPerSize['720'] || {};
-            console.log('  train720:', train720, 'count:', train720.count);
             document.getElementById('train720Count').textContent = train720.count || 0;
             if (train720.has_new && train720.new_count > 0) {
                 document.getElementById('train720NewFiles').style.display = 'block';
@@ -2048,7 +2004,6 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             
             // 540 training
             const train540 = trainPerSize['540'] || {};
-            console.log('  train540:', train540, 'count:', train540.count);
             document.getElementById('train540Count').textContent = train540.count || 0;
             if (train540.has_new && train540.new_count > 0) {
                 document.getElementById('train540NewFiles').style.display = 'block';
