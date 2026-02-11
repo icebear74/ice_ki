@@ -107,7 +107,7 @@ class VideoManager:
             cats = video.get('categories', {})
             cat_str = ', '.join([f"{k}:{v:.2f}" for k, v in cats.items()])
             if not cat_str:
-                cat_str = "<unassigned>"
+                cat_str = "⚠️  <WILL BE SKIPPED - no categories>"
             
             print(f"{i:<6} {name:<50} {cat_str:<40}")
     
