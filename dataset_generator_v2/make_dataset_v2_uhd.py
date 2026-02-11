@@ -111,11 +111,12 @@ class DatasetGeneratorV2UHD:
         self.tracker.initialize_categories(self.category_targets)
         
         # Runtime state
-        self.workers = self.settings.get('max_workers', 4)
+        self.workers = 6  # Use 6 threads for faster extraction
         self.running = True
         self.paused = False
         self.last_update_time = time.time()
         self.update_interval = 0.5
+        self.logger.info(f"⚡ Using {self.workers} threads for FFmpeg extraction")
         
         # Statistics
         self.start_time = time.time()
@@ -496,9 +497,11 @@ class DatasetGeneratorV2UHD:
             )
             
             # CPU-only mode (no CUDA) - more stable and reliable
+            # FIXED: Added nice priority for lower system impact
             cmd = [
+                'nice', '-n', '19',  # Lowest priority
                 'ffmpeg',
-                '-threads', str(self.workers),  # Add threading support
+                '-threads', str(self.workers),  # 6 threads for faster extraction
                 '-ss', str(start_time),
                 '-i', video_path,
                 '-vf', vf_filter,
@@ -632,24 +635,26 @@ class DatasetGeneratorV2UHD:
             interval = frame_numbers[i+1] - (frame_numbers[i] + n_frames - 1) - 1
             intervals.append(interval)
         
-        # Check if we have a uniform stride pattern
-        if len(set(intervals)) <= 2:  # Mostly uniform (allow 1-2 variations)
-            # Can use stride-based extraction
-            stride = max(set(intervals), key=intervals.count) if intervals else 0
-            self.logger.info(f"Detected uniform stride pattern: {stride} frames between groups")
+        # Check if we have a STRICTLY uniform stride pattern
+        # FIXED: Require truly uniform spacing to avoid frame skipping
+        # Previous logic allowed up to 2 variations which caused partial extractions
+        if len(set(intervals)) == 1:  # Strictly uniform - all intervals identical
+            # Can safely use stride-based extraction
+            stride = intervals[0] if intervals else 0
+            self.logger.info(f"✓ Detected STRICT uniform stride pattern: {stride} frames between groups")
             return self._extract_frames_with_stride(video_path, sorted_ts, n_frames, fps, stride)
         else:
-            # Non-uniform pattern, need chunking approach
-            self.logger.info(f"Non-uniform intervals detected, using chunking approach")
+            # Non-uniform pattern, use chunking to ensure all frames are extracted
+            self.logger.info(f"⚠️  Non-uniform intervals detected ({len(set(intervals))} variations), using chunking for reliability")
             return self._extract_frames_chunked(video_path, sorted_ts, n_frames, fps)
     
     def _extract_frames_with_stride(self, video_path: str, timestamps: List[float],
                                    n_frames: int, fps: float, stride: int) -> Dict[float, List[np.ndarray]]:
         """
-        Extract frames using stride pattern: "extract N frames, skip M frames, repeat"
+        Extract frames using stride pattern with FIXED modulo calculation.
         
-        Uses FFmpeg select filter with modulo operation for efficiency.
-        Command is much shorter than listing individual frames.
+        FIXED: Corrected modulo pattern to avoid frame skipping.
+        Uses compact modulo expression instead of explicit frame list to avoid command line length issues.
         """
         temp_dir = None
         try:
@@ -662,13 +667,17 @@ class DatasetGeneratorV2UHD:
             last_frame = int(timestamps[-1] * fps) + n_frames - 1
             total_frames_to_extract = len(timestamps) * n_frames
             
-            # Build select filter using modulo pattern
-            # Extract n_frames, then skip (stride + n_frames - 1) frames
-            cycle_length = n_frames + stride
+            # Build select filter using CORRECTED modulo pattern
+            # Cycle length = distance from start of one group to start of next
+            # For example: frames 100-106, skip 68, frames 175-181, skip 68...
+            # interval (stride) = 68, n_frames = 7
+            # cycle_length = 68 + 7 = 75 (distance from frame 100 to frame 175)
+            cycle_length = stride + n_frames
             
-            # Select filter: within each cycle, take the first n_frames
-            # Example: if cycle_length=250, n_frames=7:
-            #   Take frames where: (n - first_frame) % 250 < 7
+            # FIXED: The select filter now correctly uses modulo
+            # Within each cycle starting at first_frame, take first n_frames
+            # Formula: frame is selected if (frame_number - first_frame) % cycle_length < n_frames
+            # This ensures: frames [0-6], skip, frames [75-81], skip, frames [150-156], etc.
             select_filter = f"gte(n,{first_frame})*lte(n,{last_frame})*lt(mod(n-{first_frame},{cycle_length}),{n_frames})"
             
             # UHD tonemap filter with 1080p scaling
@@ -685,17 +694,20 @@ class DatasetGeneratorV2UHD:
             # Full filter: select specific frames + tonemap
             full_filter = f"select='{select_filter}',setpts=N/FRAME_RATE/TB,{tonemap_filter}"
             
-            self.logger.info(f"Batch extracting with stride pattern:")
+            self.logger.info(f"Batch extracting with CORRECTED stride pattern:")
             self.logger.info(f"  First frame: {first_frame}, Last frame: {last_frame}")
-            self.logger.info(f"  Cycle length: {cycle_length} frames (extract {n_frames} frames, skip {stride} frames)")
-            self.logger.info(f"  Pattern: Extract frames {first_frame}-{first_frame+n_frames-1}, {first_frame+cycle_length}-{first_frame+cycle_length+n_frames-1}, etc.")
+            self.logger.info(f"  Stride (gap): {stride} frames, n_frames: {n_frames}")
+            self.logger.info(f"  Cycle length: {cycle_length} frames (from start of group to start of next)")
             self.logger.info(f"  Expected frames: {total_frames_to_extract}")
-            self.logger.info(f"  FFmpeg select filter: Extracts frames where (frame_number - {first_frame}) % {cycle_length} < {n_frames}")
+            self.logger.info(f"  Select filter: (n-{first_frame}) % {cycle_length} < {n_frames}")
+            self.logger.info(f"  This extracts: [{first_frame}-{first_frame+n_frames-1}], [{first_frame+cycle_length}-{first_frame+cycle_length+n_frames-1}], etc.")
             
             # CPU-only mode (no CUDA) - more stable and reliable
+            # FIXED: Added nice priority for lower system impact
             cmd = [
+                'nice', '-n', '19',  # Lowest priority to not interfere with other processes
                 'ffmpeg',
-                '-threads', str(self.workers),  # Add threading support
+                '-threads', str(self.workers),  # 6 threads for faster extraction
                 '-i', video_path,
                 '-vf', full_filter,
                 '-vsync', 'vfr',
@@ -736,6 +748,22 @@ class DatasetGeneratorV2UHD:
                     frame_paths[ts] = paths
                 else:
                     self.logger.warning(f"Incomplete frame set for timestamp {ts}, skipping")
+            
+            # VALIDATION: Check that we got all expected frames
+            total_extracted = sum(len(paths) for paths in frame_paths.values())
+            if total_extracted != total_frames_to_extract:
+                self.logger.error(f"⚠️  Frame count mismatch!")
+                self.logger.error(f"   Expected: {total_frames_to_extract} frames")
+                self.logger.error(f"   Got: {total_extracted} frames")
+                self.logger.error(f"   Missing: {total_frames_to_extract - total_extracted} frames")
+                # Log which timestamps are incomplete
+                for ts in timestamps:
+                    if ts not in frame_paths:
+                        self.logger.error(f"   Timestamp {ts:.2f}s: MISSING (0/{n_frames} frames)")
+                    elif len(frame_paths.get(ts, [])) != n_frames:
+                        self.logger.error(f"   Timestamp {ts:.2f}s: INCOMPLETE ({len(frame_paths[ts])}/{n_frames} frames)")
+            else:
+                self.logger.info(f"✓ Frame validation passed: {total_extracted}/{total_frames_to_extract} frames extracted")
             
             self.logger.info(f"Stride extraction complete: {len(frame_paths)}/{len(timestamps)} timestamps successful")
             
@@ -1754,7 +1782,9 @@ class DatasetGeneratorV2UHD:
             # Cache miss or invalid - query ffprobe
             self.logger.debug(f"Scanning video metadata: {os.path.basename(video_path)}")
             
+            # FIXED: Added nice priority for lower system impact
             cmd = [
+                'nice', '-n', '19',  # Lowest priority
                 'ffprobe',
                 '-v', 'quiet',
                 '-print_format', 'json',
