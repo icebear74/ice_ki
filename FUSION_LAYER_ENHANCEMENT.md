@@ -1,9 +1,10 @@
 # Fusion Layer Enhancement Summary
 
 ## Overview
-Enhanced the fusion layers in **both** VSR models to improve ghosting/shadow suppression and scene cut handling:
-- **5-frame model**: `vsr_plus_plus/core/model.py` (VSRBidirectional_3x)
+Enhanced the fusion layers in the **7-frame VSR model** to improve ghosting/shadow suppression and scene cut handling:
 - **7-frame model**: `vsr_plusplus_NEU/core/model_7frame.py` (VSRBidirectional_7frames_3x)
+
+**Note**: The original 5-frame models (`vsr_plus_plus/core/model.py` and `vsr_plusplus_NEU/core/model.py`) remain unchanged with TrackedConv2d fusion layers.
 
 ## Changes Made
 
@@ -53,20 +54,6 @@ FusionBlock(in_feats, out_feats):
 
 ## Parameter Analysis
 
-### 5-Frame Model (VSRBidirectional_3x)
-Default configuration: `n_feats=128, n_blocks=32`
-
-| Component | Original (1x1 Conv) | New (FusionBlock) | Increase |
-|-----------|---------------------|-------------------|----------|
-| backward_fuse | 32,896 | 311,552 | +278,656 |
-| forward_fuse | 32,896 | 311,552 | +278,656 |
-| fusion | 32,896 | 311,552 | +278,656 |
-| **Total Fusion** | **98,688** | **934,656** | **+835,968** |
-| **Entire Model** | **10,879,363** | **11,715,331** | **+835,968** |
-
-- Fusion blocks now account for **7.98%** of total model parameters
-- Overall model size increase: **~7.7%**
-
 ### 7-Frame Model (VSRBidirectional_7frames_3x)
 Default configuration: `n_feats=72, n_blocks=26`
 
@@ -80,19 +67,9 @@ Default configuration: `n_feats=72, n_blocks=26`
 
 - Fusion blocks now account for **9.39%** of total model parameters
 - Overall model size increase: **~9.2%**
-
-### Summary
-Both models show similar relative increases (~845-847% in fusion layer parameters), but the parameter increase is justified by the improved spatial awareness and feature learning capabilities.
+- The parameter increase is justified by the improved spatial awareness and feature learning capabilities
 
 ## Testing
-
-### 5-Frame Model Tests
-All tests pass:
-- ✅ Model instantiation with FusionBlocks
-- ✅ FusionBlock structure verification
-- ✅ Activity tracking functionality
-- ✅ Forward pass execution (input: [1, 5, 3, 64, 64] → output: [1, 3, 192, 192])
-- ✅ `get_layer_activity()` method structure
 
 ### 7-Frame Model Tests
 All tests pass:
@@ -102,11 +79,6 @@ All tests pass:
 - ✅ Forward pass execution (input: [1, 7, 3, 64, 64] → output: [1, 3, 192, 192])
 - ✅ `get_layer_activity()` method structure
 - ✅ Existing 7-frame system tests
-
-### Integration Tests
-- ✅ Both FusionBlock implementations identical
-- ✅ Both produce same output shape for same input dimensions
-- ✅ Both track activity correctly
 
 ## Security
 - ✅ CodeQL scan: No security issues found
@@ -157,4 +129,6 @@ The `.item()` call incurs CPU-GPU sync overhead, but this is acceptable because:
 
 ## Conclusion
 
-The fusion layer enhancement successfully improves **both** the 5-frame and 7-frame VSR models' ability to handle ghosting, shadows, and scene cuts while maintaining compatibility with existing GUI components. The parameter increases are modest (7-9% of total model size) and justified by the improved capabilities. Both models now have consistent FusionBlock implementations for easier maintenance and debugging.
+The fusion layer enhancement successfully improves the 7-frame VSR model's ability to handle ghosting, shadows, and scene cuts while maintaining compatibility with existing GUI components. The parameter increase is modest (9.2% of total model size) and justified by the improved capabilities.
+
+**Important Note**: The original 5-frame models (`vsr_plus_plus/core/model.py` and `vsr_plusplus_NEU/core/model.py`) remain unchanged as requested, preserving backward compatibility and existing training setups.
