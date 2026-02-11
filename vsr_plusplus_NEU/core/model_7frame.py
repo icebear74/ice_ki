@@ -32,21 +32,25 @@ class FusionBlock(nn.Module):
     """
     Fusion block with spatial awareness for improved ghosting/shadow suppression.
     Uses 3x3 conv for spatial context, followed by 1x1 conv for gating logic.
+    Tracks activity of both layers separately for detailed WebUI visualization.
     """
     def __init__(self, in_feats, out_feats):
         super().__init__()
         self.conv3x3 = nn.Conv2d(in_feats, out_feats, 3, 1, 1)
         self.relu = nn.LeakyReLU(0.1, inplace=True)
         self.conv1x1 = nn.Conv2d(out_feats, out_feats, 1)
-        self.last_activity = 0.0
+        self.last_activity_3x3 = 0.0
+        self.last_activity_1x1 = 0.0
     
     def forward(self, x):
         out = self.conv3x3(x)
+        # Track 3x3 conv activity
+        self.last_activity_3x3 = out.detach().abs().mean().item()
+        
         out = self.relu(out)
         out = self.conv1x1(out)
-        
-        # Track activity
-        self.last_activity = out.detach().abs().mean().item()
+        # Track 1x1 conv activity
+        self.last_activity_1x1 = out.detach().abs().mean().item()
         
         return out
 
@@ -145,10 +149,10 @@ class VSRBidirectional_7frames_3x(nn.Module):
             Dict with activities:
             {
                 'backward_trunk': [list of ResidualBlock activities],
-                'backward_fuse': float (fusion layer activity),
+                'backward_fuse': [3x3 activity, 1x1 activity],
                 'forward_trunk': [list of ResidualBlock activities],
-                'forward_fuse': float (fusion layer activity),
-                'fusion': float (final fusion layer activity)
+                'forward_fuse': [3x3 activity, 1x1 activity],
+                'fusion': [3x3 activity, 1x1 activity]
             }
         """
         backward_activities = []
@@ -161,8 +165,8 @@ class VSRBidirectional_7frames_3x(nn.Module):
         
         return {
             'backward_trunk': backward_activities,
-            'backward_fuse': self.backward_fuse.last_activity,
+            'backward_fuse': [self.backward_fuse.last_activity_3x3, self.backward_fuse.last_activity_1x1],
             'forward_trunk': forward_activities,
-            'forward_fuse': self.forward_fuse.last_activity,
-            'fusion': self.fusion.last_activity
+            'forward_fuse': [self.forward_fuse.last_activity_3x3, self.forward_fuse.last_activity_1x1],
+            'fusion': [self.fusion.last_activity_3x3, self.fusion.last_activity_1x1]
         }
