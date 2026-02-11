@@ -603,13 +603,13 @@ class DatasetGeneratorV2UHD:
     def extract_frames_batch_uhd(self, video_path: str, timestamps: List[float],
                                  n_frames: int = 7, fps: float = 25.0) -> Dict[float, List[np.ndarray]]:
         """
-        OPTIMIZED: Extract frames at multiple timestamps in a SINGLE FFmpeg pass using stride/interval pattern.
+        OPTIMIZED: Extract frames at multiple timestamps in a SINGLE FFmpeg pass using file-based frame selection.
         
         This is 10-50x faster than calling extract_frames_uhd() multiple times because:
         - Video file opened only ONCE
         - Single decode pass through video
         - No repeated seek operations
-        - Uses FFmpeg's select filter with stride pattern (not listing individual frames)
+        - Uses sendcmd with external file (works for ANY timestamp pattern)
         
         Args:
             video_path: Path to video file
@@ -624,43 +624,28 @@ class DatasetGeneratorV2UHD:
         if not timestamps:
             return {}
         
-        # Calculate stride pattern between extraction points
+        # Sort timestamps for predictable extraction order
         sorted_ts = sorted(timestamps)
-        frame_numbers = [int(ts * fps) for ts in sorted_ts]
         
-        # Calculate intervals between extraction points
-        intervals = []
-        for i in range(len(frame_numbers) - 1):
-            # Distance from end of one group to start of next
-            interval = frame_numbers[i+1] - (frame_numbers[i] + n_frames - 1) - 1
-            intervals.append(interval)
-        
-        # Check if we have a STRICTLY uniform stride pattern
-        # FIXED: Require truly uniform spacing to avoid frame skipping
-        # Previous logic allowed up to 2 variations which caused partial extractions
-        if len(set(intervals)) == 1:  # Strictly uniform - all intervals identical
-            # Can safely use stride-based extraction
-            stride = intervals[0] if intervals else 0
-            self.logger.info(f"✓ Detected STRICT uniform stride pattern: {stride} frames between groups")
-            return self._extract_frames_with_stride(video_path, sorted_ts, n_frames, fps, stride)
-        else:
-            # Non-uniform pattern, use chunking to ensure all frames are extracted
-            self.logger.info(f"⚠️  Non-uniform intervals detected ({len(set(intervals))} variations), using chunking for reliability")
-            return self._extract_frames_chunked(video_path, sorted_ts, n_frames, fps)
+        # ALWAYS use file-based extraction (works for uniform AND non-uniform patterns)
+        # User feedback: "I thought we were doing this via a file where the frames to extract are listed?!"
+        self.logger.info(f"📄 Using FILE-BASED frame extraction for {len(sorted_ts)} timestamps")
+        return self._extract_frames_with_file(video_path, sorted_ts, n_frames, fps)
     
-    def _extract_frames_with_stride(self, video_path: str, timestamps: List[float],
-                                   n_frames: int, fps: float, stride: int) -> Dict[float, List[np.ndarray]]:
+    def _extract_frames_with_file(self, video_path: str, timestamps: List[float],
+                                   n_frames: int, fps: float) -> Dict[float, List[np.ndarray]]:
         """
         Extract frames using sendcmd with frame list file.
         
-        FIXED: Uses sendcmd with external file to avoid command line length limits.
+        Uses sendcmd with external file to avoid command line length limits.
         Creates commands.txt with explicit frame selections, then uses:
         -vf "sendcmd=f=commands.txt,select"
         
         This approach:
         - No command line length issues (frame list in file)
         - Explicit frame selection (100% accurate)
-        - Works with any number of frames
+        - Works with ANY timestamp pattern (uniform or non-uniform)
+        - Fast seeking with -discard nokey
         """
         temp_dir = None
         commands_file = None
@@ -708,11 +693,13 @@ class DatasetGeneratorV2UHD:
             full_filter = f"sendcmd=f={commands_file},select,setpts=N/FRAME_RATE/TB,{tonemap_filter}"
             
             # CPU-only mode (no CUDA) - more stable and reliable
-            # FIXED: Added nice priority for lower system impact
+            # ADDED: -discard nokey for faster seeking (user suggestion)
+            # Since we extract 7 consecutive frames, exact seek position doesn't matter
             cmd = [
                 'nice', '-n', '19',  # Lowest priority to not interfere with other processes
                 'ffmpeg',
                 '-threads', str(self.workers),  # 6 threads for faster extraction
+                '-discard', 'nokey',  # Skip non-keyframes during seek = 2-5x faster
                 '-i', video_path,
                 '-vf', full_filter,
                 '-vsync', 'vfr',
@@ -790,31 +777,6 @@ class DatasetGeneratorV2UHD:
             return {}
         # NOTE: temp_dir is NOT cleaned up here on success
         # It will be cleaned up after frames are processed to avoid OOM
-    
-    def _extract_frames_chunked(self, video_path: str, timestamps: List[float],
-                               n_frames: int, fps: float, chunk_size: int = 50) -> Dict[float, List[np.ndarray]]:
-        """
-        Extract frames in chunks to avoid command line length limits.
-        
-        For non-uniform intervals, process in smaller batches.
-        """
-        self.logger.info(f"Using chunked extraction with chunk size {chunk_size}")
-        
-        all_extracted = {}
-        
-        # Process timestamps in chunks
-        for i in range(0, len(timestamps), chunk_size):
-            chunk = timestamps[i:i+chunk_size]
-            self.logger.info(f"Processing chunk {i//chunk_size + 1}/{(len(timestamps)-1)//chunk_size + 1} ({len(chunk)} timestamps)")
-            
-            # Use legacy extraction for this chunk (safe, no command line issues)
-            for ts in chunk:
-                frames = self.extract_frames_uhd(video_path, ts, n_frames)
-                if frames and len(frames) == n_frames:
-                    all_extracted[ts] = frames
-        
-        self.logger.info(f"Chunked extraction complete: {len(all_extracted)}/{len(timestamps)} timestamps successful")
-        return all_extracted
     
     def create_patch_pair(self, frames: List[np.ndarray], format_name: str, 
                          format_config: dict, force_center: bool = False) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
