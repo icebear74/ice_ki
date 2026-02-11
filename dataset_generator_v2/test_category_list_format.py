@@ -121,7 +121,7 @@ try:
     
     print(f"Testing category display for {len(videos)} videos:")
     for i, video in videos:
-        cats = video.get('categories', {})
+        cats = video.get('categories', [])
         # This line was causing the error before the fix
         cat_str = format_categories_display(cats)
         print(f"  Video {i}: {video['name']} - {cat_str}")

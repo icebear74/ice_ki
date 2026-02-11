@@ -136,7 +136,7 @@ class VideoManager:
                 break
             
             name = video['name'][:48]
-            cats = video.get('categories', {})
+            cats = video.get('categories', [])
             cat_str = format_categories_display(cats)
             
             print(f"{i:<6} {name:<50} {cat_str:<40}")
@@ -213,7 +213,7 @@ class VideoManager:
                 if shown < 20 or i in selected:
                     sel_marker = "[X]" if i in selected else "[ ]"
                     name = video['name'][:48]
-                    cats = video.get('categories', {})
+                    cats = video.get('categories', [])
                     cat_str = format_categories_display(cats)[:28] if cats else ""
                     print(f"{sel_marker:<5} {i:<6} {name:<50} {cat_str:<30}")
                     shown += 1
