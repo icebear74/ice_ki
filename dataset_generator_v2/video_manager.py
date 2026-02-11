@@ -65,15 +65,36 @@ class VideoManager:
         
     def list_videos(self, filter_pattern: Optional[str] = None, 
                    category: Optional[str] = None, 
-                   show_unassigned: bool = False):
-        """List videos with optional filtering."""
+                   show_unassigned: bool = False,
+                   use_simple_search: bool = False):
+        """
+        List videos with optional filtering.
+        
+        Args:
+            filter_pattern: Pattern to match (regex or simple string)
+            category: Filter by category
+            show_unassigned: Show only unassigned videos
+            use_simple_search: Use simple substring search instead of regex
+        """
         
         filtered = []
         for i, video in enumerate(self.videos):
             # Filter by pattern
             if filter_pattern:
-                if not re.search(filter_pattern, video['name'], re.IGNORECASE):
-                    continue
+                if use_simple_search:
+                    # Simple case-insensitive substring search
+                    if filter_pattern.lower() not in video['name'].lower():
+                        continue
+                else:
+                    # Regex search with error handling
+                    try:
+                        if not re.search(filter_pattern, video['name'], re.IGNORECASE):
+                            continue
+                    except re.error as e:
+                        # Invalid regex - fall back to simple search
+                        print(f"⚠️  Invalid regex pattern, using simple search instead: {e}")
+                        if filter_pattern.lower() not in video['name'].lower():
+                            continue
             
             # Filter by category
             if category:
@@ -143,6 +164,117 @@ class VideoManager:
         
         self.modified = True
         print(f"✓ Assigned {count} videos to categories: {normalized}")
+    
+    def interactive_select_videos(self, initial_filter: Optional[str] = None):
+        """
+        Interactive video selection with simple terminal interface.
+        Users can toggle videos with their ID and confirm with 'done'.
+        
+        Args:
+            initial_filter: Optional filter to pre-filter videos
+            
+        Returns:
+            List of selected video indices or None if cancelled
+        """
+        # Get initial list of videos
+        if initial_filter:
+            videos = self.list_videos(filter_pattern=initial_filter, use_simple_search=True)
+        else:
+            videos = self.list_videos()
+        
+        if not videos:
+            print("No videos found.")
+            return None
+        
+        selected = set()
+        
+        print("\n" + "="*80)
+        print("INTERACTIVE VIDEO SELECTION")
+        print("="*80)
+        print("Commands:")
+        print("  [ID]      - Toggle video selection (e.g., '5' or '5,7,9')")
+        print("  all       - Select all videos")
+        print("  none      - Deselect all videos")
+        print("  show      - Show current selection")
+        print("  done      - Confirm selection")
+        print("  cancel    - Cancel and return")
+        print("="*80)
+        
+        while True:
+            # Show videos with selection status
+            print(f"\n{len(videos)} videos available, {len(selected)} selected")
+            print(f"\n{'Sel':<5} {'ID':<6} {'Name':<50} {'Categories':<30}")
+            print("-" * 95)
+            
+            # Show first 20 and selected videos
+            shown = 0
+            for idx, (i, video) in enumerate(videos):
+                if shown < 20 or i in selected:
+                    sel_marker = "[X]" if i in selected else "[ ]"
+                    name = video['name'][:48]
+                    cats = video.get('categories', {})
+                    cat_str = ', '.join([f"{k}:{v:.1f}" for k, v in cats.items()])[:28] if cats else ""
+                    print(f"{sel_marker:<5} {i:<6} {name:<50} {cat_str:<30}")
+                    shown += 1
+            
+            if len(videos) > 20:
+                remaining = len(videos) - 20
+                print(f"... and {remaining} more (use filter or select by ID)")
+            
+            # Get command
+            cmd = input(f"\nCommand (selected: {len(selected)}): ").strip().lower()
+            
+            if not cmd:
+                continue
+            
+            if cmd == 'done':
+                if not selected:
+                    print("No videos selected.")
+                    continue
+                return list(selected)
+            
+            elif cmd == 'cancel':
+                return None
+            
+            elif cmd == 'all':
+                selected = {i for i, v in videos}
+                print(f"✓ Selected all {len(selected)} videos")
+            
+            elif cmd == 'none':
+                selected.clear()
+                print("✓ Cleared selection")
+            
+            elif cmd == 'show':
+                if not selected:
+                    print("No videos selected.")
+                else:
+                    print(f"\nSelected {len(selected)} videos:")
+                    for i, video in enumerate(self.videos):
+                        if i in selected:
+                            print(f"  {i:<6} {video['name']}")
+            
+            else:
+                # Try to parse as ID(s)
+                try:
+                    # Support comma-separated IDs
+                    ids = [int(x.strip()) for x in cmd.split(',')]
+                    for vid_id in ids:
+                        # Validate ID
+                        if vid_id < 0 or vid_id >= len(self.videos):
+                            print(f"❌ Invalid ID: {vid_id}")
+                            continue
+                        
+                        # Toggle selection
+                        if vid_id in selected:
+                            selected.remove(vid_id)
+                            print(f"  Deselected: {self.videos[vid_id]['name']}")
+                        else:
+                            selected.add(vid_id)
+                            print(f"  Selected: {self.videos[vid_id]['name']}")
+                
+                except ValueError:
+                    print(f"❌ Invalid command: {cmd}")
+                    print("   Use ID numbers, 'all', 'none', 'show', 'done', or 'cancel'")
     
     def remove_from_category(self, video_indices: List[int], category: str):
         """Remove videos from a specific category."""
@@ -220,11 +352,12 @@ def print_menu():
     print("3. List unassigned videos")
     print("4. Search videos by name")
     print("5. Assign video(s) to categories")
-    print("6. Multi-assign by pattern")
-    print("7. Remove from category")
-    print("8. Reset all assignments")
-    print("9. Show statistics")
-    print("10. Edit category targets")
+    print("6. Interactive multi-select (NEW!)")
+    print("7. Multi-assign by pattern (regex/search)")
+    print("8. Remove from category")
+    print("9. Reset all assignments")
+    print("10. Show statistics")
+    print("11. Edit category targets")
     print("s. Save changes")
     print("q. Quit")
     print("="*60)
@@ -332,12 +465,28 @@ def main():
                 print("❌ Invalid ID format")
         
         elif choice == '6':
-            # Multi-assign by pattern
-            pattern = input("Search pattern (regex, e.g., 'Star Trek.*'): ").strip()
+            # Interactive multi-select (NEW!)
+            filter_str = input("Optional filter (leave empty for all, or enter text to search): ").strip()
+            selected_ids = manager.interactive_select_videos(filter_str if filter_str else None)
+            
+            if selected_ids:
+                print(f"\n✓ Selected {len(selected_ids)} videos")
+                weights = get_category_weights(manager)
+                if weights:
+                    manager.assign_videos(selected_ids, weights)
+            else:
+                print("Selection cancelled")
+        
+        elif choice == '7':
+            # Multi-assign by pattern (regex/search)
+            pattern = input("Search pattern (text or regex, e.g., 'Star Trek' or 'Star Trek.*'): ").strip()
             if not pattern:
                 continue
             
-            videos = manager.list_videos(filter_pattern=pattern)
+            # Try simple search first
+            use_simple = '*' in pattern or not any(c in pattern for c in r'\.[](){}^$+?|')
+            
+            videos = manager.list_videos(filter_pattern=pattern, use_simple_search=use_simple)
             if not videos:
                 print(f"No videos match pattern: {pattern}")
                 continue
@@ -353,7 +502,7 @@ def main():
                 ids = [i for i, v in videos]
                 manager.assign_videos(ids, weights)
         
-        elif choice == '7':
+        elif choice == '8':
             # Remove from category
             print(f"Categories: {', '.join(manager.categories)}")
             cat = input("Category to remove: ").strip()
@@ -373,15 +522,15 @@ def main():
             
             manager.remove_from_category(ids, cat)
         
-        elif choice == '8':
+        elif choice == '9':
             # Reset all
             manager.reset_all()
         
-        elif choice == '9':
+        elif choice == '10':
             # Statistics
             manager.show_statistics()
         
-        elif choice == '10':
+        elif choice == '11':
             # Edit category targets
             manager.edit_category_targets()
         
