@@ -15,6 +15,7 @@ Features:
 import json
 import os
 import sys
+import traceback
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 import re
@@ -423,11 +424,11 @@ def main():
         manager.load()
     except Exception as e:
         print(f"❌ Error initializing Video Manager: {e}")
-        import traceback
         traceback.print_exc()
         sys.exit(1)
     
     while True:
+        choice = ""  # Initialize to avoid NameError in exception handler
         try:
             print_menu()
             choice = input("\nChoice: ").strip().lower()
@@ -635,7 +636,6 @@ def main():
             break
         except Exception as e:
             print(f"\n⚠️  Error processing menu choice '{choice}': {e}")
-            import traceback
             traceback.print_exc()
             print("\nContinuing...")
             continue
@@ -649,6 +649,5 @@ if __name__ == '__main__':
         sys.exit(0)
     except Exception as e:
         print(f"\n❌ Unexpected error: {e}")
-        import traceback
         traceback.print_exc()
         sys.exit(1)
