@@ -2,18 +2,21 @@
 
 ## Expected Layer Count
 
-When using the **7-frame model** (`vsr_plusplus_NEU/core/model_7frame.py`), you should see **29 layers** total in the WebUI.
+When using the **7-frame model** (`vsr_plusplus_NEU/core/model_7frame.py`), you should see **32 layers** total in the WebUI.
 
 ### Layer Breakdown
 
 | Layer Type | Count | Description |
 |------------|-------|-------------|
 | Backward Trunk | 13 | ResidualBlock layers (backward propagation) |
-| Backward Fusion | 1 | **FusionBlock** (NEW - enhanced with 3x3+1x1 conv) |
+| Backward Fusion 3x3 | 1 | FusionBlock 3x3 conv (spatial context) |
+| Backward Fusion 1x1 | 1 | FusionBlock 1x1 conv (channel gating) |
 | Forward Trunk | 13 | ResidualBlock layers (forward propagation) |
-| Forward Fusion | 1 | **FusionBlock** (NEW - enhanced with 3x3+1x1 conv) |
-| Final Fusion | 1 | **FusionBlock** (NEW - enhanced with 3x3+1x1 conv) |
-| **TOTAL** | **29** | All layers with activity tracking |
+| Forward Fusion 3x3 | 1 | FusionBlock 3x3 conv (spatial context) |
+| Forward Fusion 1x1 | 1 | FusionBlock 1x1 conv (channel gating) |
+| Final Fusion 3x3 | 1 | FusionBlock 3x3 conv (spatial context) |
+| Final Fusion 1x1 | 1 | FusionBlock 1x1 conv (channel gating) |
+| **TOTAL** | **32** | All layers with activity tracking |
 
 ### Activity Structure
 
@@ -21,20 +24,24 @@ The `get_layer_activity()` method returns:
 
 ```python
 {
-    'backward_trunk': [13 float values],  # Activity of 13 ResidualBlocks
-    'backward_fuse': float,               # Activity of backward FusionBlock
-    'forward_trunk': [13 float values],   # Activity of 13 ResidualBlocks
-    'forward_fuse': float,                # Activity of forward FusionBlock
-    'fusion': float                       # Activity of final FusionBlock
+    'backward_trunk': [13 float values],      # Activity of 13 ResidualBlocks
+    'backward_fuse': [3x3_act, 1x1_act],      # 2 values: 3x3 and 1x1 activities
+    'forward_trunk': [13 float values],       # Activity of 13 ResidualBlocks
+    'forward_fuse': [3x3_act, 1x1_act],       # 2 values: 3x3 and 1x1 activities
+    'fusion': [3x3_act, 1x1_act]              # 2 values: 3x3 and 1x1 activities
 }
 ```
 
 ### What's New? ⭐
 
-The **3 FusionBlock layers** (backward_fuse, forward_fuse, fusion) are NEW:
-- Previously: Simple 1x1 convolutions (no spatial awareness)
-- Now: FusionBlock with 3x3 convolution + LeakyReLU + 1x1 convolution
-- Benefit: Better ghosting/shadow suppression and scene cut handling
+The **FusionBlock layers** are tracked separately:
+- **3x3 convolution**: Provides spatial context (sees neighboring pixels)
+- **1x1 convolution**: Provides channel gating (feature selection)
+
+This separate tracking allows you to:
+- See which layer is more active (3x3 spatial vs 1x1 gating)
+- Debug issues with specific parts of the fusion block
+- Understand the model's internal behavior better
 
 ### Configuration
 
@@ -51,9 +58,11 @@ If the WebUI shows a different number of layers:
 2. Verify the model configuration (n_blocks=26 gives 13+13 trunk blocks)
 3. Ensure the model's `get_layer_activity()` method is being called
 4. Check WebUI code for how it processes the activity dictionary
+5. Each FusionBlock should show 2 values (as a list), not 1
 
 ## Notes
 
 - The 5-frame models remain unchanged and will show their original layer counts
 - Only `vsr_plusplus_NEU/core/model_7frame.py` has the enhanced FusionBlocks
 - Activity values range from 0.0 to higher values depending on the data being processed
+- Separate tracking does NOT change model quality, only visualization detail
