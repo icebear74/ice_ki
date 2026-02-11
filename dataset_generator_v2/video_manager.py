@@ -16,8 +16,18 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 import re
+
+# Import utilities
+from category_utils import (
+    normalize_categories, 
+    get_video_categories,
+    is_video_in_category,
+    format_categories_display,
+    convert_config_to_new_format
+)
+from interactive_selector import select_items, select_categories
 
 
 class VideoManager:
@@ -39,11 +49,11 @@ class VideoManager:
         self.videos = self.config.get('videos', [])
         self.category_targets = self.config.get('category_targets', {})
         
-        # Extract unique categories
+        # Extract unique categories (handle both formats)
         self.categories = set()
         for video in self.videos:
-            for cat in video.get('categories', {}).keys():
-                self.categories.add(cat)
+            cats = get_video_categories(video)
+            self.categories.update(cats)
         self.categories = sorted(list(self.categories))
         
         print(f"✓ Loaded {len(self.videos)} videos")
@@ -146,24 +156,16 @@ class VideoManager:
         print(f"✓ Reset {len(self.videos)} videos")
     
     def assign_videos(self, video_indices: List[int], 
-                     category_weights: Dict[str, float]):
-        """Assign categories to videos."""
-        # Normalize weights
-        total = sum(category_weights.values())
-        if total == 0:
-            print("❌ Error: Total weight cannot be zero")
-            return
-        
-        normalized = {k: v/total for k, v in category_weights.items()}
-        
+                     categories: List[str]):
+        """Assign categories to videos (NO WEIGHTS - simple list)."""
         count = 0
         for idx in video_indices:
             if 0 <= idx < len(self.videos):
-                self.videos[idx]['categories'] = normalized
+                self.videos[idx]['categories'] = categories
                 count += 1
         
         self.modified = True
-        print(f"✓ Assigned {count} videos to categories: {normalized}")
+        print(f"✓ Assigned {count} videos to categories: {categories}")
     
     def interactive_select_videos(self, initial_filter: Optional[str] = None):
         """
@@ -363,36 +365,48 @@ def print_menu():
     print("="*60)
 
 
-def get_category_weights(manager: VideoManager) -> Dict[str, float]:
-    """Interactive input for category weights."""
+def get_categories_interactive(manager: VideoManager, current_categories: List[str] = None) -> Optional[List[str]]:
+    """Interactive category selection using curses UI."""
+    try:
+        categories = select_categories(
+            available_categories=manager.categories,
+            current_categories=current_categories
+        )
+        return categories
+    except Exception as e:
+        print(f"⚠️  Curses UI not available: {e}")
+        print("Falling back to simple input...")
+        return get_categories_simple(manager, current_categories)
+
+
+def get_categories_simple(manager: VideoManager, current_categories: List[str] = None) -> Optional[List[str]]:
+    """Simple text-based category selection (fallback)."""
     print(f"\nAvailable categories: {', '.join(manager.categories)}")
-    print("Enter weights for each category (0 to skip):")
+    if current_categories:
+        print(f"Current categories: {', '.join(current_categories)}")
     
-    weights = {}
-    for cat in manager.categories:
-        while True:
-            val = input(f"  {cat}: ").strip()
-            if not val:
-                continue
-            try:
-                weight = float(val)
-                if weight > 0:
-                    weights[cat] = weight
-                break
-            except ValueError:
-                print("    Invalid number, try again")
+    print("\nEnter category names (comma-separated) or 'none' to clear:")
+    print("Example: master,space,toon")
     
-    if not weights:
-        print("No categories assigned")
-        return {}
-    
-    # Show preview
-    total = sum(weights.values())
-    print("\nNormalized weights:")
-    for cat, weight in weights.items():
-        print(f"  {cat}: {weight/total:.2f}")
-    
-    return weights
+    while True:
+        val = input("Categories: ").strip()
+        if not val:
+            continue
+        
+        if val.lower() == 'none':
+            return []
+        
+        # Split and clean
+        cats = [c.strip() for c in val.split(',')]
+        
+        # Validate
+        invalid = [c for c in cats if c not in manager.categories]
+        if invalid:
+            print(f"❌ Invalid categories: {', '.join(invalid)}")
+            print(f"Available: {', '.join(manager.categories)}")
+            continue
+        
+        return cats
 
 
 def main():
@@ -454,15 +468,76 @@ def main():
                 manager.print_video_list(videos)
         
         elif choice == '5':
-            # Assign single/multiple videos
-            ids_str = input("Video ID(s) (comma-separated): ").strip()
-            try:
-                ids = [int(x.strip()) for x in ids_str.split(',')]
-                weights = get_category_weights(manager)
-                if weights:
-                    manager.assign_videos(ids, weights)
-            except ValueError:
-                print("❌ Invalid ID format")
+            # Assign categories to videos (with interactive selector)
+            print("\n🎯 Assign Videos to Categories")
+            print("Step 1: Select videos")
+            print("  a) Select videos interactively (curses UI)")
+            print("  b) Enter video IDs manually")
+            
+            method = input("Method (a/b): ").strip().lower()
+            
+            video_indices = []
+            if method == 'a':
+                # Interactive video selection with curses
+                filter_str = input("Optional filter (leave empty for all): ").strip()
+                videos = manager.list_videos(filter_pattern=filter_str if filter_str else None)
+                
+                if not videos:
+                    print("No videos found")
+                    continue
+                
+                try:
+                    selected = select_items(
+                        items=[v for _, v in videos],
+                        title="Select videos (Space to toggle, Enter to confirm)",
+                        get_label=lambda v: v['name'],
+                        get_details=lambda v: format_categories_display(v.get('categories', []))
+                    )
+                    
+                    if selected is None:
+                        print("❌ Cancelled")
+                        continue
+                    
+                    video_indices = [videos[i][0] for i in selected]
+                    print(f"✓ Selected {len(video_indices)} videos")
+                    
+                except Exception as e:
+                    print(f"⚠️  Curses UI failed: {e}")
+                    print("Please use method 'b' for manual ID entry")
+                    continue
+            
+            elif method == 'b':
+                # Manual ID entry
+                ids_str = input("Video ID(s) (comma-separated): ").strip()
+                try:
+                    video_indices = [int(x.strip()) for x in ids_str.split(',')]
+                except ValueError:
+                    print("❌ Invalid ID format")
+                    continue
+            else:
+                print("❌ Invalid method")
+                continue
+            
+            if not video_indices:
+                print("No videos selected")
+                continue
+            
+            # Step 2: Select categories interactively
+            print("\nStep 2: Select categories")
+            categories = get_categories_interactive(manager)
+            
+            if categories is None:
+                print("❌ Cancelled")
+                continue
+            
+            if not categories:
+                print("⚠️  No categories selected - videos will be SKIPPED")
+                confirm = input("Proceed anyway? (y/n): ").strip().lower()
+                if confirm != 'y':
+                    continue
+            
+            # Assign
+            manager.assign_videos(video_indices, categories)
         
         elif choice == '6':
             # Interactive multi-select (NEW!)
