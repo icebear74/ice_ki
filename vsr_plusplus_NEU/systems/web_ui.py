@@ -1409,6 +1409,41 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             </div>
         </div>
         
+        <div class="section-header">📦 Current Batch</div>
+        
+        <div class="layer-activity-container">
+            <!-- Files used counter -->
+            <div style="display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid var(--border-color); margin-bottom: 12px;">
+                <span style="color: var(--text-secondary); font-size: 1.05em;">Files Used</span>
+                <span style="color: var(--accent-blue); font-weight: bold; font-family: 'Courier New', monospace; font-size: 1.05em;" id="batchFilesUsed">0 / 0</span>
+            </div>
+            
+            <!-- Current batch size -->
+            <div style="display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid var(--border-color); margin-bottom: 12px;">
+                <span style="color: var(--text-secondary); font-size: 1.05em;">Batch Size</span>
+                <span style="color: var(--accent-green); font-weight: bold; font-size: 1.05em;" id="batchSizeKey">-</span>
+            </div>
+            
+            <!-- Batch files list -->
+            <div style="margin-top: 8px;">
+                <h3 style="color: var(--accent-orange); margin-bottom: 8px; font-size: 1.05em;">Files in Batch:</h3>
+                <textarea id="batchFilesList" readonly style="
+                    width: 100%;
+                    height: 120px;
+                    background: rgba(15, 23, 42, 0.6);
+                    border: 1px solid var(--border-color);
+                    border-radius: 6px;
+                    color: var(--text-primary);
+                    padding: 10px;
+                    font-size: 0.8em;
+                    font-family: 'Courier New', monospace;
+                    resize: vertical;
+                    line-height: 1.5;
+                    box-sizing: border-box;
+                "></textarea>
+            </div>
+        </div>
+        
         <div class="section-header">🎮 Steuerung</div>
         
         <div class="controls-section">
@@ -1582,6 +1617,9 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             
             // Dataset files
             updateDatasetFiles(data);
+            
+            // Current batch files
+            updateBatchFiles(data);
             
             // TensorBoard link
             const tbLink = document.getElementById('tensorboardLink');
@@ -2065,6 +2103,24 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             
             // Last check
             document.getElementById('datasetLastCheck').textContent = dsFiles.last_check || 0;
+        }
+        
+        function updateBatchFiles(data) {
+            const batch = data.current_batch || {};
+            
+            // Update files used counter
+            const filesUsed = batch.files_used_in_epoch || 0;
+            const totalFiles = batch.total_files_in_epoch || 0;
+            document.getElementById('batchFilesUsed').textContent = `${filesUsed} / ${totalFiles}`;
+            
+            // Update batch size key
+            const sizeKey = batch.size_key || '-';
+            document.getElementById('batchSizeKey').textContent = sizeKey;
+            
+            // Update batch files list
+            const files = batch.files || [];
+            const filesList = files.join('\\n');
+            document.getElementById('batchFilesList').value = filesList;
         }
         
         function downloadDataAsJSON() {
