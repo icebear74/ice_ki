@@ -467,9 +467,12 @@ class DatasetGeneratorV2UHD:
         
         return temp_subdir
     
-    def extract_frames_uhd(self, video_path: str, start_time: float, n_frames: int = 7) -> Optional[List[np.ndarray]]:
+    def extract_frames_uhd(self, video_path: str, start_time: float, n_frames: int = 7) -> Optional[Dict]:
         """
-        Extract frames with HDR→SDR tonemap, NO resize (UHD quality)
+        Extract frames with HDR→SDR tonemap to DISK (memory-efficient).
+        
+        MEMORY OPTIMIZATION: Returns PATHS to frames (NOT loaded into memory).
+        Caller must load frames when needed and clean up temp_dir when done.
         
         Args:
             video_path: Path to video
@@ -477,7 +480,8 @@ class DatasetGeneratorV2UHD:
             n_frames: Number of frames (7 or 5)
         
         Returns:
-            List of UHD frames or None
+            Dict with 'frame_paths' (list of paths) and 'temp_dir' (must be cleaned up)
+            or None on failure
         """
         temp_dir = None
         try:
@@ -522,30 +526,34 @@ class DatasetGeneratorV2UHD:
             )
             
             if result.returncode != 0:
+                # Clean up on failure
+                if temp_dir and os.path.exists(temp_dir):
+                    shutil.rmtree(temp_dir, ignore_errors=True)
                 return None
             
-            # Load frames
-            frames = []
+            # Build list of frame paths (do NOT load into memory!)
+            frame_paths = []
             for i in range(1, n_frames + 1):
                 frame_path = os.path.join(temp_dir, f"frame_{i:04d}.png")
                 if not os.path.exists(frame_path):
+                    # Clean up on failure
+                    if temp_dir and os.path.exists(temp_dir):
+                        shutil.rmtree(temp_dir, ignore_errors=True)
                     return None
-                
-                frame = cv2.imread(frame_path)
-                if frame is None:
-                    return None
-                
-                frames.append(frame)
+                frame_paths.append(frame_path)
             
-            return frames
+            # Return paths (NOT frames!) - memory efficient!
+            return {
+                'frame_paths': frame_paths,
+                'temp_dir': temp_dir  # Caller MUST clean up!
+            }
         
         except Exception as e:
             self.logger.error(f"Error extracting frames: {e}")
-            return None
-        finally:
-            # Clean up temp directory
+            # Clean up on exception
             if temp_dir and os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir, ignore_errors=True)
+            return None
     
     def _run_ffmpeg_with_progress(self, cmd: List[str], description: str = "FFmpeg", timeout: int = 300) -> int:
         """
@@ -604,17 +612,20 @@ class DatasetGeneratorV2UHD:
             return -1
     
     def extract_frames_batch_uhd(self, video_path: str, timestamps: List[float],
-                                 n_frames: int = 7, fps: float = 25.0) -> Dict[float, List[np.ndarray]]:
+                                 n_frames: int = 7, fps: float = 25.0) -> Dict:
         """
         Extract frames using SINGLE extraction mode (one FFmpeg call per timestamp).
         
-        Slower than batch but 100% RELIABLE - user priority: reliability over speed.
-        User feedback: "Ok speed isn't everything... we'll go back to single extraction mode"
+        Returns PATHS to frames (memory-efficient) instead of loading into RAM.
+        
+        MEMORY OPTIMIZATION: Does NOT keep frames in memory!
+        Returns dict of file paths. Caller must load frames when needed and clean up temp_dirs.
         
         This approach:
         - One FFmpeg call per timestamp (simple, proven)
         - Uses -ss for fast seeking before input
-        - Extracts exactly n_frames with -frames:v
+        - Extracts exactly n_frames to disk
+        - Returns PATHS (not frames) - memory efficient!
         - Proven to work reliably (no mysterious failures)
         
         Args:
@@ -624,36 +635,45 @@ class DatasetGeneratorV2UHD:
             fps: Video frame rate (NOT used in single mode)
         
         Returns:
-            Dictionary mapping timestamp -> list of frames
-            Example: {10.0: [frame1, frame2, ...], 13.0: [frame1, frame2, ...]}
+            Dict with 'frame_paths' (mapping timestamp -> list of file paths)
+            and 'temp_dirs' (list of temp directories to clean up)
         """
         if not timestamps:
-            return {}
+            return {'frame_paths': {}, 'temp_dirs': []}
         
         # Sort timestamps for predictable extraction order
         sorted_ts = sorted(timestamps)
         
         # USE SINGLE EXTRACTION MODE (reliable!)
         # User explicitly requested: "we'll go back to single extraction mode with ss"
-        self.logger.info(f"Extracting {len(sorted_ts)} scenes using SINGLE extraction mode (reliable):")
+        self.logger.info(f"Extracting {len(sorted_ts)} scenes using SINGLE extraction mode (reliable, memory-efficient):")
         
-        results = {}
+        frame_paths_dict = {}
+        temp_dirs = []
         total_frames = 0
+        
         for idx, ts in enumerate(sorted_ts, 1):
             # Call the proven extract_frames_uhd() method for each timestamp
-            frames = self.extract_frames_uhd(video_path, ts, n_frames)
-            if frames:
-                results[ts] = frames
-                total_frames += len(frames)
-                self.logger.info(f"  Timestamp {ts:.1f}s: ✓ {len(frames)} frames ({total_frames}/{len(sorted_ts)*n_frames} total)")
+            # Returns PATHS (not frames!) - memory efficient
+            result = self.extract_frames_uhd(video_path, ts, n_frames)
+            if result and result['frame_paths']:
+                frame_paths_dict[ts] = result['frame_paths']
+                temp_dirs.append(result['temp_dir'])
+                total_frames += len(result['frame_paths'])
+                self.logger.info(f"  Timestamp {ts:.1f}s: ✓ {len(result['frame_paths'])} frames ({total_frames}/{len(sorted_ts)*n_frames} total)")
             else:
                 self.logger.warning(f"  Timestamp {ts:.1f}s: ✗ Failed to extract frames")
         
         # Summary
-        success_count = len(results)
+        success_count = len(frame_paths_dict)
         self.logger.info(f"✓ Extraction complete: {success_count}/{len(sorted_ts)} timestamps successful, {total_frames}/{len(sorted_ts)*n_frames} frames extracted")
+        self.logger.info(f"💾 Memory-efficient: Frames on disk (NOT in RAM)")
         
-        return results
+        return {
+            'frame_paths': frame_paths_dict,
+            'temp_dirs': temp_dirs  # Caller MUST clean up!
+        }
+    
     
     def create_patch_pair(self, frames: List[np.ndarray], format_name: str, 
                          format_config: dict, force_center: bool = False) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
@@ -1043,7 +1063,7 @@ class DatasetGeneratorV2UHD:
             )
         
         frame_paths_dict = batch_result['frame_paths']
-        temp_dir = batch_result['temp_dir']
+        temp_dirs = batch_result.get('temp_dirs', [])
         
         self.logger.info(f"✓ Batch extraction complete in {batch_duration:.1f}s")
         self.logger.info(f"  Successfully extracted {len(frame_paths_dict)} timestamps")
@@ -1258,13 +1278,15 @@ class DatasetGeneratorV2UHD:
             for format_name, stats in formats.items():
                 self.logger.info(f"    └─ {format_name}: {stats['created']}/{stats['target']}")
         
-        # Clean up temp directory
-        if temp_dir and os.path.exists(temp_dir):
-            try:
-                shutil.rmtree(temp_dir, ignore_errors=True)
-                self.logger.info(f"✓ Cleaned up temp directory: {temp_dir}")
-            except Exception as e:
-                self.logger.warning(f"Could not clean up temp directory: {e}")
+        # Clean up temp directories
+        if temp_dirs:
+            for temp_dir in temp_dirs:
+                if temp_dir and os.path.exists(temp_dir):
+                    try:
+                        shutil.rmtree(temp_dir, ignore_errors=True)
+                    except Exception as e:
+                        self.logger.warning(f"Could not clean up temp directory {temp_dir}: {e}")
+            self.logger.info(f"✓ Cleaned up {len(temp_dirs)} temp directories")
         
         return patches_created
     
