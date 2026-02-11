@@ -172,6 +172,9 @@ class VSRTrainer:
         steps_per_epoch = len(self.train_loader) // accumulation_steps
         current_epoch_step = 0
         
+        # Buffer for accumulation window files
+        accumulation_buffer = []
+        
         # Initialize loop timing
         loop_start_time = time.time()
         
@@ -198,12 +201,56 @@ class VSRTrainer:
                 lr_stack = batch['lr'].to(self.device)
                 gt = batch['gt'].to(self.device)
                 size_key = batch.get('size_key', 'unknown')
+                batch_filenames = batch.get('filenames', [])
             else:
                 # Traditional single-size batch (tuple)
                 lr_stack, gt = batch
                 lr_stack = lr_stack.to(self.device)
                 gt = gt.to(self.device)
                 size_key = 'default'
+                batch_filenames = []
+            
+            # Track batch files for WebUI display
+            if batch_filenames and hasattr(self, 'web_monitor') and self.web_monitor:
+                # Format filenames as "size_key/filename.png"
+                formatted_files = [f"{size_key}/{fn}" for fn in batch_filenames]
+                
+                # Add to accumulation buffer
+                accumulation_buffer.append({
+                    'files': formatted_files,
+                    'size_key': size_key
+                })
+                
+                # Keep only last accumulation_steps batches
+                if len(accumulation_buffer) > accumulation_steps:
+                    accumulation_buffer.pop(0)
+                
+                # Collect all files in accumulation window
+                all_accumulated_files = []
+                files_per_size = {'720': 0, '540': 0, '720_169': 0}
+                for buffer_item in accumulation_buffer:
+                    all_accumulated_files.extend(buffer_item['files'])
+                    # Count files per size
+                    files_per_size[buffer_item['size_key']] += len(buffer_item['files'])
+                
+                # Calculate total files used in epoch (based on batch_idx and batch size)
+                batch_size = lr_stack.size(0)
+                files_used_in_epoch = (batch_idx + 1) * batch_size
+                
+                # Get total files in epoch
+                total_files_in_epoch = len(self.train_loader.sampler) if hasattr(self.train_loader, 'sampler') else steps_per_epoch
+                
+                # Update web_monitor with current batch info
+                self.web_monitor.data_store.update_all_metrics(
+                    current_batch={
+                        'files': all_accumulated_files,
+                        'size_key': size_key,
+                        'files_used_in_epoch': files_used_in_epoch,
+                        'total_files_in_epoch': total_files_in_epoch,
+                        'files_per_size': files_per_size,
+                        'accumulation_steps': accumulation_steps
+                    }
+                )
             
             # Forward pass
             output = self.model(lr_stack)

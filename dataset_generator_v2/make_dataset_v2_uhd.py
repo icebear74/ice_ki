@@ -1048,17 +1048,41 @@ class DatasetGeneratorV2UHD:
         Returns:
             Dictionary of {category: {format_name: count}}
         """
+        Calculate format distribution for this video across ALL its categories.
+        
+        NEW LOGIC (NO WEIGHTS):
+        - Video is 100% in each assigned category
+        - Distribute patches evenly across assigned categories
+        - Each category gets: target_patches / num_categories
+        
+        Args:
+            video: Video dict with categories
+            target_patches: Total patches to extract from this video
+        
+        Returns:
+            Dict[category][format] = patch_count
+        """
         distribution = {}
         
-        # Get category weights for this video
-        video_categories = video.get('categories', {})
+        # Get categories for this video (handle both dict and list formats)
+        video_cats = get_video_categories(video)
         
-        for category, category_weight in video_categories.items():
+        if not video_cats:
+            return distribution
+        
+        # Calculate patches per category (equal distribution)
+        num_categories = len(video_cats)
+        patches_per_category = target_patches // num_categories
+        remainder = target_patches % num_categories
+        
+        for cat_idx, category in enumerate(video_cats):
             if category not in self.format_config:
                 continue
             
-            # Calculate patches for this category
-            category_patches = int(target_patches * category_weight)
+            # This category gets equal share (+ 1 if remainder)
+            category_patches = patches_per_category
+            if cat_idx < remainder:
+                category_patches += 1
             
             # Get format probabilities for this category
             format_probs = self.format_probabilities.get(category, {})
@@ -1100,6 +1124,12 @@ class DatasetGeneratorV2UHD:
         video_path = video['path']
         video_name = video['name']
         self.current_video_name = video_name
+        
+        # Skip videos without any category assignments
+        video_categories = video.get('categories', {})
+        if not video_categories:
+            self.logger.info(f"⏭️  Skipping video {video_idx + 1}/{len(self.videos)}: {video_name} (no categories assigned)")
+            return {'skipped': True, 'reason': 'no_categories'}
         
         if not os.path.exists(video_path):
             self.logger.warning(f"Video not found: {video_path}")
@@ -2160,7 +2190,14 @@ class DatasetGeneratorV2UHD:
                         video_path = video['path']
                         target_patches = distribution.get(video_path, 0)
                         
+                        # Skip if no patches allocated (or no categories)
                         if target_patches == 0:
+                            self.logger.info(f"[EXTRACTION] Skipping: {video['name']} (no patches allocated)")
+                            continue
+                        
+                        # Also skip if video has no categories
+                        if not video.get('categories', {}):
+                            self.logger.info(f"[EXTRACTION] Skipping: {video['name']} (no categories assigned)")
                             continue
                         
                         self.logger.info(f"\n[EXTRACTION] Starting: {video['name']} (video {idx+1}/{len(self.videos)})")
@@ -2213,14 +2250,23 @@ class DatasetGeneratorV2UHD:
                             try:
                                 stats = self.process_video(idx)
                                 
-                                # Update tracker
-                                self.tracker.update_progress(
-                                    current_video_index=idx + 1,
-                                    patches_created=stats.get('patches_created', 0)
-                                )
-                                self.tracker.save()
+                                # Check if video was skipped
+                                if stats.get('skipped'):
+                                    self.logger.info(f"[PROCESSING] Skipped: {video['name']} - {stats.get('reason', 'unknown')}")
+                                    # Update tracker with skip
+                                    self.tracker.update_progress(
+                                        current_video_index=idx + 1,
+                                        patches_created=0
+                                    )
+                                else:
+                                    # Update tracker with actual patches
+                                    self.tracker.update_progress(
+                                        current_video_index=idx + 1,
+                                        patches_created=stats.get('patches_created', 0)
+                                    )
+                                    self.logger.info(f"[PROCESSING] Complete: {video['name']} - {stats.get('patches_created', 0)} patches created")
                                 
-                                self.logger.info(f"[PROCESSING] Complete: {video['name']} - {stats.get('patches_created', 0)} patches created")
+                                self.tracker.save()
                                 
                             except Exception as e:
                                 self.logger.error(f"[PROCESSING] Error: {video['name']}: {e}")

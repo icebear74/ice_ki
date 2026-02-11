@@ -63,6 +63,29 @@ class TrackedConv2d(nn.Module):
         return out
 
 
+class FusionBlock(nn.Module):
+    """
+    Fusion block with spatial awareness for improved ghosting/shadow suppression.
+    Uses 3x3 conv for spatial context, followed by 1x1 conv for gating logic.
+    """
+    def __init__(self, in_feats, out_feats):
+        super().__init__()
+        self.conv3x3 = nn.Conv2d(in_feats, out_feats, 3, 1, 1)
+        self.relu = nn.LeakyReLU(0.1, inplace=True)
+        self.conv1x1 = nn.Conv2d(out_feats, out_feats, 1)
+        self.last_activity = 0.0
+    
+    def forward(self, x):
+        out = self.conv3x3(x)
+        out = self.relu(out)
+        out = self.conv1x1(out)
+        
+        # Track activity
+        self.last_activity = out.detach().abs().mean().item()
+        
+        return out
+
+
 class VSRBidirectional_3x(nn.Module):
     """
     Bidirectional VSR model with Frame-3 initialization
@@ -88,8 +111,8 @@ class VSRBidirectional_3x(nn.Module):
         self.feat_extract = nn.Conv2d(3, n_feats, 3, 1, 1)
         
         # 2. Fusion layers for combining features (WITH TRACKING)
-        self.backward_fuse = TrackedConv2d(n_feats * 2, n_feats, 1)
-        self.forward_fuse = TrackedConv2d(n_feats * 2, n_feats, 1)
+        self.backward_fuse = FusionBlock(n_feats * 2, n_feats)
+        self.forward_fuse = FusionBlock(n_feats * 2, n_feats)
         
         # 3. Propagation Trunks
         self.backward_trunk = nn.ModuleList([
@@ -100,7 +123,7 @@ class VSRBidirectional_3x(nn.Module):
         ])
         
         # 4. Final Fusion (WITH TRACKING)
-        self.fusion = TrackedConv2d(n_feats * 2, n_feats, 1)
+        self.fusion = FusionBlock(n_feats * 2, n_feats)
         
         # 5. Upsampling (3x with PixelShuffle)
         self.upsample = nn.Sequential(
