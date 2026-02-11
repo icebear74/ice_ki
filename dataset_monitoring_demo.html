@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dataset File Monitoring Demo</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+            color: #e2e8f0;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+        }
+        
+        .card {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            padding: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            margin-bottom: 20px;
+        }
+        
+        .card-title {
+            font-size: 1.3em;
+            margin-bottom: 15px;
+            color: #60a5fa;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .metric-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+        
+        .metric-row:last-child {
+            border-bottom: none;
+        }
+        
+        .metric-label {
+            color: #94a3b8;
+            font-size: 0.95em;
+        }
+        
+        .metric-value {
+            font-weight: bold;
+            color: #e2e8f0;
+            font-size: 1.1em;
+        }
+        
+        .new-files-indicator {
+            margin-top: 5px;
+            margin-bottom: 8px;
+            padding: 8px;
+            background: rgba(34, 197, 94, 0.1);
+            border-left: 3px solid #22c55e;
+            border-radius: 4px;
+            font-size: 0.85em;
+            color: #22c55e;
+            animation: pulse 2s ease-in-out infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+        
+        .last-check {
+            margin-top: 12px;
+            padding-top: 12px;
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+            font-size: 0.8em;
+            color: #64748b;
+        }
+        
+        .section-header {
+            font-size: 0.9em;
+            color: #94a3b8;
+            margin-bottom: 8px;
+            margin-top: 15px;
+            font-weight: bold;
+        }
+        
+        .section-header:first-child {
+            margin-top: 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 style="text-align: center; margin-bottom: 30px; background: linear-gradient(90deg, #60a5fa, #a78bfa); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">
+            VSR++ Dataset Monitoring
+        </h1>
+        
+        <!-- Dataset Files Card -->
+        <div class="card">
+            <div class="card-title">📂 Dataset Files</div>
+            
+            <!-- Training Dataset -->
+            <div class="section-header">Training Dataset</div>
+            <div class="metric-row">
+                <span class="metric-label">Size: 540</span>
+                <span class="metric-value">12,453</span>
+            </div>
+            <div class="new-files-indicator">
+                ✨ New files detected: <strong>127</strong>
+            </div>
+            
+            <!-- Validation Datasets -->
+            <div class="section-header">Validation Datasets</div>
+            <div class="metric-row">
+                <span class="metric-label">720×720</span>
+                <span class="metric-value">1,234</span>
+            </div>
+            
+            <div class="metric-row">
+                <span class="metric-label">540×540</span>
+                <span class="metric-value">856</span>
+            </div>
+            <div class="new-files-indicator">
+                ✨ +<strong>42</strong> new files
+            </div>
+            
+            <div class="metric-row">
+                <span class="metric-label">720×405 (16:9)</span>
+                <span class="metric-value">723</span>
+            </div>
+            
+            <div class="last-check">
+                Last check: Step 15,200
+            </div>
+        </div>
+        
+        <div style="text-align: center; color: #64748b; font-size: 0.9em;">
+            <p>✓ Checks run every 100 training steps</p>
+            <p style="margin-top: 5px;">✓ New files detected automatically</p>
+            <p style="margin-top: 5px;">✓ Real-time monitoring in Web UI</p>
+        </div>
+    </div>
+</body>
+</html>

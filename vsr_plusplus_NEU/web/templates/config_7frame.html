@@ -193,28 +193,31 @@
             color: #ef4444;
         }
         
-        .distribution-slider {
-            margin: 15px 0;
+        #dataset-file-counts {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
         }
         
-        .distribution-sum {
-            text-align: center;
-            font-size: 1.2em;
-            margin-top: 15px;
-            padding: 10px;
+        .file-count-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px;
+            background: rgba(255, 255, 255, 0.05);
             border-radius: 8px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
         }
         
-        .sum-valid {
-            background: rgba(16, 185, 129, 0.2);
-            border: 1px solid #10b981;
-            color: #10b981;
+        .file-count-label {
+            font-size: 1.1em;
+            color: #e2e8f0;
         }
         
-        .sum-invalid {
-            background: rgba(239, 68, 68, 0.2);
-            border: 1px solid #ef4444;
-            color: #ef4444;
+        .file-count-value {
+            font-size: 1.2em;
+            font-weight: bold;
+            color: #60a5fa;
         }
     </style>
 </head>
@@ -223,6 +226,10 @@
         <div class="header">
             <h1>🎛️ 7-Frame VSR Configuration</h1>
             <p>Real-time training configuration and monitoring</p>
+            <div style="margin-top: 15px;">
+                <a href="/monitoring" style="color: #60a5fa; text-decoration: none; margin-right: 20px;">📊 Monitor</a>
+                <a href="/config/ui" style="color: #60a5fa; text-decoration: none;">⚙️ Configuration</a>
+            </div>
         </div>
         
         <!-- Batch Size Configuration -->
@@ -257,40 +264,16 @@
             <div class="status-message" id="batch-status"></div>
         </div>
         
-        <!-- Size Distribution Configuration -->
+        <!-- Dataset File Counts -->
         <div class="card">
-            <div class="card-title">📊 Size Distribution</div>
+            <div class="card-title">📂 Dataset File Counts</div>
+            <p style="color: #94a3b8; margin-bottom: 15px; font-size: 0.95em;">
+                File counts are auto-detected from filesystem. Training ratio is determined by the number of files in each size directory.
+            </p>
             
-            <div class="distribution-slider">
-                <div class="slider-label">
-                    <span>Small (540×540):</span>
-                    <span id="dist-small-value">65%</span>
-                </div>
-                <input type="range" min="0" max="100" value="65" class="slider" id="dist-small-slider">
+            <div id="dataset-file-counts">
+                <!-- Populated by JavaScript -->
             </div>
-            
-            <div class="distribution-slider">
-                <div class="slider-label">
-                    <span>Medium (720×405):</span>
-                    <span id="dist-medium-value">35%</span>
-                </div>
-                <input type="range" min="0" max="100" value="35" class="slider" id="dist-medium-slider">
-            </div>
-            
-            <div class="distribution-slider">
-                <div class="slider-label">
-                    <span>Large (720×720):</span>
-                    <span id="dist-large-value">0%</span>
-                </div>
-                <input type="range" min="0" max="100" value="0" class="slider" id="dist-large-slider">
-            </div>
-            
-            <div class="distribution-sum" id="distribution-sum">
-                Total: 100%
-            </div>
-            
-            <button class="button" id="apply-distribution-btn" style="margin-top: 15px;">Apply Distribution</button>
-            <div class="status-message" id="distribution-status"></div>
         </div>
         
         <!-- Size Training Progress -->
@@ -387,81 +370,58 @@
             }
         });
         
-        // Size distribution sliders
-        const distSliders = {
-            small: document.getElementById('dist-small-slider'),
-            medium: document.getElementById('dist-medium-slider'),
-            large: document.getElementById('dist-large-slider')
-        };
-        
-        const distValues = {
-            small: document.getElementById('dist-small-value'),
-            medium: document.getElementById('dist-medium-value'),
-            large: document.getElementById('dist-large-value')
-        };
-        
-        const distSum = document.getElementById('distribution-sum');
-        
-        function updateDistributionSum() {
-            const total = parseInt(distSliders.small.value) + 
-                          parseInt(distSliders.medium.value) + 
-                          parseInt(distSliders.large.value);
-            
-            distSum.textContent = `Total: ${total}%`;
-            
-            if (total === 100) {
-                distSum.className = 'distribution-sum sum-valid';
-            } else {
-                distSum.className = 'distribution-sum sum-invalid';
-            }
-            
-            return total === 100;
-        }
-        
-        for (const [key, slider] of Object.entries(distSliders)) {
-            slider.addEventListener('input', function() {
-                distValues[key].textContent = this.value + '%';
-                const isValid = updateDistributionSum();
-                document.getElementById('apply-distribution-btn').disabled = !isValid;
-            });
-        }
-        
-        // Apply distribution
-        document.getElementById('apply-distribution-btn').addEventListener('click', async function() {
-            const distribution = {
-                'small_540': parseInt(distSliders.small.value) / 100.0,
-                'medium_169': parseInt(distSliders.medium.value) / 100.0,
-                'large_720': parseInt(distSliders.large.value) / 100.0
-            };
-            
-            const statusDiv = document.getElementById('distribution-status');
-            
+        // Load dataset file counts
+        async function loadDatasetFileCounts() {
             try {
-                const response = await fetch('/api/update_size_distribution', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify(distribution)
-                });
+                const response = await fetch('/monitoring/data');
                 const data = await response.json();
                 
-                if (data.success) {
-                    statusDiv.className = 'status-message status-success';
-                    statusDiv.textContent = data.message;
-                } else {
-                    statusDiv.className = 'status-message status-error';
-                    statusDiv.textContent = data.error || 'Failed to update distribution';
+                if (data.dataset_files) {
+                    renderFileCounts(data.dataset_files);
                 }
-                
-                statusDiv.style.display = 'block';
-                setTimeout(() => { statusDiv.style.display = 'none'; }, 5000);
             } catch (error) {
-                statusDiv.className = 'status-message status-error';
-                statusDiv.textContent = 'Error: ' + error.message;
-                statusDiv.style.display = 'block';
+                console.error('Error loading dataset file counts:', error);
             }
-        });
+        }
+        
+        function renderFileCounts(datasetFiles) {
+            const container = document.getElementById('dataset-file-counts');
+            let html = '';
+            
+            // Training datasets
+            if (datasetFiles.train) {
+                html += '<div style="margin-bottom: 15px;"><strong>Training:</strong></div>';
+                for (const [size, info] of Object.entries(datasetFiles.train)) {
+                    if (size === 'size_key' || size === 'count' || size === 'has_new' || size === 'new_count') continue;
+                    
+                    const sizeLabel = size === '540' ? '540×540' : size === '720' ? '720×720' : '720×405 (16:9)';
+                    html += `
+                        <div class="file-count-item">
+                            <span class="file-count-label">${sizeLabel}</span>
+                            <span class="file-count-value">${info.count.toLocaleString()} files</span>
+                        </div>
+                    `;
+                }
+            }
+            
+            // Validation datasets
+            if (datasetFiles.validation) {
+                html += '<div style="margin-top: 20px; margin-bottom: 15px;"><strong>Validation:</strong></div>';
+                for (const [size, info] of Object.entries(datasetFiles.validation)) {
+                    if (size === 'size_key' || size === 'count' || size === 'has_new' || size === 'new_count') continue;
+                    
+                    const sizeLabel = size === '540' ? '540×540' : size === '720' ? '720×720' : '720×405 (16:9)';
+                    html += `
+                        <div class="file-count-item">
+                            <span class="file-count-label">${sizeLabel}</span>
+                            <span class="file-count-value">${info.count.toLocaleString()} files</span>
+                        </div>
+                    `;
+                }
+            }
+            
+            container.innerHTML = html || '<p style="color: #94a3b8;">No dataset information available</p>';
+        }
         
         // Load size stats
         async function loadSizeStats() {
@@ -504,10 +464,14 @@
         
         // Initial load
         updateBatchPreview(6);
+        loadDatasetFileCounts();
         loadSizeStats();
         
-        // Refresh size stats periodically
-        setInterval(loadSizeStats, STATS_REFRESH_INTERVAL_MS);
+        // Refresh periodically
+        setInterval(() => {
+            loadDatasetFileCounts();
+            loadSizeStats();
+        }, STATS_REFRESH_INTERVAL_MS);
     </script>
 </body>
 </html>

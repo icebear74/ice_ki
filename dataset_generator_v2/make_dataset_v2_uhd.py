@@ -589,13 +589,14 @@ class DatasetGeneratorV2UHD:
             temp_dir = self._create_temp_dir("extract_single")
             output_pattern = os.path.join(temp_dir, "frame_%04d.png")
             
-            # UHD tonemap filter (NO scale!)
+            # UHD tonemap filter with 1080p scaling
             vf_filter = (
                 "zscale=t=linear:npl=100,"
                 "format=gbrpf32le,"
                 "zscale=p=bt709,"
                 "tonemap=tonemap=mobius:desat=0,"
                 "zscale=t=bt709:m=bt709:range=limited,"
+                "scale=1920:1080:flags=lanczos,"
                 "format=yuv420p"
             )
             
@@ -815,13 +816,14 @@ class DatasetGeneratorV2UHD:
             #   Take frames where: (n - first_frame) % 250 < 7
             select_filter = f"gte(n,{first_frame})*lte(n,{last_frame})*lt(mod(n-{first_frame},{cycle_length}),{n_frames})"
             
-            # UHD tonemap filter (NO scale!)
+            # UHD tonemap filter with 1080p scaling
             tonemap_filter = (
                 "zscale=t=linear:npl=100,"
                 "format=gbrpf32le,"
                 "zscale=p=bt709,"
                 "tonemap=tonemap=mobius:desat=0,"
                 "zscale=t=bt709:m=bt709:range=limited,"
+                "scale=1920:1080:flags=lanczos,"
                 "format=yuv420p"
             )
             
@@ -966,7 +968,7 @@ class DatasetGeneratorV2UHD:
         return all_extracted
     
     def create_patch_pair(self, frames: List[np.ndarray], format_name: str, 
-                         format_config: dict) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+                         format_config: dict, force_center: bool = False) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         """
         Create GT + LR pair with random crop from UHD
         
@@ -974,6 +976,7 @@ class DatasetGeneratorV2UHD:
             frames: UHD frames
             format_name: Format key (small_540, medium_169, large_720)
             format_config: Format configuration
+            force_center: If True, use center crop instead of random crop
         
         Returns:
             (gt, lr_stacked) or (None, None)
@@ -991,11 +994,18 @@ class DatasetGeneratorV2UHD:
         if frame_h < gt_h or frame_w < gt_w:
             return None, None
         
-        # Random crop
+        # Calculate crop position
         max_x = frame_w - gt_w
         max_y = frame_h - gt_h
-        crop_x = random.randint(0, max_x)
-        crop_y = random.randint(0, max_y)
+        
+        if force_center:
+            # Center crop: exact center of frame
+            crop_x = max_x // 2
+            crop_y = max_y // 2
+        else:
+            # Random crop
+            crop_x = random.randint(0, max_x)
+            crop_y = random.randint(0, max_y)
         
         # GT: Center frame
         center_idx = n_frames // 2
@@ -1299,10 +1309,10 @@ class DatasetGeneratorV2UHD:
         self.logger.info(f"  Total frames to extract: {len(timestamps) * n_frames}")
         self.logger.info(f"  All {len(timestamps)} scenes will be used (0% waste)")
         
-        # Phase 2: Batch extract ALL frames
-        self.logger.info(f"\n🎬 Phase 2: Batch extracting frames (this is the FAST part!)...")
+        # Phase 2: Batch extract ALL frames with ONE FFmpeg call
+        self.logger.info(f"\n🎬 Phase 2: Batch extracting frames (ONE FFmpeg call)...")
         self.logger.info(f"  Opening video file ONCE (instead of {len(timestamps)} times)")
-        self.logger.info(f"  Single FFmpeg pass through video...")
+        self.logger.info(f"  Single FFmpeg pass through entire video...")
         
         batch_start = time.time()
         batch_result = self.extract_frames_batch_uhd(video_path, timestamps, n_frames, fps)
@@ -1339,12 +1349,13 @@ class DatasetGeneratorV2UHD:
         black_frames_detected = 0
         black_frames_skipped = 0
         total_created = 0
-        processed_count = 0
         
-        # Calculate which scenes each format should use
-        # This ensures each format covers the entire video timeline evenly
-        total_scenes = len(frame_paths_dict)
-        timestamps_list = sorted(frame_paths_dict.keys())
+        # IMPORTANT: Calculate scene selection based on ORIGINAL timestamps list
+        # This ensures the distribution logic remains correct even if some extractions failed
+        total_scenes = len(timestamps)
+        
+        # Create mapping from original timestamp index to actual timestamp
+        timestamp_to_original_idx = {ts: idx for idx, ts in enumerate(timestamps)}
         
         scene_selection = {}
         self.logger.info(f"\n📊 Scene distribution per format:")
@@ -1353,19 +1364,15 @@ class DatasetGeneratorV2UHD:
             scene_selection[category] = {}
             format_idx = 0
             for format_name, target_count in formats.items():
-                # Calculate which scenes this format should use
+                # Calculate which scenes this format should use (based on ORIGINAL scene count)
                 if target_count >= total_scenes:
-                    # Use all scenes
                     selected_indices = list(range(total_scenes))
                 else:
-                    # Select evenly distributed subset
                     stride = total_scenes / target_count
                     selected_indices = []
                     for i in range(target_count):
-                        # Add small offset per format to distribute different formats across timeline
-                        offset = (format_idx % 3) * 0.3  # Offset up to 0.9
+                        offset = (format_idx % 3) * 0.3
                         scene_idx = int(offset + i * stride)
-                        # Ensure within bounds
                         scene_idx = min(scene_idx, total_scenes - 1)
                         selected_indices.append(scene_idx)
                 
@@ -1388,8 +1395,17 @@ class DatasetGeneratorV2UHD:
                 
                 format_idx += 1
         
-        # Process each timestamp (load frames on-demand to avoid OOM)
-        for scene_idx, ts in enumerate(timestamps_list):
+        # Process extracted frames into patches
+        processed_count = 0
+        
+        for ts in sorted(frame_paths_dict.keys()):
+            # Get the original scene index from the timestamp
+            scene_idx = timestamp_to_original_idx.get(ts)
+            if scene_idx is None:
+                # This shouldn't happen, but skip if timestamp not in original list
+                self.logger.warning(f"Timestamp {ts} not in original list, skipping")
+                continue
+            
             frame_file_paths = frame_paths_dict[ts]
             
             # Check if any format needs this scene
@@ -1402,15 +1418,13 @@ class DatasetGeneratorV2UHD:
                 if scene_needed:
                     break
             
-            # Skip this scene if no format needs it (shouldn't happen with current logic)
             if not scene_needed:
-                # Delete the files
                 for frame_path in frame_file_paths:
                     if os.path.exists(frame_path):
                         os.remove(frame_path)
                 continue
             
-            # Load frames from disk ONLY when needed (prevents OOM)
+            # Load frames
             frames = []
             for frame_path in frame_file_paths:
                 frame = cv2.imread(frame_path)
@@ -1419,10 +1433,8 @@ class DatasetGeneratorV2UHD:
                     break
                 frames.append(frame)
             
-            # Skip if frames couldn't be loaded
             if len(frames) != n_frames:
                 self.logger.warning(f"Incomplete frames for timestamp {ts}, skipping")
-                # Delete the files even on error
                 for frame_path in frame_file_paths:
                     if os.path.exists(frame_path):
                         os.remove(frame_path)
@@ -1431,31 +1443,43 @@ class DatasetGeneratorV2UHD:
             # Process for each category-format combination that needs this scene
             for category, formats in format_distribution.items():
                 for format_name, target_count in formats.items():
-                    # Only process if this format needs this scene
                     if scene_idx not in scene_selection[category][format_name]:
                         continue
                     
-                    # Get format config
                     format_config = self.format_config[category][format_name]
                     
-                    # Create patch pair
-                    gt, lr = self.create_patch_pair(frames, format_name, format_config)
+                    # Try up to 5 times to find an interesting patch with random crops
+                    # Then use center crop as guaranteed fallback
+                    MAX_RANDOM_ATTEMPTS = 5
+                    gt, lr = None, None
+                    
+                    for attempt in range(MAX_RANDOM_ATTEMPTS + 1):
+                        if attempt < MAX_RANDOM_ATTEMPTS:
+                            # Attempts 1-5: Random crop
+                            gt, lr = self.create_patch_pair(frames, format_name, format_config, force_center=False)
+                        else:
+                            # Final attempt: Center crop as fallback
+                            gt, lr = self.create_patch_pair(frames, format_name, format_config, force_center=True)
+                        
+                        if gt is None or lr is None:
+                            continue
+                        
+                        # Check if patch is interesting, or accept it if this is the final attempt
+                        if self.is_interesting_patch(gt) or attempt >= MAX_RANDOM_ATTEMPTS:
+                            break
                     
                     if gt is None or lr is None:
                         continue
                     
-                    # Save patches
                     saved, gt_path, lr_path = self._save_patch_pair(
                         gt, lr, video_path, ts,
                         category, format_name, n_frames
                     )
                     
                     if saved:
-                        # Check if GT is a black frame (only first 10 seconds)
                         if ts <= black_frame_detection_limit_seconds and \
                            self._is_black_frame(gt_path, black_frame_threshold_kb):
                             black_frames_detected += 1
-                            # Delete the files
                             try:
                                 if os.path.exists(gt_path):
                                     os.remove(gt_path)
@@ -1463,10 +1487,8 @@ class DatasetGeneratorV2UHD:
                                     os.remove(lr_path)
                             except Exception as e:
                                 self.logger.error(f"Error deleting black frame files: {e}")
-                            # Don't count as created
                             continue
                         
-                        # Valid frame
                         if ts > black_frame_detection_limit_seconds:
                             black_frames_skipped += 1
                         
@@ -1476,8 +1498,7 @@ class DatasetGeneratorV2UHD:
             
             processed_count += 1
             
-            # IMPORTANT: Delete frame files immediately after processing to free memory
-            # This prevents OOM when processing thousands of frames
+            # Delete frame files immediately
             for frame_path in frame_file_paths:
                 try:
                     if os.path.exists(frame_path):
@@ -1485,7 +1506,6 @@ class DatasetGeneratorV2UHD:
                 except Exception as e:
                     self.logger.warning(f"Could not delete frame file {frame_path}: {e}")
             
-            # Release frames from memory
             del frames
             
             if processed_count % 100 == 0:
@@ -1493,22 +1513,19 @@ class DatasetGeneratorV2UHD:
                 self.logger.info(f"  Progress: {processed_count}/{len(frame_paths_dict)} scenes processed ({scenes_pct:.1f}%)")
                 self.logger.info(f"  Patches created so far: {total_created}")
             
-            # Check if should stop (user interrupt)
             if not self.running:
                 self.logger.warning("  Interrupted by user")
                 break
         
         # Final statistics
         total_time = time.time() - start_time
-        scenes_extracted = len(frame_paths_dict)
-        scenes_processed = processed_count
         
         self.logger.info(f"\n╔══════════════════════════════════════════════════════════╗")
         self.logger.info(f"║  EXTRACTION COMPLETE                                     ║")
         self.logger.info(f"╚══════════════════════════════════════════════════════════╝")
-        self.logger.info(f"✓ Processed {scenes_processed}/{scenes_extracted} scenes in {total_time:.1f}s")
+        self.logger.info(f"✓ Processed {processed_count}/{len(frame_paths_dict)} scenes in {total_time:.1f}s")
         self.logger.info(f"✓ Created {total_created} patches total")
-        self.logger.info(f"  Scene utilization: {100*scenes_processed/scenes_extracted:.1f}% (all extracted scenes used)")
+        self.logger.info(f"  Scene utilization: {100*processed_count/len(frame_paths_dict):.1f}% (all extracted scenes used)")
         
         if black_frames_detected > 0:
             self.logger.info(f"  🚫 Black frames detected and removed: {black_frames_detected}")
@@ -1523,7 +1540,7 @@ class DatasetGeneratorV2UHD:
             for format_name, stats in formats.items():
                 self.logger.info(f"    └─ {format_name}: {stats['created']}/{stats['target']}")
         
-        # Clean up temp directory (remove any remaining files)
+        # Clean up temp directory
         if temp_dir and os.path.exists(temp_dir):
             try:
                 shutil.rmtree(temp_dir, ignore_errors=True)
@@ -1992,6 +2009,50 @@ class DatasetGeneratorV2UHD:
         except Exception as e:
             self.logger.error(f"Error checking file size: {e}")
             return False
+    
+    def is_interesting_patch(self, patch: np.ndarray) -> bool:
+        """
+        Check if a patch has enough detail/sharpness to be interesting.
+        
+        Uses Laplacian variance to detect blur/lack of detail.
+        Black or very dark frames are always considered interesting to preserve user's requested cuts.
+        
+        Typical threshold values:
+        - < 50: Very permissive, accepts most patches
+        - 80 (default): Good balance, filters out very blurry/uniform patches
+        - > 150: Strict, only accepts very sharp patches
+        
+        Args:
+            patch: Image patch to check (numpy array)
+        
+        Returns:
+            True if patch is interesting (has detail or is very dark), False otherwise
+        """
+        try:
+            # Check if patch is very dark/black (average brightness < 5)
+            # These are always considered "interesting" to preserve black frames/cuts
+            avg_brightness = np.mean(patch)
+            if avg_brightness < 5:
+                return True
+            
+            # Convert to grayscale if needed
+            if len(patch.shape) == 3:
+                gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = patch
+            
+            # Calculate Laplacian variance (measure of sharpness/detail)
+            laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
+            
+            # Get threshold from settings (default 80.0)
+            threshold = self.settings.get('min_detail_threshold', 80.0)
+            
+            # Patch is interesting if it has enough detail
+            return laplacian_var >= threshold
+        
+        except Exception as e:
+            self.logger.error(f"Error checking patch interestingness: {e}")
+            return True  # Default to interesting on error
     
     def _save_patch_pair(self, gt: np.ndarray, lr: np.ndarray,
                         video_path: str, timestamp: float,

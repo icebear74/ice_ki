@@ -91,6 +91,26 @@ class CompleteTrainingDataStore:
             # Layer-Aktivitäten (dict: layer_name -> percentage)
             'layer_activity_map': {},
             
+            # Dataset File Information (NEW)
+            'dataset_files': {
+                'train_per_size': {
+                    '720': {'count': 0, 'has_new': False, 'new_count': 0},
+                    '540': {'count': 0, 'has_new': False, 'new_count': 0},
+                    '720_169': {'count': 0, 'has_new': False, 'new_count': 0}
+                },
+                'val': {
+                    '720': {'count': 0, 'has_new': False, 'new_count': 0},
+                    '540': {'count': 0, 'has_new': False, 'new_count': 0},
+                    '720_169': {'count': 0, 'has_new': False, 'new_count': 0}
+                },
+                'distribution': {
+                    '720': 0.0,
+                    '540': 0.0,
+                    '720_169': 0.0
+                },
+                'last_check': 0
+            },
+            
             # Statusflags
             'training_active': True,
             'validation_running': False,
@@ -134,6 +154,12 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             self._deliver_json_snapshot()
         elif self.path == '/monitoring/config' or self.path == '/config':
             self._deliver_config_json()
+        elif self.path == '/config/ui':
+            self._deliver_config_page()
+        elif self.path.startswith('/api/size_stats'):
+            self._handle_size_stats()
+        elif self.path.startswith('/api/batch_preview'):
+            self._handle_batch_preview()
         elif self.path.startswith('/monitoring'):
             self._deliver_main_page()
         else:
@@ -143,6 +169,10 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         """POST-Request-Handler"""
         if self.path == '/monitoring/command':
             self._process_user_command()
+        elif self.path == '/api/update_size_distribution':
+            self._handle_update_size_distribution()
+        elif self.path.startswith('/api/update_batch_config'):
+            self._handle_update_batch_config()
         else:
             self.send_error(404)
     
@@ -191,6 +221,31 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         
         self.wfile.write(json.dumps(config, indent=2).encode('utf-8'))
     
+    def _deliver_config_page(self):
+        """Liefert Config-HTML-Seite (config_7frame.html template)"""
+        import os
+        
+        # Load config template
+        template_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            'web', 'templates', 'config_7frame.html'
+        )
+        
+        try:
+            with open(template_path, 'r', encoding='utf-8') as f:
+                html_content = f.read()
+            
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Cache-Control', 'no-cache')
+            self.end_headers()
+            self.wfile.write(html_content.encode('utf-8'))
+            
+        except FileNotFoundError:
+            self.send_error(404, f'Config template not found: {template_path}')
+        except Exception as e:
+            self.send_error(500, f'Error loading config template: {str(e)}')
+    
     def _process_user_command(self):
         """Verarbeitet Befehle vom Benutzer"""
         content_length = int(self.headers.get('Content-Length', 0))
@@ -227,6 +282,162 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             
         except Exception as e:
             self.send_error(400, str(e))
+    
+    def _handle_size_stats(self):
+        """Handle /api/size_stats GET request"""
+        try:
+            # Return placeholder stats for now
+            # In a real implementation, this would get actual dataset statistics
+            stats = {
+                '720': {'train': 0, 'val': 0},
+                '540': {'train': 0, 'val': 0},
+                '720_169': {'train': 0, 'val': 0}
+            }
+            
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Cache-Control', 'no-cache')
+            self.end_headers()
+            self.wfile.write(json.dumps(stats).encode('utf-8'))
+            
+        except Exception as e:
+            self.send_error(500, str(e))
+    
+    def _handle_batch_preview(self):
+        """Handle /api/batch_preview GET request"""
+        try:
+            # Parse query parameters
+            from urllib.parse import urlparse, parse_qs
+            parsed = urlparse(self.path)
+            params = parse_qs(parsed.query)
+            
+            effective_batch = int(params.get('effective_batch', [6])[0])
+            
+            # Return batch preview
+            preview = {
+                'effective_batch': effective_batch,
+                'gpu_batch': min(effective_batch, 3),
+                'accumulation': max(1, effective_batch // 3),
+                'estimated_vram': f'{effective_batch * 0.8:.1f} GB'
+            }
+            
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Cache-Control', 'no-cache')
+            self.end_headers()
+            self.wfile.write(json.dumps(preview).encode('utf-8'))
+            
+        except Exception as e:
+            self.send_error(500, str(e))
+    
+    def _handle_update_size_distribution(self):
+        """Handle /api/update_size_distribution POST request"""
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            request_body = self.rfile.read(content_length)
+            data = json.loads(request_body.decode('utf-8'))
+            
+            # Get distribution - handle both formats
+            if 'distribution' in data:
+                # New format: {'distribution': {'720': 0.4, '540': 0.3, '720_169': 0.3}}
+                distribution = data['distribution']
+            else:
+                # Old format from config template: {'small_540': 0.3, 'medium_169': 0.3, 'large_720': 0.4}
+                # Map to correct keys
+                key_mapping = {
+                    'small_540': '540',
+                    'medium_169': '720_169',
+                    'large_720': '720'
+                }
+                distribution = {}
+                for old_key, value in data.items():
+                    new_key = key_mapping.get(old_key, old_key)
+                    distribution[new_key] = value
+            
+            # Validate distribution
+            total = sum(float(v) for v in distribution.values())
+            
+            if abs(total - 1.0) > 0.01:
+                response = {
+                    'success': False,
+                    'error': f'Distribution must sum to 1.0 (currently {total:.2f})'
+                }
+            else:
+                # Update runtime config if available
+                if hasattr(self, 'runtime_config_manager') and self.runtime_config_manager is not None:
+                    try:
+                        self.runtime_config_manager.set('size_distribution', distribution)
+                        response = {
+                            'success': True,
+                            'message': 'Distribution updated successfully',
+                            'distribution': distribution
+                        }
+                    except Exception as e:
+                        response = {
+                            'success': False,
+                            'error': f'Failed to update config: {str(e)}'
+                        }
+                else:
+                    response = {
+                        'success': False,
+                        'error': 'Runtime config not available'
+                    }
+            
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps(response).encode('utf-8'))
+            
+        except json.JSONDecodeError as e:
+            self.send_error(400, f'Invalid JSON: {str(e)}')
+        except Exception as e:
+            self.send_error(500, str(e))
+    
+    def _handle_update_batch_config(self):
+        """Handle /api/update_batch_config POST request"""
+        try:
+            # Parse query parameters
+            from urllib.parse import urlparse, parse_qs
+            parsed = urlparse(self.path)
+            params = parse_qs(parsed.query)
+            
+            effective_batch = int(params.get('effective_batch', [6])[0])
+            
+            # Update runtime config if available
+            if hasattr(self, 'runtime_config_manager') and self.runtime_config_manager is not None:
+                try:
+                    # Calculate batch_size and accumulation_steps
+                    batch_size = min(effective_batch, 3)
+                    accumulation_steps = max(1, effective_batch // batch_size)
+                    
+                    self.runtime_config_manager.set('batch_size', batch_size)
+                    self.runtime_config_manager.set('accumulation_steps', accumulation_steps)
+                    
+                    response = {
+                        'success': True,
+                        'message': 'Batch configuration updated',
+                        'batch_size': batch_size,
+                        'accumulation_steps': accumulation_steps,
+                        'effective_batch': batch_size * accumulation_steps
+                    }
+                except Exception as e:
+                    response = {
+                        'success': False,
+                        'error': f'Failed to update config: {str(e)}'
+                    }
+            else:
+                response = {
+                    'success': False,
+                    'error': 'Runtime config not available'
+                }
+            
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps(response).encode('utf-8'))
+            
+        except Exception as e:
+            self.send_error(500, str(e))
     
     def _deliver_main_page(self):
         """Liefert Haupt-HTML-Seite mit eingebettetem JavaScript"""
@@ -1125,6 +1336,71 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             </div>
         </div>
         
+        <div class="section-header">📂 Dataset Files</div>
+        
+        <div class="layer-activity-container">
+            <!-- Training Datasets -->
+            <div style="margin-bottom: 20px;">
+                <h3 style="color: var(--accent-blue); margin-bottom: 10px; font-size: 1.1em;">🎯 Training Datasets</h3>
+                
+                <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border-color);">
+                    <span style="color: var(--text-secondary);">720×720</span>
+                    <span style="color: var(--text-primary); font-weight: bold;" id="train720Count">0</span>
+                </div>
+                <div id="train720NewFiles" style="display: none; margin-top: 5px; margin-bottom: 8px; padding: 6px; background: rgba(34, 197, 94, 0.1); border-left: 3px solid #22c55e; border-radius: 4px; font-size: 0.85em;">
+                    <span style="color: #22c55e;">✨ +<strong id="train720NewCount">0</strong> reloaded</span>
+                </div>
+                
+                <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border-color);">
+                    <span style="color: var(--text-secondary);">540×540</span>
+                    <span style="color: var(--text-primary); font-weight: bold;" id="train540Count">0</span>
+                </div>
+                <div id="train540NewFiles" style="display: none; margin-top: 5px; margin-bottom: 8px; padding: 6px; background: rgba(34, 197, 94, 0.1); border-left: 3px solid #22c55e; border-radius: 4px; font-size: 0.85em;">
+                    <span style="color: #22c55e;">✨ +<strong id="train540NewCount">0</strong> reloaded</span>
+                </div>
+                
+                <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border-color);">
+                    <span style="color: var(--text-secondary);">720×405 (16:9)</span>
+                    <span style="color: var(--text-primary); font-weight: bold;" id="train720_169Count">0</span>
+                </div>
+                <div id="train720_169NewFiles" style="display: none; margin-top: 5px; margin-bottom: 8px; padding: 6px; background: rgba(34, 197, 94, 0.1); border-left: 3px solid #22c55e; border-radius: 4px; font-size: 0.85em;">
+                    <span style="color: #22c55e;">✨ +<strong id="train720_169NewCount">0</strong> reloaded</span>
+                </div>
+            </div>
+            
+            <!-- Validation Datasets -->
+            <div>
+                <h3 style="color: var(--accent-green); margin-bottom: 10px; font-size: 1.1em;">✅ Validation Datasets</h3>
+                <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border-color);">
+                    <span style="color: var(--text-secondary);">720×720</span>
+                    <span style="color: var(--text-primary); font-weight: bold;" id="val720Count">0</span>
+                </div>
+                <div id="val720NewFiles" style="display: none; margin-top: 5px; margin-bottom: 8px; padding: 6px; background: rgba(34, 197, 94, 0.1); border-left: 3px solid #22c55e; border-radius: 4px; font-size: 0.85em;">
+                    <span style="color: #22c55e;">✨ +<strong id="val720NewCount">0</strong> reloaded</span>
+                </div>
+                
+                <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border-color);">
+                    <span style="color: var(--text-secondary);">540×540</span>
+                    <span style="color: var(--text-primary); font-weight: bold;" id="val540Count">0</span>
+                </div>
+                <div id="val540NewFiles" style="display: none; margin-top: 5px; margin-bottom: 8px; padding: 6px; background: rgba(34, 197, 94, 0.1); border-left: 3px solid #22c55e; border-radius: 4px; font-size: 0.85em;">
+                    <span style="color: #22c55e;">✨ +<strong id="val540NewCount">0</strong> reloaded</span>
+                </div>
+                
+                <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border-color);">
+                    <span style="color: var(--text-secondary);">720×405 (16:9)</span>
+                    <span style="color: var(--text-primary); font-weight: bold;" id="val720_169Count">0</span>
+                </div>
+                <div id="val720_169NewFiles" style="display: none; margin-top: 5px; margin-bottom: 8px; padding: 6px; background: rgba(34, 197, 94, 0.1); border-left: 3px solid #22c55e; border-radius: 4px; font-size: 0.85em;">
+                    <span style="color: #22c55e;">✨ +<strong id="val720_169NewCount">0</strong> reloaded</span>
+                </div>
+            </div>
+            
+            <div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-color); font-size: 0.85em; color: var(--text-secondary);">
+                Last check: Step <span id="datasetLastCheck">0</span>
+            </div>
+        </div>
+        
         <div class="section-header">🎮 Steuerung</div>
         
         <div class="controls-section">
@@ -1295,6 +1571,9 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             
             // Layer activities with grouping
             updateLayerActivities(data.layer_activity_map);
+            
+            // Dataset files
+            updateDatasetFiles(data);
             
             // TensorBoard link
             const tbLink = document.getElementById('tensorboardLink');
@@ -1707,6 +1986,79 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             });
         }
         
+        function updateDatasetFiles(data) {
+            const dsFiles = data.dataset_files || {};
+            
+            // Update training datasets (per-size)
+            const trainPerSize = dsFiles.train_per_size || {};
+            
+            // 720 training
+            const train720 = trainPerSize['720'] || {};
+            document.getElementById('train720Count').textContent = train720.count || 0;
+            if (train720.has_new && train720.new_count > 0) {
+                document.getElementById('train720NewFiles').style.display = 'block';
+                document.getElementById('train720NewCount').textContent = train720.new_count;
+            } else {
+                document.getElementById('train720NewFiles').style.display = 'none';
+            }
+            
+            // 540 training
+            const train540 = trainPerSize['540'] || {};
+            document.getElementById('train540Count').textContent = train540.count || 0;
+            if (train540.has_new && train540.new_count > 0) {
+                document.getElementById('train540NewFiles').style.display = 'block';
+                document.getElementById('train540NewCount').textContent = train540.new_count;
+            } else {
+                document.getElementById('train540NewFiles').style.display = 'none';
+            }
+            
+            // 720_169 training
+            const train720_169 = trainPerSize['720_169'] || {};
+            document.getElementById('train720_169Count').textContent = train720_169.count || 0;
+            if (train720_169.has_new && train720_169.new_count > 0) {
+                document.getElementById('train720_169NewFiles').style.display = 'block';
+                document.getElementById('train720_169NewCount').textContent = train720_169.new_count;
+            } else {
+                document.getElementById('train720_169NewFiles').style.display = 'none';
+            }
+            
+            // Update validation datasets
+            const val = dsFiles.val || {};
+            
+            // 720
+            const val720 = val['720'] || {};
+            document.getElementById('val720Count').textContent = val720.count || 0;
+            if (val720.has_new && val720.new_count > 0) {
+                document.getElementById('val720NewFiles').style.display = 'block';
+                document.getElementById('val720NewCount').textContent = val720.new_count;
+            } else {
+                document.getElementById('val720NewFiles').style.display = 'none';
+            }
+            
+            // 540
+            const val540 = val['540'] || {};
+            document.getElementById('val540Count').textContent = val540.count || 0;
+            if (val540.has_new && val540.new_count > 0) {
+                document.getElementById('val540NewFiles').style.display = 'block';
+                document.getElementById('val540NewCount').textContent = val540.new_count;
+            } else {
+                document.getElementById('val540NewFiles').style.display = 'none';
+            }
+            
+            // 720_169
+            const val720_169 = val['720_169'] || {};
+            document.getElementById('val720_169Count').textContent = val720_169.count || 0;
+            if (val720_169.has_new && val720_169.new_count > 0) {
+                document.getElementById('val720_169NewFiles').style.display = 'block';
+                document.getElementById('val720_169NewCount').textContent = val720_169.new_count;
+            } else {
+                document.getElementById('val720_169NewFiles').style.display = 'none';
+            }
+            
+            // Last check
+            document.getElementById('datasetLastCheck').textContent = dsFiles.last_check || 0;
+        }
+        
         function downloadDataAsJSON() {
             // Fetch current data and trigger download
             fetch('/monitoring/data')
@@ -1748,8 +2100,8 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         }
         
         function openConfigPage() {
-            // Check if config API is available
-            window.open('/config', '_blank');
+            // Open config UI page
+            window.open('/config/ui', '_blank');
         }
         
         function triggerCheckpoint() {
