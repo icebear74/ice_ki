@@ -606,19 +606,22 @@ class DatasetGeneratorV2UHD:
     def extract_frames_batch_uhd(self, video_path: str, timestamps: List[float],
                                  n_frames: int = 7, fps: float = 25.0) -> Dict[float, List[np.ndarray]]:
         """
-        OPTIMIZED: Extract frames at multiple timestamps in a SINGLE FFmpeg pass using file-based frame selection.
+        Extract frames using SINGLE extraction mode (one FFmpeg call per timestamp).
         
-        This is 10-50x faster than calling extract_frames_uhd() multiple times because:
-        - Video file opened only ONCE
-        - Single decode pass through video
-        - No repeated seek operations
-        - Uses sendcmd with external file (works for ANY timestamp pattern)
+        Slower than batch but 100% RELIABLE - user priority: reliability over speed.
+        User feedback: "Ok speed isn't everything... we'll go back to single extraction mode"
+        
+        This approach:
+        - One FFmpeg call per timestamp (simple, proven)
+        - Uses -ss for fast seeking before input
+        - Extracts exactly n_frames with -frames:v
+        - Proven to work reliably (no mysterious failures)
         
         Args:
             video_path: Path to video file
             timestamps: List of start timestamps to extract from
             n_frames: Number of consecutive frames per timestamp (default 7)
-            fps: Video frame rate (default 25.0)
+            fps: Video frame rate (NOT used in single mode)
         
         Returns:
             Dictionary mapping timestamp -> list of frames
@@ -630,162 +633,27 @@ class DatasetGeneratorV2UHD:
         # Sort timestamps for predictable extraction order
         sorted_ts = sorted(timestamps)
         
-        # ALWAYS use file-based extraction (works for uniform AND non-uniform patterns)
-        # User feedback: "I thought we were doing this via a file where the frames to extract are listed?!"
-        self.logger.info(f"📄 Using FILE-BASED frame extraction for {len(sorted_ts)} timestamps")
-        return self._extract_frames_with_file(video_path, sorted_ts, n_frames, fps)
-    
-    def _extract_frames_with_file(self, video_path: str, timestamps: List[float],
-                                   n_frames: int, fps: float) -> Dict[float, List[np.ndarray]]:
-        """
-        Extract frames using sendcmd with TIME-BASED selection file.
+        # USE SINGLE EXTRACTION MODE (reliable!)
+        # User explicitly requested: "we'll go back to single extraction mode with ss"
+        self.logger.info(f"Extracting {len(sorted_ts)} scenes using SINGLE extraction mode (reliable):")
         
-        Uses sendcmd with external file to avoid command line length limits.
-        Creates commands.txt with TIME-BASED selections (not frame numbers!), then uses:
-        -vf "sendcmd=f=commands.txt,select"
-        
-        IMPORTANT: Uses TIME-BASED selection (between(t,...)) instead of frame numbers (eq(n,...))
-        because -discard nokey breaks frame numbering but time-based selection works correctly.
-        
-        This approach:
-        - No command line length issues (frame list in file)
-        - TIME-BASED selection (works with -discard nokey)
-        - Works with ANY timestamp pattern (uniform or non-uniform)
-        - Fast seeking with -discard nokey
-        """
-        temp_dir = None
-        commands_file = None
-        try:
-            # Use configured temp directory
-            temp_dir = self._create_temp_dir("batch_stride")
-            output_pattern = os.path.join(temp_dir, "frame_%05d.png")
-            
-            total_frames_to_extract = len(timestamps) * n_frames
-            
-            # Create commands file with TIME-BASED selections
-            # Format: "0 select 'between(t,START_TIME,END_TIME)';"
-            # This works correctly with -discard nokey (unlike frame numbers)
-            commands_file = os.path.join(temp_dir, "frame_select_commands.txt")
-            with open(commands_file, 'w') as f:
-                for ts in timestamps:
-                    # Calculate time range for n_frames at given fps
-                    start_t = ts
-                    duration = n_frames / fps
-                    end_t = ts + duration
-                    # Use between(t,...) for time-based selection
-                    # This is compatible with -discard nokey
-                    f.write(f"0 select 'between(t,{start_t:.6f},{end_t:.6f})';\n")
-            
-            self.logger.info(f"Batch extracting with TIME-BASED frame selection:")
-            self.logger.info(f"  Timestamps: {len(timestamps)}")
-            self.logger.info(f"  Frames per timestamp: {n_frames}")
-            self.logger.info(f"  Total frames to extract: {total_frames_to_extract}")
-            self.logger.info(f"  Commands file: {commands_file}")
-            self.logger.info(f"  First few timestamps: {timestamps[:3]}...")
-            
-            # UHD tonemap filter with 1080p scaling
-            tonemap_filter = (
-                "zscale=t=linear:npl=100,"
-                "format=gbrpf32le,"
-                "zscale=p=bt709,"
-                "tonemap=tonemap=mobius:desat=0,"
-                "zscale=t=bt709:m=bt709:range=limited,"
-                "scale=1920:1080:flags=lanczos,"
-                "format=yuv420p"
-            )
-            
-            # Full filter: sendcmd from file + select + tonemap
-            # sendcmd reads TIME-BASED selections from file, select applies them
-            full_filter = f"sendcmd=f={commands_file},select,setpts=N/FRAME_RATE/TB,{tonemap_filter}"
-            
-            # CPU-only mode (no CUDA) - more stable and reliable
-            # ADDED: -discard nokey for faster seeking (user suggestion)
-            # TIME-BASED selection (between(t,...)) works correctly with -discard nokey
-            cmd = [
-                'nice', '-n', '19',  # Lowest priority to not interfere with other processes
-                'ffmpeg',
-                '-threads', str(self.workers),  # 6 threads for faster extraction
-                '-discard', 'nokey',  # Skip non-keyframes during seek = 2-5x faster
-                '-i', video_path,
-                '-vf', full_filter,
-                '-vsync', 'vfr',
-                '-y',
-                output_pattern
-            ]
-            
-            # LOG THE FFMPEG COMMAND (user requested)
-            self.logger.info(f"FFmpeg command: {' '.join(cmd)}")
-            
-            timeout = self.config.get('ffmpeg_timeout', 120) * len(timestamps) // 10
-            timeout = max(timeout, 300)
-            
-            # Run FFmpeg with progress display
-            video_name = os.path.basename(video_path)
-            returncode = self._run_ffmpeg_with_progress(
-                cmd, 
-                description=f"🎬 Batch extracting {len(timestamps)} scenes from {video_name[:40]}",
-                timeout=timeout
-            )
-            
-            if returncode != 0:
-                self.logger.error(f"Batch extraction failed")
-                return {}
-            
-            # Instead of loading all frames into memory, return frame file paths
-            # This prevents OOM when processing thousands of frames
-            frame_paths = {}
-            frame_idx = 1
-            for ts in timestamps:
-                paths = []
-                for _ in range(n_frames):
-                    frame_path = os.path.join(temp_dir, f"frame_{frame_idx:05d}.png")
-                    if not os.path.exists(frame_path):
-                        self.logger.warning(f"Missing frame {frame_idx} for timestamp {ts}")
-                        break
-                    paths.append(frame_path)
-                    frame_idx += 1
-                
-                if len(paths) == n_frames:
-                    frame_paths[ts] = paths
-                else:
-                    self.logger.warning(f"Incomplete frame set for timestamp {ts}, skipping")
-            
-            # VALIDATION: Check that we got all expected frames
-            total_extracted = sum(len(paths) for paths in frame_paths.values())
-            if total_extracted != total_frames_to_extract:
-                self.logger.error(f"⚠️  Frame count mismatch!")
-                self.logger.error(f"   Expected: {total_frames_to_extract} frames")
-                self.logger.error(f"   Got: {total_extracted} frames")
-                self.logger.error(f"   Missing: {total_frames_to_extract - total_extracted} frames")
-                # Log which timestamps are incomplete
-                for ts in timestamps:
-                    if ts not in frame_paths:
-                        self.logger.error(f"   Timestamp {ts:.2f}s: MISSING (0/{n_frames} frames)")
-                    elif len(frame_paths.get(ts, [])) != n_frames:
-                        self.logger.error(f"   Timestamp {ts:.2f}s: INCOMPLETE ({len(frame_paths[ts])}/{n_frames} frames)")
+        results = {}
+        total_frames = 0
+        for idx, ts in enumerate(sorted_ts, 1):
+            # Call the proven extract_frames_uhd() method for each timestamp
+            frames = self.extract_frames_uhd(video_path, ts, n_frames)
+            if frames:
+                results[ts] = frames
+                total_frames += len(frames)
+                self.logger.info(f"  Timestamp {ts:.1f}s: ✓ {len(frames)} frames ({total_frames}/{len(sorted_ts)*n_frames} total)")
             else:
-                self.logger.info(f"✓ Frame validation passed: {total_extracted}/{total_frames_to_extract} frames extracted")
-            
-            self.logger.info(f"Stride extraction complete: {len(frame_paths)}/{len(timestamps)} timestamps successful")
-            
-            # Return dictionary mapping timestamp to frame file paths
-            # Frames will be loaded on-demand to avoid OOM
-            return {'frame_paths': frame_paths, 'temp_dir': temp_dir}
+                self.logger.warning(f"  Timestamp {ts:.1f}s: ✗ Failed to extract frames")
         
-        except subprocess.TimeoutExpired:
-            self.logger.error(f"Batch extraction timed out")
-            # Clean up on error
-            if temp_dir and os.path.exists(temp_dir):
-                shutil.rmtree(temp_dir, ignore_errors=True)
-            return {}
-        except Exception as e:
-            self.logger.error(f"Error in stride extraction: {e}")
-            # Clean up on error
-            if temp_dir and os.path.exists(temp_dir):
-                shutil.rmtree(temp_dir, ignore_errors=True)
-            return {}
-        # NOTE: temp_dir is NOT cleaned up here on success
-        # It will be cleaned up after frames are processed to avoid OOM
+        # Summary
+        success_count = len(results)
+        self.logger.info(f"✓ Extraction complete: {success_count}/{len(sorted_ts)} timestamps successful, {total_frames}/{len(sorted_ts)*n_frames} frames extracted")
+        
+        return results
     
     def create_patch_pair(self, frames: List[np.ndarray], format_name: str, 
                          format_config: dict, force_center: bool = False) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
