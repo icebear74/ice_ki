@@ -311,12 +311,20 @@ class VideoManager:
         unassigned = 0
         
         for video in self.videos:
-            cats = video.get('categories', {})
+            cats = video.get('categories', [])
             if not cats:
                 unassigned += 1
             else:
-                for cat in cats.keys():
-                    category_counts[cat] += 1
+                # Handle both list and dict formats
+                if isinstance(cats, list):
+                    for cat in cats:
+                        if cat in category_counts:
+                            category_counts[cat] += 1
+                else:
+                    # Legacy dict format
+                    for cat in cats.keys():
+                        if cat in category_counts:
+                            category_counts[cat] += 1
         
         print(f"\nTotal videos: {len(self.videos)}")
         print(f"Unassigned: {unassigned}")
