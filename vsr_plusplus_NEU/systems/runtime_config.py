@@ -193,9 +193,12 @@ class EnhancedRuntimeConfigManager:
         
         # Validate new structure
         if self.use_new_structure:
-            # Check size distribution sum
+            # Check size distribution sum (skip documentation keys starting with _)
             if 'size_distribution' in config:
-                total = sum(config['size_distribution'].values())
+                # Filter out documentation keys and non-numeric values
+                numeric_dist = {k: v for k, v in config['size_distribution'].items() 
+                              if not k.startswith('_') and isinstance(v, (int, float))}
+                total = sum(numeric_dist.values())
                 if not (1.0 - DISTRIBUTION_SUM_TOLERANCE <= total <= 1.0 + DISTRIBUTION_SUM_TOLERANCE):
                     errors.append(
                         f"Size distribution sum is {total:.4f}, must be 1.0 (±{DISTRIBUTION_SUM_TOLERANCE})"

@@ -44,7 +44,9 @@ class SizeGroupedSampler(Sampler):
         self.shuffle = shuffle
         
         # Filter to only active size keys (those with non-zero distribution)
-        self.active_sizes = [k for k, v in size_distribution.items() if v > 0]
+        # Skip documentation keys (starting with _) and non-numeric values
+        self.active_sizes = [k for k, v in size_distribution.items() 
+                           if not k.startswith('_') and isinstance(v, (int, float)) and v > 0]
         
         if not self.active_sizes:
             raise ValueError("No active sizes (all distributions are 0)")

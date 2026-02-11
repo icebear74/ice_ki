@@ -407,12 +407,21 @@ def main():
             
             # Check if multi-size is configured via size_distribution
             size_dist = rt_config.get('size_distribution', {})
-            if size_dist and any(v > 0 for v in size_dist.values()):
+            # Filter out documentation keys (those starting with _) and non-numeric values
+            numeric_dist = {k: v for k, v in size_dist.items() 
+                           if not k.startswith('_') and isinstance(v, (int, float))}
+            if numeric_dist and any(v > 0 for v in numeric_dist.values()):
                 use_multi_size = True
                 print(f"{C_CYAN}✓ Multi-size training enabled (runtime_config.json found at {runtime_config_path}){C_RESET}")
         except Exception as e:
             print(f"{C_YELLOW}⚠ Failed to load runtime_config.json: {e}{C_RESET}")
             print(f"{C_YELLOW}Using single-size training{C_RESET}")
+    
+    # Helper function to filter size_distribution values (skip underscore-prefixed docs)
+    def get_numeric_distribution(size_dist):
+        """Extract numeric values from size_distribution, skipping documentation keys."""
+        return {k: v for k, v in size_dist.items() 
+                if not k.startswith('_') and isinstance(v, (int, float))}
     
     if use_multi_size:
         # Use multi-size dataloader
@@ -428,7 +437,10 @@ def main():
             
             # Convert to dataloader format: sizes dict with enabled/distribution/batch_size
             sizes_config = {}
-            for size_key, distribution in size_dist.items():
+            # Filter out documentation keys (those starting with _) and non-numeric values
+            numeric_dist = {k: v for k, v in size_dist.items() 
+                           if not k.startswith('_') and isinstance(v, (int, float))}
+            for size_key, distribution in numeric_dist.items():
                 batch_info = adaptive_batch.get(size_key, {})
                 sizes_config[size_key] = {
                     'enabled': distribution > 0,
@@ -471,9 +483,10 @@ def main():
             data_config = rt_config.get('data', {})
             data_root = data_config.get('root', DATASET_ROOT)
             dataset_name = data_config.get('dataset_name', 'master')
-            # Get first enabled size from size_distribution
+            # Get first enabled size from size_distribution (filter out documentation keys)
             size_dist = rt_config.get('size_distribution', {})
-            size_key = next((k for k, v in size_dist.items() if v > 0), '540')
+            size_key = next((k for k, v in size_dist.items() 
+                           if not k.startswith('_') and isinstance(v, (int, float)) and v > 0), '540')
         else:
             # Fallback to defaults
             data_root = DATASET_ROOT
@@ -513,9 +526,10 @@ def main():
         # Get ALL enabled validation sizes
         val_sizes = rt_config.get('validation', {}).get('sizes', [])
         if not val_sizes:
-            # Fallback to all sizes from size_distribution
+            # Fallback to all sizes from size_distribution (filter out documentation keys)
             size_dist = rt_config.get('size_distribution', {})
-            val_sizes = [k for k, v in size_dist.items() if v > 0]
+            val_sizes = [k for k, v in size_dist.items() 
+                        if not k.startswith('_') and isinstance(v, (int, float)) and v > 0]
         if not val_sizes:
             val_sizes = ['540']  # Ultimate fallback
     else:
