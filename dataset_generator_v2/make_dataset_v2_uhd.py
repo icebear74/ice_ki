@@ -1047,7 +1047,7 @@ class DatasetGeneratorV2UHD:
         
         Returns:
             Dictionary of {category: {format_name: count}}
-        """
+        
         Calculate format distribution for this video across ALL its categories.
         
         NEW LOGIC (NO WEIGHTS):
