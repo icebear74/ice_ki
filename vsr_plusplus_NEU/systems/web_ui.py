@@ -1335,25 +1335,6 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         <div class="section-header">📂 Dataset Files</div>
         
         <div class="layer-activity-container">
-            <!-- Distribution Info -->
-            <div style="margin-bottom: 20px; padding: 12px; background: rgba(96, 165, 250, 0.05); border-radius: 6px; border: 1px solid rgba(96, 165, 250, 0.2);">
-                <h3 style="color: var(--accent-blue); margin-bottom: 10px; font-size: 1.1em;">📊 Distribution (Config)</h3>
-                <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;">
-                    <div style="text-align: center;">
-                        <div style="color: var(--text-secondary); font-size: 0.85em; margin-bottom: 4px;">720</div>
-                        <div style="color: var(--text-primary); font-weight: bold; font-size: 1.1em;" id="dist720">0%</div>
-                    </div>
-                    <div style="text-align: center;">
-                        <div style="color: var(--text-secondary); font-size: 0.85em; margin-bottom: 4px;">540</div>
-                        <div style="color: var(--text-primary); font-weight: bold; font-size: 1.1em;" id="dist540">0%</div>
-                    </div>
-                    <div style="text-align: center;">
-                        <div style="color: var(--text-secondary); font-size: 0.85em; margin-bottom: 4px;">720_169</div>
-                        <div style="color: var(--text-primary); font-weight: bold; font-size: 1.1em;" id="dist720_169">0%</div>
-                    </div>
-                </div>
-            </div>
-            
             <!-- Training Datasets -->
             <div style="margin-bottom: 20px;">
                 <h3 style="color: var(--accent-blue); margin-bottom: 10px; font-size: 1.1em;">🎯 Training Datasets</h3>
