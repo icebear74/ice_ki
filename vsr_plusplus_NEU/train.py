@@ -409,12 +409,19 @@ def main():
             data_root = data_config.get('root', DATASET_ROOT)
             dataset_name = data_config.get('dataset_name', 'master')
             
-            print(f"{C_CYAN}Checking for dataset sizes in: {os.path.join(data_root, dataset_name, 'patches')}{C_RESET}")
+            # Get configurable paths (with defaults)
+            paths_config = data_config.get('paths', {})
+            train_gt_pattern = paths_config.get('train_gt', 'patches/{size_key}/GT')
+            
+            print(f"{C_CYAN}Checking for dataset sizes in: {os.path.join(data_root, dataset_name)}{C_RESET}")
+            print(f"{C_CYAN}  Using path pattern: {train_gt_pattern}{C_RESET}")
             
             # Check which size directories exist and have files
             available_sizes = []
             for size_key in ['540', '720', '720_169']:
-                train_dir = os.path.join(data_root, dataset_name, 'patches', size_key, 'GT')
+                # Build path using pattern
+                train_path = train_gt_pattern.replace('{size_key}', size_key)
+                train_dir = os.path.join(data_root, dataset_name, train_path)
                 print(f"{C_CYAN}  Checking {size_key}: {train_dir}{C_RESET}")
                 
                 if os.path.exists(train_dir):
@@ -440,13 +447,22 @@ def main():
             print(f"{C_YELLOW}Using single-size training{C_RESET}")
     
     # Helper function to auto-detect available sizes
-    def detect_available_sizes(data_root, dataset_name):
-        """Detect which dataset sizes are available by checking directories."""
+    def detect_available_sizes(data_root, dataset_name, train_gt_pattern='patches/{size_key}/GT'):
+        """Detect which dataset sizes are available by checking directories.
+        
+        Args:
+            data_root: Root directory
+            dataset_name: Dataset name (e.g., 'master')
+            train_gt_pattern: Path pattern with {size_key} placeholder
+        """
         available = []
-        print(f"{C_CYAN}Detecting available sizes in: {os.path.join(data_root, dataset_name, 'patches')}{C_RESET}")
+        print(f"{C_CYAN}Detecting available sizes in: {os.path.join(data_root, dataset_name)}{C_RESET}")
+        print(f"{C_CYAN}  Using path pattern: {train_gt_pattern}{C_RESET}")
         
         for size_key in ['540', '720', '720_169']:
-            train_dir = os.path.join(data_root, dataset_name, 'patches', size_key, 'GT')
+            # Build path using pattern
+            train_path = train_gt_pattern.replace('{size_key}', size_key)
+            train_dir = os.path.join(data_root, dataset_name, train_path)
             print(f"{C_CYAN}  Checking {size_key}: {train_dir}{C_RESET}")
             
             if os.path.exists(train_dir):
@@ -475,7 +491,9 @@ def main():
             
             # Auto-detect available sizes and create config
             sizes_config = {}
-            available = detect_available_sizes(data_root, dataset_name)
+            paths_config = data_config.get('paths', {})
+            train_gt_pattern = paths_config.get('train_gt', 'patches/{size_key}/GT')
+            available = detect_available_sizes(data_root, dataset_name, train_gt_pattern)
             
             for size_key, file_count in available:
                 batch_info = adaptive_batch.get(size_key, {})
@@ -491,7 +509,8 @@ def main():
                 'dataset_name': dataset_name,
                 'sizes': sizes_config,
                 'augment': True,
-                'shuffle': True
+                'shuffle': True,
+                'paths': paths_config  # NEW: Pass paths config
             }
             
             train_loader = create_train_loader(loader_config)
@@ -520,14 +539,17 @@ def main():
             data_config = rt_config.get('data', {})
             data_root = data_config.get('root', DATASET_ROOT)
             dataset_name = data_config.get('dataset_name', 'master')
+            paths_config = data_config.get('paths', None)  # NEW: Get paths config
             # Auto-detect first available size
-            available = detect_available_sizes(data_root, dataset_name)
+            train_gt_pattern = paths_config.get('train_gt', 'patches/{size_key}/GT') if paths_config else 'patches/{size_key}/GT'
+            available = detect_available_sizes(data_root, dataset_name, train_gt_pattern)
             size_key = available[0][0] if available else '540'
         else:
             # Fallback to defaults
             data_root = DATASET_ROOT
             dataset_name = 'master'
             size_key = '540'
+            paths_config = None
         
         try:
             train_dataset = VSRDataset(
@@ -535,7 +557,8 @@ def main():
                 dataset_name=dataset_name,
                 size_key=size_key,
                 mode='train',
-                augment=True
+                augment=True,
+                paths_config=paths_config  # NEW: Pass paths config
             )
             
             print(f"✅ Training samples: {len(train_dataset):,}\n")
@@ -559,17 +582,20 @@ def main():
         data_config = rt_config.get('data', {})
         data_root = data_config.get('root', DATASET_ROOT)
         dataset_name = data_config.get('dataset_name', 'master')
+        paths_config = data_config.get('paths', None)  # NEW: Get paths config
         # Get validation sizes from config
         val_sizes = rt_config.get('validation', {}).get('sizes', [])
         if not val_sizes:
             # Fallback to auto-detected training sizes
-            available = detect_available_sizes(data_root, dataset_name)
+            train_gt_pattern = paths_config.get('train_gt', 'patches/{size_key}/GT') if paths_config else 'patches/{size_key}/GT'
+            available = detect_available_sizes(data_root, dataset_name, train_gt_pattern)
             val_sizes = [size_key for size_key, _ in available] if available else ['540']
     else:
         # Fallback to defaults
         data_root = DATASET_ROOT
         dataset_name = 'master'
         val_sizes = ['540']
+        paths_config = None
     
     # Create validation dataset and loader for EACH size
     print(f"{C_CYAN}Creating validation datasets for sizes: {', '.join(val_sizes)}{C_RESET}")
@@ -582,7 +608,8 @@ def main():
                 dataset_name=dataset_name,
                 size_key=size_key,
                 mode='val',
-                augment=False
+                augment=False,
+                paths_config=paths_config  # NEW: Pass paths config
             )
             
             val_loader = DataLoader(

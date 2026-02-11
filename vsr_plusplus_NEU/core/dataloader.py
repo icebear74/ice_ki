@@ -198,6 +198,7 @@ def create_train_loader(config):
     sizes_config = config.get('sizes', {})
     augment = config.get('augment', True)
     shuffle = config.get('shuffle', True)
+    paths_config = config.get('paths', None)  # NEW: Get paths config
     
     if not data_root:
         raise ValueError("config must contain 'data_root'")
@@ -221,7 +222,8 @@ def create_train_loader(config):
             dataset_name=dataset_name,
             size_key=size_key,
             mode='train',
-            augment=augment
+            augment=augment,
+            paths_config=paths_config  # NEW: Pass paths config
         )
         
         datasets_dict[size_key] = dataset

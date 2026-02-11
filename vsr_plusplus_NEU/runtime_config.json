@@ -3,7 +3,14 @@
   
   "data": {
     "root": "/mnt/data/training/datasetNeu",
-    "dataset_name": "master"
+    "dataset_name": "master",
+    "_PATH_NOTE": "Relative paths from data.root/dataset_name. Use {size_key} placeholder for size variants (540, 720, 720_169).",
+    "paths": {
+      "train_gt": "patches/{size_key}/GT",
+      "train_lr": "patches/{size_key}/LR_7frames",
+      "val_gt": "val/GT/{size_key}",
+      "val_lr": "patches/{size_key}/LR_7frames"
+    }
   },
   "model": {
     "n_frames": 7,

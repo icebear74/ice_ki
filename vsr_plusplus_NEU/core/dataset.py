@@ -28,9 +28,14 @@ class VSRDataset(Dataset):
         size_key: Size variant ('720', '540', or '720_169')
         mode: 'train' or 'val'
         augment: Whether to apply augmentations (flip, rotate)
+        paths_config: Optional dict with path patterns:
+            - train_gt: Pattern for training GT (default: 'patches/{size_key}/GT')
+            - train_lr: Pattern for training LR (default: 'patches/{size_key}/LR_7frames')
+            - val_gt: Pattern for validation GT (default: 'val/GT/{size_key}')
+            - val_lr: Pattern for validation LR (default: 'patches/{size_key}/LR_7frames')
     """
     
-    def __init__(self, root, dataset_name='master', size_key='720', mode='train', augment=True):
+    def __init__(self, root, dataset_name='master', size_key='720', mode='train', augment=True, paths_config=None):
         self.root = root
         self.dataset_name = dataset_name
         self.size_key = size_key
@@ -40,23 +45,33 @@ class VSRDataset(Dataset):
         # Thread lock for safe reloading during training
         self.reload_lock = threading.Lock()
         
+        # Path patterns (configurable or defaults)
+        if paths_config is None:
+            paths_config = {}
+        self.train_gt_pattern = paths_config.get('train_gt', 'patches/{size_key}/GT')
+        self.train_lr_pattern = paths_config.get('train_lr', 'patches/{size_key}/LR_7frames')
+        self.val_gt_pattern = paths_config.get('val_gt', 'val/GT/{size_key}')
+        self.val_lr_pattern = paths_config.get('val_lr', 'patches/{size_key}/LR_7frames')
+        
         # Build paths based on mode
         dataset_path = os.path.join(root, dataset_name)
         
         if mode == 'train':
-            # Training: root/dataset_name/patches/size_key/GT and LR_7frames
-            patches_path = os.path.join(dataset_path, 'patches', size_key)
-            self.gt_dir = os.path.join(patches_path, 'GT')
-            self.lr_dir = os.path.join(patches_path, 'LR_7frames')
+            # Training: use train_gt_pattern and train_lr_pattern
+            gt_path = self.train_gt_pattern.replace('{size_key}', size_key)
+            lr_path = self.train_lr_pattern.replace('{size_key}', size_key)
+            
+            self.gt_dir = os.path.join(dataset_path, gt_path)
+            self.lr_dir = os.path.join(dataset_path, lr_path)
             self.patch_lr_dir = None  # Not needed for training
         elif mode == 'val':
-            # Validation: GT from val/GT/size_key, LR from patches/size_key/LR_7frames
-            val_gt_path = os.path.join(dataset_path, 'val', 'GT', size_key)
-            self.gt_dir = val_gt_path
-            # LR always comes from patches (no separate val LR directory)
+            # Validation: use val_gt_pattern and val_lr_pattern
+            gt_path = self.val_gt_pattern.replace('{size_key}', size_key)
+            lr_path = self.val_lr_pattern.replace('{size_key}', size_key)
+            
+            self.gt_dir = os.path.join(dataset_path, gt_path)
             self.lr_dir = None  # Will use patch_lr_dir
-            # Fallback to patches/LR_7frames for validation
-            self.patch_lr_dir = os.path.join(dataset_path, 'patches', size_key, 'LR_7frames')
+            self.patch_lr_dir = os.path.join(dataset_path, lr_path)
         else:
             raise ValueError(f"Invalid mode: {mode}. Must be 'train' or 'val'")
         
