@@ -409,15 +409,24 @@ def main():
             data_root = data_config.get('root', DATASET_ROOT)
             dataset_name = data_config.get('dataset_name', 'master')
             
+            print(f"{C_CYAN}Checking for dataset sizes in: {os.path.join(data_root, dataset_name, 'train')}{C_RESET}")
+            
             # Check which size directories exist and have files
             available_sizes = []
             for size_key in ['540', '720', '720_169']:
                 train_dir = os.path.join(data_root, dataset_name, 'train', size_key, 'GT')
+                print(f"{C_CYAN}  Checking {size_key}: {train_dir}{C_RESET}")
+                
                 if os.path.exists(train_dir):
-                    files = [f for f in os.listdir(train_dir) if f.endswith('.png')]
+                    # Check for both .png and .PNG files (case-insensitive)
+                    files = [f for f in os.listdir(train_dir) if f.lower().endswith('.png')]
                     if files:
                         available_sizes.append(size_key)
-                        print(f"{C_CYAN}  Found {len(files)} files for size {size_key}{C_RESET}")
+                        print(f"{C_GREEN}    ✓ Found {len(files)} files for size {size_key}{C_RESET}")
+                    else:
+                        print(f"{C_YELLOW}    ⚠ Directory exists but no .png files found{C_RESET}")
+                else:
+                    print(f"{C_YELLOW}    ⚠ Directory does not exist{C_RESET}")
             
             if len(available_sizes) > 1:
                 use_multi_size = True
@@ -434,12 +443,23 @@ def main():
     def detect_available_sizes(data_root, dataset_name):
         """Detect which dataset sizes are available by checking directories."""
         available = []
+        print(f"{C_CYAN}Detecting available sizes in: {os.path.join(data_root, dataset_name, 'train')}{C_RESET}")
+        
         for size_key in ['540', '720', '720_169']:
             train_dir = os.path.join(data_root, dataset_name, 'train', size_key, 'GT')
+            print(f"{C_CYAN}  Checking {size_key}: {train_dir}{C_RESET}")
+            
             if os.path.exists(train_dir):
-                files = [f for f in os.listdir(train_dir) if f.endswith('.png')]
+                # Check for both .png and .PNG files (case-insensitive)
+                files = [f for f in os.listdir(train_dir) if f.lower().endswith('.png')]
                 if files:
                     available.append((size_key, len(files)))
+                    print(f"{C_GREEN}    ✓ Found {len(files)} files{C_RESET}")
+                else:
+                    print(f"{C_YELLOW}    ⚠ Directory exists but no .png files found{C_RESET}")
+            else:
+                print(f"{C_YELLOW}    ⚠ Directory does not exist{C_RESET}")
+        
         return available
     
     if use_multi_size:
