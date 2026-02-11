@@ -1048,17 +1048,41 @@ class DatasetGeneratorV2UHD:
         Returns:
             Dictionary of {category: {format_name: count}}
         """
+        Calculate format distribution for this video across ALL its categories.
+        
+        NEW LOGIC (NO WEIGHTS):
+        - Video is 100% in each assigned category
+        - Distribute patches evenly across assigned categories
+        - Each category gets: target_patches / num_categories
+        
+        Args:
+            video: Video dict with categories
+            target_patches: Total patches to extract from this video
+        
+        Returns:
+            Dict[category][format] = patch_count
+        """
         distribution = {}
         
-        # Get category weights for this video
-        video_categories = video.get('categories', {})
+        # Get categories for this video (handle both dict and list formats)
+        video_cats = get_video_categories(video)
         
-        for category, category_weight in video_categories.items():
+        if not video_cats:
+            return distribution
+        
+        # Calculate patches per category (equal distribution)
+        num_categories = len(video_cats)
+        patches_per_category = target_patches // num_categories
+        remainder = target_patches % num_categories
+        
+        for cat_idx, category in enumerate(video_cats):
             if category not in self.format_config:
                 continue
             
-            # Calculate patches for this category
-            category_patches = int(target_patches * category_weight)
+            # This category gets equal share (+ 1 if remainder)
+            category_patches = patches_per_category
+            if cat_idx < remainder:
+                category_patches += 1
             
             # Get format probabilities for this category
             format_probs = self.format_probabilities.get(category, {})
