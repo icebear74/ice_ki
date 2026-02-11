@@ -1063,12 +1063,25 @@ class VSRTrainer:
                 for size_key, info in dataset_info['train_per_size'].items():
                     dataset_info['distribution'][size_key] = info['count'] / total_train_files
             
+            # Debug: Show what we're sending to Web UI
+            print(f"\n📊 DEBUG: Dataset info for Web UI:")
+            print(f"   Training files per size: {dataset_info['train_per_size']}")
+            print(f"   Validation files: {dataset_info['val']}")
+            print(f"   Distribution: {dataset_info['distribution']}")
+            print(f"   Total training files: {total_train_files}\n")
+            
             # Update web monitor
             if hasattr(self, 'web_monitor') and self.web_monitor:
                 try:
+                    print(f"   Updating web monitor with dataset_files...")
                     self.web_monitor.data_store.update_all_metrics(dataset_files=dataset_info)
+                    print(f"   ✓ Web monitor updated successfully")
                 except Exception as e:
                     print(f"⚠️  Error updating web monitor: {e}")
+                    import traceback
+                    traceback.print_exc()
+            else:
+                print(f"⚠️  Web monitor not available")
             
         except Exception as e:
             print(f"⚠️  Error checking dataset files: {e}")
