@@ -521,7 +521,8 @@ def main():
             print(f"{C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{C_RESET}")
             print(f"{C_CYAN}📊 Dataset Sizes Loaded at Startup:{C_RESET}")
             for size_key, dataset in train_loader.datasets_dict.items():
-                dist = size_dist.get(size_key, 0.0)
+                # Calculate actual distribution from file counts
+                dist = len(dataset) / total_samples if total_samples > 0 else 0.0
                 print(f"  • {size_key}: {len(dataset):,} samples ({dist*100:.1f}%)")
             print(f"{C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{C_RESET}")
             print(f"{C_YELLOW}⚠️  To change dataset sizes, modify runtime_config.json and RESTART training{C_RESET}")
