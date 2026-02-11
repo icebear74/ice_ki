@@ -137,9 +137,7 @@ class VideoManager:
             
             name = video['name'][:48]
             cats = video.get('categories', {})
-            cat_str = ', '.join([f"{k}:{v:.2f}" for k, v in cats.items()])
-            if not cat_str:
-                cat_str = "⚠️  <WILL BE SKIPPED - no categories>"
+            cat_str = format_categories_display(cats)
             
             print(f"{i:<6} {name:<50} {cat_str:<40}")
     
@@ -216,7 +214,7 @@ class VideoManager:
                     sel_marker = "[X]" if i in selected else "[ ]"
                     name = video['name'][:48]
                     cats = video.get('categories', {})
-                    cat_str = ', '.join([f"{k}:{v:.1f}" for k, v in cats.items()])[:28] if cats else ""
+                    cat_str = format_categories_display(cats)[:28] if cats else ""
                     print(f"{sel_marker:<5} {i:<6} {name:<50} {cat_str:<30}")
                     shown += 1
             
@@ -284,15 +282,14 @@ class VideoManager:
         count = 0
         for idx in video_indices:
             if 0 <= idx < len(self.videos):
-                cats = self.videos[idx].get('categories', {})
-                if category in cats:
-                    del cats[category]
+                cats = self.videos[idx].get('categories', [])
+                # Handle both dict and list formats
+                cats_list = normalize_categories(cats)
+                
+                if category in cats_list:
+                    cats_list.remove(category)
+                    self.videos[idx]['categories'] = cats_list
                     count += 1
-                    # Renormalize remaining categories
-                    total = sum(cats.values())
-                    if total > 0:
-                        cats = {k: v/total for k, v in cats.items()}
-                        self.videos[idx]['categories'] = cats
         
         self.modified = True
         print(f"✓ Removed {count} videos from category '{category}'")
