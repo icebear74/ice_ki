@@ -2031,13 +2031,6 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             console.log('  dsFiles.val:', dsFiles.val);
             console.log('  dsFiles.distribution:', dsFiles.distribution);
             
-            // Update distribution
-            const dist = dsFiles.distribution || {};
-            console.log('  dist:', dist);
-            document.getElementById('dist720').textContent = dist['720'] !== undefined ? `${(dist['720'] * 100).toFixed(0)}%` : '0%';
-            document.getElementById('dist540').textContent = dist['540'] !== undefined ? `${(dist['540'] * 100).toFixed(0)}%` : '0%';
-            document.getElementById('dist720_169').textContent = dist['720_169'] !== undefined ? `${(dist['720_169'] * 100).toFixed(0)}%` : '0%';
-            
             // Update training datasets (per-size)
             const trainPerSize = dsFiles.train_per_size || {};
             console.log('  trainPerSize:', trainPerSize);
