@@ -1014,7 +1014,7 @@ class DatasetGeneratorV2UHD:
         
         # Extract patches using OPTIMIZED batch mode
         patches_created = self._extract_patches_multi_format_batch(
-            video_path, duration, format_distribution, n_frames, video_name, fps
+            video_path, duration, format_distribution, n_frames, video_name, fps, video_idx
         )
         
         return patches_created
@@ -1081,7 +1081,8 @@ class DatasetGeneratorV2UHD:
     
     def _extract_patches_multi_format_batch(self, video_path: str, duration: float,
                                            format_distribution: Dict[str, Dict[str, int]], 
-                                           n_frames: int, video_name: str, fps: float = 25.0) -> Dict[str, int]:
+                                           n_frames: int, video_name: str, fps: float = 25.0,
+                                           video_idx: int = 0) -> Dict[str, int]:
         """
         OPTIMIZED: Extract patches using BATCH frame extraction (10-50x faster).
         
