@@ -45,7 +45,16 @@ category_targets = {
 }
 ```
 
-**Gesamt-Target:** 310,000 Patches insgesamt
+**WICHTIG / IMPORTANT:**
+Der Gesamt-Target wird aus den Kategorien berechnet, die **tatsächlich verwendet werden**, nicht immer alle 4!
+
+The total target is calculated from the categories that are **actually used**, not always all 4!
+
+**Beispiele / Examples:**
+- Nur master Videos: Gesamt = 150,000
+- Master + space Videos: Gesamt = 210,000
+- Master + space + toon: Gesamt = 260,000
+- Alle 4 Kategorien: Gesamt = 310,000
 
 ### Schritt 2: Video-Proportionen berechnen / Calculate Video Proportions
 
@@ -66,10 +75,18 @@ Proportion = Video_Dauer / Gesamt_Dauer_Aller_Videos
 Target_Patches_Film = Gesamt_Target × Proportion
 ```
 
-**Beispiel:**
-- Gesamt-Target: 310,000 Patches
+**WICHTIG:** Gesamt_Target = Summe der VERWENDETEN Kategorien, nicht aller 4!
+
+**Beispiel (Avatar in master + space):**
+- Verwendete Kategorien: ['master', 'space']
+- Gesamt-Target: 150,000 + 60,000 = **210,000 Patches**
 - Proportion: 0.0025
-- **Target Patches**: 310,000 × 0.0025 = 775 Patches
+- **Target Patches**: 210,000 × 0.0025 = 525 Patches
+
+**Vergleich zur alten (falschen) Berechnung:**
+- Alt (FALSCH): 310,000 × 0.0025 = 775 Patches
+- Neu (RICHTIG): 210,000 × 0.0025 = 525 Patches
+- **Unterschied: Alter Wert war zu niedrig! Jetzt mehr Patches!**
 
 ### Schritt 4: Verteilung auf Kategorien / Distribution to Categories
 
@@ -217,50 +234,52 @@ Total Patches: 310 (über alle Formate)
 **Ausgangsdaten:**
 - Film-Dauer: 9000 Sekunden (2.5 Stunden)
 - Kategorien: ['master', 'space']
-- Gesamt-Target: 310,000 Patches
+- **Verwendete Kategorien-Targets:** master (150k) + space (60k) = **210,000 Patches**
 - Proportion: 0.0025 (0.25%)
-- Target Patches: 775 Patches
+- **Target Patches: 210,000 × 0.0025 = 525 Patches** (KORRIGIERT!)
+
+**Alte (falsche) Berechnung:** 310,000 × 0.0025 = 775 Patches (zu wenig!)
 
 **Berechnung:**
 
 1. **Kategorie-Verteilung:**
-   - master: 775 / 2 = 387 Patches
-   - space: 775 / 2 = 388 Patches
+   - master: 525 / 2 = 262 Patches
+   - space: 525 / 2 = 263 Patches
 
 2. **Format-Verteilung (master):**
-   - large_1080: 387 × 0.50 = 193 Patches
-   - small_540: 387 × 0.25 = 96 Patches
-   - medium_720: 387 × 0.25 = 98 Patches
+   - large_1080: 262 × 0.50 = 131 Patches
+   - small_540: 262 × 0.25 = 65 Patches
+   - medium_720: 262 × 0.25 = 66 Patches
 
 3. **Format-Verteilung (space):**
-   - large_1080: 388 × 0.50 = 194 Patches
-   - small_540: 388 × 0.25 = 97 Patches
-   - medium_720: 388 × 0.25 = 97 Patches
+   - large_1080: 263 × 0.50 = 131 Patches
+   - small_540: 263 × 0.25 = 65 Patches
+   - medium_720: 263 × 0.25 = 67 Patches
 
 4. **Scenes benötigt:**
-   - Maximum: 194 (space/large_1080)
-   - **Scenes Needed: 194**
+   - Maximum: 131 (beide large_1080)
+   - **Scenes Needed: 131**
 
 5. **Stride:**
-   - (9000 - 1) / 194 = 46.4 Sekunden
+   - (9000 - 1) / 131 = 68.7 Sekunden
 
 6. **Patches pro Scene:**
    - 3 Formate × 2 Kategorien = 6 Patches pro Scene
 
 7. **Gesamt erstellt:**
-   - 194 Scenes × 6 Patches/Scene = 1,164 Patches potentiell
-   - Aber: Nur 775 werden tatsächlich benötigt
+   - 131 Scenes × 6 Patches/Scene = 786 Patches potentiell
+   - Aber: Nur 525 werden tatsächlich benötigt
    - Die Formate mit weniger Target stoppen früher
 
 **Ergebnis:**
 ```
-Scenes: 194
-Stride: 46.4 Sekunden
-Extraction Points: 0s, 46.4s, 92.8s, ..., 8,953.6s
-Total Patches: 775 (über alle Formate und Kategorien)
+Scenes: 131 (KORRIGIERT - war 194)
+Stride: 68.7 Sekunden (KORRIGIERT - war 46.4)
+Extraction Points: 0s, 68.7s, 137.4s, ..., 8,931.3s
+Total Patches: 525 (KORRIGIERT - war 775)
 
 Verteilung:
-  master/large_1080:  193 Patches
+  master/large_1080:  131 Patches
   master/small_540:    96 Patches
   master/medium_720:   98 Patches
   space/large_1080:   194 Patches
