@@ -433,18 +433,10 @@ class VSRDataset(Dataset):
                         'error': 'No PNG files found'
                     }
                 
-                # Expected shapes for validation
-                expected_gt_shapes = {
-                    '720': (720, 720, 3),
-                    '540': (540, 540, 3),
-                    '720_169': (405, 720, 3)
-                }
-                expected_gt_shape = expected_gt_shapes.get(self.size_key)
-                invalid_dimension_files = []
-                
-                # Build new file lists with validation
+                # Build new file lists - only check LR file existence (fast reload)
                 new_gt_files = []
                 new_lr_paths = {}
+                skipped_files = 0
                 
                 for gt_file in all_gt_files:
                     # For training, check lr_dir. For validation, use patch_lr_dir
@@ -452,31 +444,33 @@ class VSRDataset(Dataset):
                         lr_path = os.path.join(self.lr_dir, gt_file)
                         
                         if os.path.exists(lr_path):
-                            # Validate dimensions before adding
-                            if self._validate_file_dimensions(gt_file, self.gt_dir, self.lr_dir, expected_gt_shape, invalid_dimension_files):
-                                new_gt_files.append(gt_file)
-                                new_lr_paths[gt_file] = self.lr_dir
+                            # Only check file existence - no dimension validation during reload
+                            new_gt_files.append(gt_file)
+                            new_lr_paths[gt_file] = self.lr_dir
                         elif self.mode == 'val' and self.patch_lr_dir:
                             # For validation, fallback to patches/LR
                             patch_lr_path = os.path.join(self.patch_lr_dir, gt_file)
                             if os.path.exists(patch_lr_path):
-                                if self._validate_file_dimensions(gt_file, self.gt_dir, self.patch_lr_dir, expected_gt_shape, invalid_dimension_files):
-                                    new_gt_files.append(gt_file)
-                                    new_lr_paths[gt_file] = self.patch_lr_dir
+                                new_gt_files.append(gt_file)
+                                new_lr_paths[gt_file] = self.patch_lr_dir
+                            else:
+                                skipped_files += 1
+                        else:
+                            skipped_files += 1
                     elif self.mode == 'val' and self.patch_lr_dir:
                         # For validation with no val LR dir, always use patches
                         patch_lr_path = os.path.join(self.patch_lr_dir, gt_file)
                         if os.path.exists(patch_lr_path):
-                            if self._validate_file_dimensions(gt_file, self.gt_dir, self.patch_lr_dir, expected_gt_shape, invalid_dimension_files):
-                                new_gt_files.append(gt_file)
-                                new_lr_paths[gt_file] = self.patch_lr_dir
+                            new_gt_files.append(gt_file)
+                            new_lr_paths[gt_file] = self.patch_lr_dir
+                        else:
+                            skipped_files += 1
+                    else:
+                        skipped_files += 1
                 
-                # Report any invalid files found during reload
-                if invalid_dimension_files:
-                    print(f"\n⚠️  Reload: Skipped {len(invalid_dimension_files)} files with invalid dimensions ({self.mode}, size_key={self.size_key})")
-                    if len(invalid_dimension_files) <= 3:
-                        for f, reason in invalid_dimension_files:
-                            print(f"  - {f}: {reason}")
+                # Report skipped files (only if any were skipped)
+                if skipped_files > 0:
+                    print(f"\n⚠️  Reload: Skipped {skipped_files} GT files without matching LR files ({self.mode}, size_key={self.size_key})")
                 
                 # Update the dataset atomically
                 self.gt_files = new_gt_files
