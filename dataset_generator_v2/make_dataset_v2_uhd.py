@@ -233,9 +233,21 @@ class DatasetGeneratorV2UHD:
             self.logger.warning(f"Could not save metadata cache: {e}")
     
     def _signal_handler(self, signum, frame):
-        """Handle shutdown signals gracefully"""
-        self.logger.info(f"Received signal {signum}, shutting down gracefully...")
+        """Handle shutdown signals gracefully - fast exit on Ctrl+C"""
+        print("\n\n⚠️  Ctrl+C detected! Aborting immediately...")
         self.running = False
+        # Show cursor before exit
+        if self.use_terminal_ui:
+            show_cursor()
+        # Save progress before exit
+        if hasattr(self, 'tracker'):
+            try:
+                self.tracker.save()
+                print("✓ Progress saved")
+            except:
+                pass
+        # Immediate exit
+        sys.exit(0)
     
     def _update_terminal_ui(self):
         """Update and redraw the terminal UI"""
@@ -302,6 +314,8 @@ class DatasetGeneratorV2UHD:
             # Draw the UI
             clear_screen()
             draw_dataset_ui(self.ui_state)
+            # Force flush to ensure display updates immediately
+            sys.stdout.flush()
             
         except Exception as e:
             # Don't let UI errors crash the program
@@ -540,11 +554,6 @@ class DatasetGeneratorV2UHD:
             import traceback
             traceback.print_exc()
             raise
-    
-    def _signal_handler(self, signum, frame):
-        """Handle shutdown signals gracefully"""
-        self.logger.info(f"Received signal {signum}, shutting down gracefully...")
-        self.running = False
     
     def _create_temp_dir(self, prefix: str = "extract") -> str:
         """
@@ -1262,6 +1271,11 @@ class DatasetGeneratorV2UHD:
             if not scene_needed:
                 self.logger.debug(f"  ⏭️  Skipping (not needed by any format)")
                 continue
+            
+            # Check if we should abort
+            if not self.running:
+                self.logger.info("⚠️  Aborting extraction (Ctrl+C detected)")
+                break
             
             # EXTRACT 7 frames for this timestamp
             self.logger.info(f"  🎬 Extracting {n_frames} frames...")
