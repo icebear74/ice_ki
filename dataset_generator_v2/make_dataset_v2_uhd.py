@@ -263,7 +263,8 @@ class DatasetGeneratorV2UHD:
             for category in ['master', 'space', 'toon', 'universal']:
                 if category in self.tracker.category_stats:
                     stats = self.tracker.category_stats[category]
-                    target = self.category_targets.get(category, 0)
+                    # Use actual distribution totals instead of raw category targets
+                    target = self.distribution_totals.get(category, 0)
                     self.ui_state['overall_progress'][category] = {
                         'current': stats['patches_created'],
                         'target': target
@@ -280,7 +281,8 @@ class DatasetGeneratorV2UHD:
                         total = self.tracker.category_stats[category]['patches_created']
                         prob = self.format_probabilities.get(category, {}).get(f'{size_key}p', 0.33)
                         current = int(total * prob)
-                        target_total = self.category_targets.get(category, 0)
+                        # Use actual distribution totals
+                        target_total = self.distribution_totals.get(category, 0)
                         target = int(target_total * prob)
                         patch_dist[category][size_key] = {
                             'current': current,
@@ -546,6 +548,20 @@ class DatasetGeneratorV2UHD:
                 cat_breakdown = video_targets[video_path]
                 cat_str = ", ".join([f"{cat}: {cnt}" for cat, cnt in cat_breakdown.items()])
                 self.logger.info(f"    {video_name}: {total_patches} total ({cat_str})")
+            
+            # Calculate actual totals from distribution (not raw targets)
+            # This is what will actually be created based on video assignments
+            self.distribution_totals = {}
+            for category in ['master', 'space', 'toon', 'universal']:
+                total = 0
+                for video_path, cat_targets in video_targets.items():
+                    if category in cat_targets:
+                        total += cat_targets[category]
+                self.distribution_totals[category] = total
+            
+            self.logger.info(f"\n📊 Actual Distribution Totals (sum of all video assignments):")
+            for cat, total in self.distribution_totals.items():
+                self.logger.info(f"  {cat}: {total:,} patches")
             
             return video_targets
             
@@ -2059,9 +2075,8 @@ class DatasetGeneratorV2UHD:
                 traceback.print_exc()
                 return
             
-            if RICH_AVAILABLE:
-                console.print(f"\n[bold green]✓ Distribution calculated[/bold green]")
-                console.print(f"[bold cyan]📹 Phase 3: Generating Patches[/bold cyan]\n")
+            # Console output removed - all info shown in terminal GUI
+            # No need to print here, user sees progress in the GUI
             
             # Get resume point
             start_idx = self.tracker.status['progress']['current_video_index']
