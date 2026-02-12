@@ -261,13 +261,14 @@ class DatasetGeneratorV2UHD:
         
         try:
             # Update overall progress from tracker
+            category_stats = self.tracker.status.get('category_stats', {})
             for category in ['master', 'space', 'toon', 'universal']:
-                if category in self.tracker.category_stats:
-                    stats = self.tracker.category_stats[category]
+                if category in category_stats:
+                    stats = category_stats[category]
                     # Use actual distribution totals instead of raw category targets
                     target = self.distribution_totals.get(category, 0)
                     self.ui_state['overall_progress'][category] = {
-                        'current': stats['patches_created'],
+                        'current': stats.get('images_created', 0),  # ProgressTracker uses 'images_created'
                         'target': target
                     }
             
@@ -280,9 +281,9 @@ class DatasetGeneratorV2UHD:
                 if category in self.format_config:
                     for format_name in self.format_config[category].keys():
                         # Get from tracker if available
-                        if category in self.tracker.category_stats:
+                        if category in category_stats:
                             # Get distribution based on actual format probabilities
-                            total = self.tracker.category_stats[category]['patches_created']
+                            total = category_stats[category].get('images_created', 0)  # ProgressTracker uses 'images_created'
                             prob = self.format_probabilities.get(category, {}).get(format_name, 0.0)
                             current = int(total * prob)
                             # Use actual distribution totals
@@ -332,8 +333,10 @@ class DatasetGeneratorV2UHD:
             print("", end='', flush=True)
             
         except Exception as e:
-            # Don't let UI errors crash the program
-            self.logger.debug(f"UI update error: {e}")
+            # Don't let UI errors crash the program, but DO show them on screen!
+            print(f"\n⚠️  GUI UPDATE ERROR: {e}")
+            print(f"   (Check log for stack trace)")
+            self.logger.error(f"UI update error: {e}", exc_info=True)
     
     def _log_system_resources(self, operation: str = ""):
         """Log current system resource usage"""
