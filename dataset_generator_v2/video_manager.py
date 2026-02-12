@@ -15,6 +15,7 @@ Features:
 import json
 import os
 import sys
+import traceback
 from pathlib import Path
 from typing import Dict, List, Optional, Union
 import re
@@ -25,7 +26,7 @@ from category_utils import (
     get_video_categories,
     is_video_in_category,
     format_categories_display,
-    convert_config_to_new_format
+    convert_config_to_list_format
 )
 from interactive_selector import select_items, select_categories
 
@@ -49,6 +50,9 @@ class VideoManager:
         self.videos = self.config.get('videos', [])
         self.category_targets = self.config.get('category_targets', {})
         
+        # Sort videos by name (case-insensitive)
+        self.videos.sort(key=lambda v: v.get('name', '').lower())
+        
         # Extract unique categories (handle both formats)
         self.categories = set()
         for video in self.videos:
@@ -56,11 +60,28 @@ class VideoManager:
             self.categories.update(cats)
         self.categories = sorted(list(self.categories))
         
-        print(f"✓ Loaded {len(self.videos)} videos")
+        print(f"✓ Loaded {len(self.videos)} videos (sorted by title)")
         print(f"✓ Categories: {', '.join(self.categories)}")
         
     def save(self, backup=True):
         """Save configuration to JSON."""
+        # Sort videos with priority to multi-category videos
+        # Order: (1) number of categories DESC, (2) first category ASC, (3) name ASC
+        # This ensures videos in multiple categories come first, with master at the top
+        def sort_key(video):
+            cats = get_video_categories(video)
+            # Primary sort: number of categories (descending - negative for reverse)
+            # Videos in multiple categories (e.g., master+space) come before single category
+            num_cats = -len(cats) if cats else 999
+            # Secondary sort: first category alphabetically (master comes first)
+            first_cat = cats[0] if cats else 'zzz_no_category'
+            # Tertiary sort: video name
+            name = video.get('name', '').lower()
+            return (num_cats, first_cat, name)
+        
+        self.videos.sort(key=sort_key)
+        self.config['videos'] = self.videos
+        
         if backup:
             backup_path = self.config_path + '.backup'
             with open(backup_path, 'w', encoding='utf-8') as f:
@@ -70,7 +91,7 @@ class VideoManager:
         with open(self.config_path, 'w', encoding='utf-8') as f:
             json.dump(self.config, f, indent=2, ensure_ascii=False)
         
-        print(f"✓ Saved to {self.config_path}")
+        print(f"✓ Saved to {self.config_path} (videos sorted by: multi-category priority, category, then title)")
         self.modified = False
         
     def list_videos(self, filter_pattern: Optional[str] = None, 
@@ -135,10 +156,12 @@ class VideoManager:
                 break
             
             name = video['name'][:48]
-            cats = video.get('categories', {})
-            cat_str = ', '.join([f"{k}:{v:.2f}" for k, v in cats.items()])
-            if not cat_str:
-                cat_str = "⚠️  <WILL BE SKIPPED - no categories>"
+            cats = video.get('categories', [])
+            # Format categories in brackets
+            if cats:
+                cat_str = "[" + ", ".join(cats) + "]"
+            else:
+                cat_str = "[no categories]"
             
             print(f"{i:<6} {name:<50} {cat_str:<40}")
     
@@ -156,21 +179,69 @@ class VideoManager:
         print(f"✓ Reset {len(self.videos)} videos")
     
     def assign_videos(self, video_indices: List[int], 
-                     categories: List[str]):
-        """Assign categories to videos (NO WEIGHTS - simple list)."""
+                     categories: List[str],
+                     mode: str = 'ask'):
+        """
+        Assign categories to videos (NO WEIGHTS - simple list).
+        
+        Args:
+            video_indices: List of video indices to assign
+            categories: List of category names to assign
+            mode: 'ask' (prompt user), 'add' (append to existing), 'replace' (replace all)
+        """
+        if not video_indices:
+            return
+        
+        # Check if any videos already have categories
+        has_existing_categories = False
+        for idx in video_indices:
+            if 0 <= idx < len(self.videos):
+                existing = get_video_categories(self.videos[idx])
+                if existing:
+                    has_existing_categories = True
+                    break
+        
+        # Determine the actual mode to use
+        actual_mode = mode
+        if mode == 'ask' and has_existing_categories:
+            print("\n⚠️  Some videos already have categories assigned.")
+            print("Options:")
+            print("  1. ADD to existing categories (keep old + add new)")
+            print("  2. REPLACE all categories (remove old, set new)")
+            choice = input("Choose (1/2) [default: 1]: ").strip()
+            
+            if choice == '2':
+                actual_mode = 'replace'
+            else:
+                actual_mode = 'add'
+        elif mode == 'ask':
+            # No existing categories, just assign
+            actual_mode = 'replace'
+        
+        # Apply the assignment
         count = 0
         for idx in video_indices:
             if 0 <= idx < len(self.videos):
-                self.videos[idx]['categories'] = categories
+                if actual_mode == 'add':
+                    # Get existing categories and add new ones
+                    existing = get_video_categories(self.videos[idx])
+                    # Merge and remove duplicates while preserving order
+                    combined = existing.copy()
+                    for cat in categories:
+                        if cat not in combined:
+                            combined.append(cat)
+                    self.videos[idx]['categories'] = combined
+                else:  # replace
+                    self.videos[idx]['categories'] = categories
                 count += 1
         
         self.modified = True
-        print(f"✓ Assigned {count} videos to categories: {categories}")
+        mode_text = "Added to" if actual_mode == 'add' else "Replaced with"
+        print(f"✓ {mode_text} {count} videos: {categories}")
     
     def interactive_select_videos(self, initial_filter: Optional[str] = None):
         """
-        Interactive video selection with simple terminal interface.
-        Users can toggle videos with their ID and confirm with 'done'.
+        Interactive video selection with curses-based UI (arrow keys, space bar).
         
         Args:
             initial_filter: Optional filter to pre-filter videos
@@ -188,110 +259,56 @@ class VideoManager:
             print("No videos found.")
             return None
         
-        selected = set()
-        
-        print("\n" + "="*80)
-        print("INTERACTIVE VIDEO SELECTION")
-        print("="*80)
-        print("Commands:")
-        print("  [ID]      - Toggle video selection (e.g., '5' or '5,7,9')")
-        print("  all       - Select all videos")
-        print("  none      - Deselect all videos")
-        print("  show      - Show current selection")
-        print("  done      - Confirm selection")
-        print("  cancel    - Cancel and return")
-        print("="*80)
-        
-        while True:
-            # Show videos with selection status
-            print(f"\n{len(videos)} videos available, {len(selected)} selected")
-            print(f"\n{'Sel':<5} {'ID':<6} {'Name':<50} {'Categories':<30}")
-            print("-" * 95)
+        # Use curses-based interactive selector
+        try:
+            # Extract just the video objects for display
+            video_list = [v for _, v in videos]
             
-            # Show first 20 and selected videos
-            shown = 0
-            for idx, (i, video) in enumerate(videos):
-                if shown < 20 or i in selected:
-                    sel_marker = "[X]" if i in selected else "[ ]"
-                    name = video['name'][:48]
-                    cats = video.get('categories', {})
-                    cat_str = ', '.join([f"{k}:{v:.1f}" for k, v in cats.items()])[:28] if cats else ""
-                    print(f"{sel_marker:<5} {i:<6} {name:<50} {cat_str:<30}")
-                    shown += 1
+            # Create display with video ID in details
+            def get_video_label(video):
+                return video['name']
             
-            if len(videos) > 20:
-                remaining = len(videos) - 20
-                print(f"... and {remaining} more (use filter or select by ID)")
+            def get_video_details(video):
+                # Find the video ID
+                video_id = next((i for i, v in videos if v == video), None)
+                cats = video.get('categories', [])
+                cat_str = format_categories_display(cats)
+                if video_id is not None:
+                    return f"[{video_id}] {cat_str}"
+                return cat_str
             
-            # Get command
-            cmd = input(f"\nCommand (selected: {len(selected)}): ").strip().lower()
+            selected_indices = select_items(
+                items=video_list,
+                title=f"Select Videos - {len(video_list)} available (↑↓ navigate, Space toggle, Enter done, Esc cancel)",
+                get_label=get_video_label,
+                get_details=get_video_details
+            )
             
-            if not cmd:
-                continue
-            
-            if cmd == 'done':
-                if not selected:
-                    print("No videos selected.")
-                    continue
-                return list(selected)
-            
-            elif cmd == 'cancel':
+            if selected_indices is None:
                 return None
             
-            elif cmd == 'all':
-                selected = {i for i, v in videos}
-                print(f"✓ Selected all {len(selected)} videos")
+            # Convert from list indices to video IDs
+            video_ids = [videos[i][0] for i in selected_indices]
+            return video_ids
             
-            elif cmd == 'none':
-                selected.clear()
-                print("✓ Cleared selection")
-            
-            elif cmd == 'show':
-                if not selected:
-                    print("No videos selected.")
-                else:
-                    print(f"\nSelected {len(selected)} videos:")
-                    for i, video in enumerate(self.videos):
-                        if i in selected:
-                            print(f"  {i:<6} {video['name']}")
-            
-            else:
-                # Try to parse as ID(s)
-                try:
-                    # Support comma-separated IDs
-                    ids = [int(x.strip()) for x in cmd.split(',')]
-                    for vid_id in ids:
-                        # Validate ID
-                        if vid_id < 0 or vid_id >= len(self.videos):
-                            print(f"❌ Invalid ID: {vid_id}")
-                            continue
-                        
-                        # Toggle selection
-                        if vid_id in selected:
-                            selected.remove(vid_id)
-                            print(f"  Deselected: {self.videos[vid_id]['name']}")
-                        else:
-                            selected.add(vid_id)
-                            print(f"  Selected: {self.videos[vid_id]['name']}")
-                
-                except ValueError:
-                    print(f"❌ Invalid command: {cmd}")
-                    print("   Use ID numbers, 'all', 'none', 'show', 'done', or 'cancel'")
+        except Exception as e:
+            print(f"⚠️  Curses UI failed: {e}")
+            print("Please try using menu option 5 instead")
+            return None
     
     def remove_from_category(self, video_indices: List[int], category: str):
         """Remove videos from a specific category."""
         count = 0
         for idx in video_indices:
             if 0 <= idx < len(self.videos):
-                cats = self.videos[idx].get('categories', {})
-                if category in cats:
-                    del cats[category]
+                cats = self.videos[idx].get('categories', [])
+                # Handle both dict and list formats
+                cats_list = normalize_categories(cats)
+                
+                if category in cats_list:
+                    cats_list.remove(category)
+                    self.videos[idx]['categories'] = cats_list
                     count += 1
-                    # Renormalize remaining categories
-                    total = sum(cats.values())
-                    if total > 0:
-                        cats = {k: v/total for k, v in cats.items()}
-                        self.videos[idx]['categories'] = cats
         
         self.modified = True
         print(f"✓ Removed {count} videos from category '{category}'")
@@ -307,12 +324,20 @@ class VideoManager:
         unassigned = 0
         
         for video in self.videos:
-            cats = video.get('categories', {})
+            cats = video.get('categories', [])
             if not cats:
                 unassigned += 1
             else:
-                for cat in cats.keys():
-                    category_counts[cat] += 1
+                # Handle both list and dict formats
+                if isinstance(cats, list):
+                    for cat in cats:
+                        if cat in category_counts:
+                            category_counts[cat] += 1
+                else:
+                    # Legacy dict format
+                    for cat in cats.keys():
+                        if cat in category_counts:
+                            category_counts[cat] += 1
         
         print(f"\nTotal videos: {len(self.videos)}")
         print(f"Unassigned: {unassigned}")
@@ -410,208 +435,245 @@ def get_categories_simple(manager: VideoManager, current_categories: List[str] =
 
 
 def main():
-    # Find config file
-    config_path = Path(__file__).parent / 'generator_config.json'
-    if not config_path.exists():
-        print(f"❌ Config file not found: {config_path}")
-        print("Please run from dataset_generator_v2 directory")
+    """Main entry point for video manager CLI."""
+    try:
+        # Find config file
+        config_path = Path(__file__).parent / 'generator_config.json'
+        if not config_path.exists():
+            print(f"❌ Config file not found: {config_path}")
+            print("Please run from dataset_generator_v2 directory")
+            sys.exit(1)
+        
+        manager = VideoManager(str(config_path))
+        manager.load()
+    except Exception as e:
+        print(f"❌ Error initializing Video Manager: {e}")
+        traceback.print_exc()
         sys.exit(1)
     
-    manager = VideoManager(str(config_path))
-    manager.load()
-    
     while True:
-        print_menu()
-        choice = input("\nChoice: ").strip().lower()
-        
-        if choice == 'q':
-            if manager.modified:
-                save = input("Save changes before quitting? (y/n): ").strip().lower()
-                if save == 'y':
+        choice = ""  # Initialize to avoid NameError in exception handler
+        try:
+            print_menu()
+            choice = input("\nChoice: ").strip().lower()
+            
+            if choice == 'q':
+                if manager.modified:
+                    save = input("Save changes before quitting? (y/n): ").strip().lower()
+                    if save == 'y':
+                        manager.save()
+                print("Goodbye!")
+                break
+            
+            elif choice == 's':
+                if manager.modified:
                     manager.save()
-            print("Goodbye!")
-            break
-        
-        elif choice == 's':
-            if manager.modified:
-                manager.save()
-            else:
-                print("No changes to save")
-        
-        elif choice == '1':
-            # List all videos
-            show_all = input("Show all videos? (y/n, default=first 20): ").strip().lower()
-            max_display = None if show_all == 'y' else 20
-            videos = manager.list_videos()
-            manager.print_video_list(videos, max_display)
-        
-        elif choice == '2':
-            # List by category
-            print(f"Categories: {', '.join(manager.categories)}")
-            cat = input("Category: ").strip()
-            if cat in manager.categories:
-                videos = manager.list_videos(category=cat)
-                manager.print_video_list(videos)
-            else:
-                print(f"❌ Unknown category: {cat}")
-        
-        elif choice == '3':
-            # List unassigned
-            videos = manager.list_videos(show_unassigned=True)
-            manager.print_video_list(videos)
-        
-        elif choice == '4':
-            # Search
-            pattern = input("Search pattern (regex): ").strip()
-            if pattern:
-                videos = manager.list_videos(filter_pattern=pattern)
-                manager.print_video_list(videos)
-        
-        elif choice == '5':
-            # Assign categories to videos (with interactive selector)
-            print("\n🎯 Assign Videos to Categories")
-            print("Step 1: Select videos")
-            print("  a) Select videos interactively (curses UI)")
-            print("  b) Enter video IDs manually")
+                else:
+                    print("No changes to save")
             
-            method = input("Method (a/b): ").strip().lower()
+            elif choice == '1':
+                # List all videos
+                show_all = input("Show all videos? (y/n, default=first 20): ").strip().lower()
+                max_display = None if show_all == 'y' else 20
+                videos = manager.list_videos()
+                manager.print_video_list(videos, max_display)
             
-            video_indices = []
-            if method == 'a':
-                # Interactive video selection with curses
-                filter_str = input("Optional filter (leave empty for all): ").strip()
-                videos = manager.list_videos(filter_pattern=filter_str if filter_str else None)
+            elif choice == '2':
+                # List by category
+                print(f"Categories: {', '.join(manager.categories)}")
+                cat = input("Category: ").strip()
+                if cat in manager.categories:
+                    videos = manager.list_videos(category=cat)
+                    manager.print_video_list(videos)
+                else:
+                    print(f"❌ Unknown category: {cat}")
+            
+            elif choice == '3':
+                # List unassigned
+                videos = manager.list_videos(show_unassigned=True)
+                manager.print_video_list(videos)
+            
+            elif choice == '4':
+                # Search
+                pattern = input("Search pattern (regex): ").strip()
+                if pattern:
+                    videos = manager.list_videos(filter_pattern=pattern)
+                    manager.print_video_list(videos)
+            
+            elif choice == '5':
+                # Assign categories to videos (with interactive selector)
+                print("\n🎯 Assign Videos to Categories")
+                print("Step 1: Select videos")
+                print("  a) Select videos interactively (curses UI)")
+                print("  b) Enter video IDs manually")
                 
-                if not videos:
-                    print("No videos found")
-                    continue
+                method = input("Method (a/b): ").strip().lower()
                 
-                try:
-                    selected = select_items(
-                        items=[v for _, v in videos],
-                        title="Select videos (Space to toggle, Enter to confirm)",
-                        get_label=lambda v: v['name'],
-                        get_details=lambda v: format_categories_display(v.get('categories', []))
-                    )
+                video_indices = []
+                if method == 'a':
+                    # Interactive video selection with curses
+                    filter_str = input("Optional filter (leave empty for all): ").strip()
+                    videos = manager.list_videos(filter_pattern=filter_str if filter_str else None)
                     
-                    if selected is None:
-                        print("❌ Cancelled")
+                    if not videos:
+                        print("No videos found")
                         continue
                     
-                    video_indices = [videos[i][0] for i in selected]
-                    print(f"✓ Selected {len(video_indices)} videos")
-                    
-                except Exception as e:
-                    print(f"⚠️  Curses UI failed: {e}")
-                    print("Please use method 'b' for manual ID entry")
+                    try:
+                        selected = select_items(
+                            items=[v for _, v in videos],
+                            title="Select videos (Space to toggle, Enter to confirm)",
+                            get_label=lambda v: v['name'],
+                            get_details=lambda v: format_categories_display(v.get('categories', []))
+                        )
+                        
+                        if selected is None:
+                            print("❌ Cancelled")
+                            continue
+                        
+                        video_indices = [videos[i][0] for i in selected]
+                        print(f"✓ Selected {len(video_indices)} videos")
+                        
+                    except Exception as e:
+                        print(f"⚠️  Curses UI failed: {e}")
+                        print("Please use method 'b' for manual ID entry")
+                        continue
+                
+                elif method == 'b':
+                    # Manual ID entry
+                    ids_str = input("Video ID(s) (comma-separated): ").strip()
+                    try:
+                        video_indices = [int(x.strip()) for x in ids_str.split(',')]
+                    except ValueError:
+                        print("❌ Invalid ID format")
+                        continue
+                else:
+                    print("❌ Invalid method")
                     continue
-            
-            elif method == 'b':
-                # Manual ID entry
-                ids_str = input("Video ID(s) (comma-separated): ").strip()
-                try:
-                    video_indices = [int(x.strip()) for x in ids_str.split(',')]
-                except ValueError:
-                    print("❌ Invalid ID format")
+                
+                if not video_indices:
+                    print("No videos selected")
                     continue
-            else:
-                print("❌ Invalid method")
-                continue
+                
+                # Step 2: Select categories interactively
+                print("\nStep 2: Select categories")
+                categories = get_categories_interactive(manager)
+                
+                if categories is None:
+                    print("❌ Cancelled")
+                    continue
+                
+                if not categories:
+                    print("⚠️  No categories selected - videos will be SKIPPED")
+                    confirm = input("Proceed anyway? (y/n): ").strip().lower()
+                    if confirm != 'y':
+                        continue
+                
+                # Assign
+                manager.assign_videos(video_indices, categories)
             
-            if not video_indices:
-                print("No videos selected")
-                continue
+            elif choice == '6':
+                # Interactive multi-select (NEW!)
+                filter_str = input("Optional filter (leave empty for all, or enter text to search): ").strip()
+                selected_ids = manager.interactive_select_videos(filter_str if filter_str else None)
+                
+                if selected_ids:
+                    print(f"\n✓ Selected {len(selected_ids)} videos")
+                    # Select categories interactively
+                    categories = get_categories_interactive(manager)
+                    if categories:
+                        manager.assign_videos(selected_ids, categories)
+                else:
+                    print("Selection cancelled")
             
-            # Step 2: Select categories interactively
-            print("\nStep 2: Select categories")
-            categories = get_categories_interactive(manager)
-            
-            if categories is None:
-                print("❌ Cancelled")
-                continue
-            
-            if not categories:
-                print("⚠️  No categories selected - videos will be SKIPPED")
-                confirm = input("Proceed anyway? (y/n): ").strip().lower()
+            elif choice == '7':
+                # Multi-assign by pattern (regex/search)
+                pattern = input("Search pattern (text or regex, e.g., 'Star Trek' or 'Star Trek.*'): ").strip()
+                if not pattern:
+                    continue
+                
+                # Try simple search first
+                use_simple = '*' in pattern or not any(c in pattern for c in r'\.[](){}^$+?|')
+                
+                videos = manager.list_videos(filter_pattern=pattern, use_simple_search=use_simple)
+                if not videos:
+                    print(f"No videos match pattern: {pattern}")
+                    continue
+                
+                manager.print_video_list(videos)
+                
+                confirm = input(f"\nAssign all {len(videos)} videos? (y/n): ").strip().lower()
                 if confirm != 'y':
                     continue
+                
+                # Select categories interactively
+                categories = get_categories_interactive(manager)
+                if categories:
+                    ids = [i for i, v in videos]
+                    manager.assign_videos(ids, categories)
             
-            # Assign
-            manager.assign_videos(video_indices, categories)
-        
-        elif choice == '6':
-            # Interactive multi-select (NEW!)
-            filter_str = input("Optional filter (leave empty for all, or enter text to search): ").strip()
-            selected_ids = manager.interactive_select_videos(filter_str if filter_str else None)
-            
-            if selected_ids:
-                print(f"\n✓ Selected {len(selected_ids)} videos")
-                weights = get_category_weights(manager)
-                if weights:
-                    manager.assign_videos(selected_ids, weights)
-            else:
-                print("Selection cancelled")
-        
-        elif choice == '7':
-            # Multi-assign by pattern (regex/search)
-            pattern = input("Search pattern (text or regex, e.g., 'Star Trek' or 'Star Trek.*'): ").strip()
-            if not pattern:
-                continue
-            
-            # Try simple search first
-            use_simple = '*' in pattern or not any(c in pattern for c in r'\.[](){}^$+?|')
-            
-            videos = manager.list_videos(filter_pattern=pattern, use_simple_search=use_simple)
-            if not videos:
-                print(f"No videos match pattern: {pattern}")
-                continue
-            
-            manager.print_video_list(videos)
-            
-            confirm = input(f"\nAssign all {len(videos)} videos? (y/n): ").strip().lower()
-            if confirm != 'y':
-                continue
-            
-            weights = get_category_weights(manager)
-            if weights:
-                ids = [i for i, v in videos]
-                manager.assign_videos(ids, weights)
-        
-        elif choice == '8':
-            # Remove from category
-            print(f"Categories: {', '.join(manager.categories)}")
-            cat = input("Category to remove: ").strip()
-            if cat not in manager.categories:
-                print(f"❌ Unknown category: {cat}")
-                continue
-            
-            ids_str = input("Video ID(s) (comma-separated, or 'all'): ").strip()
-            if ids_str.lower() == 'all':
-                ids = list(range(len(manager.videos)))
-            else:
-                try:
-                    ids = [int(x.strip()) for x in ids_str.split(',')]
-                except ValueError:
-                    print("❌ Invalid ID format")
+            elif choice == '8':
+                # Remove from category
+                print(f"Categories: {', '.join(manager.categories)}")
+                cat = input("Category to remove: ").strip()
+                if cat not in manager.categories:
+                    print(f"❌ Unknown category: {cat}")
                     continue
+                
+                ids_str = input("Video ID(s) (comma-separated, or 'all'): ").strip()
+                if ids_str.lower() == 'all':
+                    ids = list(range(len(manager.videos)))
+                else:
+                    try:
+                        ids = [int(x.strip()) for x in ids_str.split(',')]
+                    except ValueError:
+                        print("❌ Invalid ID format")
+                        continue
+                
+                manager.remove_from_category(ids, cat)
             
-            manager.remove_from_category(ids, cat)
+            elif choice == '9':
+                # Reset all
+                manager.reset_all()
+            
+            elif choice == '10':
+                # Statistics
+                manager.show_statistics()
+            
+            elif choice == '11':
+                # Edit category targets
+                manager.edit_category_targets()
+            
+            else:
+                print("Invalid choice")
         
-        elif choice == '9':
-            # Reset all
-            manager.reset_all()
-        
-        elif choice == '10':
-            # Statistics
-            manager.show_statistics()
-        
-        elif choice == '11':
-            # Edit category targets
-            manager.edit_category_targets()
-        
-        else:
-            print("Invalid choice")
+        except EOFError:
+            print("\n\n⚠️  End of input detected")
+            break
+        except KeyboardInterrupt:
+            print("\n\n⚠️  Interrupted by user")
+            if manager.modified:
+                try:
+                    save = input("\nSave changes before quitting? (y/n): ").strip().lower()
+                    if save == 'y':
+                        manager.save()
+                except (EOFError, KeyboardInterrupt):
+                    print("\nExiting without saving")
+            break
+        except Exception as e:
+            print(f"\n⚠️  Error processing menu choice '{choice}': {e}")
+            traceback.print_exc()
+            print("\nContinuing...")
+            continue
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n\n⚠️  Interrupted by user")
+        sys.exit(0)
+    except Exception as e:
+        print(f"\n❌ Unexpected error: {e}")
+        traceback.print_exc()
+        sys.exit(1)

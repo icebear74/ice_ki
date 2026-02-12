@@ -577,6 +577,11 @@ class VSRTrainer:
                 # Check if training complete
                 if self.global_step >= self.config.get('MAX_STEPS', 100000):
                     return
+        
+        # End of epoch - check for new dataset files
+        # This ensures video list is updated at natural epoch boundaries
+        print(f"\n📊 End of epoch {epoch} - checking for new dataset files...")
+        self._check_dataset_files()
     
     def _update_gui(self, epoch=1, loss_dict=None, avg_time=0.1, steps_per_epoch=1, current_epoch_step=0, paused=False, adam_momentum=0.0):
         """Update the GUI display"""

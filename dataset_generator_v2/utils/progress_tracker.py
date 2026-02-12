@@ -195,3 +195,21 @@ class ProgressTracker:
             stats.get("target", 0) 
             for stats in self.status["category_stats"].values()
         )
+    
+    def get_all_category_progress(self) -> str:
+        """Get formatted progress string for all categories."""
+        lines = []
+        lines.append("📊 Category Progress:")
+        
+        # Sort categories alphabetically for consistent display
+        categories = sorted(self.status["category_stats"].keys())
+        
+        for category in categories:
+            stats = self.status["category_stats"][category]
+            created = stats.get("images_created", 0)
+            target = stats.get("target", 0)
+            percent = (created / target * 100) if target > 0 else 0
+            
+            lines.append(f"   {category:12s}: {created:6d}/{target:6d} patches ({percent:5.1f}%)")
+        
+        return "\n".join(lines)
