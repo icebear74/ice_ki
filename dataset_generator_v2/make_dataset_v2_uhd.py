@@ -35,6 +35,8 @@ from utils.format_definitions import (
     select_random_format, get_output_dirs_for_format
 )
 from utils.progress_tracker import ProgressTracker
+from utils.dataset_display import draw_dataset_ui
+from utils.terminal_ui import hide_cursor, show_cursor, clear_screen
 from category_utils import get_video_categories, normalize_categories
 
 try:
@@ -124,6 +126,22 @@ class DatasetGeneratorV2UHD:
         self.success_count = 0
         self.current_video_name = ""
         
+        # Terminal UI state
+        self.ui_state = {
+            'current_video_name': "",
+            'current_video_index': 0,
+            'total_videos': len(self.videos),
+            'current_video_progress': {},
+            'overall_progress': {},
+            'patch_distribution': {},
+            'scenes_processed': 0,
+            'patches_created_total': 0,
+            'avg_time_per_scene': 0.0,
+            'eta': {}
+        }
+        self.use_terminal_ui = True  # Enable terminal GUI
+        self.ui_update_counter = 0
+        
         # Display priority distribution
         if RICH_AVAILABLE:
             self._show_priority_distribution()
@@ -204,6 +222,77 @@ class DatasetGeneratorV2UHD:
         """Handle shutdown signals gracefully"""
         self.logger.info(f"Received signal {signum}, shutting down gracefully...")
         self.running = False
+    
+    def _update_terminal_ui(self):
+        """Update and redraw the terminal UI"""
+        if not self.use_terminal_ui:
+            return
+        
+        # Only update every N calls to avoid excessive screen redraws
+        self.ui_update_counter += 1
+        if self.ui_update_counter % 5 != 0:  # Update every 5 calls
+            return
+        
+        try:
+            # Update overall progress from tracker
+            for category in ['master', 'space', 'toon', 'universal']:
+                if category in self.tracker.category_stats:
+                    stats = self.tracker.category_stats[category]
+                    target = self.category_targets.get(category, 0)
+                    self.ui_state['overall_progress'][category] = {
+                        'current': stats['patches_created'],
+                        'target': target
+                    }
+            
+            # Calculate patch distribution by category and size
+            patch_dist = {}
+            for category in ['master', 'space', 'toon', 'universal']:
+                patch_dist[category] = {}
+                for size_key in ['540', '1080', '2160']:
+                    # Get from tracker if available
+                    if category in self.tracker.category_stats:
+                        # Approximate distribution based on format probabilities
+                        total = self.tracker.category_stats[category]['patches_created']
+                        prob = self.format_probabilities.get(category, {}).get(f'{size_key}p', 0.33)
+                        current = int(total * prob)
+                        target_total = self.category_targets.get(category, 0)
+                        target = int(target_total * prob)
+                        patch_dist[category][size_key] = {
+                            'current': current,
+                            'target': target
+                        }
+                    else:
+                        patch_dist[category][size_key] = {'current': 0, 'target': 0}
+            
+            self.ui_state['patch_distribution'] = patch_dist
+            
+            # Calculate ETAs
+            elapsed = time.time() - self.start_time
+            if self.ui_state['patches_created_total'] > 0 and elapsed > 0:
+                rate = self.ui_state['patches_created_total'] / elapsed
+                
+                eta_by_category = {}
+                max_eta = 0
+                for category in ['master', 'space', 'toon', 'universal']:
+                    if category in self.ui_state['overall_progress']:
+                        current = self.ui_state['overall_progress'][category]['current']
+                        target = self.ui_state['overall_progress'][category]['target']
+                        remaining = target - current
+                        if rate > 0 and remaining > 0:
+                            eta_seconds = remaining / rate
+                            eta_by_category[category] = eta_seconds
+                            max_eta = max(max_eta, eta_seconds)
+                
+                self.ui_state['eta'] = eta_by_category
+                self.ui_state['eta']['total'] = max_eta
+            
+            # Draw the UI
+            clear_screen()
+            draw_dataset_ui(self.ui_state)
+            
+        except Exception as e:
+            # Don't let UI errors crash the program
+            self.logger.debug(f"UI update error: {e}")
     
     def _log_system_resources(self, operation: str = ""):
         """Log current system resource usage"""
@@ -1129,6 +1218,7 @@ class DatasetGeneratorV2UHD:
         
         for scene_idx, ts in enumerate(timestamps):
             self.logger.info(f"\n📍 Scene {scene_idx+1}/{len(timestamps)}: timestamp {ts:.2f}s")
+            scene_start_time = time.time()  # Track scene processing time
             
             # Check if ANY format needs this scene
             scene_needed = False
@@ -1257,6 +1347,29 @@ class DatasetGeneratorV2UHD:
             del frames
             
             processed_count += 1
+            
+            # Update UI state
+            self.ui_state['current_video_name'] = video_name
+            self.ui_state['current_video_index'] = video_idx
+            self.ui_state['scenes_processed'] = processed_count
+            self.ui_state['patches_created_total'] = total_created
+            
+            # Update current video progress
+            for category in patches_created.keys():
+                category_created = patches_created[category]
+                category_target = sum(patches_targets[category][fmt]['target'] for fmt in patches_targets[category])
+                self.ui_state['current_video_progress'][category] = {
+                    'current': category_created,
+                    'target': category_target
+                }
+            
+            # Calculate average time per scene
+            elapsed = time.time() - scene_start_time if 'scene_start_time' in locals() else 0
+            if processed_count > 0:
+                self.ui_state['avg_time_per_scene'] = elapsed / processed_count
+            
+            # Update terminal UI
+            self._update_terminal_ui()
             
             # Progress update
             self.logger.info(f"  ✓ Created {patches_created_this_scene} patches from this scene")
@@ -1852,6 +1965,10 @@ class DatasetGeneratorV2UHD:
     
     def run(self):
         """Main generation loop with proportional distribution"""
+        # Hide cursor for clean terminal UI
+        if self.use_terminal_ui:
+            hide_cursor()
+        
         try:
             if RICH_AVAILABLE:
                 console.print(Panel.fit(
@@ -2034,6 +2151,11 @@ class DatasetGeneratorV2UHD:
             import traceback
             traceback.print_exc()
             raise
+        finally:
+            # Restore cursor and clean terminal on exit
+            if self.use_terminal_ui:
+                show_cursor()
+                print("\n")  # Clean exit
 
 
 def main():
