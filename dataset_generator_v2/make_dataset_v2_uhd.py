@@ -1457,6 +1457,21 @@ class DatasetGeneratorV2UHD:
             if processed_count > 0:
                 self.ui_state['avg_time_per_scene'] = elapsed / processed_count
             
+            # Update tracker with patches created in this scene (for overall progress in GUI)
+            for category, count in patches_created.items():
+                # Get the number of new patches created for this category in this iteration
+                # patches_created is cumulative, so we need to calculate the delta
+                previous_count = self.ui_state.get('previous_patches_per_category', {}).get(category, 0)
+                new_patches = count - previous_count
+                if new_patches > 0:
+                    self.tracker.increment_category_images(category, new_patches)
+            
+            # Store current counts for next iteration
+            if 'previous_patches_per_category' not in self.ui_state:
+                self.ui_state['previous_patches_per_category'] = {}
+            for category, count in patches_created.items():
+                self.ui_state['previous_patches_per_category'][category] = count
+            
             # Update terminal UI
             self._update_terminal_ui()
             
