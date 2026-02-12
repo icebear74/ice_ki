@@ -256,7 +256,8 @@ class DatasetGeneratorV2UHD:
         
         # Update every call for real-time progress during extraction
         self.ui_update_counter += 1
-        # Removed: skip logic - always update for real-time feedback
+        # Log update to verify it's being called
+        self.logger.debug(f"GUI update #{self.ui_update_counter} - patches: {self.ui_state.get('patches_created_total', 0)}")
         
         try:
             # Update overall progress from tracker
@@ -271,25 +272,34 @@ class DatasetGeneratorV2UHD:
                     }
             
             # Calculate patch distribution by category and size
+            # Use ACTUAL format names from configuration (e.g., small_540, medium_720_169, large_720)
             patch_dist = {}
             for category in ['master', 'space', 'toon', 'universal']:
                 patch_dist[category] = {}
-                for size_key in ['540', '1080', '2160']:
-                    # Get from tracker if available
-                    if category in self.tracker.category_stats:
-                        # Approximate distribution based on format probabilities
-                        total = self.tracker.category_stats[category]['patches_created']
-                        prob = self.format_probabilities.get(category, {}).get(f'{size_key}p', 0.33)
-                        current = int(total * prob)
-                        # Use actual distribution totals
-                        target_total = self.distribution_totals.get(category, 0)
-                        target = int(target_total * prob)
-                        patch_dist[category][size_key] = {
-                            'current': current,
-                            'target': target
-                        }
-                    else:
-                        patch_dist[category][size_key] = {'current': 0, 'target': 0}
+                # Get actual format names from configuration for this category
+                if category in self.format_config:
+                    for format_name in self.format_config[category].keys():
+                        # Get from tracker if available
+                        if category in self.tracker.category_stats:
+                            # Get distribution based on actual format probabilities
+                            total = self.tracker.category_stats[category]['patches_created']
+                            prob = self.format_probabilities.get(category, {}).get(format_name, 0.0)
+                            current = int(total * prob)
+                            # Use actual distribution totals
+                            target_total = self.distribution_totals.get(category, 0)
+                            target = int(target_total * prob)
+                            
+                            # Extract size from format name (e.g., small_540 -> 540, medium_720_169 -> 720_169)
+                            size_key = format_name.split('_', 1)[1] if '_' in format_name else format_name
+                            
+                            patch_dist[category][size_key] = {
+                                'current': current,
+                                'target': target
+                            }
+                        else:
+                            # Extract size from format name
+                            size_key = format_name.split('_', 1)[1] if '_' in format_name else format_name
+                            patch_dist[category][size_key] = {'current': 0, 'target': 0}
             
             self.ui_state['patch_distribution'] = patch_dist
             
@@ -318,6 +328,8 @@ class DatasetGeneratorV2UHD:
             draw_dataset_ui(self.ui_state)
             # Force flush to ensure display updates immediately
             sys.stdout.flush()
+            # Extra newline to ensure terminal processes the output
+            print("", end='', flush=True)
             
         except Exception as e:
             # Don't let UI errors crash the program
