@@ -256,8 +256,9 @@ class DatasetGeneratorV2UHD:
         
         # Update every call for real-time progress during extraction
         self.ui_update_counter += 1
-        # Log update to verify it's being called
-        self.logger.debug(f"GUI update #{self.ui_update_counter} - patches: {self.ui_state.get('patches_created_total', 0)}")
+        # Log update to verify it's being called (visible on screen for debugging)
+        print(f"[GUI UPDATE #{self.ui_update_counter}] Patches: {self.ui_state.get('patches_created_total', 0)}", flush=True)
+        self.logger.info(f"GUI update #{self.ui_update_counter} - patches: {self.ui_state.get('patches_created_total', 0)}")
         
         try:
             # Update overall progress from tracker
@@ -325,12 +326,14 @@ class DatasetGeneratorV2UHD:
                 self.ui_state['eta']['total'] = max_eta
             
             # Draw the UI
+            print(f"[DRAWING GUI...]", flush=True)
             clear_screen()
             draw_dataset_ui(self.ui_state)
             # Force flush to ensure display updates immediately
             sys.stdout.flush()
             # Extra newline to ensure terminal processes the output
             print("", end='', flush=True)
+            print(f"[GUI DRAWN]", flush=True)
             
         except Exception as e:
             # Don't let UI errors crash the program, but DO show them on screen!
@@ -2154,6 +2157,10 @@ class DatasetGeneratorV2UHD:
                 
                 # Update UI to show video info before processing starts
                 if self.use_terminal_ui:
+                    print(f"\n{'='*80}")
+                    print(f"🎬 STARTING VIDEO: {video_name} ({idx+1}/{len(self.videos)})")
+                    print(f"   Category targets: {video_cat_targets}")
+                    print(f"{'='*80}\n")
                     self._update_terminal_ui()
                 
                 try:
