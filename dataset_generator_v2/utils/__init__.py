@@ -12,6 +12,8 @@ from .format_definitions import (
 )
 
 from .progress_tracker import ProgressTracker
+from .terminal_ui import *
+from .dataset_display import draw_dataset_ui
 
 __all__ = [
     'FORMATS',
@@ -20,5 +22,6 @@ __all__ = [
     'get_format_for_category',
     'select_random_format',
     'get_output_dirs_for_format',
-    'ProgressTracker'
+    'ProgressTracker',
+    'draw_dataset_ui'
 ]
