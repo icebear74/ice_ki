@@ -317,7 +317,7 @@ class DatasetGeneratorV2UHD:
                 max_eta = 0
                 for category in ['master', 'space', 'toon', 'universal']:
                     if category in self.ui_state['overall_progress']:
-                        current = self.ui_state['overall_progress'][category]['current']
+                        current = self.ui_state['overall_progress'][category]['created']  # Fixed: was 'current'
                         target = self.ui_state['overall_progress'][category]['target']
                         remaining = target - current
                         if rate > 0 and remaining > 0:
@@ -2086,6 +2086,14 @@ class DatasetGeneratorV2UHD:
             try:
                 distribution = self.calculate_proportional_distribution(durations)
                 
+                # Count only videos that have at least one category assigned
+                videos_with_categories = sum(1 for v in self.videos 
+                                            if distribution.get(v['path'], {}))
+                self.logger.info(f"Videos with categories: {videos_with_categories} / {len(self.videos)}")
+                
+                # Store for UI display
+                self.total_videos_with_categories = videos_with_categories
+                
                 # Initialize UI with starting state
                 if self.use_terminal_ui:
                     clear_screen()
@@ -2150,7 +2158,7 @@ class DatasetGeneratorV2UHD:
                 # Set current video info in UI state BEFORE processing starts
                 self.ui_state['current_video_name'] = video_name
                 self.ui_state['current_video_index'] = idx + 1  # 1-based for display
-                self.ui_state['total_videos'] = len(self.videos)
+                self.ui_state['total_videos'] = self.total_videos_with_categories  # Only count videos with categories!
                 
                 # Initialize current video progress with targets (0 created so far)
                 self.ui_state['current_video_progress'] = {}
