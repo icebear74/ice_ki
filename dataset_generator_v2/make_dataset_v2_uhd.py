@@ -978,8 +978,14 @@ class DatasetGeneratorV2UHD:
             self.logger.warning(f"No valid format distribution for video: {video_name}")
             return {}
         
+        # Calculate total target for logging
+        if category_targets:
+            target_total = sum(category_targets.values())
+        else:
+            target_total = target_patches
+        
         # Log the distribution plan
-        self.logger.info(f"Format distribution for {video_name} (target: {target_patches} total):")
+        self.logger.info(f"Format distribution for {video_name} (target: {target_total} total):")
         for category, formats in format_distribution.items():
             total = sum(formats.values())
             self.logger.info(f"  {category} ({total} patches): {formats}")
