@@ -242,10 +242,9 @@ class DatasetGeneratorV2UHD:
         if not self.use_terminal_ui:
             return
         
-        # Only update every N calls to avoid excessive screen redraws
+        # Update every call for real-time progress during extraction
         self.ui_update_counter += 1
-        if self.ui_update_counter % 2 != 0:  # Update every 2 calls (more frequent)
-            return
+        # Removed: skip logic - always update for real-time feedback
         
         try:
             # Update overall progress from tracker
@@ -1299,6 +1298,10 @@ class DatasetGeneratorV2UHD:
             
             self.logger.info(f"  ✓ Loaded {len(frames)} frames into memory")
             
+            # Update GUI to show extraction progress
+            self.ui_state['scenes_processed'] = processed_count + 1
+            self._update_terminal_ui()
+            
             # PROCESS frames into patches for each category-format that needs this scene
             patches_created_this_scene = 0
             for category, formats in format_distribution.items():
@@ -1355,6 +1358,9 @@ class DatasetGeneratorV2UHD:
                         total_created += 1
                         patches_created_this_scene += 1
                         
+                        # Update UI state with new patch count
+                        self.ui_state['patches_created_total'] = total_created
+                        
                         self.logger.info(f"    ✓ Saved patch: {category}/{format_name} → {os.path.basename(gt_path)}")
             
             # CLEAN UP: Delete frame files immediately to free disk space
@@ -1378,7 +1384,7 @@ class DatasetGeneratorV2UHD:
             
             processed_count += 1
             
-            # Update UI state
+            # Update UI state immediately after scene completion
             self.ui_state['current_video_name'] = video_name
             self.ui_state['current_video_index'] = video_idx
             self.ui_state['scenes_processed'] = processed_count
