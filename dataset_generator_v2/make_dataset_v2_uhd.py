@@ -1047,40 +1047,13 @@ class DatasetGeneratorV2UHD:
         self.logger.info(f"  Total frames to extract: {len(timestamps) * n_frames}")
         self.logger.info(f"  All {len(timestamps)} scenes will be used (0% waste)")
         
-        # Phase 2: Batch extract ALL frames with ONE FFmpeg call
-        self.logger.info(f"\n🎬 Phase 2: Batch extracting frames (ONE FFmpeg call)...")
-        self.logger.info(f"  Opening video file ONCE (instead of {len(timestamps)} times)")
-        self.logger.info(f"  Single FFmpeg pass through entire video...")
-        
-        batch_start = time.time()
-        batch_result = self.extract_frames_batch_uhd(video_path, timestamps, n_frames, fps)
-        batch_duration = time.time() - batch_start
-        
-        if not batch_result or 'frame_paths' not in batch_result:
-            self.logger.error(f"❌ Batch extraction failed! Falling back to individual extraction...")
-            return self._extract_patches_multi_format_legacy(
-                video_path, duration, format_distribution, n_frames, video_name
-            )
-        
-        frame_paths_dict = batch_result['frame_paths']
-        temp_dirs = batch_result.get('temp_dirs', [])
-        
-        self.logger.info(f"✓ Batch extraction complete in {batch_duration:.1f}s")
-        self.logger.info(f"  Successfully extracted {len(frame_paths_dict)} timestamps")
-        self.logger.info(f"  Success rate: {len(frame_paths_dict)}/{len(timestamps)} ({100*len(frame_paths_dict)/len(timestamps):.1f}%)")
-        
-        # Estimate time saved
-        estimated_individual_time = len(timestamps) * 2.0  # ~2 seconds per FFmpeg call
-        time_saved = estimated_individual_time - batch_duration
-        speedup = estimated_individual_time / batch_duration if batch_duration > 0 else 0
-        
-        self.logger.info(f"⚡ Performance:")
-        self.logger.info(f"  Batch time: {batch_duration:.1f}s")
-        self.logger.info(f"  Individual extraction would take: ~{estimated_individual_time:.0f}s")
-        self.logger.info(f"  Time saved: ~{time_saved:.0f}s ({speedup:.1f}x speedup)")
-        
-        # Phase 3: Process extracted frames into patches
-        self.logger.info(f"\n🔧 Phase 3: Processing frames into patches...")
+        # Phase 2: INCREMENTAL extraction and processing
+        # User request: "extrahier 7 frames .. verteile die .. extrahiere die nächsten 7 usw usw"
+        # Translation: "extract 7 frames .. distribute them .. extract the next 7, etc."
+        self.logger.info(f"\n🎬 Phase 2: INCREMENTAL extraction and processing...")
+        self.logger.info(f"  Extract 7 frames → Process → Clean up → Repeat")
+        self.logger.info(f"  Memory-efficient: Only 7 frames in RAM at a time")
+        self.logger.info(f"  Target directories (master/, space/, etc.) will be created as patches are saved")
         
         black_frame_threshold_kb = 15
         black_frame_detection_limit_seconds = 10.0
@@ -1088,11 +1061,8 @@ class DatasetGeneratorV2UHD:
         black_frames_skipped = 0
         total_created = 0
         
-        # IMPORTANT: Calculate scene selection based on ORIGINAL timestamps list
-        # This ensures the distribution logic remains correct even if some extractions failed
+        # Calculate scene selection FIRST (before extraction)
         total_scenes = len(timestamps)
-        
-        # Create mapping from original timestamp index to actual timestamp
         timestamp_to_original_idx = {ts: idx for idx, ts in enumerate(timestamps)}
         
         scene_selection = {}
@@ -1133,20 +1103,17 @@ class DatasetGeneratorV2UHD:
                 
                 format_idx += 1
         
-        # Process extracted frames into patches
-        processed_count = 0
+        # INCREMENTAL PROCESSING: Extract → Process → Clean → Repeat
+        self.logger.info(f"\n🔄 Starting incremental extraction and processing...")
+        self.logger.info(f"  Processing {len(timestamps)} timestamps one at a time")
         
-        for ts in sorted(frame_paths_dict.keys()):
-            # Get the original scene index from the timestamp
-            scene_idx = timestamp_to_original_idx.get(ts)
-            if scene_idx is None:
-                # This shouldn't happen, but skip if timestamp not in original list
-                self.logger.warning(f"Timestamp {ts} not in original list, skipping")
-                continue
+        processed_count = 0
+        extraction_failures = 0
+        
+        for scene_idx, ts in enumerate(timestamps):
+            self.logger.info(f"\n📍 Scene {scene_idx+1}/{len(timestamps)}: timestamp {ts:.2f}s")
             
-            frame_file_paths = frame_paths_dict[ts]
-            
-            # Check if any format needs this scene
+            # Check if ANY format needs this scene
             scene_needed = False
             for category, formats in format_distribution.items():
                 for format_name in formats.keys():
@@ -1157,28 +1124,46 @@ class DatasetGeneratorV2UHD:
                     break
             
             if not scene_needed:
-                for frame_path in frame_file_paths:
-                    if os.path.exists(frame_path):
-                        os.remove(frame_path)
+                self.logger.debug(f"  ⏭️  Skipping (not needed by any format)")
                 continue
             
-            # Load frames
+            # EXTRACT 7 frames for this timestamp
+            self.logger.info(f"  🎬 Extracting {n_frames} frames...")
+            result = self.extract_frames_uhd(video_path, ts, n_frames)
+            
+            if not result or not result.get('frame_paths'):
+                self.logger.error(f"  ❌ Extraction failed for timestamp {ts:.2f}s")
+                extraction_failures += 1
+                continue
+            
+            frame_file_paths = result['frame_paths']
+            temp_dir = result['temp_dir']
+            self.logger.info(f"  ✓ Extracted {len(frame_file_paths)} frames to temp directory")
+            
+            # Load frames into memory (only 7 frames - minimal RAM usage)
             frames = []
             for frame_path in frame_file_paths:
                 frame = cv2.imread(frame_path)
                 if frame is None:
-                    self.logger.warning(f"Could not read frame {frame_path}")
+                    self.logger.warning(f"  ⚠️  Could not read frame {frame_path}")
                     break
                 frames.append(frame)
             
             if len(frames) != n_frames:
-                self.logger.warning(f"Incomplete frames for timestamp {ts}, skipping")
+                self.logger.warning(f"  ⚠️  Incomplete frames ({len(frames)}/{n_frames}), skipping")
+                # Clean up
                 for frame_path in frame_file_paths:
                     if os.path.exists(frame_path):
                         os.remove(frame_path)
+                if temp_dir and os.path.exists(temp_dir):
+                    import shutil
+                    shutil.rmtree(temp_dir, ignore_errors=True)
                 continue
             
-            # Process for each category-format combination that needs this scene
+            self.logger.info(f"  ✓ Loaded {len(frames)} frames into memory")
+            
+            # PROCESS frames into patches for each category-format that needs this scene
+            patches_created_this_scene = 0
             for category, formats in format_distribution.items():
                 for format_name, target_count in formats.items():
                     if scene_idx not in scene_selection[category][format_name]:
@@ -1187,22 +1172,18 @@ class DatasetGeneratorV2UHD:
                     format_config = self.format_config[category][format_name]
                     
                     # Try up to 5 times to find an interesting patch with random crops
-                    # Then use center crop as guaranteed fallback
                     MAX_RANDOM_ATTEMPTS = 5
                     gt, lr = None, None
                     
                     for attempt in range(MAX_RANDOM_ATTEMPTS + 1):
                         if attempt < MAX_RANDOM_ATTEMPTS:
-                            # Attempts 1-5: Random crop
                             gt, lr = self.create_patch_pair(frames, format_name, format_config, force_center=False)
                         else:
-                            # Final attempt: Center crop as fallback
                             gt, lr = self.create_patch_pair(frames, format_name, format_config, force_center=True)
                         
                         if gt is None or lr is None:
                             continue
                         
-                        # Check if patch is interesting, or accept it if this is the final attempt
                         if self.is_interesting_patch(gt) or attempt >= MAX_RANDOM_ATTEMPTS:
                             break
                     
@@ -1215,16 +1196,18 @@ class DatasetGeneratorV2UHD:
                     )
                     
                     if saved:
+                        # Check for black frames only in first 10 seconds
                         if ts <= black_frame_detection_limit_seconds and \
                            self._is_black_frame(gt_path, black_frame_threshold_kb):
                             black_frames_detected += 1
+                            self.logger.debug(f"    Black frame detected, deleting")
                             try:
                                 if os.path.exists(gt_path):
                                     os.remove(gt_path)
                                 if os.path.exists(lr_path):
                                     os.remove(lr_path)
                             except Exception as e:
-                                self.logger.error(f"Error deleting black frame files: {e}")
+                                self.logger.error(f"    Error deleting black frame files: {e}")
                             continue
                         
                         if ts > black_frame_detection_limit_seconds:
@@ -1233,27 +1216,52 @@ class DatasetGeneratorV2UHD:
                         patches_targets[category][format_name]['created'] += 1
                         patches_created[category] += 1
                         total_created += 1
+                        patches_created_this_scene += 1
+                        
+                        self.logger.info(f"    ✓ Saved patch: {category}/{format_name} → {os.path.basename(gt_path)}")
             
-            processed_count += 1
-            
-            # Delete frame files immediately
+            # CLEAN UP: Delete frame files immediately to free disk space
             for frame_path in frame_file_paths:
                 try:
                     if os.path.exists(frame_path):
                         os.remove(frame_path)
                 except Exception as e:
-                    self.logger.warning(f"Could not delete frame file {frame_path}: {e}")
+                    self.logger.warning(f"  ⚠️  Could not delete frame file: {e}")
             
+            # Clean up temp directory
+            if temp_dir and os.path.exists(temp_dir):
+                import shutil
+                try:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                except Exception as e:
+                    self.logger.warning(f"  ⚠️  Could not delete temp directory: {e}")
+            
+            # Free memory
             del frames
             
-            if processed_count % 100 == 0:
-                scenes_pct = 100 * processed_count / len(frame_paths_dict)
-                self.logger.info(f"  Progress: {processed_count}/{len(frame_paths_dict)} scenes processed ({scenes_pct:.1f}%)")
-                self.logger.info(f"  Patches created so far: {total_created}")
+            processed_count += 1
             
-            if not self.running:
-                self.logger.warning("  Interrupted by user")
-                break
+            # Progress update
+            self.logger.info(f"  ✓ Created {patches_created_this_scene} patches from this scene")
+            self.logger.info(f"  📊 Progress: {processed_count}/{len(timestamps)} scenes processed, {total_created} total patches created")
+            
+            if processed_count % 10 == 0:
+                # Show category progress every 10 scenes
+                self.logger.info(f"\n  📊 Category progress after {processed_count} scenes:")
+                for category in sorted(patches_created.keys()):
+                    category_created = patches_created[category]
+                    category_target = sum(patches_targets[category][fmt]['target'] for fmt in patches_targets[category])
+                    pct = 100 * category_created / category_target if category_target > 0 else 0
+                    self.logger.info(f"    {category:12s}: {category_created:5d}/{category_target:5d} patches ({pct:5.1f}%)")
+        
+        # Final summary
+        self.logger.info(f"\n{'═'*60}")
+        self.logger.info(f"✓ Incremental extraction and processing complete!")
+        self.logger.info(f"  Scenes processed: {processed_count}/{len(timestamps)}")
+        if extraction_failures > 0:
+            self.logger.warning(f"  Extraction failures: {extraction_failures}")
+        self.logger.info(f"  Total patches created: {total_created}")
+        self.logger.info(f"{'═'*60}")
         
         # Final statistics
         total_time = time.time() - start_time
@@ -1261,9 +1269,8 @@ class DatasetGeneratorV2UHD:
         self.logger.info(f"\n╔══════════════════════════════════════════════════════════╗")
         self.logger.info(f"║  EXTRACTION COMPLETE                                     ║")
         self.logger.info(f"╚══════════════════════════════════════════════════════════╝")
-        self.logger.info(f"✓ Processed {processed_count}/{len(frame_paths_dict)} scenes in {total_time:.1f}s")
+        self.logger.info(f"✓ Processed {processed_count}/{len(timestamps)} scenes in {total_time:.1f}s")
         self.logger.info(f"✓ Created {total_created} patches total")
-        self.logger.info(f"  Scene utilization: {100*processed_count/len(frame_paths_dict):.1f}% (all extracted scenes used)")
         
         if black_frames_detected > 0:
             self.logger.info(f"  🚫 Black frames detected and removed: {black_frames_detected}")
@@ -1277,16 +1284,6 @@ class DatasetGeneratorV2UHD:
             self.logger.info(f"  {category}: {cat_total}/{cat_target} patches")
             for format_name, stats in formats.items():
                 self.logger.info(f"    └─ {format_name}: {stats['created']}/{stats['target']}")
-        
-        # Clean up temp directories
-        if temp_dirs:
-            for temp_dir in temp_dirs:
-                if temp_dir and os.path.exists(temp_dir):
-                    try:
-                        shutil.rmtree(temp_dir, ignore_errors=True)
-                    except Exception as e:
-                        self.logger.warning(f"Could not clean up temp directory {temp_dir}: {e}")
-            self.logger.info(f"✓ Cleaned up {len(temp_dirs)} temp directories")
         
         return patches_created
     
