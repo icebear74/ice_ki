@@ -196,7 +196,15 @@ def _draw_statistics_and_eta(state, width):
     
     print("  ETA pro Kategorie:")
     for cat_key, cat_name, color in categories:
-        eta_str = eta_data.get(cat_key, 'N/A')
+        eta_value = eta_data.get(cat_key, None)
+        # Convert float seconds to readable time string
+        if eta_value is None:
+            eta_str = 'N/A'
+        elif isinstance(eta_value, (int, float)):
+            eta_str = format_time(eta_value)
+        else:
+            eta_str = str(eta_value)
+        
         if cat_key == 'total':
             print(f"  {color}{C_BOLD}{cat_name:10s}: {eta_str:>15s}{C_RESET}")
         else:
