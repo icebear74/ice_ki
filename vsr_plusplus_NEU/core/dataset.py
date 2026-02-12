@@ -436,7 +436,7 @@ class VSRDataset(Dataset):
                 # Build new file lists - only check LR file existence (fast reload)
                 new_gt_files = []
                 new_lr_paths = {}
-                skipped_files = 0
+                missing_lr_count = 0
                 
                 for gt_file in all_gt_files:
                     # For training, check lr_dir. For validation, use patch_lr_dir
@@ -454,9 +454,9 @@ class VSRDataset(Dataset):
                                 new_gt_files.append(gt_file)
                                 new_lr_paths[gt_file] = self.patch_lr_dir
                             else:
-                                skipped_files += 1
+                                missing_lr_count += 1
                         else:
-                            skipped_files += 1
+                            missing_lr_count += 1
                     elif self.mode == 'val' and self.patch_lr_dir:
                         # For validation with no val LR dir, always use patches
                         patch_lr_path = os.path.join(self.patch_lr_dir, gt_file)
@@ -464,13 +464,13 @@ class VSRDataset(Dataset):
                             new_gt_files.append(gt_file)
                             new_lr_paths[gt_file] = self.patch_lr_dir
                         else:
-                            skipped_files += 1
+                            missing_lr_count += 1
                     else:
-                        skipped_files += 1
+                        missing_lr_count += 1
                 
                 # Report skipped files (only if any were skipped)
-                if skipped_files > 0:
-                    print(f"\n⚠️  Reload: Skipped {skipped_files} GT files without matching LR files ({self.mode}, size_key={self.size_key})")
+                if missing_lr_count > 0:
+                    print(f"\n⚠️  Reload: Skipped {missing_lr_count} GT files without matching LR files ({self.mode}, size_key={self.size_key})")
                 
                 # Update the dataset atomically
                 self.gt_files = new_gt_files
