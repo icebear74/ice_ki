@@ -2034,142 +2034,80 @@ class DatasetGeneratorV2UHD:
             if start_idx > 0:
                 self.logger.info(f"Resuming from video {start_idx + 1}/{len(self.videos)}")
             
-            # Parallel extraction and processing
-            # Rule: Max 1 extraction + Max 1 processing running simultaneously
+            # Sequential processing: One video at a time, fully complete before moving to next
             self.logger.info("\n" + "=" * 80)
-            self.logger.info("PARALLEL MODE: 1 FFmpeg extraction + 1 processing running")
+            self.logger.info("SEQUENTIAL MODE: Processing one video completely before moving to next")
             self.logger.info("=" * 80)
             
-            extraction_queue = queue.Queue(maxsize=1)  # Only 1 video can be queued
-            extraction_done = threading.Event()
-            processing_active = threading.Lock()
-            
-            def extraction_worker():
-                """Producer: Extract frames for videos one at a time"""
-                try:
-                    for idx in range(start_idx, len(self.videos)):
-                        if not self.running:
-                            break
-                        
-                        video = self.videos[idx]
-                        video_path = video['path']
-                        video_cat_targets = distribution.get(video_path, {})
-                        
-                        # Calculate total patches for this video (sum across all categories)
-                        total_patches = sum(video_cat_targets.values()) if video_cat_targets else 0
-                        
-                        # Skip if no patches allocated (or no categories)
-                        if total_patches == 0:
-                            self.logger.info(f"[EXTRACTION] Skipping: {video['name']} (no patches allocated)")
-                            continue
-                        
-                        # Also skip if video has no categories
-                        if not video.get('categories', {}):
-                            self.logger.info(f"[EXTRACTION] Skipping: {video['name']} (no categories assigned)")
-                            continue
-                        
-                        self.logger.info(f"\n[EXTRACTION] Starting: {video['name']} (video {idx+1}/{len(self.videos)})")
-                        
-                        # Extract frames (this shows FFmpeg progress)
-                        result = {
-                            'idx': idx,
-                            'video': video,
-                            'target': total_patches,  # Total across all categories
-                            'category_targets': video_cat_targets,  # Per-category breakdown
-                            'extracted_data': None  # Will be filled by process_video
-                        }
-                        
-                        # Put in queue (blocks if queue is full = previous video still processing)
-                        extraction_queue.put(result)
-                        self.logger.info(f"[EXTRACTION] Queued: {video['name']}")
-                    
-                    # Signal end
-                    extraction_queue.put(None)
-                    extraction_done.set()
-                    
-                except Exception as e:
-                    self.logger.error(f"[EXTRACTION] Fatal error: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    extraction_queue.put(None)
-                    extraction_done.set()
-            
-            def processing_worker():
-                """Consumer: Process extracted frames one at a time"""
-                try:
-                    while True:
-                        # Get next video to process (blocks if queue is empty)
-                        result = extraction_queue.get()
-                        
-                        if result is None:
-                            # End signal
-                            break
-                        
-                        idx = result['idx']
-                        video = result['video']
-                        target_patches = result['target']
-                        category_targets = result.get('category_targets', {})
-                        
-                        # Acquire processing lock (only 1 processing at a time)
-                        with processing_active:
-                            self.logger.info(f"\n[PROCESSING] Starting: {video['name']} (target={target_patches} patches)")
-                            if category_targets:
-                                cat_summary = ", ".join([f"{cat}: {cnt}" for cat, cnt in category_targets.items()])
-                                self.logger.info(f"  Per-category: {cat_summary}")
-                            
-                            # Set target for this video
-                            self._current_video_target = target_patches
-                            
-                            try:
-                                stats = self.process_video(idx, category_targets)
-                                
-                                # Check if video was skipped
-                                if stats.get('skipped'):
-                                    self.logger.info(f"[PROCESSING] Skipped: {video['name']} - {stats.get('reason', 'unknown')}")
-                                    # Update tracker with skip
-                                    self.tracker.update_progress(
-                                        current_video_index=idx + 1,
-                                        patches_created=0
-                                    )
-                                else:
-                                    # Update tracker with actual patches
-                                    self.tracker.update_progress(
-                                        current_video_index=idx + 1,
-                                        patches_created=stats.get('patches_created', 0)
-                                    )
-                                    self.logger.info(f"[PROCESSING] Complete: {video['name']} - {stats.get('patches_created', 0)} patches created")
-                                
-                                # Log category progress after each video
-                                progress_info = self.tracker.get_all_category_progress()
-                                self.logger.info(f"\n{progress_info}\n")
-                                
-                                self.tracker.save()
-                                
-                            except Exception as e:
-                                self.logger.error(f"[PROCESSING] Error: {video['name']}: {e}")
-                                import traceback
-                                traceback.print_exc()
-                                self.tracker.save()
+            # Process videos sequentially
+            for idx in range(start_idx, len(self.videos)):
+                if not self.running:
+                    break
                 
+                video = self.videos[idx]
+                video_path = video['path']
+                video_name = video.get('name', os.path.basename(video_path))
+                video_cat_targets = distribution.get(video_path, {})
+                
+                # Calculate total patches for this video (sum across all categories)
+                total_patches = sum(video_cat_targets.values()) if video_cat_targets else 0
+                
+                # Skip if no patches allocated
+                if total_patches == 0:
+                    self.logger.info(f"\n⏭️  Skipping video {idx + 1}/{len(self.videos)}: {video_name} (no patches allocated)")
+                    continue
+                
+                # Also skip if video has no categories
+                if not video.get('categories', {}):
+                    self.logger.info(f"\n⏭️  Skipping video {idx + 1}/{len(self.videos)}: {video_name} (no categories assigned)")
+                    continue
+                
+                # Log start
+                self.logger.info(f"\n{'='*80}")
+                self.logger.info(f"📹 Processing video {idx + 1}/{len(self.videos)}: {video_name}")
+                self.logger.info(f"   Target: {total_patches} patches across {len(video_cat_targets)} categories")
+                if video_cat_targets:
+                    cat_summary = ", ".join([f"{cat}: {cnt}" for cat, cnt in video_cat_targets.items()])
+                    self.logger.info(f"   Per-category: {cat_summary}")
+                self.logger.info(f"{'='*80}")
+                
+                # Set target for this video
+                self._current_video_target = total_patches
+                
+                try:
+                    # Process this video completely (extraction + processing)
+                    stats = self.process_video(idx, video_cat_targets)
+                    
+                    # Check if video was skipped
+                    if stats.get('skipped'):
+                        self.logger.info(f"⏭️  Skipped: {video_name} - {stats.get('reason', 'unknown')}")
+                        # Update tracker with skip
+                        self.tracker.update_progress(
+                            current_video_index=idx + 1,
+                            patches_created=0
+                        )
+                    else:
+                        # Update tracker with actual patches
+                        patches_created = stats.get('patches_created', 0)
+                        self.tracker.update_progress(
+                            current_video_index=idx + 1,
+                            patches_created=patches_created
+                        )
+                        self.logger.info(f"✅ Complete: {video_name} - {patches_created} patches created")
+                    
+                    # Log category progress after each video
+                    progress_info = self.tracker.get_all_category_progress()
+                    self.logger.info(f"\n{progress_info}\n")
+                    
+                    # Save progress after each video
+                    self.tracker.save()
+                    
                 except Exception as e:
-                    self.logger.error(f"[PROCESSING] Fatal error: {e}")
+                    self.logger.error(f"❌ Error processing {video_name}: {e}")
                     import traceback
                     traceback.print_exc()
-            
-            # Start both worker threads
-            extract_thread = threading.Thread(target=extraction_worker, name="ExtractionWorker", daemon=True)
-            process_thread = threading.Thread(target=processing_worker, name="ProcessingWorker", daemon=True)
-            
-            self.logger.info("Starting parallel workers...")
-            extract_thread.start()
-            process_thread.start()
-            
-            # Wait for both to complete
-            self.logger.info("Waiting for extraction worker...")
-            extract_thread.join()
-            self.logger.info("Extraction worker finished, waiting for processing worker...")
-            process_thread.join()
-            self.logger.info("Processing worker finished")
+                    # Save progress even on error
+                    self.tracker.save()
             
             if RICH_AVAILABLE:
                 console.print("\n[bold green]✅ Generation Complete![/bold green]")
