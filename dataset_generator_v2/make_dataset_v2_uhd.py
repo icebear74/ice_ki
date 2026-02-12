@@ -268,9 +268,12 @@ class DatasetGeneratorV2UHD:
                     stats = category_stats[category]
                     # Use actual distribution totals instead of raw category targets
                     target = self.distribution_totals.get(category, 0)
+                    current = stats.get('images_created', 0)  # ProgressTracker uses 'images_created'
+                    percent = (current / target * 100) if target > 0 else 0.0
                     self.ui_state['overall_progress'][category] = {
-                        'current': stats.get('images_created', 0),  # ProgressTracker uses 'images_created'
-                        'target': target
+                        'created': current,  # Fixed: was 'current', display expects 'created'
+                        'target': target,
+                        'percent': percent  # Added: display expects this
                     }
             
             # Calculate patch distribution by category and size
@@ -1442,9 +1445,11 @@ class DatasetGeneratorV2UHD:
             for category in patches_created.keys():
                 category_created = patches_created[category]
                 category_target = sum(patches_targets[category][fmt]['target'] for fmt in patches_targets[category])
+                category_percent = (category_created / category_target * 100) if category_target > 0 else 0.0
                 self.ui_state['current_video_progress'][category] = {
-                    'current': category_created,
-                    'target': category_target
+                    'created': category_created,  # Fixed: was 'current', display expects 'created'
+                    'target': category_target,
+                    'percent': category_percent  # Added: display expects this
                 }
             
             # Calculate average time per scene
@@ -2151,8 +2156,9 @@ class DatasetGeneratorV2UHD:
                 self.ui_state['current_video_progress'] = {}
                 for category in video_cat_targets.keys():
                     self.ui_state['current_video_progress'][category] = {
-                        'current': 0,
-                        'target': video_cat_targets[category]
+                        'created': 0,  # Fixed: was 'current', display expects 'created'
+                        'target': video_cat_targets[category],
+                        'percent': 0.0  # Added: display expects this
                     }
                 
                 # Update UI to show video info before processing starts
