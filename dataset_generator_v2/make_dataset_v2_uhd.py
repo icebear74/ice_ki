@@ -298,13 +298,13 @@ class DatasetGeneratorV2UHD:
                             size_key = format_name.split('_', 1)[1] if '_' in format_name else format_name
                             
                             patch_dist[category][size_key] = {
-                                'current': current,
+                                'count': current,  # Fixed: display expects 'count' not 'current'
                                 'target': target
                             }
                         else:
                             # Extract size from format name
                             size_key = format_name.split('_', 1)[1] if '_' in format_name else format_name
-                            patch_dist[category][size_key] = {'current': 0, 'target': 0}
+                            patch_dist[category][size_key] = {'count': 0, 'target': 0}  # Fixed: 'count' not 'current'
             
             self.ui_state['patch_distribution'] = patch_dist
             

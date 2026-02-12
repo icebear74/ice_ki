@@ -130,8 +130,8 @@ def _draw_patch_distribution_table(state, width):
     
     patch_dist = state.get('patch_distribution', {})
     
-    # Table header
-    header = f"  {'Kategorie':<12s}  {'540p':>15s}  {'1080p':>15s}  {'2160p':>15s}  {'Gesamt':>10s}"
+    # Table header - use actual format sizes from config
+    header = f"  {'Kategorie':<12s}  {'540':>15s}  {'720':>15s}  {'720_169':>15s}  {'Gesamt':>10s}"
     print(header)
     print(f"{C_GRAY}  {'─' * (len(header) - 10)}{C_RESET}")
     
@@ -145,26 +145,26 @@ def _draw_patch_distribution_table(state, width):
     for cat_key, cat_name, color in categories:
         cat_data = patch_dist.get(cat_key, {})
         
-        # Get counts for each size
+        # Get counts for each size - using actual format sizes
         size_540 = cat_data.get('540', {'count': 0, 'target': 0})
-        size_1080 = cat_data.get('1080', {'count': 0, 'target': 0})
-        size_2160 = cat_data.get('2160', {'count': 0, 'target': 0})
+        size_720 = cat_data.get('720', {'count': 0, 'target': 0})
+        size_720_169 = cat_data.get('720_169', {'count': 0, 'target': 0})
         
         count_540 = size_540.get('count', 0)
         target_540 = size_540.get('target', 0)
-        count_1080 = size_1080.get('count', 0)
-        target_1080 = size_1080.get('target', 0)
-        count_2160 = size_2160.get('count', 0)
-        target_2160 = size_2160.get('target', 0)
+        count_720 = size_720.get('count', 0)
+        target_720 = size_720.get('target', 0)
+        count_720_169 = size_720_169.get('count', 0)
+        target_720_169 = size_720_169.get('target', 0)
         
-        total_count = count_540 + count_1080 + count_2160
+        total_count = count_540 + count_720 + count_720_169
         
         # Format row
         row_540 = f"{count_540:5d}/{target_540:5d}"
-        row_1080 = f"{count_1080:5d}/{target_1080:5d}"
-        row_2160 = f"{count_2160:5d}/{target_2160:5d}"
+        row_720 = f"{count_720:5d}/{target_720:5d}"
+        row_720_169 = f"{count_720_169:5d}/{target_720_169:5d}"
         
-        print(f"  {color}{cat_name:<12s}{C_RESET}  {row_540:>15s}  {row_1080:>15s}  {row_2160:>15s}  {total_count:>10d}")
+        print(f"  {color}{cat_name:<12s}{C_RESET}  {row_540:>15s}  {row_720:>15s}  {row_720_169:>15s}  {total_count:>10d}")
 
 
 def _draw_statistics_and_eta(state, width):
