@@ -366,7 +366,24 @@ class DatasetGeneratorV2UHD:
         
         try:
             total_duration = sum(durations.values())
-            total_target_patches = sum(self.category_targets.values())
+            
+            # FIXED: Calculate total target from ONLY the categories that videos actually use
+            # (not all 4 categories - that would be wrong!)
+            used_categories = set()
+            for v in self.videos:
+                video_cats = get_video_categories(v)
+                if video_cats:
+                    used_categories.update(video_cats)
+            
+            # Sum only the categories that are actually used
+            total_target_patches = sum(
+                self.category_targets[cat] 
+                for cat in used_categories 
+                if cat in self.category_targets
+            )
+            
+            self.logger.info(f"Categories used by videos: {sorted(used_categories)}")
+            self.logger.info(f"Total target (from used categories only): {total_target_patches:,}")
             
             if total_duration == 0:
                 self.logger.warning("Total duration is 0, using equal distribution")
