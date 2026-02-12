@@ -230,7 +230,7 @@ class DatasetGeneratorV2UHD:
         
         # Only update every N calls to avoid excessive screen redraws
         self.ui_update_counter += 1
-        if self.ui_update_counter % 5 != 0:  # Update every 5 calls
+        if self.ui_update_counter % 2 != 0:  # Update every 2 calls (more frequent)
             return
         
         try:
@@ -438,109 +438,89 @@ class DatasetGeneratorV2UHD:
         
         return durations
     
-    def calculate_proportional_distribution(self, durations: Dict[str, float]) -> Dict[str, int]:
+    def calculate_proportional_distribution(self, durations: Dict[str, float]) -> Dict[str, Dict[str, int]]:
         """
-        Calculate how many patches each video should get based on its duration.
-        This is Phase 2 - distribute proportionally.
+        Calculate how many patches each video should get PER CATEGORY based on its duration.
+        This is Phase 2 - distribute proportionally PER CATEGORY (NOT globally!).
+        
+        CRITICAL: Each category target is divided among videos IN THAT CATEGORY only.
+        Example: Master 200k target divided among 63 master videos, not all 500 videos!
         
         Args:
             durations: Dictionary of video_path -> duration in seconds
         
         Returns:
-            Dictionary of video_path -> number of patches to create
+            Dictionary of video_path -> {category: patches_for_category}
         """
         self.logger.info("=" * 80)
-        self.logger.info("PHASE 2: Calculating Proportional Distribution")
+        self.logger.info("PHASE 2: Calculating PER-CATEGORY Proportional Distribution")
         self.logger.info("=" * 80)
         
         try:
-            total_duration = sum(durations.values())
+            # Store results as: video_path -> {category: patch_count}
+            video_targets = {}
             
-            # FIXED: Calculate total target from ONLY the categories that videos actually use
-            # (not all 4 categories - that would be wrong!)
-            used_categories = set()
-            for v in self.videos:
-                video_cats = get_video_categories(v)
-                if video_cats:
-                    used_categories.update(video_cats)
-            
-            # Sum only the categories that are actually used
-            total_target_patches = sum(
-                self.category_targets[cat] 
-                for cat in used_categories 
-                if cat in self.category_targets
-            )
-            
-            self.logger.info(f"Categories used by videos: {sorted(used_categories)}")
-            self.logger.info(f"Total target (from used categories only): {total_target_patches:,}")
-            
-            if total_duration == 0:
-                self.logger.warning("Total duration is 0, using equal distribution")
-                return {path: total_target_patches // len(durations) for path in durations.keys()}
-            
-            distribution = {}
+            # Initialize all videos
+            for video_path in durations.keys():
+                video_targets[video_path] = {}
             
             if RICH_AVAILABLE:
-                console.print(f"\n[bold cyan]📊 Phase 2: Calculating Proportional Distribution[/bold cyan]")
-                console.print(f"Target patches: {total_target_patches:,}")
-                console.print(f"Total duration: {total_duration/3600:.1f} hours\n")
+                console.print(f"\n[bold cyan]📊 Phase 2: Calculating PER-CATEGORY Distribution[/bold cyan]")
             
-            for video_path, duration in durations.items():
-                try:
-                    # Calculate proportional share
-                    proportion = duration / total_duration
-                    patches_for_video = int(total_target_patches * proportion)
-                    distribution[video_path] = patches_for_video
-                    
-                    # Find video name for display
-                    video_name = "Unknown"
-                    for v in self.videos:
-                        if v['path'] == video_path:
-                            video_name = v['name']
-                            break
-                    
-                    self.logger.debug(f"  {video_name}: {duration:.0f}s ({proportion*100:.1f}%) → {patches_for_video} patches")
-                except Exception as e:
-                    self.logger.error(f"Error calculating distribution for {video_path}: {e}")
+            # For EACH category separately
+            for category, category_target in self.category_targets.items():
+                self.logger.info(f"\n  Processing category: {category} (target: {category_target:,})")
+                
+                # Find videos that have THIS category
+                category_videos = []
+                category_total_duration = 0.0
+                
+                for v in self.videos:
+                    video_cats = get_video_categories(v)
+                    if category in video_cats:
+                        video_path = v['path']
+                        if video_path in durations:
+                            duration = durations[video_path]
+                            category_videos.append((video_path, v['name'], duration))
+                            category_total_duration += duration
+                
+                self.logger.info(f"    {category}: {len(category_videos)} videos, {category_total_duration/3600:.1f} hours total")
+                
+                if category_total_duration == 0 or len(category_videos) == 0:
+                    self.logger.warning(f"    No videos or zero duration for {category}, skipping")
                     continue
+                
+                # Distribute category target among these videos proportionally
+                for video_path, video_name, duration in category_videos:
+                    proportion = duration / category_total_duration
+                    patches = int(category_target * proportion)
+                    video_targets[video_path][category] = patches
+                    
+                    self.logger.debug(f"      {video_name}: {duration:.0f}s ({proportion*100:.1f}%) → {patches} patches")
             
             # Show summary
-            if RICH_AVAILABLE:
-                try:
-                    from rich.table import Table
-                    
-                    table = Table(title="Distribution Summary (Top 10 videos)")
-                    table.add_column("Video", style="cyan")
-                    table.add_column("Duration", justify="right", style="yellow")
-                    table.add_column("Patches", justify="right", style="green")
-                    table.add_column("%", justify="right", style="magenta")
-                    
-                    # Sort by patches descending
-                    sorted_dist = sorted(distribution.items(), key=lambda x: x[1], reverse=True)[:10]
-                    
-                    for video_path, patches in sorted_dist:
-                        video_name = "Unknown"
-                        for v in self.videos:
-                            if v['path'] == video_path:
-                                video_name = v['name']
-                                break
-                        
-                        duration = durations.get(video_path, 0)
-                        proportion = duration / total_duration * 100
-                        
-                        table.add_row(
-                            video_name[:40],
-                            f"{duration/60:.1f} min",
-                            f"{patches:,}",
-                            f"{proportion:.1f}%"
-                        )
-                    
-                    console.print(table)
-                except Exception as e:
-                    self.logger.warning(f"Could not display distribution table: {e}")
+            self.logger.info("\n  Per-video summary (top 10 by total patches):")
             
-            self.logger.info(f"Distribution calculated for {len(distribution)} videos")
-            return distribution
+            # Calculate total patches per video
+            video_totals = {}
+            for video_path, cat_patches in video_targets.items():
+                video_totals[video_path] = sum(cat_patches.values())
+            
+            # Sort by total patches
+            sorted_videos = sorted(video_totals.items(), key=lambda x: x[1], reverse=True)[:10]
+            
+            for video_path, total_patches in sorted_videos:
+                video_name = "Unknown"
+                for v in self.videos:
+                    if v['path'] == video_path:
+                        video_name = v['name']
+                        break
+                
+                cat_breakdown = video_targets[video_path]
+                cat_str = ", ".join([f"{cat}: {cnt}" for cat, cnt in cat_breakdown.items()])
+                self.logger.info(f"    {video_name}: {total_patches} total ({cat_str})")
+            
+            return video_targets
             
         except Exception as e:
             self.logger.error(f"FATAL: Error in calculate_proportional_distribution: {e}")
@@ -919,14 +899,18 @@ class DatasetGeneratorV2UHD:
         
         return distribution
     
-    def process_video(self, video_idx: int) -> Dict[str, int]:
+    def process_video(self, video_idx: int, category_targets: Dict[str, int] = None) -> Dict[str, int]:
         """
         Process a single video and extract patches for ALL formats.
         
-        NEW BEHAVIOR (per user requirement):
-        - Each video extracts ALL formats (not randomly selected)
-        - Format distribution is pre-calculated per video
-        - Ensures every video has all formats in all categories
+        NEW BEHAVIOR (per-category distribution):
+        - Each category has its own target patch count
+        - Format distribution calculated per category
+        - Ensures category targets are met
+        
+        Args:
+            video_idx: Index of video in self.videos
+            category_targets: Dict of {category: patch_count} for this video
         
         Returns:
             Statistics dict with patches created per category
@@ -958,12 +942,37 @@ class DatasetGeneratorV2UHD:
         
         duration = metadata['duration']
         
-        # Calculate target patches for this video (from proportional distribution)
-        # This is passed via an instance variable from the run() method
-        target_patches = getattr(self, '_current_video_target', 1000)
-        
-        # Calculate format distribution for this video
-        format_distribution = self.calculate_format_distribution_for_video(video, target_patches)
+        # Use category targets if provided, otherwise use old method
+        if category_targets:
+            # NEW: Per-category targets
+            format_distribution = {}
+            
+            for category, patches in category_targets.items():
+                if category not in self.format_config:
+                    continue
+                
+                # Get format probabilities for this category
+                format_probs = self.format_probabilities.get(category, {})
+                
+                # Calculate patches per format
+                format_distribution[category] = {}
+                remaining_patches = patches
+                
+                # Sort by probability (descending) for better rounding
+                sorted_formats = sorted(format_probs.items(), key=lambda x: x[1], reverse=True)
+                
+                for idx, (format_name, prob) in enumerate(sorted_formats):
+                    if idx == len(sorted_formats) - 1:
+                        # Last format gets remaining patches
+                        format_distribution[category][format_name] = remaining_patches
+                    else:
+                        count = int(patches * prob)
+                        format_distribution[category][format_name] = count
+                        remaining_patches -= count
+        else:
+            # OLD: Total target (backward compatibility)
+            target_patches = getattr(self, '_current_video_target', 1000)
+            format_distribution = self.calculate_format_distribution_for_video(video, target_patches)
         
         if not format_distribution:
             self.logger.warning(f"No valid format distribution for video: {video_name}")
@@ -1996,6 +2005,13 @@ class DatasetGeneratorV2UHD:
             self.logger.info("Starting Phase 2: Calculating proportional distribution...")
             try:
                 distribution = self.calculate_proportional_distribution(durations)
+                
+                # Initialize UI with starting state
+                if self.use_terminal_ui:
+                    clear_screen()
+                    draw_dataset_ui(self.ui_state)
+                    time.sleep(1)  # Give user a moment to see initial state
+                    
             except Exception as e:
                 self.logger.error(f"FATAL: Error during distribution calculation: {e}")
                 import traceback
@@ -2031,10 +2047,13 @@ class DatasetGeneratorV2UHD:
                         
                         video = self.videos[idx]
                         video_path = video['path']
-                        target_patches = distribution.get(video_path, 0)
+                        video_cat_targets = distribution.get(video_path, {})
+                        
+                        # Calculate total patches for this video (sum across all categories)
+                        total_patches = sum(video_cat_targets.values()) if video_cat_targets else 0
                         
                         # Skip if no patches allocated (or no categories)
-                        if target_patches == 0:
+                        if total_patches == 0:
                             self.logger.info(f"[EXTRACTION] Skipping: {video['name']} (no patches allocated)")
                             continue
                         
@@ -2049,7 +2068,8 @@ class DatasetGeneratorV2UHD:
                         result = {
                             'idx': idx,
                             'video': video,
-                            'target': target_patches,
+                            'target': total_patches,  # Total across all categories
+                            'category_targets': video_cat_targets,  # Per-category breakdown
                             'extracted_data': None  # Will be filled by process_video
                         }
                         
@@ -2082,16 +2102,20 @@ class DatasetGeneratorV2UHD:
                         idx = result['idx']
                         video = result['video']
                         target_patches = result['target']
+                        category_targets = result.get('category_targets', {})
                         
                         # Acquire processing lock (only 1 processing at a time)
                         with processing_active:
                             self.logger.info(f"\n[PROCESSING] Starting: {video['name']} (target={target_patches} patches)")
+                            if category_targets:
+                                cat_summary = ", ".join([f"{cat}: {cnt}" for cat, cnt in category_targets.items()])
+                                self.logger.info(f"  Per-category: {cat_summary}")
                             
                             # Set target for this video
                             self._current_video_target = target_patches
                             
                             try:
-                                stats = self.process_video(idx)
+                                stats = self.process_video(idx, category_targets)
                                 
                                 # Check if video was skipped
                                 if stats.get('skipped'):
