@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dataset Generator Monitoring</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #fff;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        
+        header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        
+        h1 {
+            font-size: 2.5em;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+            margin-bottom: 10px;
+        }
+        
+        .subtitle {
+            font-size: 1.2em;
+            opacity: 0.9;
+        }
+        
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(600px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        
+        .card {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 15px;
+            padding: 25px;
+            box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.37);
+            border: 1px solid rgba(255, 255, 255, 0.18);
+        }
+        
+        .card h2 {
+            font-size: 1.5em;
+            margin-bottom: 20px;
+            border-bottom: 2px solid rgba(255, 255, 255, 0.3);
+            padding-bottom: 10px;
+        }
+        
+        .current-video {
+            font-size: 1.2em;
+            margin-bottom: 15px;
+            padding: 15px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+        }
+        
+        .video-name {
+            font-weight: bold;
+            color: #ffd700;
+        }
+        
+        .progress-section {
+            margin-bottom: 20px;
+        }
+        
+        .progress-item {
+            margin-bottom: 15px;
+        }
+        
+        .progress-label {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            font-size: 0.95em;
+        }
+        
+        .progress-bar-container {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 10px;
+            height: 25px;
+            overflow: hidden;
+            position: relative;
+        }
+        
+        .progress-bar {
+            height: 100%;
+            transition: width 0.3s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 0.85em;
+        }
+        
+        .progress-bar.master {
+            background: linear-gradient(90deg, #ff6b6b, #ee5a6f);
+        }
+        
+        .progress-bar.space {
+            background: linear-gradient(90deg, #4ecdc4, #44a08d);
+        }
+        
+        .progress-bar.toon {
+            background: linear-gradient(90deg, #f093fb, #f5576c);
+        }
+        
+        .progress-bar.universal {
+            background: linear-gradient(90deg, #fda085, #f6d365);
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 15px;
+        }
+        
+        th, td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        
+        th {
+            background: rgba(255, 255, 255, 0.1);
+            font-weight: bold;
+        }
+        
+        tr:hover {
+            background: rgba(255, 255, 255, 0.05);
+        }
+        
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }
+        
+        .stat-box {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 15px;
+            border-radius: 10px;
+            text-align: center;
+        }
+        
+        .stat-label {
+            font-size: 0.85em;
+            opacity: 0.8;
+            margin-bottom: 5px;
+        }
+        
+        .stat-value {
+            font-size: 1.5em;
+            font-weight: bold;
+        }
+        
+        .eta-section {
+            margin-top: 20px;
+        }
+        
+        .eta-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+            gap: 10px;
+        }
+        
+        .eta-box {
+            background: rgba(0, 0, 0, 0.3);
+            padding: 10px;
+            border-radius: 8px;
+            text-align: center;
+        }
+        
+        .eta-label {
+            font-size: 0.8em;
+            opacity: 0.8;
+        }
+        
+        .eta-value {
+            font-size: 1.1em;
+            font-weight: bold;
+            margin-top: 5px;
+        }
+        
+        .full-width {
+            grid-column: 1 / -1;
+        }
+        
+        @keyframes pulse {
+            0%, 100% {
+                opacity: 1;
+            }
+            50% {
+                opacity: 0.6;
+            }
+        }
+        
+        .processing {
+            animation: pulse 2s infinite;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🎬 Dataset Generator Monitoring</h1>
+            <div class="subtitle">Echtzeit-Fortschritt der Patch-Generierung</div>
+        </header>
+        
+        <div class="grid">
+            <!-- Current Video Progress -->
+            <div class="card">
+                <h2>📹 Aktueller Film</h2>
+                <div class="current-video">
+                    <div>Film <span id="current-video-index">0</span> / <span id="total-videos">0</span></div>
+                    <div class="video-name" id="current-video-name">Warte auf Start...</div>
+                </div>
+                
+                <div class="progress-section">
+                    <div class="progress-item">
+                        <div class="progress-label">
+                            <span>Master</span>
+                            <span><span id="cur-master-created">0</span> / <span id="cur-master-target">0</span> (<span id="cur-master-percent">0</span>%)</span>
+                        </div>
+                        <div class="progress-bar-container">
+                            <div class="progress-bar master" id="cur-master-bar" style="width: 0%">
+                                <span id="cur-master-percent-text">0%</span>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="progress-item">
+                        <div class="progress-label">
+                            <span>Space</span>
+                            <span><span id="cur-space-created">0</span> / <span id="cur-space-target">0</span> (<span id="cur-space-percent">0</span>%)</span>
+                        </div>
+                        <div class="progress-bar-container">
+                            <div class="progress-bar space" id="cur-space-bar" style="width: 0%">
+                                <span id="cur-space-percent-text">0%</span>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="progress-item">
+                        <div class="progress-label">
+                            <span>Toon</span>
+                            <span><span id="cur-toon-created">0</span> / <span id="cur-toon-target">0</span> (<span id="cur-toon-percent">0</span>%)</span>
+                        </div>
+                        <div class="progress-bar-container">
+                            <div class="progress-bar toon" id="cur-toon-bar" style="width: 0%">
+                                <span id="cur-toon-percent-text">0%</span>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="progress-item">
+                        <div class="progress-label">
+                            <span>Universal</span>
+                            <span><span id="cur-universal-created">0</span> / <span id="cur-universal-target">0</span> (<span id="cur-universal-percent">0</span>%)</span>
+                        </div>
+                        <div class="progress-bar-container">
+                            <div class="progress-bar universal" id="cur-universal-bar" style="width: 0%">
+                                <span id="cur-universal-percent-text">0%</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Overall Progress -->
+            <div class="card">
+                <h2>🌍 Gesamtfortschritt</h2>
+                <div class="progress-section">
+                    <div class="progress-item">
+                        <div class="progress-label">
+                            <span>Master</span>
+                            <span><span id="all-master-created">0</span> / <span id="all-master-target">150000</span> (<span id="all-master-percent">0</span>%)</span>
+                        </div>
+                        <div class="progress-bar-container">
+                            <div class="progress-bar master" id="all-master-bar" style="width: 0%">
+                                <span id="all-master-percent-text">0%</span>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="progress-item">
+                        <div class="progress-label">
+                            <span>Space</span>
+                            <span><span id="all-space-created">0</span> / <span id="all-space-target">60000</span> (<span id="all-space-percent">0</span>%)</span>
+                        </div>
+                        <div class="progress-bar-container">
+                            <div class="progress-bar space" id="all-space-bar" style="width: 0%">
+                                <span id="all-space-percent-text">0%</span>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="progress-item">
+                        <div class="progress-label">
+                            <span>Toon</span>
+                            <span><span id="all-toon-created">0</span> / <span id="all-toon-target">50000</span> (<span id="all-toon-percent">0</span>%)</span>
+                        </div>
+                        <div class="progress-bar-container">
+                            <div class="progress-bar toon" id="all-toon-bar" style="width: 0%">
+                                <span id="all-toon-percent-text">0%</span>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="progress-item">
+                        <div class="progress-label">
+                            <span>Universal</span>
+                            <span><span id="all-universal-created">0</span> / <span id="all-universal-target">50000</span> (<span id="all-universal-percent">0</span>%)</span>
+                        </div>
+                        <div class="progress-bar-container">
+                            <div class="progress-bar universal" id="all-universal-bar" style="width: 0%">
+                                <span id="all-universal-percent-text">0%</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Patch Distribution Table -->
+        <div class="card full-width">
+            <h2>📊 Patch-Verteilung (Finale Werte)</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Kategorie</th>
+                        <th>540p (Aktuell / Ziel)</th>
+                        <th>1080p (Aktuell / Ziel)</th>
+                        <th>2160p (Aktuell / Ziel)</th>
+                        <th>Gesamt</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>Master</strong></td>
+                        <td><span id="master-540-count">0</span> / <span id="master-540-target">0</span></td>
+                        <td><span id="master-1080-count">0</span> / <span id="master-1080-target">0</span></td>
+                        <td><span id="master-2160-count">0</span> / <span id="master-2160-target">0</span></td>
+                        <td><strong><span id="master-total">0</span></strong></td>
+                    </tr>
+                    <tr>
+                        <td><strong>Space</strong></td>
+                        <td><span id="space-540-count">0</span> / <span id="space-540-target">0</span></td>
+                        <td><span id="space-1080-count">0</span> / <span id="space-1080-target">0</span></td>
+                        <td><span id="space-2160-count">0</span> / <span id="space-2160-target">0</span></td>
+                        <td><strong><span id="space-total">0</span></strong></td>
+                    </tr>
+                    <tr>
+                        <td><strong>Toon</strong></td>
+                        <td><span id="toon-540-count">0</span> / <span id="toon-540-target">0</span></td>
+                        <td><span id="toon-1080-count">0</span> / <span id="toon-1080-target">0</span></td>
+                        <td><span id="toon-2160-count">0</span> / <span id="toon-2160-target">0</span></td>
+                        <td><strong><span id="toon-total">0</span></strong></td>
+                    </tr>
+                    <tr>
+                        <td><strong>Universal</strong></td>
+                        <td><span id="universal-540-count">0</span> / <span id="universal-540-target">0</span></td>
+                        <td><span id="universal-1080-count">0</span> / <span id="universal-1080-target">0</span></td>
+                        <td><span id="universal-2160-count">0</span> / <span id="universal-2160-target">0</span></td>
+                        <td><strong><span id="universal-total">0</span></strong></td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+        
+        <!-- Statistics and ETA -->
+        <div class="grid">
+            <div class="card">
+                <h2>📈 Statistiken</h2>
+                <div class="stats-grid">
+                    <div class="stat-box">
+                        <div class="stat-label">Szenen verarbeitet</div>
+                        <div class="stat-value" id="scenes-processed">0</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Patches erstellt</div>
+                        <div class="stat-value" id="patches-total">0</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Ø Zeit pro Szene</div>
+                        <div class="stat-value" id="avg-time">0.0s</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h2>⏱️ Geschätzte Restzeit (ETA)</h2>
+                <div class="eta-grid">
+                    <div class="eta-box">
+                        <div class="eta-label">Master</div>
+                        <div class="eta-value" id="eta-master">N/A</div>
+                    </div>
+                    <div class="eta-box">
+                        <div class="eta-label">Space</div>
+                        <div class="eta-value" id="eta-space">N/A</div>
+                    </div>
+                    <div class="eta-box">
+                        <div class="eta-label">Toon</div>
+                        <div class="eta-value" id="eta-toon">N/A</div>
+                    </div>
+                    <div class="eta-box">
+                        <div class="eta-label">Universal</div>
+                        <div class="eta-value" id="eta-universal">N/A</div>
+                    </div>
+                    <div class="eta-box" style="grid-column: 1 / -1; background: rgba(255, 215, 0, 0.2);">
+                        <div class="eta-label">Gesamt</div>
+                        <div class="eta-value" id="eta-total" style="font-size: 1.5em;">N/A</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        // Auto-refresh data every 2 seconds
+        function updateData() {
+            fetch('/monitoring/data')
+                .then(response => response.json())
+                .then(data => {
+                    // Update current video info
+                    document.getElementById('current-video-index').textContent = data.current_video_index;
+                    document.getElementById('total-videos').textContent = data.total_videos;
+                    document.getElementById('current-video-name').textContent = data.current_video_name || 'Warte auf Start...';
+                    
+                    // Update current video progress
+                    updateProgress('cur', 'master', data.current_video_progress.master);
+                    updateProgress('cur', 'space', data.current_video_progress.space);
+                    updateProgress('cur', 'toon', data.current_video_progress.toon);
+                    updateProgress('cur', 'universal', data.current_video_progress.universal);
+                    
+                    // Update overall progress
+                    updateProgress('all', 'master', data.overall_progress.master);
+                    updateProgress('all', 'space', data.overall_progress.space);
+                    updateProgress('all', 'toon', data.overall_progress.toon);
+                    updateProgress('all', 'universal', data.overall_progress.universal);
+                    
+                    // Update patch distribution table
+                    updatePatchDistribution(data.patch_distribution);
+                    
+                    // Update statistics
+                    document.getElementById('scenes-processed').textContent = data.scenes_processed;
+                    document.getElementById('patches-total').textContent = data.patches_created_total;
+                    document.getElementById('avg-time').textContent = data.avg_time_per_scene.toFixed(1) + 's';
+                    
+                    // Update ETA
+                    document.getElementById('eta-master').textContent = data.eta.master;
+                    document.getElementById('eta-space').textContent = data.eta.space;
+                    document.getElementById('eta-toon').textContent = data.eta.toon;
+                    document.getElementById('eta-universal').textContent = data.eta.universal;
+                    document.getElementById('eta-total').textContent = data.eta.total;
+                })
+                .catch(error => console.error('Error fetching data:', error));
+        }
+        
+        function updateProgress(prefix, category, data) {
+            const percent = data.percent.toFixed(1);
+            document.getElementById(`${prefix}-${category}-created`).textContent = data.created;
+            document.getElementById(`${prefix}-${category}-target`).textContent = data.target;
+            document.getElementById(`${prefix}-${category}-percent`).textContent = percent;
+            document.getElementById(`${prefix}-${category}-bar`).style.width = percent + '%';
+            document.getElementById(`${prefix}-${category}-percent-text`).textContent = percent + '%';
+        }
+        
+        function updatePatchDistribution(dist) {
+            ['master', 'space', 'toon', 'universal'].forEach(category => {
+                let total = 0;
+                ['540', '1080', '2160'].forEach(size => {
+                    const count = dist[category][size].count;
+                    const target = dist[category][size].target;
+                    document.getElementById(`${category}-${size}-count`).textContent = count;
+                    document.getElementById(`${category}-${size}-target`).textContent = target;
+                    total += count;
+                });
+                document.getElementById(`${category}-total`).textContent = total;
+            });
+        }
+        
+        // Start auto-refresh
+        updateData();
+        setInterval(updateData, 2000);  // Refresh every 2 seconds
+    </script>
+</body>
+</html>
