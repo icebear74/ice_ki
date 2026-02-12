@@ -2139,6 +2139,23 @@ class DatasetGeneratorV2UHD:
                 # Set target for this video
                 self._current_video_target = total_patches
                 
+                # Set current video info in UI state BEFORE processing starts
+                self.ui_state['current_video_name'] = video_name
+                self.ui_state['current_video_index'] = idx + 1  # 1-based for display
+                self.ui_state['total_videos'] = len(self.videos)
+                
+                # Initialize current video progress with targets (0 created so far)
+                self.ui_state['current_video_progress'] = {}
+                for category in video_cat_targets.keys():
+                    self.ui_state['current_video_progress'][category] = {
+                        'current': 0,
+                        'target': video_cat_targets[category]
+                    }
+                
+                # Update UI to show video info before processing starts
+                if self.use_terminal_ui:
+                    self._update_terminal_ui()
+                
                 try:
                     # Process this video completely (extraction + processing)
                     stats = self.process_video(idx, video_cat_targets)
