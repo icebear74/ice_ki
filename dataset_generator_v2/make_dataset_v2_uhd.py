@@ -53,7 +53,7 @@ except ImportError:
     print("Warning: 'rich' library not found. Install with: pip install rich")
 
 console = Console() if RICH_AVAILABLE else None
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Don't configure basic logging here - will be done in _setup_logger based on UI mode
 logger = logging.getLogger(__name__)
 
 
@@ -84,6 +84,9 @@ class DatasetGeneratorV2UHD:
         self.base_dir = self.settings['output_base_dir']
         self.temp_dir = self.settings['temp_dir']
         self.status_file = self.settings['status_file']
+        
+        # Terminal UI setting (MUST be before logger setup!)
+        self.use_terminal_ui = True  # Enable terminal GUI by default
         
         # Initialize logger
         self.logger = self._setup_logger()
@@ -139,7 +142,7 @@ class DatasetGeneratorV2UHD:
             'avg_time_per_scene': 0.0,
             'eta': {}
         }
-        self.use_terminal_ui = True  # Enable terminal GUI
+        # Terminal UI already set before logger init (line 89)
         self.ui_update_counter = 0
         
         # Display priority distribution
@@ -151,19 +154,30 @@ class DatasetGeneratorV2UHD:
         signal.signal(signal.SIGTERM, self._signal_handler)
     
     def _setup_logger(self):
-        """Setup file and console logger"""
+        """Setup file and console logger (console disabled when terminal UI active)"""
         log_dir = os.path.join(self.base_dir, "logs")
         os.makedirs(log_dir, exist_ok=True)
         
         logger = logging.getLogger('DatasetGenerator')
         logger.setLevel(logging.DEBUG)
+        logger.handlers = []  # Clear any existing handlers
         
-        # File handler
+        # File handler (always enabled)
         log_file = os.path.join(log_dir, f"generator_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
         fh = logging.FileHandler(log_file)
         fh.setLevel(logging.DEBUG)
         fh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
         logger.addHandler(fh)
+        
+        # Console handler (only if terminal UI is disabled)
+        if not self.use_terminal_ui:
+            ch = logging.StreamHandler(sys.stdout)
+            ch.setLevel(logging.INFO)
+            ch.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+            logger.addHandler(ch)
+            logger.info("Console logging enabled (terminal UI disabled)")
+        else:
+            logger.info("Console logging disabled (terminal UI active - see GUI)")
         
         return logger
     
