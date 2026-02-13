@@ -8,7 +8,7 @@
     "paths": {
       "train_gt": "patches/{size_key}/GT",
       "train_lr": "patches/{size_key}/LR_7frames",
-      "val_gt": "val/GT/{size_key}",
+      "val_gt": "val/{size_key}/GT",
       "val_lr": "patches/{size_key}/LR_7frames"
     }
   },
@@ -40,6 +40,7 @@
     "_NOTE": "Specify which sizes to use for validation. Training will auto-detect available sizes from disk.",
     "sizes": [
       "720",
+      "540",
       "720_169"
     ],
     "batch_size": 1,

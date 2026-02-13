@@ -20,9 +20,9 @@
     ]
   },
   "category_targets": {
-    "master": 200000,
-    "universal": 60000,
-    "space": 80000,
+    "master": 100000,
+    "universal": 50000,
+    "space": 50000,
     "toon": 40000
   },
   "format_config": {
@@ -36,7 +36,7 @@
           180,
           180
         ],
-        "probability": 0.4
+        "probability": 0.6
       },
       "medium_169": {
         "gt_size": [
@@ -47,7 +47,7 @@
           135,
           240
         ],
-        "probability": 0.4
+        "probability": 0.2
       },
       "large_720": {
         "gt_size": [
@@ -71,7 +71,7 @@
           180,
           180
         ],
-        "probability": 0.4
+        "probability": 0.6
       },
       "medium_169": {
         "gt_size": [
@@ -82,7 +82,7 @@
           135,
           240
         ],
-        "probability": 0.4
+        "probability": 0.2
       },
       "large_720": {
         "gt_size": [
@@ -106,7 +106,7 @@
           180,
           180
         ],
-        "probability": 0.4
+        "probability": 0.6
       },
       "medium_169": {
         "gt_size": [
@@ -117,7 +117,7 @@
           135,
           240
         ],
-        "probability": 0.4
+        "probability": 0.2
       },
       "large_720": {
         "gt_size": [
@@ -131,6 +131,7 @@
         "probability": 0.2
       }
     },
+
     "toon": {
       "small_540": {
         "gt_size": [
@@ -141,7 +142,7 @@
           180,
           180
         ],
-        "probability": 0.5
+        "probability": 0.6
       },
       "medium_169": {
         "gt_size": [
@@ -152,7 +153,18 @@
           135,
           240
         ],
-        "probability": 0.5
+        "probability": 0.2
+      },
+      "large_720": {
+        "gt_size": [
+          720,
+          720
+        ],
+        "lr_size": [
+          240,
+          240
+        ],
+        "probability": 0.2
       }
     }
   },
