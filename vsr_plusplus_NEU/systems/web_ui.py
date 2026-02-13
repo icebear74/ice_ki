@@ -280,6 +280,9 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 current_paused = current_state.get('training_paused', False)
                 # Return the expected new state (will be toggled by trainer)
                 response = {'success': True, 'message': 'Pause toggle queued', 'paused': not current_paused}
+            elif action_type == 'run_video_test':
+                self.action_queue.put('run_video_test')
+                response = {'success': True, 'message': 'Video test run queued'}
             else:
                 response = {'success': False, 'message': f'Unknown action: {action_type}'}
             
@@ -1022,6 +1025,9 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 </button>
                 <button class="btn btn-primary" id="pauseBtn" onclick="togglePause()">
                     ⏸️ Pause Training
+                </button>
+                <button class="btn btn-success" onclick="triggerVideoInference()">
+                    🎬 Video Testlauf
                 </button>
                 <button class="btn btn-primary" onclick="exportLogs()">
                     📊 Export Logs
@@ -2258,6 +2264,36 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             .catch(error => {
                 console.error('Error toggling pause:', error);
                 alert('❌ Error toggling pause');
+            });
+        }
+        
+        function triggerVideoInference() {
+            // Ask for user confirmation
+            if (!confirm('🎬 Video-Testlauf starten?\n\nDies wird das Training kurz pausieren und ein Test-Video verarbeiten.')) {
+                return;
+            }
+            
+            // Send command to run video test
+            fetch('/monitoring/command', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    action: 'run_video_test'
+                })
+            })
+            .then(response => response.json())
+            .then(result => {
+                if (result.success) {
+                    alert('✅ Video test run queued successfully!\n\nThe trainer will process the test video shortly.');
+                } else {
+                    alert('❌ Failed to queue video test: ' + (result.message || 'Unknown error'));
+                }
+            })
+            .catch(error => {
+                console.error('Error triggering video test:', error);
+                alert('❌ Error triggering video test');
             });
         }
         
