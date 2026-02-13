@@ -105,7 +105,7 @@ class VSRValidator:
                 del loss_dict  # Free loss tensors immediately
                 
                 # Get LR center frame (upscaled for comparison)
-                lr_center = lr_stack[:, 2]  # Center frame
+                lr_center = lr_stack[:, 3]  # Center frame (7-frame model)
                 lr_upscaled = F.interpolate(lr_center, scale_factor=3, mode='bilinear', align_corners=False)
                 del lr_center  # Free immediately after use
                 
