@@ -75,60 +75,17 @@ def load_model_from_checkpoint(checkpoint_path, device='cuda'):
         print(f"   📝 Verwende Defaults aus config.py.example: n_feats={n_feats}, n_blocks={n_blocks}")
         print(f"   💡 Tipp: Erstelle config.py mit: cp vsr_plusplus_NEU/config.py.example vsr_plusplus_NEU/config.py")
     
-    # 7-Frame Modell erstellen
-    from vsr_plusplus_NEU.core.model_7frame import VSRBidirectional_7frames_3x
-    model = VSRBidirectional_7frames_3x(
+    # Modell erstellen - VERWENDE DAS GLEICHE MODELL WIE TRAINING!
+    # Das Training verwendet VSRBidirectional_3x (5-Frame), nicht VSRBidirectional_7frames_3x
+    from vsr_plusplus_NEU.core.model import VSRBidirectional_3x
+    model = VSRBidirectional_3x(
         n_feats=n_feats,
-        n_blocks=n_blocks
+        n_blocks=n_blocks,
+        use_checkpointing=False  # Kein Checkpointing bei Inferenz
     ).to(device)
     
-    # State Dict laden mit Kompatibilität für alte FusionBlock-Checkpoints
-    state_dict = checkpoint['model_state_dict']
-    
-    # Konvertiere alte FusionBlock Weights (conv) zu neuem Format (conv3x3 + conv1x1)
-    # Alte Checkpoints haben: backward_fuse.conv.weight/bias
-    # Neues Format braucht: backward_fuse.conv3x3.weight/bias + backward_fuse.conv1x1.weight/bias
-    converted = False
-    for old_key in ['backward_fuse.conv.weight', 'backward_fuse.conv.bias',
-                    'forward_fuse.conv.weight', 'forward_fuse.conv.bias',
-                    'fusion.conv.weight', 'fusion.conv.bias']:
-        if old_key in state_dict:
-            converted = True
-            break
-    
-    if converted:
-        print(f"   🔄 Konvertiere altes FusionBlock-Format zu neuem Format...")
-        new_state_dict = {}
-        
-        for key, value in state_dict.items():
-            # Konvertiere alte FusionBlock-Keys
-            if '.conv.weight' in key or '.conv.bias' in key:
-                # Ersetze .conv. mit .conv3x3. (die 3x3 conv übernimmt die alten weights)
-                new_key = key.replace('.conv.', '.conv3x3.')
-                new_state_dict[new_key] = value
-                
-                # Initialisiere conv1x1 mit Identity-ähnlichen Werten
-                if '.conv.weight' in key:
-                    # conv1x1 wird als Identity initialisiert
-                    conv1x1_key = key.replace('.conv.', '.conv1x1.')
-                    out_channels = value.shape[0]
-                    # Identity-Matrix für 1x1 conv
-                    import torch
-                    conv1x1_weight = torch.eye(out_channels).view(out_channels, out_channels, 1, 1)
-                    new_state_dict[conv1x1_key] = conv1x1_weight.to(value.device)
-                elif '.conv.bias' in key:
-                    # conv1x1 bias wird auf 0 initialisiert
-                    conv1x1_key = key.replace('.conv.', '.conv1x1.')
-                    import torch
-                    new_state_dict[conv1x1_key] = torch.zeros_like(value)
-            else:
-                # Alle anderen Keys bleiben unverändert
-                new_state_dict[key] = value
-        
-        state_dict = new_state_dict
-        print(f"   ✅ FusionBlock-Weights konvertiert (conv → conv3x3 + conv1x1)")
-    
-    model.load_state_dict(state_dict)
+    # State Dict laden
+    model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
     
     # Checkpoint-Informationen
@@ -205,10 +162,10 @@ def extract_frames_from_video(video_path, output_dir, target_size=180):
 
 def process_frames_with_model(model, frames_dir, frame_files, output_dir, device='cuda', batch_size=1):
     """
-    Verarbeitet Frames mit dem 7-Frame Modell (Sliding Window)
+    Verarbeitet Frames mit dem VSR Modell (Sliding Window mit 5 Frames)
     
     Args:
-        model: VSR 7-Frame Modell
+        model: VSR Modell (VSRBidirectional_3x)
         frames_dir: Verzeichnis mit Input-Frames
         frame_files: Liste der Frame-Dateien
         output_dir: Verzeichnis für Output-Frames
@@ -224,23 +181,23 @@ def process_frames_with_model(model, frames_dir, frame_files, output_dir, device
     import numpy as np
     from tqdm import tqdm
     
-    print(f"🔄 Verarbeite Frames mit 7-Frame Modell...")
+    print(f"🔄 Verarbeite Frames mit 5-Frame Modell (wie Training)...")
     
     total_frames = len(frame_files)
     
-    if total_frames < 7:
-        raise ValueError(f"Zu wenige Frames ({total_frames}). Mindestens 7 Frames benötigt.")
+    if total_frames < 5:
+        raise ValueError(f"Zu wenige Frames ({total_frames}). Mindestens 5 Frames benötigt.")
     
     processed_count = 0
     
     with torch.no_grad():
-        # Wir brauchen 7 Frames für das Modell (mit Frame 3 als Center, Index 3)
-        # Verarbeite von Frame 3 bis Frame (total-3) um immer Context zu haben
-        for i in tqdm(range(3, total_frames - 3), desc="Processing frames"):
-            # Lade 7 aufeinanderfolgende Frames (i-3 bis i+3, mit i als Center)
+        # Wir brauchen 5 Frames für das Modell (mit Frame 2 als Center, Index 2)
+        # Verarbeite von Frame 2 bis Frame (total-2) um immer Context zu haben
+        for i in tqdm(range(2, total_frames - 2), desc="Processing frames"):
+            # Lade 5 aufeinanderfolgende Frames (i-2 bis i+2, mit i als Center)
             window_frames = []
             
-            for offset in range(-3, 4):  # -3, -2, -1, 0, 1, 2, 3
+            for offset in range(-2, 3):  # -2, -1, 0, 1, 2
                 frame_path = os.path.join(frames_dir, frame_files[i + offset])
                 frame = cv2.imread(frame_path)
                 
@@ -252,9 +209,9 @@ def process_frames_with_model(model, frames_dir, frame_files, output_dir, device
                 frame = frame.astype(np.float32) / 255.0
                 window_frames.append(frame)
             
-            # Stack frames: [7, H, W, 3] -> [1, 7, 3, H, W]
+            # Stack frames: [5, H, W, 3] -> [1, 5, 3, H, W]
             frames_tensor = torch.from_numpy(np.stack(window_frames))
-            frames_tensor = frames_tensor.permute(0, 3, 1, 2).unsqueeze(0)  # [1, 7, 3, H, W]
+            frames_tensor = frames_tensor.permute(0, 3, 1, 2).unsqueeze(0)  # [1, 5, 3, H, W]
             frames_tensor = frames_tensor.to(device)
             
             # Durch Modell laufen lassen
@@ -265,8 +222,8 @@ def process_frames_with_model(model, frames_dir, frame_files, output_dir, device
             output_img = np.clip(output_img * 255.0, 0, 255).astype(np.uint8)
             output_img = cv2.cvtColor(output_img, cv2.COLOR_RGB2BGR)
             
-            # Output-Frame speichern (first iteration at i=3 produces frame_000000.png)
-            output_path = os.path.join(output_dir, f'frame_{i-3:06d}.png')
+            # Output-Frame speichern (first iteration at i=2 produces frame_000000.png)
+            output_path = os.path.join(output_dir, f'frame_{i-2:06d}.png')
             cv2.imwrite(output_path, output_img)
             
             processed_count += 1
