@@ -675,7 +675,9 @@ def main():
     # Load checkpoint if resuming
     if start_step > 0 and selected_checkpoint_path:
         print(f"Loading checkpoint from {selected_checkpoint_path}...")
-        checkpoint = torch.load(selected_checkpoint_path, map_location=device)
+        # Use weights_only=False for compatibility with PyTorch 2.6+
+        # Our checkpoints contain custom classes (AdaptiveLRScheduler) which are safe to load
+        checkpoint = torch.load(selected_checkpoint_path, map_location=device, weights_only=False)
         
         model.load_state_dict(checkpoint['model_state_dict'])
         

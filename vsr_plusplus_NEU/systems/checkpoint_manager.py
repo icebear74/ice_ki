@@ -345,7 +345,9 @@ class CheckpointManager:
                     continue
                 
                 # Load checkpoint metadata
-                ckpt_data = torch.load(ckpt_path, map_location='cpu')
+                # Use weights_only=False for compatibility with PyTorch 2.6+
+                # Our checkpoints contain custom classes (AdaptiveLRScheduler) which are safe to load
+                ckpt_data = torch.load(ckpt_path, map_location='cpu', weights_only=False)
                 
                 # Determine checkpoint type from filename and step
                 if '_emergency' in filename:
