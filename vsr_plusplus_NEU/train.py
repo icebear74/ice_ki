@@ -26,7 +26,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Add current directory to path for local config.py
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from vsr_plusplus_NEU.core.model import VSRBidirectional_3x
+from vsr_plusplus_NEU.core.model_7frame import VSRBidirectional_7frames_3x
 from vsr_plusplus_NEU.core.loss import HybridLoss
 from vsr_plusplus_NEU.core.dataset import VSRDataset
 from vsr_plusplus_NEU.training.trainer import VSRTrainer
@@ -268,13 +268,12 @@ def main():
     batch_size = config['BATCH_SIZE']
     accumulation_steps = config['ACCUMULATION_STEPS']
     
-    # Create model
-    print("Creating model...")
+    # Create model - USING 7-FRAME MODEL (as intended by dataset_generator_v2)
+    print("Creating 7-frame model...")
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = VSRBidirectional_3x(
+    model = VSRBidirectional_7frames_3x(
         n_feats=n_feats, 
-        n_blocks=n_blocks,
-        use_checkpointing=config.get('USE_GRADIENT_CHECKPOINTING', True)
+        n_blocks=n_blocks
     ).to(device)
     
     # Count parameters

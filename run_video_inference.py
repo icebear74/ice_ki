@@ -75,13 +75,11 @@ def load_model_from_checkpoint(checkpoint_path, device='cuda'):
         print(f"   📝 Verwende Defaults aus config.py.example: n_feats={n_feats}, n_blocks={n_blocks}")
         print(f"   💡 Tipp: Erstelle config.py mit: cp vsr_plusplus_NEU/config.py.example vsr_plusplus_NEU/config.py")
     
-    # Modell erstellen - VERWENDE DAS GLEICHE MODELL WIE TRAINING!
-    # Das Training verwendet VSRBidirectional_3x (5-Frame), nicht VSRBidirectional_7frames_3x
-    from vsr_plusplus_NEU.core.model import VSRBidirectional_3x
-    model = VSRBidirectional_3x(
+    # 7-Frame Modell erstellen (wie vom dataset_generator_v2 generiert)
+    from vsr_plusplus_NEU.core.model_7frame import VSRBidirectional_7frames_3x
+    model = VSRBidirectional_7frames_3x(
         n_feats=n_feats,
-        n_blocks=n_blocks,
-        use_checkpointing=False  # Kein Checkpointing bei Inferenz
+        n_blocks=n_blocks
     ).to(device)
     
     # State Dict laden
@@ -162,10 +160,10 @@ def extract_frames_from_video(video_path, output_dir, target_size=180):
 
 def process_frames_with_model(model, frames_dir, frame_files, output_dir, device='cuda', batch_size=1):
     """
-    Verarbeitet Frames mit dem VSR Modell (Sliding Window mit 5 Frames)
+    Verarbeitet Frames mit dem 7-Frame Modell (Sliding Window)
     
     Args:
-        model: VSR Modell (VSRBidirectional_3x)
+        model: VSR 7-Frame Modell (VSRBidirectional_7frames_3x)
         frames_dir: Verzeichnis mit Input-Frames
         frame_files: Liste der Frame-Dateien
         output_dir: Verzeichnis für Output-Frames
@@ -181,23 +179,23 @@ def process_frames_with_model(model, frames_dir, frame_files, output_dir, device
     import numpy as np
     from tqdm import tqdm
     
-    print(f"🔄 Verarbeite Frames mit 5-Frame Modell (wie Training)...")
+    print(f"🔄 Verarbeite Frames mit 7-Frame Modell (wie Training)...")
     
     total_frames = len(frame_files)
     
-    if total_frames < 5:
-        raise ValueError(f"Zu wenige Frames ({total_frames}). Mindestens 5 Frames benötigt.")
+    if total_frames < 7:
+        raise ValueError(f"Zu wenige Frames ({total_frames}). Mindestens 7 Frames benötigt.")
     
     processed_count = 0
     
     with torch.no_grad():
-        # Wir brauchen 5 Frames für das Modell (mit Frame 2 als Center, Index 2)
-        # Verarbeite von Frame 2 bis Frame (total-2) um immer Context zu haben
-        for i in tqdm(range(2, total_frames - 2), desc="Processing frames"):
-            # Lade 5 aufeinanderfolgende Frames (i-2 bis i+2, mit i als Center)
+        # Wir brauchen 7 Frames für das Modell (mit Frame 3 als Center, Index 3)
+        # Verarbeite von Frame 3 bis Frame (total-3) um immer Context zu haben
+        for i in tqdm(range(3, total_frames - 3), desc="Processing frames"):
+            # Lade 7 aufeinanderfolgende Frames (i-3 bis i+3, mit i als Center)
             window_frames = []
             
-            for offset in range(-2, 3):  # -2, -1, 0, 1, 2
+            for offset in range(-3, 4):  # -3, -2, -1, 0, 1, 2, 3
                 frame_path = os.path.join(frames_dir, frame_files[i + offset])
                 frame = cv2.imread(frame_path)
                 
@@ -209,9 +207,9 @@ def process_frames_with_model(model, frames_dir, frame_files, output_dir, device
                 frame = frame.astype(np.float32) / 255.0
                 window_frames.append(frame)
             
-            # Stack frames: [5, H, W, 3] -> [1, 5, 3, H, W]
+            # Stack frames: [7, H, W, 3] -> [1, 7, 3, H, W]
             frames_tensor = torch.from_numpy(np.stack(window_frames))
-            frames_tensor = frames_tensor.permute(0, 3, 1, 2).unsqueeze(0)  # [1, 5, 3, H, W]
+            frames_tensor = frames_tensor.permute(0, 3, 1, 2).unsqueeze(0)  # [1, 7, 3, H, W]
             frames_tensor = frames_tensor.to(device)
             
             # Durch Modell laufen lassen
@@ -222,8 +220,8 @@ def process_frames_with_model(model, frames_dir, frame_files, output_dir, device
             output_img = np.clip(output_img * 255.0, 0, 255).astype(np.uint8)
             output_img = cv2.cvtColor(output_img, cv2.COLOR_RGB2BGR)
             
-            # Output-Frame speichern (first iteration at i=2 produces frame_000000.png)
-            output_path = os.path.join(output_dir, f'frame_{i-2:06d}.png')
+            # Output-Frame speichern (first iteration at i=3 produces frame_000000.png)
+            output_path = os.path.join(output_dir, f'frame_{i-3:06d}.png')
             cv2.imwrite(output_path, output_img)
             
             processed_count += 1
