@@ -181,6 +181,19 @@ def main():
     # E.g., /mnt/data/training/datasetNeu/master/ (not DATA_ROOT)
     DATASET_SPECIFIC_ROOT = os.path.join(DATASET_ROOT, dataset_name)
     
+    # DEBUG: Show all path configurations
+    print(f"\n{C_CYAN}{'='*80}{C_RESET}")
+    print(f"{C_CYAN}PATH CONFIGURATION{C_RESET}")
+    print(f"{C_CYAN}{'='*80}{C_RESET}")
+    print(f"  config.py DATASET_ROOT:     {config.get('DATASET_ROOT', 'NOT SET')}")
+    print(f"  runtime_config DATASET_ROOT: {rt_config.get('data', {}).get('root', 'NOT SET') if rt_config else 'N/A (no runtime_config.json)'}")
+    print(f"  Final DATASET_ROOT:          {DATASET_ROOT}")
+    print(f"  Dataset Name:                {dataset_name}")
+    print(f"  DATASET_SPECIFIC_ROOT:       {DATASET_SPECIFIC_ROOT}")
+    print(f"  Checkpoints will be in:      {DATASET_SPECIFIC_ROOT}/checkpoint_*.pth")
+    print(f"  Logs will be in:             {DATASET_SPECIFIC_ROOT}/logs/")
+    print(f"{C_CYAN}{'='*80}{C_RESET}\n")
+    
     print("\n" + "="*80)
     print("VSR++ Training System - Manual Configuration")
     print("="*80 + "\n")
