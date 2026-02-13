@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """
-Video Inference Script - Manuelle Video-Verarbeitung mit VSR++ Modell
+Video Inference Script - Manuelle Video-Verarbeitung mit VSR++ Modell (7 Frames)
 
-Lädt ein gespeichertes Checkpoint und verarbeitet ein Video mit dem trainierten Modell.
+Lädt ein gespeichertes Checkpoint und verarbeitet ein Video mit dem trainierten 7-Frame Modell.
 
 Verwendung:
+    # Interaktive Checkpoint-Auswahl (nutzt Training-Pfade)
+    python run_video_inference.py --input video.mkv --output result.mkv
+    
+    # Oder spezifischen Checkpoint angeben
     python run_video_inference.py --checkpoint path/to/checkpoint.pth --input video.mkv --output result.mkv
     
 Optionale Parameter:
     --device cuda/cpu       (Standard: cuda falls verfügbar)
-    --batch-size N          (Standard: 1 - Anzahl Frames parallel zu verarbeiten)
-    --framerate N           (Standard: 24 - FPS für Output-Video)
+    --framerate N           (Standard: wie Input-Video)
 """
 
 import argparse
@@ -21,10 +24,13 @@ import tempfile
 import shutil
 from pathlib import Path
 
+# Add vsr_plusplus_NEU to path
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'vsr_plusplus_NEU'))
+
 
 def load_model_from_checkpoint(checkpoint_path, device='cuda'):
     """
-    Lädt das Modell aus einem Checkpoint
+    Lädt das 7-Frame Modell aus einem Checkpoint
     
     Args:
         checkpoint_path: Pfad zum Checkpoint (.pth Datei)
@@ -52,12 +58,11 @@ def load_model_from_checkpoint(checkpoint_path, device='cuda'):
     
     print(f"   Modell-Konfiguration: n_feats={n_feats}, n_blocks={n_blocks}")
     
-    # Modell erstellen
-    from vsr_plusplus_NEU.core.model import VSRBidirectional_3x
-    model = VSRBidirectional_3x(
+    # 7-Frame Modell erstellen
+    from vsr_plusplus_NEU.core.model_7frame import VSRBidirectional_7frames_3x
+    model = VSRBidirectional_7frames_3x(
         n_feats=n_feats,
-        n_blocks=n_blocks,
-        use_checkpointing=False  # Kein Gradient Checkpointing bei Inferenz
+        n_blocks=n_blocks
     ).to(device)
     
     # State Dict laden
@@ -138,15 +143,15 @@ def extract_frames_from_video(video_path, output_dir, target_size=180):
 
 def process_frames_with_model(model, frames_dir, frame_files, output_dir, device='cuda', batch_size=1):
     """
-    Verarbeitet Frames mit dem Modell (Sliding Window)
+    Verarbeitet Frames mit dem 7-Frame Modell (Sliding Window)
     
     Args:
-        model: VSR Modell
+        model: VSR 7-Frame Modell
         frames_dir: Verzeichnis mit Input-Frames
         frame_files: Liste der Frame-Dateien
         output_dir: Verzeichnis für Output-Frames
         device: Device für Inferenz
-        batch_size: Anzahl Frames parallel zu verarbeiten
+        batch_size: Anzahl Frames parallel zu verarbeiten (aktuell nicht verwendet)
     
     Returns:
         processed_count: Anzahl verarbeiteter Frames
@@ -157,23 +162,23 @@ def process_frames_with_model(model, frames_dir, frame_files, output_dir, device
     import numpy as np
     from tqdm import tqdm
     
-    print(f"🔄 Verarbeite Frames mit Modell...")
+    print(f"🔄 Verarbeite Frames mit 7-Frame Modell...")
     
     total_frames = len(frame_files)
     
-    if total_frames < 5:
-        raise ValueError(f"Zu wenige Frames ({total_frames}). Mindestens 5 Frames benötigt.")
+    if total_frames < 7:
+        raise ValueError(f"Zu wenige Frames ({total_frames}). Mindestens 7 Frames benötigt.")
     
     processed_count = 0
     
     with torch.no_grad():
-        # Wir brauchen 5 Frames für das Modell (mit Frame 2 als Center)
-        # Verarbeite von Frame 2 bis Frame (total-2) um immer Context zu haben
-        for i in tqdm(range(2, total_frames - 2), desc="Processing frames"):
-            # Lade 5 aufeinanderfolgende Frames (i-2 bis i+2, mit i als Center)
+        # Wir brauchen 7 Frames für das Modell (mit Frame 3 als Center, Index 3)
+        # Verarbeite von Frame 3 bis Frame (total-3) um immer Context zu haben
+        for i in tqdm(range(3, total_frames - 3), desc="Processing frames"):
+            # Lade 7 aufeinanderfolgende Frames (i-3 bis i+3, mit i als Center)
             window_frames = []
             
-            for offset in range(-2, 3):  # -2, -1, 0, 1, 2
+            for offset in range(-3, 4):  # -3, -2, -1, 0, 1, 2, 3
                 frame_path = os.path.join(frames_dir, frame_files[i + offset])
                 frame = cv2.imread(frame_path)
                 
@@ -185,9 +190,9 @@ def process_frames_with_model(model, frames_dir, frame_files, output_dir, device
                 frame = frame.astype(np.float32) / 255.0
                 window_frames.append(frame)
             
-            # Stack frames: [5, H, W, 3] -> [1, 5, 3, H, W]
+            # Stack frames: [7, H, W, 3] -> [1, 7, 3, H, W]
             frames_tensor = torch.from_numpy(np.stack(window_frames))
-            frames_tensor = frames_tensor.permute(0, 3, 1, 2).unsqueeze(0)  # [1, 5, 3, H, W]
+            frames_tensor = frames_tensor.permute(0, 3, 1, 2).unsqueeze(0)  # [1, 7, 3, H, W]
             frames_tensor = frames_tensor.to(device)
             
             # Durch Modell laufen lassen
@@ -198,8 +203,8 @@ def process_frames_with_model(model, frames_dir, frame_files, output_dir, device
             output_img = np.clip(output_img * 255.0, 0, 255).astype(np.uint8)
             output_img = cv2.cvtColor(output_img, cv2.COLOR_RGB2BGR)
             
-            # Output-Frame speichern (output index is i-1 because we start at i=2)
-            output_path = os.path.join(output_dir, f'frame_{i-1:06d}.png')
+            # Output-Frame speichern (output index is i-3+1 = i-2 because we start at i=3)
+            output_path = os.path.join(output_dir, f'frame_{i-2:06d}.png')
             cv2.imwrite(output_path, output_img)
             
             processed_count += 1
@@ -276,28 +281,29 @@ def main():
         torch_available = False
     
     parser = argparse.ArgumentParser(
-        description='Video Inference mit VSR++ Modell',
+        description='Video Inference mit VSR++ 7-Frame Modell',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Beispiele:
-  # Einfache Verwendung
+  # Interaktive Checkpoint-Auswahl (nutzt Training-Pfade aus config.py)
+  python run_video_inference.py --input video.mkv --output result.mkv
+  
+  # Spezifischen Checkpoint angeben
   python run_video_inference.py --checkpoint checkpoints/best.pth --input video.mkv --output result.mkv
   
   # Mit CPU statt GPU
-  python run_video_inference.py --checkpoint checkpoints/best.pth --input video.mkv --output result.mkv --device cpu
+  python run_video_inference.py --input video.mkv --output result.mkv --device cpu
   
   # Mit 30 FPS Output
-  python run_video_inference.py --checkpoint checkpoints/best.pth --input video.mkv --output result.mkv --framerate 30
+  python run_video_inference.py --input video.mkv --output result.mkv --framerate 30
         """
     )
     
-    parser.add_argument('--checkpoint', '-c', required=True, help='Pfad zum Checkpoint (.pth Datei)')
+    parser.add_argument('--checkpoint', '-c', default=None, help='Pfad zum Checkpoint (.pth Datei). Wenn nicht angegeben, interaktive Auswahl.')
     parser.add_argument('--input', '-i', required=True, help='Pfad zum Input-Video')
     parser.add_argument('--output', '-o', required=True, help='Pfad zum Output-Video')
     parser.add_argument('--device', '-d', default='auto', choices=['auto', 'cuda', 'cpu'],
                         help='Device für Inferenz (Standard: auto - nutzt CUDA falls verfügbar)')
-    parser.add_argument('--batch-size', '-b', type=int, default=1,
-                        help='Batch Size (Standard: 1, höher = schneller aber mehr VRAM)')
     parser.add_argument('--framerate', '-f', type=float, default=None,
                         help='FPS für Output-Video (Standard: wie Input-Video)')
     
@@ -312,6 +318,43 @@ Beispiele:
     
     import torch
     
+    # Checkpoint-Auswahl
+    checkpoint_path = args.checkpoint
+    
+    if checkpoint_path is None:
+        # Interaktive Auswahl
+        print("\n" + "="*70)
+        print("Interaktive Checkpoint-Auswahl")
+        print("="*70 + "\n")
+        
+        try:
+            from vsr_plusplus_NEU.utils.checkpoint_selector import select_checkpoint_interactive, get_checkpoint_dir_from_config
+            from vsr_plusplus_NEU.systems.checkpoint_manager import CheckpointManager
+            
+            # Get checkpoint directory from config
+            checkpoint_dir = get_checkpoint_dir_from_config()
+            print(f"📁 Checkpoint-Verzeichnis: {checkpoint_dir}\n")
+            
+            # Create checkpoint manager
+            checkpoint_mgr = CheckpointManager(checkpoint_dir)
+            
+            # Interactive selection
+            selected_ckpt = select_checkpoint_interactive(checkpoint_mgr, auto_select_latest=False)
+            
+            if selected_ckpt is None:
+                print("❌ Keine Checkpoints gefunden!")
+                print(f"   Überprüfen Sie das Verzeichnis: {checkpoint_dir}")
+                return 1
+            
+            checkpoint_path = selected_ckpt['path']
+        
+        except Exception as e:
+            print(f"❌ Fehler bei Checkpoint-Auswahl: {e}")
+            print("   Bitte geben Sie den Checkpoint-Pfad manuell an mit --checkpoint")
+            import traceback
+            traceback.print_exc()
+            return 1
+    
     # Device auswählen
     if args.device == 'auto':
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -319,17 +362,17 @@ Beispiele:
         device = args.device
     
     print("=" * 70)
-    print("🎬 VSR++ Video Inference")
+    print("🎬 VSR++ Video Inference (7 Frames)")
     print("=" * 70)
-    print(f"📁 Checkpoint: {args.checkpoint}")
+    print(f"📁 Checkpoint: {checkpoint_path}")
     print(f"📹 Input:      {args.input}")
     print(f"💾 Output:     {args.output}")
     print(f"🖥️  Device:     {device}")
     print("=" * 70)
     
     # Validierung
-    if not os.path.exists(args.checkpoint):
-        print(f"❌ Checkpoint nicht gefunden: {args.checkpoint}")
+    if not os.path.exists(checkpoint_path):
+        print(f"❌ Checkpoint nicht gefunden: {checkpoint_path}")
         return 1
     
     if not os.path.exists(args.input):
@@ -347,7 +390,7 @@ Beispiele:
         
         try:
             # Schritt 1: Modell laden
-            model, checkpoint_info = load_model_from_checkpoint(args.checkpoint, device)
+            model, checkpoint_info = load_model_from_checkpoint(checkpoint_path, device)
             print()
             
             # Schritt 2: Frames extrahieren
@@ -358,10 +401,10 @@ Beispiele:
             output_fps = args.framerate if args.framerate is not None else video_fps
             print(f"🎯 Output FPS: {output_fps:.2f}\n")
             
-            # Schritt 3: Frames verarbeiten
+            # Schritt 3: Frames verarbeiten (7-Frame Modell)
             processed_count = process_frames_with_model(
                 model, frames_dir, frame_files, output_frames_dir, 
-                device=device, batch_size=args.batch_size
+                device=device
             )
             print()
             

@@ -240,61 +240,16 @@ def main():
         print(f"{C_CYAN}Searching for checkpoints in: {DATASET_SPECIFIC_ROOT}{C_RESET}")
         print(f"{C_CYAN}Looking for pattern: checkpoint_*.pth{C_RESET}\n")
         
-        # Get all checkpoints
-        all_checkpoints = checkpoint_mgr.list_checkpoints()
+        # Use shared checkpoint selector module
+        from vsr_plusplus_NEU.utils.checkpoint_selector import select_checkpoint_interactive
         
-        if not all_checkpoints:
-            print("⚠️  No checkpoint found, starting fresh")
+        selected_ckpt = select_checkpoint_interactive(checkpoint_mgr, auto_select_latest=False)
+        
+        if selected_ckpt:
+            start_step = selected_ckpt['step']
+            selected_checkpoint_path = selected_ckpt['path']
         else:
-            # Show detailed checkpoint selection menu
-            print("=" * 100)
-            print("AVAILABLE CHECKPOINTS (Last 10):")
-            print("=" * 100)
-            print(f"{'#':<4} {'Step':<12} {'Type':<12} {'Quality':<12} {'Loss':<10} {'Date':<18}")
-            print("-" * 100)
-            
-            # Show last 10 checkpoints
-            recent_checkpoints = all_checkpoints[-10:]
-            for idx, ckpt in enumerate(recent_checkpoints, 1):
-                step_display = f"{ckpt['step']:,}"
-                type_display = ckpt['type']
-                quality_display = f"{ckpt['quality']*100:.1f}%"
-                loss_display = f"{ckpt['loss']:.4f}"
-                date_display = ckpt['date_str']
-                
-                print(f"{idx:<4} {step_display:<12} {type_display:<12} {quality_display:<12} {loss_display:<10} {date_display:<18}")
-            
-            print("=" * 100)
-            
-            # User selection
-            selection = input(f"\n{C_CYAN}Welchen Checkpoint laden? (Nummer 1-{len(recent_checkpoints)} oder Enter für neuesten): {C_RESET}").strip()
-            
-            if selection == "":
-                # Use latest (last in list)
-                selected_ckpt = all_checkpoints[-1]
-                start_step = selected_ckpt['step']
-                selected_checkpoint_path = selected_ckpt['path']
-                print(f"{C_GREEN}✅ Using latest checkpoint: Step {start_step:,}{C_RESET}")
-            else:
-                try:
-                    choice_idx = int(selection)
-                    if 1 <= choice_idx <= len(recent_checkpoints):
-                        selected_ckpt = recent_checkpoints[choice_idx - 1]
-                        start_step = selected_ckpt['step']
-                        selected_checkpoint_path = selected_ckpt['path']
-                        print(f"{C_GREEN}✅ Selected checkpoint: Step {start_step:,} ({selected_ckpt['type']}){C_RESET}")
-                    else:
-                        print(f"{C_YELLOW}Invalid selection, using latest checkpoint{C_RESET}")
-                        selected_ckpt = all_checkpoints[-1]
-                        start_step = selected_ckpt['step']
-                        selected_checkpoint_path = selected_ckpt['path']
-                except ValueError:
-                    print(f"{C_YELLOW}Invalid input, using latest checkpoint{C_RESET}")
-                    selected_ckpt = all_checkpoints[-1]
-                    start_step = selected_ckpt['step']
-                    selected_checkpoint_path = selected_ckpt['path']
-            
-            print()
+            print("⚠️  No checkpoint found, starting fresh")
     
     # Start TensorBoard with dataset-specific log directory
     log_dir = os.path.join(DATASET_SPECIFIC_ROOT, "logs")
