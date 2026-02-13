@@ -203,8 +203,8 @@ def process_frames_with_model(model, frames_dir, frame_files, output_dir, device
             output_img = np.clip(output_img * 255.0, 0, 255).astype(np.uint8)
             output_img = cv2.cvtColor(output_img, cv2.COLOR_RGB2BGR)
             
-            # Output-Frame speichern (output index is i-3+1 = i-2 because we start at i=3)
-            output_path = os.path.join(output_dir, f'frame_{i-2:06d}.png')
+            # Output-Frame speichern (first iteration at i=3 produces frame_000000.png)
+            output_path = os.path.join(output_dir, f'frame_{i-3:06d}.png')
             cv2.imwrite(output_path, output_img)
             
             processed_count += 1
@@ -348,7 +348,7 @@ Beispiele:
             
             checkpoint_path = selected_ckpt['path']
         
-        except Exception as e:
+        except (ImportError, FileNotFoundError, KeyError, AttributeError) as e:
             print(f"❌ Fehler bei Checkpoint-Auswahl: {e}")
             print("   Bitte geben Sie den Checkpoint-Pfad manuell an mit --checkpoint")
             import traceback

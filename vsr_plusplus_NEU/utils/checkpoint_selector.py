@@ -110,7 +110,7 @@ def get_checkpoint_dir_from_config():
                 data_config = rt_config.get('data', {})
                 DATASET_ROOT = data_config.get('root', DATASET_ROOT)
                 dataset_name = data_config.get('dataset_name', 'master')
-            except:
+            except (json.JSONDecodeError, IOError, KeyError):
                 pass
         
         # Dataset-specific checkpoint directory
@@ -118,7 +118,7 @@ def get_checkpoint_dir_from_config():
         
         return checkpoint_dir
     
-    except Exception as e:
+    except (ImportError, AttributeError, KeyError) as e:
         # Fallback to default
         print(f"{C_YELLOW}⚠️  Could not load config, using default path: {e}{C_RESET}")
         return "/mnt/data/training/Dataset/Universal/Mastermodell/master"
@@ -139,7 +139,7 @@ def get_data_root_from_config():
         config = cfg.get_config()
         return config.get('DATA_ROOT', "/mnt/data/training/Universal/Mastermodell/Learn")
     
-    except Exception as e:
+    except (ImportError, AttributeError, KeyError) as e:
         # Fallback to default
         print(f"{C_YELLOW}⚠️  Could not load config, using default DATA_ROOT: {e}{C_RESET}")
         return "/mnt/data/training/Universal/Mastermodell/Learn"
