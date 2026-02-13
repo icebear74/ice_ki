@@ -82,8 +82,53 @@ def load_model_from_checkpoint(checkpoint_path, device='cuda'):
         n_blocks=n_blocks
     ).to(device)
     
-    # State Dict laden
-    model.load_state_dict(checkpoint['model_state_dict'])
+    # State Dict laden mit Kompatibilität für alte FusionBlock-Checkpoints
+    state_dict = checkpoint['model_state_dict']
+    
+    # Konvertiere alte FusionBlock Weights (conv) zu neuem Format (conv3x3 + conv1x1)
+    # Alte Checkpoints haben: backward_fuse.conv.weight/bias
+    # Neues Format braucht: backward_fuse.conv3x3.weight/bias + backward_fuse.conv1x1.weight/bias
+    converted = False
+    for old_key in ['backward_fuse.conv.weight', 'backward_fuse.conv.bias',
+                    'forward_fuse.conv.weight', 'forward_fuse.conv.bias',
+                    'fusion.conv.weight', 'fusion.conv.bias']:
+        if old_key in state_dict:
+            converted = True
+            break
+    
+    if converted:
+        print(f"   🔄 Konvertiere altes FusionBlock-Format zu neuem Format...")
+        new_state_dict = {}
+        
+        for key, value in state_dict.items():
+            # Konvertiere alte FusionBlock-Keys
+            if '.conv.weight' in key or '.conv.bias' in key:
+                # Ersetze .conv. mit .conv3x3. (die 3x3 conv übernimmt die alten weights)
+                new_key = key.replace('.conv.', '.conv3x3.')
+                new_state_dict[new_key] = value
+                
+                # Initialisiere conv1x1 mit Identity-ähnlichen Werten
+                if '.conv.weight' in key:
+                    # conv1x1 wird als Identity initialisiert
+                    conv1x1_key = key.replace('.conv.', '.conv1x1.')
+                    out_channels = value.shape[0]
+                    # Identity-Matrix für 1x1 conv
+                    import torch
+                    conv1x1_weight = torch.eye(out_channels).view(out_channels, out_channels, 1, 1)
+                    new_state_dict[conv1x1_key] = conv1x1_weight.to(value.device)
+                elif '.conv.bias' in key:
+                    # conv1x1 bias wird auf 0 initialisiert
+                    conv1x1_key = key.replace('.conv.', '.conv1x1.')
+                    import torch
+                    new_state_dict[conv1x1_key] = torch.zeros_like(value)
+            else:
+                # Alle anderen Keys bleiben unverändert
+                new_state_dict[key] = value
+        
+        state_dict = new_state_dict
+        print(f"   ✅ FusionBlock-Weights konvertiert (conv → conv3x3 + conv1x1)")
+    
+    model.load_state_dict(state_dict)
     model.eval()
     
     # Checkpoint-Informationen
