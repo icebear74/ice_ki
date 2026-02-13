@@ -328,6 +328,10 @@ class CheckpointManager:
             print(f"  [DEBUG] Checkpoint search directory: {self.checkpoint_dir}")
             print(f"  [DEBUG] Search pattern: {search_pattern}")
             print(f"  [DEBUG] Found {len(checkpoint_files)} checkpoint files")
+            if checkpoint_files:
+                print(f"  [DEBUG] Files found:")
+                for f in checkpoint_files:
+                    print(f"    - {os.path.basename(f)}")
         
         for ckpt_path in checkpoint_files:
             try:
@@ -336,6 +340,8 @@ class CheckpointManager:
                 # Parse step from filename
                 step_num = self._parse_step_from_filename(filename)
                 if step_num is None:
+                    if '--debug-checkpoints' in sys.argv or True:
+                        print(f"  [DEBUG] Skipping {filename}: Could not parse step number")
                     continue
                 
                 # Load checkpoint metadata
@@ -394,6 +400,8 @@ class CheckpointManager:
                 checkpoints.append(info_dict)
             except Exception as e:
                 # Skip corrupted checkpoints
+                if '--debug-checkpoints' in sys.argv or True:
+                    print(f"  [DEBUG] Error loading {os.path.basename(ckpt_path)}: {str(e)}")
                 continue
         
         # Sort by step number
