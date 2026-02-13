@@ -319,7 +319,15 @@ class CheckpointManager:
         checkpoints = []
         
         # Find all checkpoint files
-        checkpoint_files = glob.glob(os.path.join(self.checkpoint_dir, "checkpoint_*.pth"))
+        search_pattern = os.path.join(self.checkpoint_dir, "checkpoint_*.pth")
+        checkpoint_files = glob.glob(search_pattern)
+        
+        # DEBUG: Print what we're searching for (can be disabled later)
+        import sys
+        if '--debug-checkpoints' in sys.argv or True:  # Always show for now
+            print(f"  [DEBUG] Checkpoint search directory: {self.checkpoint_dir}")
+            print(f"  [DEBUG] Search pattern: {search_pattern}")
+            print(f"  [DEBUG] Found {len(checkpoint_files)} checkpoint files")
         
         for ckpt_path in checkpoint_files:
             try:

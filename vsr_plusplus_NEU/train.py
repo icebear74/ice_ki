@@ -223,6 +223,10 @@ def main():
         # Resume mode (either selected 'f' or canceled 'l')
         print("\n📂 Resuming training...\n")
         
+        # DEBUG: Show where we're looking for checkpoints
+        print(f"{C_CYAN}Searching for checkpoints in: {DATASET_SPECIFIC_ROOT}{C_RESET}")
+        print(f"{C_CYAN}Looking for pattern: checkpoint_*.pth{C_RESET}\n")
+        
         # Get all checkpoints
         all_checkpoints = checkpoint_mgr.list_checkpoints()
         
