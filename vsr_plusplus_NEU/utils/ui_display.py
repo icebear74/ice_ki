@@ -130,6 +130,28 @@ def get_activity_data(model):
     forward_fuse = activity_dict.get('forward_fuse', 0.0)
     fusion = activity_dict.get('fusion', 0.0)
     
+    # Helper function to convert fusion activity (handles both list and float)
+    def add_fusion_activity(name, activity):
+        """Add fusion layer activity - handles both FusionBlock (list) and TrackedConv2d (float)"""
+        if isinstance(activity, list):
+            if len(activity) == 2:
+                # 7-frame FusionBlock: [conv3x3_act, conv1x1_act]
+                activities_with_names.append((f"{name} 3x3", float(activity[0]) if activity[0] is not None else 0.0))
+                activities_with_names.append((f"{name} 1x1", float(activity[1]) if activity[1] is not None else 0.0))
+            elif len(activity) > 0:
+                # Unexpected list length - use average
+                avg_act = sum(float(a) if a is not None else 0.0 for a in activity) / len(activity)
+                activities_with_names.append((name, avg_act))
+            else:
+                # Empty list - use 0.0
+                activities_with_names.append((name, 0.0))
+        elif activity is not None:
+            # Old TrackedConv2d: single value
+            activities_with_names.append((name, float(activity)))
+        else:
+            # None - use 0.0
+            activities_with_names.append((name, 0.0))
+    
     # Build combined list with names
     activities_with_names = []
     
@@ -138,17 +160,17 @@ def get_activity_data(model):
         activities_with_names.append((f"Backward {i+1}", float(act) if act is not None else 0.0))
     
     # Backward fuse layer
-    activities_with_names.append(("Backward Fuse", float(backward_fuse) if backward_fuse is not None else 0.0))
+    add_fusion_activity("Backward Fuse", backward_fuse)
     
     # Forward trunk blocks
     for i, act in enumerate(forward):
         activities_with_names.append((f"Forward {i+1}", float(act) if act is not None else 0.0))
     
     # Forward fuse layer
-    activities_with_names.append(("Forward Fuse", float(forward_fuse) if forward_fuse is not None else 0.0))
+    add_fusion_activity("Forward Fuse", forward_fuse)
     
     # Final fusion layer
-    activities_with_names.append(("Final Fusion", float(fusion) if fusion is not None else 0.0))
+    add_fusion_activity("Final Fusion", fusion)
     
     # Extract just the values for trend calculation
     activities_raw = [val for name, val in activities_with_names]
