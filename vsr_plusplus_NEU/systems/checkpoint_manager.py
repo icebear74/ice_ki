@@ -322,9 +322,12 @@ class CheckpointManager:
         search_pattern = os.path.join(self.checkpoint_dir, "checkpoint_*.pth")
         checkpoint_files = glob.glob(search_pattern)
         
-        # DEBUG: Print what we're searching for (can be disabled later)
+        # DEBUG: Print what we're searching for
+        # Set DEBUG_CHECKPOINTS environment variable to enable detailed output
         import sys
-        if '--debug-checkpoints' in sys.argv or True:  # Always show for now
+        debug_mode = '--debug-checkpoints' in sys.argv or os.getenv('DEBUG_CHECKPOINTS', '').lower() in ('1', 'true', 'yes')
+        
+        if debug_mode:
             print(f"  [DEBUG] Checkpoint search directory: {self.checkpoint_dir}")
             print(f"  [DEBUG] Search pattern: {search_pattern}")
             print(f"  [DEBUG] Found {len(checkpoint_files)} checkpoint files")
@@ -340,7 +343,7 @@ class CheckpointManager:
                 # Parse step from filename
                 step_num = self._parse_step_from_filename(filename)
                 if step_num is None:
-                    if '--debug-checkpoints' in sys.argv or True:
+                    if debug_mode:
                         print(f"  [DEBUG] Skipping {filename}: Could not parse step number")
                     continue
                 
@@ -402,7 +405,7 @@ class CheckpointManager:
                 checkpoints.append(info_dict)
             except Exception as e:
                 # Skip corrupted checkpoints
-                if '--debug-checkpoints' in sys.argv or True:
+                if debug_mode:
                     print(f"  [DEBUG] Error loading {os.path.basename(ckpt_path)}: {str(e)}")
                 continue
         
