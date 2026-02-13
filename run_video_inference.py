@@ -53,8 +53,8 @@ def load_model_from_checkpoint(checkpoint_path, device='cuda'):
     # Our checkpoints contain custom classes (AdaptiveLRScheduler) which are safe to load
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
-    # Modell-Konfiguration: ZUERST aus config.py laden, dann Checkpoint als Fallback
-    # config.py hat die korrekten Werte: N_FEATS=72, N_BLOCKS=28
+    # Modell-Konfiguration: IMMER aus config.py laden (nicht aus Checkpoint!)
+    # Der Checkpoint könnte alte Werte haben (z.B. 128/32), aber wir wollen die aktuellen (72/28)
     n_feats = None
     n_blocks = None
     
@@ -67,12 +67,13 @@ def load_model_from_checkpoint(checkpoint_path, device='cuda'):
         n_blocks = config.get('N_BLOCKS')
         print(f"   ✅ Modell-Konfiguration aus config.py geladen: n_feats={n_feats}, n_blocks={n_blocks}")
     except (ImportError, AttributeError, KeyError) as e:
-        print(f"   ⚠️  config.py nicht gefunden oder unvollständig, verwende Checkpoint-Werte")
-        # Fall back to checkpoint values
-        model_config = checkpoint.get('model_config', {})
-        n_feats = model_config.get('n_feats', 72)  # Default: 72 wie in config.py.example
-        n_blocks = model_config.get('n_blocks', 28)  # Default: 28 wie in config.py.example
-        print(f"   Modell-Konfiguration aus Checkpoint: n_feats={n_feats}, n_blocks={n_blocks}")
+        # Wenn config.py nicht gefunden wird, verwende FESTE Defaults (NICHT Checkpoint-Werte!)
+        # Diese Defaults entsprechen config.py.example
+        n_feats = 72
+        n_blocks = 28
+        print(f"   ⚠️  config.py nicht gefunden oder unvollständig")
+        print(f"   📝 Verwende Defaults aus config.py.example: n_feats={n_feats}, n_blocks={n_blocks}")
+        print(f"   💡 Tipp: Erstelle config.py mit: cp vsr_plusplus_NEU/config.py.example vsr_plusplus_NEU/config.py")
     
     # 7-Frame Modell erstellen
     from vsr_plusplus_NEU.core.model_7frame import VSRBidirectional_7frames_3x
