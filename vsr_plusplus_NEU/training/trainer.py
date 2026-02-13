@@ -1239,8 +1239,8 @@ class VSRTrainer:
                         output_img = np.clip(output_img * 255.0, 0, 255).astype(np.uint8)
                         output_img = cv2.cvtColor(output_img, cv2.COLOR_RGB2BGR)
                         
-                        # Save output frame (output index is i-2+1 because we start at i=2)
-                        output_path = os.path.join(output_frames_dir, f'frame_{i-2+1:05d}.png')
+                        # Save output frame (output index is i-1 because we start at i=2)
+                        output_path = os.path.join(output_frames_dir, f'frame_{i-1:05d}.png')
                         cv2.imwrite(output_path, output_img)
                         
                         processed_count += 1

@@ -198,9 +198,8 @@ def process_frames_with_model(model, frames_dir, frame_files, output_dir, device
             output_img = np.clip(output_img * 255.0, 0, 255).astype(np.uint8)
             output_img = cv2.cvtColor(output_img, cv2.COLOR_RGB2BGR)
             
-            # Output-Frame speichern
-            # Output-Index ist i-2+1 (wegen Start bei i=2)
-            output_path = os.path.join(output_dir, f'frame_{i-2+1:06d}.png')
+            # Output-Frame speichern (output index is i-1 because we start at i=2)
+            output_path = os.path.join(output_dir, f'frame_{i-1:06d}.png')
             cv2.imwrite(output_path, output_img)
             
             processed_count += 1
