@@ -49,7 +49,9 @@ def load_model_from_checkpoint(checkpoint_path, device='cuda'):
         raise FileNotFoundError(f"Checkpoint nicht gefunden: {checkpoint_path}")
     
     # Checkpoint laden
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    # Use weights_only=False for compatibility with PyTorch 2.6+
+    # Our checkpoints contain custom classes (AdaptiveLRScheduler) which are safe to load
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
     # Modell-Konfiguration aus Checkpoint extrahieren
     model_config = checkpoint.get('model_config', {})
