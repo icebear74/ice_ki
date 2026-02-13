@@ -217,8 +217,8 @@ class EnhancedRuntimeConfigManager:
             if 'model' in config:
                 model = config['model']
                 
-                if model.get('n_frames', 0) not in [5, 7]:
-                    errors.append(f"n_frames must be 5 or 7, got {model.get('n_frames')}")
+                if model.get('n_frames', 0) != 7:
+                    errors.append(f"n_frames must be 7 (only 7-frame model supported), got {model.get('n_frames')}")
                 
                 if model.get('n_feats', 0) < 32 or model.get('n_feats', 0) > 128:
                     errors.append(f"n_feats should be 32-128, got {model.get('n_feats')}")

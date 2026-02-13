@@ -294,11 +294,12 @@ def main():
     lr = 10 ** config['LR_EXPONENT']
     
     # Separate Final Fusion parameters from other parameters
+    # 7-frame model uses FusionBlock with conv3x3 and conv1x1
     final_fusion_params = []
     other_params = []
     
     for name, param in model.named_parameters():
-        if 'fusion.conv' in name:  # Final fusion layer (TrackedConv2d wraps the conv)
+        if 'fusion.conv3x3' in name or 'fusion.conv1x1' in name:  # Final fusion layer (FusionBlock)
             final_fusion_params.append(param)
         else:
             other_params.append(param)
