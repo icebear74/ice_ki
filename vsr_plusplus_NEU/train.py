@@ -181,6 +181,19 @@ def main():
     # E.g., /mnt/data/training/datasetNeu/master/ (not DATA_ROOT)
     DATASET_SPECIFIC_ROOT = os.path.join(DATASET_ROOT, dataset_name)
     
+    # DEBUG: Show all path configurations
+    print(f"\n{C_CYAN}{'='*80}{C_RESET}")
+    print(f"{C_CYAN}PATH CONFIGURATION{C_RESET}")
+    print(f"{C_CYAN}{'='*80}{C_RESET}")
+    print(f"  config.py DATASET_ROOT:     {config.get('DATASET_ROOT', 'NOT SET')}")
+    print(f"  runtime_config DATASET_ROOT: {rt_config.get('data', {}).get('root', 'NOT SET') if rt_config else 'N/A (no runtime_config.json)'}")
+    print(f"  Final DATASET_ROOT:          {DATASET_ROOT}")
+    print(f"  Dataset Name:                {dataset_name}")
+    print(f"  DATASET_SPECIFIC_ROOT:       {DATASET_SPECIFIC_ROOT}")
+    print(f"  Checkpoints will be in:      {DATASET_SPECIFIC_ROOT}/checkpoint_*.pth")
+    print(f"  Logs will be in:             {DATASET_SPECIFIC_ROOT}/logs/")
+    print(f"{C_CYAN}{'='*80}{C_RESET}\n")
+    
     print("\n" + "="*80)
     print("VSR++ Training System - Manual Configuration")
     print("="*80 + "\n")
@@ -222,6 +235,10 @@ def main():
     if choice != 'l' or choice == 'f':
         # Resume mode (either selected 'f' or canceled 'l')
         print("\n📂 Resuming training...\n")
+        
+        # DEBUG: Show where we're looking for checkpoints
+        print(f"{C_CYAN}Searching for checkpoints in: {DATASET_SPECIFIC_ROOT}{C_RESET}")
+        print(f"{C_CYAN}Looking for pattern: checkpoint_*.pth{C_RESET}\n")
         
         # Get all checkpoints
         all_checkpoints = checkpoint_mgr.list_checkpoints()
@@ -658,7 +675,9 @@ def main():
     # Load checkpoint if resuming
     if start_step > 0 and selected_checkpoint_path:
         print(f"Loading checkpoint from {selected_checkpoint_path}...")
-        checkpoint = torch.load(selected_checkpoint_path, map_location=device)
+        # Use weights_only=False for compatibility with PyTorch 2.6+
+        # Our checkpoints contain custom classes (AdaptiveLRScheduler) which are safe to load
+        checkpoint = torch.load(selected_checkpoint_path, map_location=device, weights_only=False)
         
         model.load_state_dict(checkpoint['model_state_dict'])
         

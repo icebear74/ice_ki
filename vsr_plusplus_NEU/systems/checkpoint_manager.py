@@ -319,7 +319,22 @@ class CheckpointManager:
         checkpoints = []
         
         # Find all checkpoint files
-        checkpoint_files = glob.glob(os.path.join(self.checkpoint_dir, "checkpoint_*.pth"))
+        search_pattern = os.path.join(self.checkpoint_dir, "checkpoint_*.pth")
+        checkpoint_files = glob.glob(search_pattern)
+        
+        # DEBUG: Print what we're searching for
+        # Set DEBUG_CHECKPOINTS environment variable to enable detailed output
+        import sys
+        debug_mode = '--debug-checkpoints' in sys.argv or os.getenv('DEBUG_CHECKPOINTS', '').lower() in ('1', 'true', 'yes')
+        
+        if debug_mode:
+            print(f"  [DEBUG] Checkpoint search directory: {self.checkpoint_dir}")
+            print(f"  [DEBUG] Search pattern: {search_pattern}")
+            print(f"  [DEBUG] Found {len(checkpoint_files)} checkpoint files")
+            if checkpoint_files:
+                print(f"  [DEBUG] Files found:")
+                for f in checkpoint_files:
+                    print(f"    - {os.path.basename(f)}")
         
         for ckpt_path in checkpoint_files:
             try:
@@ -328,10 +343,14 @@ class CheckpointManager:
                 # Parse step from filename
                 step_num = self._parse_step_from_filename(filename)
                 if step_num is None:
+                    if debug_mode:
+                        print(f"  [DEBUG] Skipping {filename}: Could not parse step number")
                     continue
                 
                 # Load checkpoint metadata
-                ckpt_data = torch.load(ckpt_path, map_location='cpu')
+                # Use weights_only=False for compatibility with PyTorch 2.6+
+                # Our checkpoints contain custom classes (AdaptiveLRScheduler) which are safe to load
+                ckpt_data = torch.load(ckpt_path, map_location='cpu', weights_only=False)
                 
                 # Determine checkpoint type from filename and step
                 if '_emergency' in filename:
@@ -386,6 +405,8 @@ class CheckpointManager:
                 checkpoints.append(info_dict)
             except Exception as e:
                 # Skip corrupted checkpoints
+                if debug_mode:
+                    print(f"  [DEBUG] Error loading {os.path.basename(ckpt_path)}: {str(e)}")
                 continue
         
         # Sort by step number
