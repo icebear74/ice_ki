@@ -1197,23 +1197,23 @@ class VSRTrainer:
                 frame_files = sorted([f for f in os.listdir(frames_dir) if f.endswith('.png')])
                 total_frames = len(frame_files)
                 
-                if total_frames < 7:
-                    self.train_logger.log_event(f"❌ Not enough frames ({total_frames} < 7)")
+                if total_frames < 5:
+                    self.train_logger.log_event(f"❌ Not enough frames ({total_frames} < 5)")
                     return
                 
                 self.train_logger.log_event(f"✅ Extracted {total_frames} frames")
                 
-                # Process frames with sliding window (7 frames)
+                # Process frames with sliding window (5 frames)
                 self.train_logger.log_event("🔄 Processing frames with model...")
                 processed_count = 0
                 
                 with torch.no_grad():
-                    # We need 7 frames for the sliding window, but only output the center frame
-                    # Process from frame 3 to frame (total-3) to always have context
-                    for i in range(3, total_frames - 3):
-                        # Load 7 consecutive frames (i-3 to i+3, with i being center)
+                    # We need 5 frames for the sliding window, with center frame being upscaled
+                    # Process from frame 2 to frame (total-2) to always have context
+                    for i in range(2, total_frames - 2):
+                        # Load 5 consecutive frames (i-2 to i+2, with i being center)
                         window_frames = []
-                        for offset in range(-3, 4):
+                        for offset in range(-2, 3):  # -2, -1, 0, 1, 2
                             frame_path = os.path.join(frames_dir, frame_files[i + offset])
                             frame = cv2.imread(frame_path)
                             if frame is None:
@@ -1224,12 +1224,11 @@ class VSRTrainer:
                             frame = frame.astype(np.float32) / 255.0
                             window_frames.append(frame)
                         
-                        if len(window_frames) != 7:
+                        if len(window_frames) != 5:
                             continue
                         
-                        # Stack frames and convert to tensor [1, 7, 3, H, W]
-                        # But our model expects [1, 5, 3, H, W] - use frames [1:6] (indices 1-5)
-                        frames_tensor = torch.from_numpy(np.stack(window_frames[1:6])).permute(0, 3, 1, 2).unsqueeze(0)
+                        # Stack frames and convert to tensor [1, 5, 3, H, W]
+                        frames_tensor = torch.from_numpy(np.stack(window_frames)).permute(0, 3, 1, 2).unsqueeze(0)
                         frames_tensor = frames_tensor.to(self.device)
                         
                         # Process through model
@@ -1240,15 +1239,15 @@ class VSRTrainer:
                         output_img = np.clip(output_img * 255.0, 0, 255).astype(np.uint8)
                         output_img = cv2.cvtColor(output_img, cv2.COLOR_RGB2BGR)
                         
-                        # Save output frame
-                        output_path = os.path.join(output_frames_dir, f'frame_{i-3+1:05d}.png')
+                        # Save output frame (output index is i-2+1 because we start at i=2)
+                        output_path = os.path.join(output_frames_dir, f'frame_{i-2+1:05d}.png')
                         cv2.imwrite(output_path, output_img)
                         
                         processed_count += 1
                         
                         # Log progress every 30 frames
                         if processed_count % 30 == 0:
-                            self.train_logger.log_event(f"  Processed {processed_count}/{total_frames-6} frames...")
+                            self.train_logger.log_event(f"  Processed {processed_count}/{total_frames-4} frames...")
                 
                 self.train_logger.log_event(f"✅ Processed {processed_count} frames")
                 
