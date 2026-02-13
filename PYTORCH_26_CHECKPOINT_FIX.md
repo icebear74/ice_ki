@@ -67,13 +67,23 @@ To verify the fix:
 
 ## Debug Output
 
-The fix includes debug output that shows:
+The fix includes optional debug output that shows:
 - Path configuration (DATASET_ROOT, DATASET_SPECIFIC_ROOT)
 - Checkpoint search directory and pattern
 - List of found checkpoint files
 - Any errors during checkpoint loading
 
-This can be disabled by removing the debug print statements after confirming the fix works.
+To enable debug output, use either:
+```bash
+# Option 1: Environment variable
+export DEBUG_CHECKPOINTS=1
+python vsr_plusplus_NEU/train.py
+
+# Option 2: Command line flag
+python vsr_plusplus_NEU/train.py --debug-checkpoints
+```
+
+By default, debug output is disabled for cleaner output.
 
 ## Alternative Solution (Not Used)
 
