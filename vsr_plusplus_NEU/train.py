@@ -16,6 +16,7 @@ import sys
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from torch.cuda.amp import autocast, GradScaler
 import subprocess
 import socket
 import time
@@ -26,7 +27,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Add current directory to path for local config.py
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from vsr_plusplus_NEU.core.model import VSRBidirectional_3x
+from vsr_plusplus_NEU.core.model_7frame import VSRBidirectional_7frames_3x
 from vsr_plusplus_NEU.core.loss import HybridLoss
 from vsr_plusplus_NEU.core.dataset import VSRDataset
 from vsr_plusplus_NEU.training.trainer import VSRTrainer
@@ -37,8 +38,15 @@ from vsr_plusplus_NEU.systems.logger import TrainingLogger, TensorBoardLogger
 from vsr_plusplus_NEU.systems.adaptive_system import AdaptiveSystem
 from vsr_plusplus_NEU.systems.runtime_config import RuntimeConfigManager
 
-# Import manual configuration
-# Import from local directory (config.py is not in repo due to .gitignore)
+# NOTE: config.py is a LOCAL configuration file that exists on each developer's machine.
+# It is listed in .gitignore (line 58) and should NEVER be pushed to the repository!
+# 
+# To create your config.py:
+#   cp config.py.example config.py
+#   OR
+#   cp config.py.active config.py  (if you have an active config)
+# 
+# Then edit config.py to match your local setup (paths, GPU settings, etc.)
 import config as cfg
 
 # ANSI colors
@@ -240,61 +248,16 @@ def main():
         print(f"{C_CYAN}Searching for checkpoints in: {DATASET_SPECIFIC_ROOT}{C_RESET}")
         print(f"{C_CYAN}Looking for pattern: checkpoint_*.pth{C_RESET}\n")
         
-        # Get all checkpoints
-        all_checkpoints = checkpoint_mgr.list_checkpoints()
+        # Use shared checkpoint selector module
+        from vsr_plusplus_NEU.utils.checkpoint_selector import select_checkpoint_interactive
         
-        if not all_checkpoints:
-            print("⚠️  No checkpoint found, starting fresh")
+        selected_ckpt = select_checkpoint_interactive(checkpoint_mgr, auto_select_latest=False)
+        
+        if selected_ckpt:
+            start_step = selected_ckpt['step']
+            selected_checkpoint_path = selected_ckpt['path']
         else:
-            # Show detailed checkpoint selection menu
-            print("=" * 100)
-            print("AVAILABLE CHECKPOINTS (Last 10):")
-            print("=" * 100)
-            print(f"{'#':<4} {'Step':<12} {'Type':<12} {'Quality':<12} {'Loss':<10} {'Date':<18}")
-            print("-" * 100)
-            
-            # Show last 10 checkpoints
-            recent_checkpoints = all_checkpoints[-10:]
-            for idx, ckpt in enumerate(recent_checkpoints, 1):
-                step_display = f"{ckpt['step']:,}"
-                type_display = ckpt['type']
-                quality_display = f"{ckpt['quality']*100:.1f}%"
-                loss_display = f"{ckpt['loss']:.4f}"
-                date_display = ckpt['date_str']
-                
-                print(f"{idx:<4} {step_display:<12} {type_display:<12} {quality_display:<12} {loss_display:<10} {date_display:<18}")
-            
-            print("=" * 100)
-            
-            # User selection
-            selection = input(f"\n{C_CYAN}Welchen Checkpoint laden? (Nummer 1-{len(recent_checkpoints)} oder Enter für neuesten): {C_RESET}").strip()
-            
-            if selection == "":
-                # Use latest (last in list)
-                selected_ckpt = all_checkpoints[-1]
-                start_step = selected_ckpt['step']
-                selected_checkpoint_path = selected_ckpt['path']
-                print(f"{C_GREEN}✅ Using latest checkpoint: Step {start_step:,}{C_RESET}")
-            else:
-                try:
-                    choice_idx = int(selection)
-                    if 1 <= choice_idx <= len(recent_checkpoints):
-                        selected_ckpt = recent_checkpoints[choice_idx - 1]
-                        start_step = selected_ckpt['step']
-                        selected_checkpoint_path = selected_ckpt['path']
-                        print(f"{C_GREEN}✅ Selected checkpoint: Step {start_step:,} ({selected_ckpt['type']}){C_RESET}")
-                    else:
-                        print(f"{C_YELLOW}Invalid selection, using latest checkpoint{C_RESET}")
-                        selected_ckpt = all_checkpoints[-1]
-                        start_step = selected_ckpt['step']
-                        selected_checkpoint_path = selected_ckpt['path']
-                except ValueError:
-                    print(f"{C_YELLOW}Invalid input, using latest checkpoint{C_RESET}")
-                    selected_ckpt = all_checkpoints[-1]
-                    start_step = selected_ckpt['step']
-                    selected_checkpoint_path = selected_ckpt['path']
-            
-            print()
+            print("⚠️  No checkpoint found, starting fresh")
     
     # Start TensorBoard with dataset-specific log directory
     log_dir = os.path.join(DATASET_SPECIFIC_ROOT, "logs")
@@ -313,13 +276,12 @@ def main():
     batch_size = config['BATCH_SIZE']
     accumulation_steps = config['ACCUMULATION_STEPS']
     
-    # Create model
-    print("Creating model...")
+    # Create model - USING 7-FRAME MODEL (as intended by dataset_generator_v2)
+    print("Creating 7-frame model...")
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = VSRBidirectional_3x(
+    model = VSRBidirectional_7frames_3x(
         n_feats=n_feats, 
-        n_blocks=n_blocks,
-        use_checkpointing=config.get('USE_GRADIENT_CHECKPOINTING', True)
+        n_blocks=n_blocks
     ).to(device)
     
     # Count parameters
@@ -340,11 +302,12 @@ def main():
     lr = 10 ** config['LR_EXPONENT']
     
     # Separate Final Fusion parameters from other parameters
+    # 7-frame model uses FusionBlock with conv3x3 and conv1x1
     final_fusion_params = []
     other_params = []
     
     for name, param in model.named_parameters():
-        if 'fusion.conv' in name:  # Final fusion layer (TrackedConv2d wraps the conv)
+        if 'fusion.conv3x3' in name or 'fusion.conv1x1' in name:  # Final fusion layer (FusionBlock)
             final_fusion_params.append(param)
         else:
             other_params.append(param)
@@ -397,6 +360,15 @@ def main():
             initial_grad=config['GRAD_WEIGHT'],
             initial_perceptual=config.get('PERCEPTUAL_WEIGHT', 0.0)  # NEW: Pass perceptual weight
         )
+    
+    # Create GradScaler for mixed precision training if enabled
+    use_amp = config.get('USE_AMP', False)
+    scaler = GradScaler(enabled=use_amp)
+    
+    if use_amp:
+        print(f"{C_GREEN}✅ Mixed Precision (AMP) enabled - reduced VRAM usage{C_RESET}\n")
+    else:
+        print(f"{C_YELLOW}⚠️  Mixed Precision (AMP) disabled - higher VRAM usage{C_RESET}\n")
     
     # Create datasets
     print("Loading datasets...")
@@ -715,7 +687,9 @@ def main():
         adaptive_system=adaptive_system,
         config=config,
         device=device,
-        runtime_config=runtime_config
+        runtime_config=runtime_config,
+        scaler=scaler,
+        use_amp=use_amp
     )
     
     # Pass all validation loaders to trainer for multi-size validation

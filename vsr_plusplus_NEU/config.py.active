@@ -25,7 +25,7 @@ Key parameters:
 N_FEATS = 72
 
 # Total number of residual blocks - Optimized for quality
-# 28 blocks provides excellent capacity for 7-frame processing
+# 26 blocks provides excellent capacity for 7-frame processing
 N_BLOCKS = 28
 
 

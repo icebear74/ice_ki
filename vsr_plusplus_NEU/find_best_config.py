@@ -27,7 +27,6 @@ from datetime import datetime
 # Add module to path
 sys.path.insert(0, os.path.dirname(__file__))
 
-from core.model_5frame import VSRBidirectional_5frames_3x
 from core.model_7frame import VSRBidirectional_7frames_3x
 from core.loss import HybridLoss
 
@@ -58,12 +57,12 @@ class DualLogger:
     def close(self):
         self.log.close()
 
-# Test parameters
+# Test parameters - 7-FRAME ONLY
 TEST_CONFIGS = {
-    'frames': [5, 7],
+    'frames': [7],  # Only 7-frame model
     'batch_size': [1, 2],
-    'n_blocks': [24, 26],
-    'n_feats': [60, 72],
+    'n_blocks': [24, 26, 28],
+    'n_feats': [64, 72, 80],
     'gt_sizes': [(540, 540), (720, 405), (720, 720)],
     'precision': ['float16', 'float32']
 }
@@ -107,14 +106,14 @@ def create_dummy_batch(frames, batch_size, lr_size, gt_size, precision):
     Create dummy input/target tensors matching real training format.
     
     Args:
-        frames: Number of frames (5 or 7)
+        frames: Number of frames (only 7 supported)
         batch_size: Batch size
         lr_size: LR frame size (H, W)
         gt_size: GT frame size (H*3, W*3)
         precision: 'float16' or 'float32'
     
     Returns:
-        lr_input: [B, T, 3, H, W] - T frames
+        lr_input: [B, 7, 3, H, W] - 7 frames
         gt_target: [B, 3, H*3, W*3] - upscaled center frame
     """
     lr_h, lr_w = lr_size

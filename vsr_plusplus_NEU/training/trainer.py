@@ -14,6 +14,7 @@ import time
 import os
 import json
 import torch
+from torch.cuda.amp import autocast
 from ..utils.ui_display import draw_ui, get_activity_data
 from ..utils.keyboard_handler import KeyboardHandler
 from ..utils.ui_terminal import C_GREEN, C_CYAN, C_YELLOW, C_RESET, show_cursor
@@ -41,7 +42,7 @@ class VSRTrainer:
     
     def __init__(self, model, optimizer, lr_scheduler, train_loader, val_loader, loss_fn,
                  validator, checkpoint_mgr, train_logger, tb_logger, adaptive_system, 
-                 config, device='cuda', runtime_config=None):
+                 config, device='cuda', runtime_config=None, scaler=None, use_amp=False):
         self.model = model
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
@@ -56,6 +57,8 @@ class VSRTrainer:
         self.config = config
         self.device = device
         self.runtime_config = runtime_config
+        self.scaler = scaler
+        self.use_amp = use_amp
         
         self.global_step = 0
         self.start_step = 0
@@ -252,34 +255,48 @@ class VSRTrainer:
                     }
                 )
             
-            # Forward pass
-            output = self.model(lr_stack)
+            # Forward pass with mixed precision
+            with autocast(enabled=self.use_amp):
+                output = self.model(lr_stack)
+                
+                # Compute L1 loss for adaptive system
+                with torch.no_grad():
+                    current_l1 = torch.abs(output - gt).mean().item()
+                
+                # Get adaptive weights (now returns 5 values including status)
+                l1_w, ms_w, grad_w, perceptual_w, adaptive_status = self.adaptive_system.update_loss_weights(
+                    output, gt, self.global_step, 
+                    current_l1_loss=current_l1
+                )
+                
+                # Compute loss
+                loss_dict = self.loss_fn(output, gt, l1_w, ms_w, grad_w, perceptual_w)
+                loss = loss_dict['total']
+                
+                # Scale loss for accumulation
+                loss = loss / accumulation_steps
             
-            # Compute L1 loss for adaptive system
-            with torch.no_grad():
-                current_l1 = torch.abs(output - gt).mean().item()
-            
-            # Get adaptive weights (now returns 5 values including status)
-            l1_w, ms_w, grad_w, perceptual_w, adaptive_status = self.adaptive_system.update_loss_weights(
-                output, gt, self.global_step, 
-                current_l1_loss=current_l1
-            )
-            
-            # Compute loss
-            loss_dict = self.loss_fn(output, gt, l1_w, ms_w, grad_w, perceptual_w)
-            loss = loss_dict['total']
-            
-            # Backward pass (with accumulation)
-            loss = loss / accumulation_steps
-            loss.backward()
+            # Backward pass with gradient scaling
+            if self.scaler is not None:
+                self.scaler.scale(loss).backward()
+            else:
+                loss.backward()
             
             # Update optimizer (every accumulation_steps)
             if (batch_idx + 1) % accumulation_steps == 0:
+                # Unscale gradients before clipping
+                if self.scaler is not None:
+                    self.scaler.unscale_(self.optimizer)
+                
                 # Clip gradients
                 grad_norm, clip_val = self.adaptive_system.clip_gradients(self.model)
                 
-                # Update optimizer (every accumulation_steps)
-                self.optimizer.step()
+                # Update optimizer with scaler
+                if self.scaler is not None:
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    self.optimizer.step()
                 
                 # Extract AdamW momentum (exp_avg) for GUI
                 adam_momentum = self._get_adam_momentum()
@@ -682,67 +699,82 @@ class VSRTrainer:
                 # Track maximum raw value across all layers
                 peak_activity_value = max(peak_activity_value, raw_value)
         
-        self.web_monitor.update(
-            # Grundlegende Metriken
-            step_current=self.global_step,
-            epoch_num=epoch,
-            step_max=self.config.get('MAX_STEPS', 100000),
-            epoch_step_current=current_epoch_step,
-            epoch_step_total=steps_per_epoch,
-            
-            # Verluste
-            total_loss_value=losses['total'],
-            l1_loss_value=losses['l1'],
-            ms_loss_value=losses['ms'],
-            gradient_loss_value=losses['grad'],
-            perceptual_loss_value=losses['perceptual'],
-            
-            # Adaptive Gewichte
-            l1_weight_current=adaptive_status.get('l1_weight', 1.0),
-            ms_weight_current=adaptive_status.get('ms_weight', 1.0),
-            gradient_weight_current=adaptive_status.get('grad_weight', 1.0),
-            perceptual_weight_current=adaptive_status.get('perceptual_weight', 0.0),
-            gradient_clip_val=adaptive_status.get('grad_clip', 1.0),
-            
-            # Adaptive Status (NEW)
-            adaptive_mode=adaptive_status.get('mode', 'Stable'),
-            adaptive_is_cooldown=adaptive_status.get('is_cooldown', False),
-            adaptive_cooldown_remaining=adaptive_status.get('cooldown_remaining', 0),
-            adaptive_plateau_counter=adaptive_status.get('plateau_counter', 0),
-            adaptive_lr_boost_available=adaptive_status.get('lr_boost_available', False),
-            adaptive_perceptual_trend=0,  # TODO: calculate trend
-            
-            # Lernrate
-            learning_rate_value=current_lr,
-            lr_phase_name=lr_phase,
-            
-            # Performance
-            iteration_duration=avg_time,
-            vram_usage_gb=gpu_mem,
-            adam_momentum_avg=adam_momentum,
-            
-            # Zeitschätzungen
-            eta_total_formatted=total_eta,
-            eta_epoch_formatted=epoch_eta,
-            
-            # Quality-Metriken
-            quality_lr_value=quality_metrics.get('lr_quality', 0.0) / 100.0 if quality_metrics else 0.0,
-            quality_ki_value=quality_metrics.get('ki_quality', 0.0) / 100.0 if quality_metrics else 0.0,
-            quality_improvement_value=quality_metrics.get('improvement', 0.0) / 100.0 if quality_metrics else 0.0,
-            quality_ki_to_gt_value=quality_metrics.get('ki_to_gt', 0.0) / 100.0 if quality_metrics else 0.0,
-            quality_lr_to_gt_value=quality_metrics.get('lr_to_gt', 0.0) / 100.0 if quality_metrics else 0.0,
-            validation_loss_value=self.last_metrics.get('val_loss', 0.0) if self.last_metrics else 0.0,
-            best_quality_ever=best_quality,
-            
-            # Layer-Aktivitäten
-            layer_activity_map=layer_act_dict,
-            layer_activity_peak_value=peak_activity_value,
-            
-            # Status
-            training_active=not paused,
-            validation_running=False,
-            training_paused=paused
-        )
+        # Debug: Print first update to verify data flow
+        if self.global_step == 1:
+            print(f"\n🔍 Web UI Debug - First Update:")
+            print(f"   Step: {self.global_step}")
+            print(f"   Total Loss: {losses['total']}")
+            print(f"   LR: {current_lr}")
+            print(f"   VRAM: {gpu_mem:.2f} GB")
+            print(f"   Layer activities: {len(layer_act_dict)} layers")
+        
+        try:
+            self.web_monitor.update(
+                # Grundlegende Metriken
+                step_current=self.global_step,
+                epoch_num=epoch,
+                step_max=self.config.get('MAX_STEPS', 100000),
+                epoch_step_current=current_epoch_step,
+                epoch_step_total=steps_per_epoch,
+                
+                # Verluste
+                total_loss_value=losses['total'],
+                l1_loss_value=losses['l1'],
+                ms_loss_value=losses['ms'],
+                gradient_loss_value=losses['grad'],
+                perceptual_loss_value=losses['perceptual'],
+                
+                # Adaptive Gewichte
+                l1_weight_current=adaptive_status.get('l1_weight', 1.0),
+                ms_weight_current=adaptive_status.get('ms_weight', 1.0),
+                gradient_weight_current=adaptive_status.get('grad_weight', 1.0),
+                perceptual_weight_current=adaptive_status.get('perceptual_weight', 0.0),
+                gradient_clip_val=adaptive_status.get('grad_clip', 1.0),
+                
+                # Adaptive Status (NEW)
+                adaptive_mode=adaptive_status.get('mode', 'Stable'),
+                adaptive_is_cooldown=adaptive_status.get('is_cooldown', False),
+                adaptive_cooldown_remaining=adaptive_status.get('cooldown_remaining', 0),
+                adaptive_plateau_counter=adaptive_status.get('plateau_counter', 0),
+                adaptive_lr_boost_available=adaptive_status.get('lr_boost_available', False),
+                adaptive_perceptual_trend=0,  # TODO: calculate trend
+                
+                # Lernrate
+                learning_rate_value=current_lr,
+                lr_phase_name=lr_phase,
+                
+                # Performance
+                iteration_duration=avg_time,
+                vram_usage_gb=gpu_mem,
+                adam_momentum_avg=adam_momentum,
+                
+                # Zeitschätzungen
+                eta_total_formatted=total_eta,
+                eta_epoch_formatted=epoch_eta,
+                
+                # Quality-Metriken
+                quality_lr_value=quality_metrics.get('lr_quality', 0.0) / 100.0 if quality_metrics else 0.0,
+                quality_ki_value=quality_metrics.get('ki_quality', 0.0) / 100.0 if quality_metrics else 0.0,
+                quality_improvement_value=quality_metrics.get('improvement', 0.0) / 100.0 if quality_metrics else 0.0,
+                quality_ki_to_gt_value=quality_metrics.get('ki_to_gt', 0.0) / 100.0 if quality_metrics else 0.0,
+                quality_lr_to_gt_value=quality_metrics.get('lr_to_gt', 0.0) / 100.0 if quality_metrics else 0.0,
+                validation_loss_value=self.last_metrics.get('val_loss', 0.0) if self.last_metrics else 0.0,
+                best_quality_ever=best_quality,
+                
+                # Layer-Aktivitäten
+                layer_activity_map=layer_act_dict,
+                layer_activity_peak_value=peak_activity_value,
+                
+                # Status
+                training_active=not paused,
+                validation_running=False,
+                training_paused=paused
+            )
+        except Exception as e:
+            # Log error but don't crash training
+            print(f"\n⚠️  Web UI update failed: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _apply_ema_smoothing(self, loss_dict):
         """
@@ -837,6 +869,9 @@ class VSRTrainer:
             self.paused = not self.paused
             status = "paused" if self.paused else "resumed"
             self.train_logger.log_event(f"Training {status} at step {self.global_step}")
+        elif web_cmd == 'run_video_test':
+            # Trigger video inference
+            self._run_video_inference()
     
     def _save_checkpoint(self):
         """Save checkpoint immediately"""
@@ -1130,6 +1165,173 @@ class VSRTrainer:
             print(f"⚠️  Error checking dataset files: {e}")
             import traceback
             traceback.print_exc()
+    
+    def _run_video_inference(self):
+        """
+        Run video inference on test video using sliding window approach
+        
+        Processes testvideo.mkv from DATA_ROOT and saves output as testvideo_step_[STEP].mkv
+        Uses FFmpeg to extract frames, processes with model, and merges audio back in
+        """
+        import subprocess
+        import tempfile
+        import shutil
+        import cv2
+        import numpy as np
+        
+        # Get DATA_ROOT from config
+        data_root = self.config.get('DATA_ROOT', './Learn')
+        input_video_path = os.path.join(data_root, 'testvideo.mkv')
+        output_video_path = os.path.join(data_root, f'testvideo_step_{self.global_step}.mkv')
+        
+        # Check if input file exists
+        if not os.path.exists(input_video_path):
+            self.train_logger.log_event(f"⚠️  Video test skipped: {input_video_path} not found")
+            return
+        
+        self.train_logger.log_event(f"🎬 Starting video test run at step {self.global_step}")
+        
+        # Save safety checkpoint before processing
+        try:
+            self._save_checkpoint()
+            self.train_logger.log_event("💾 Safety checkpoint saved before video test")
+        except Exception as e:
+            self.train_logger.log_event(f"⚠️  Warning: Could not save safety checkpoint: {e}")
+        
+        # Set model to eval mode
+        was_training = self.model.training
+        self.model.eval()
+        
+        try:
+            # Create temporary directory for frames
+            with tempfile.TemporaryDirectory() as temp_dir:
+                frames_dir = os.path.join(temp_dir, 'frames')
+                output_frames_dir = os.path.join(temp_dir, 'output_frames')
+                os.makedirs(frames_dir, exist_ok=True)
+                os.makedirs(output_frames_dir, exist_ok=True)
+                
+                # Extract frames from video using FFmpeg
+                self.train_logger.log_event("📹 Extracting frames from video...")
+                extract_cmd = [
+                    'ffmpeg', '-i', input_video_path,
+                    '-vf', 'scale=180:180',  # Scale to LR size (180x180)
+                    '-q:v', '1',  # High quality
+                    os.path.join(frames_dir, 'frame_%05d.png')
+                ]
+                
+                try:
+                    subprocess.run(extract_cmd, check=True, capture_output=True)
+                except subprocess.CalledProcessError as e:
+                    self.train_logger.log_event(f"❌ FFmpeg extraction failed: {e.stderr.decode()}")
+                    return
+                
+                # Get list of extracted frames
+                frame_files = sorted([f for f in os.listdir(frames_dir) if f.endswith('.png')])
+                total_frames = len(frame_files)
+                
+                if total_frames < 7:
+                    self.train_logger.log_event(f"❌ Not enough frames ({total_frames} < 7)")
+                    return
+                
+                self.train_logger.log_event(f"✅ Extracted {total_frames} frames")
+                
+                # Process frames with sliding window (7 frames)
+                self.train_logger.log_event("🔄 Processing frames with 7-frame model...")
+                processed_count = 0
+                
+                with torch.no_grad():
+                    # We need 7 frames for the sliding window, with center frame (index 3) being upscaled
+                    # Process from frame 3 to frame (total-3) to always have context
+                    for i in range(3, total_frames - 3):
+                        # Load 7 consecutive frames (i-3 to i+3, with i being center)
+                        window_frames = []
+                        for offset in range(-3, 4):  # -3, -2, -1, 0, 1, 2, 3
+                            frame_path = os.path.join(frames_dir, frame_files[i + offset])
+                            frame = cv2.imread(frame_path)
+                            if frame is None:
+                                self.train_logger.log_event(f"❌ Failed to load frame {frame_files[i + offset]}")
+                                break
+                            # Convert BGR to RGB and normalize to [0, 1]
+                            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                            frame = frame.astype(np.float32) / 255.0
+                            window_frames.append(frame)
+                        
+                        if len(window_frames) != 7:
+                            continue
+                        
+                        # Stack frames and convert to tensor [1, 7, 3, H, W]
+                        frames_tensor = torch.from_numpy(np.stack(window_frames)).permute(0, 3, 1, 2).unsqueeze(0)
+                        frames_tensor = frames_tensor.to(self.device)
+                        
+                        # Process through model
+                        output = self.model(frames_tensor)  # [1, 3, 540, 540]
+                        
+                        # Convert output back to image
+                        output_img = output[0].cpu().permute(1, 2, 0).numpy()
+                        output_img = np.clip(output_img * 255.0, 0, 255).astype(np.uint8)
+                        output_img = cv2.cvtColor(output_img, cv2.COLOR_RGB2BGR)
+                        
+                        # Save output frame (first iteration at i=3 produces frame_00000.png)
+                        output_path = os.path.join(output_frames_dir, f'frame_{i-3:05d}.png')
+                        cv2.imwrite(output_path, output_img)
+                        
+                        processed_count += 1
+                        
+                        # Log progress every 30 frames
+                        if processed_count % 30 == 0:
+                            self.train_logger.log_event(f"  Processed {processed_count}/{total_frames-6} frames...")
+                
+                self.train_logger.log_event(f"✅ Processed {processed_count} frames")
+                
+                # Create output video with FFmpeg and merge audio
+                self.train_logger.log_event("🎞️  Creating output video with audio...")
+                
+                # First, create video from frames
+                temp_video = os.path.join(temp_dir, 'temp_video.mkv')
+                create_video_cmd = [
+                    'ffmpeg', '-framerate', '24',
+                    '-i', os.path.join(output_frames_dir, 'frame_%05d.png'),
+                    '-c:v', 'libx264', '-preset', 'medium', '-crf', '18',
+                    '-pix_fmt', 'yuv420p',
+                    '-y', temp_video
+                ]
+                
+                try:
+                    subprocess.run(create_video_cmd, check=True, capture_output=True)
+                except subprocess.CalledProcessError as e:
+                    self.train_logger.log_event(f"❌ Video creation failed: {e.stderr.decode()}")
+                    return
+                
+                # Then merge with audio and metadata from original
+                merge_cmd = [
+                    'ffmpeg', '-i', temp_video,
+                    '-i', input_video_path,
+                    '-map', '0:v:0',  # Video from processed
+                    '-map', '1:a?',   # Audio from original (if exists)
+                    '-c:v', 'copy',   # Copy video codec
+                    '-c:a', 'copy',   # Copy audio codec
+                    '-y', output_video_path
+                ]
+                
+                try:
+                    subprocess.run(merge_cmd, check=True, capture_output=True)
+                except subprocess.CalledProcessError as e:
+                    # If audio merge fails, just save video without audio
+                    self.train_logger.log_event(f"⚠️  Audio merge failed, saving video only: {e.stderr.decode()}")
+                    shutil.copy(temp_video, output_video_path)
+                
+                self.train_logger.log_event(f"✅ Video test complete! Saved to: {output_video_path}")
+                
+        except Exception as e:
+            self.train_logger.log_event(f"❌ Video test failed: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        finally:
+            # Restore model mode
+            if was_training:
+                self.model.train()
+            self.train_logger.log_event("🔄 Training mode restored, continuing training...")
     
     def _save_statistics_json(self, step):
         """

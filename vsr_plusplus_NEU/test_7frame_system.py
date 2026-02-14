@@ -232,26 +232,21 @@ def test_terminal_ui():
 def test_models():
     """Test model imports"""
     print("\n" + "="*80)
-    print("Testing Model Imports")
+    print("Testing 7-Frame Model Import")
     print("="*80 + "\n")
     
     try:
-        from vsr_plusplus_NEU.core.model_5frame import VSRBidirectional_5frames_3x
         from vsr_plusplus_NEU.core.model_7frame import VSRBidirectional_7frames_3x
         
-        # Create models with correct parameters
-        model_5 = VSRBidirectional_5frames_3x(n_feats=72, n_blocks=26)
-        model_7 = VSRBidirectional_7frames_3x(n_feats=72, n_blocks=26)
+        # Create model with correct parameters
+        model_7 = VSRBidirectional_7frames_3x(n_feats=72, n_blocks=28)
         
-        print(f"✅ 5-frame model created: {model_5.n_feats} features, {model_5.n_blocks} blocks")
         print(f"✅ 7-frame model created: {model_7.n_feats} features, {model_7.n_blocks} blocks")
         print()
         
         # Count parameters
-        params_5 = sum(p.numel() for p in model_5.parameters())
         params_7 = sum(p.numel() for p in model_7.parameters())
         
-        print(f"5-frame model parameters: {params_5:,}")
         print(f"7-frame model parameters: {params_7:,}")
         print()
         
