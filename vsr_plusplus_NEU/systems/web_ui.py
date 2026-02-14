@@ -2161,7 +2161,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             
             // Update batch files list
             const files = batch.files || [];
-            const filesList = files.join('\\n');
+            const filesList = files.join('\\\\n');
             document.getElementById('batchFilesList').value = filesList;
         }
         
