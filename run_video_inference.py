@@ -100,22 +100,64 @@ def load_model_from_checkpoint(checkpoint_path, device='cuda'):
     return model, checkpoint_info
 
 
-def extract_frames_from_video(video_path, output_dir, target_size=180):
+def get_video_resolution(video_path):
+    """
+    Ermittelt die Auflösung eines Videos
+    
+    Args:
+        video_path: Pfad zum Video
+        
+    Returns:
+        (width, height): Video-Auflösung als Tupel
+    """
+    probe_cmd = [
+        'ffprobe', '-v', 'error',
+        '-select_streams', 'v:0',
+        '-show_entries', 'stream=width,height',
+        '-of', 'csv=p=0',
+        video_path
+    ]
+    
+    try:
+        output = subprocess.check_output(probe_cmd, stderr=subprocess.DEVNULL).decode().strip()
+        width, height = map(int, output.split(','))
+        return width, height
+    except Exception as e:
+        raise ValueError(f"Konnte Video-Auflösung nicht ermitteln: {e}")
+
+
+def extract_frames_from_video(video_path, output_dir, scale_factor=None):
     """
     Extrahiert Frames aus einem Video mit FFmpeg
     
     Args:
         video_path: Pfad zum Input-Video
         output_dir: Verzeichnis für extrahierte Frames
-        target_size: Zielgröße für LR-Frames (Standard: 180x180)
+        scale_factor: Optional - Skalierungsfaktor für Input-Frames (z.B. 0.5 für halbe Größe)
+                     None = Original-Auflösung beibehalten (empfohlen für 3x Upscaling)
     
     Returns:
         frame_files: Liste der extrahierten Frame-Dateien
         fps: Framerate des Videos
+        resolution: (width, height) der extrahierten Frames
     """
     print(f"📹 Extrahiere Frames aus Video...")
     
-    # Erst die Framerate auslesen
+    # Video-Auflösung ermitteln
+    orig_width, orig_height = get_video_resolution(video_path)
+    print(f"   Original-Auflösung: {orig_width}×{orig_height}")
+    
+    # Ziel-Auflösung berechnen
+    if scale_factor is not None:
+        target_width = int(orig_width * scale_factor)
+        target_height = int(orig_height * scale_factor)
+        print(f"   Skaliere auf: {target_width}×{target_height} (Faktor: {scale_factor})")
+    else:
+        target_width = orig_width
+        target_height = orig_height
+        print(f"   Behalte Original-Auflösung bei")
+    
+    # Framerate auslesen
     probe_cmd = [
         'ffprobe', '-v', 'error',
         '-select_streams', 'v:0',
@@ -137,13 +179,22 @@ def extract_frames_from_video(video_path, output_dir, target_size=180):
         fps = 24.0  # Fallback
         print(f"   ⚠️  Konnte FPS nicht auslesen, verwende {fps}")
     
-    # Frames extrahieren
-    extract_cmd = [
-        'ffmpeg', '-i', video_path,
-        '-vf', f'scale={target_size}:{target_size}:flags=lanczos',
-        '-q:v', '1',  # Hohe Qualität
-        os.path.join(output_dir, 'frame_%06d.png')
-    ]
+    # Frames extrahieren - mit Aspect Ratio!
+    if scale_factor is not None:
+        # Skalierung mit Aspect Ratio Erhaltung
+        extract_cmd = [
+            'ffmpeg', '-i', video_path,
+            '-vf', f'scale={target_width}:{target_height}:flags=lanczos',
+            '-q:v', '1',  # Hohe Qualität
+            os.path.join(output_dir, 'frame_%06d.png')
+        ]
+    else:
+        # Keine Skalierung - Original-Auflösung
+        extract_cmd = [
+            'ffmpeg', '-i', video_path,
+            '-q:v', '1',  # Hohe Qualität
+            os.path.join(output_dir, 'frame_%06d.png')
+        ]
     
     try:
         subprocess.run(extract_cmd, check=True, capture_output=True)
@@ -155,7 +206,7 @@ def extract_frames_from_video(video_path, output_dir, target_size=180):
     frame_files = sorted([f for f in os.listdir(output_dir) if f.endswith('.png')])
     print(f"✅ {len(frame_files)} Frames extrahiert")
     
-    return frame_files, fps
+    return frame_files, fps, (target_width, target_height)
 
 
 def process_frames_with_model(model, frames_dir, frame_files, output_dir, device='cuda', batch_size=1):
@@ -212,8 +263,8 @@ def process_frames_with_model(model, frames_dir, frame_files, output_dir, device
             frames_tensor = frames_tensor.permute(0, 3, 1, 2).unsqueeze(0)  # [1, 7, 3, H, W]
             frames_tensor = frames_tensor.to(device)
             
-            # Durch Modell laufen lassen
-            output = model(frames_tensor)  # [1, 3, 540, 540]
+            # Durch Modell laufen lassen (3x Upscaling)
+            output = model(frames_tensor)  # [1, 3, H*3, W*3]
             
             # Output zu Bild konvertieren
             output_img = output[0].cpu().permute(1, 2, 0).numpy()
@@ -410,8 +461,10 @@ Beispiele:
             model, checkpoint_info = load_model_from_checkpoint(checkpoint_path, device)
             print()
             
-            # Schritt 2: Frames extrahieren
-            frame_files, video_fps = extract_frames_from_video(args.input, frames_dir)
+            # Schritt 2: Frames extrahieren (Original-Auflösung)
+            frame_files, video_fps, input_resolution = extract_frames_from_video(args.input, frames_dir)
+            print(f"   LR Input: {input_resolution[0]}×{input_resolution[1]}")
+            print(f"   HR Output wird: {input_resolution[0]*3}×{input_resolution[1]*3} (3x Upscaling)")
             print()
             
             # Framerate für Output bestimmen
