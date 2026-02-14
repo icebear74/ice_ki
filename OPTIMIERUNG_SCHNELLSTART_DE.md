@@ -49,6 +49,13 @@ pip install onnx onnxruntime-gpu
 # Für Pruning: Keine Installation nötig (in PyTorch eingebaut)
 ```
 
+⚠️ **WICHTIG - Häufige Tippfehler vermeiden:**
+- ✅ `onnx` (richtig) - ❌ NICHT `onxx` (falsch)
+- ✅ `onnxruntime-gpu` (richtig) - ❌ NICHT `onxxruntime-gpu` (falsch)
+- ✅ `torch2trt` (richtig) - ❌ NICHT `torch2rt` (falsch)
+
+📖 Bei Installationsproblemen: Siehe `INSTALLATION_PAKETE_DE.md`
+
 ### Schritt 2: Modell optimieren
 
 Wählen Sie **eine** der folgenden Optionen:

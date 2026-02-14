@@ -79,6 +79,13 @@ pip install onnx onnxruntime-gpu
 
 # Für Pruning: Keine Installation nötig!
 
+⚠️  WICHTIG: Achten Sie auf korrekte Schreibweise!
+    - onnx (nicht onxx)
+    - onnxruntime-gpu (nicht onxxruntime-gpu)
+    - torch2trt (nicht torch2rt)
+
+📖 Bei Installationsproblemen siehe: INSTALLATION_PAKETE_DE.md
+
 Schritt 2: Modell optimieren
 -----------------------------
 # Option A: TensorRT FP16 (empfohlen)
@@ -201,6 +208,9 @@ Für CPU oder andere Hardware:
 HILFE UND DOKUMENTATION
 ================================================================================
 
+Installations-Probleme?
+→ INSTALLATION_PAKETE_DE.md (Häufige Tippfehler, Lösungen)
+
 Schnellstart:
 → OPTIMIERUNG_SCHNELLSTART_DE.md
 
@@ -210,6 +220,34 @@ Vollständige Dokumentation:
 Hilfe anzeigen:
 → python optimize_checkpoint.py --help
 → python run_video_inference_optimized.py --help
+
+HÄUFIGE INSTALLATIONS-FEHLER
+================================================================================
+
+❌ "Could not find a version that satisfies the requirement onxx"
+✅ Lösung: Korrekter Name ist "onnx" (mit zwei 'n')
+   pip install onnx
+
+❌ "Could not find a version that satisfies the requirement onxxruntime-gpu"
+✅ Lösung: Korrekter Name ist "onnxruntime-gpu" (mit zwei 'n')
+   pip install onnxruntime-gpu
+
+❌ "Could not find a version that satisfies the requirement torch2rt"
+✅ Lösung: Korrekter Name ist "torch2trt" (mit zwei 't')
+   pip install torch2trt
+   
+   Falls pip nicht funktioniert, von GitHub installieren:
+   git clone https://github.com/NVIDIA-AI-IOT/torch2trt
+   cd torch2trt
+   python setup.py install
+
+💡 TIPP: Wenn Installation fehlschlägt, verwenden Sie TorchScript!
+   TorchScript benötigt KEINE zusätzlichen Pakete und funktioniert immer:
+   
+   python optimize_checkpoint.py \
+       --checkpoint model.pth \
+       --output model.pt \
+       --format torchscript
 
 ALLE ANFORDERUNGEN ERFÜLLT
 ================================================================================

@@ -27,12 +27,20 @@ pip install torch2trt
 # Folgen Sie der offiziellen Installationsanleitung
 ```
 
+⚠️ **Häufiger Tippfehler:** Das Paket heißt `torch2trt` (mit zwei 't'), nicht `torch2rt`
+
 ### Für ONNX (optional, für Portabilität)
 ```bash
 pip install onnx onnxruntime-gpu
 # Oder für CPU:
 pip install onnx onnxruntime
 ```
+
+⚠️ **Häufige Tippfehler:**
+- Das Paket heißt `onnx` (mit zwei 'n'), nicht `onxx`
+- Das Paket heißt `onnxruntime-gpu` (mit zwei 'n'), nicht `onxxruntime-gpu`
+
+📖 **Installationsprobleme?** Siehe `INSTALLATION_PAKETE_DE.md` für ausführliche Hilfe
 
 ### Für Pruning
 Keine zusätzliche Installation erforderlich - ist in PyTorch eingebaut (`torch.nn.utils.prune`)
