@@ -146,7 +146,7 @@ def extract_frames_from_video(video_path, output_dir, target_size=180):
     ]
     
     try:
-        subprocess.run(extract_cmd, check=True, capture_output=True, stderr=subprocess.PIPE)
+        subprocess.run(extract_cmd, check=True, capture_output=True)
     except subprocess.CalledProcessError as e:
         print(f"❌ FFmpeg Fehler: {e.stderr.decode()}")
         raise
@@ -258,7 +258,7 @@ def create_video_from_frames(frames_dir, output_path, input_video_path, fps=24):
             '-y', temp_video
         ]
         
-        subprocess.run(create_cmd, check=True, capture_output=True, stderr=subprocess.PIPE)
+        subprocess.run(create_cmd, check=True, capture_output=True)
         print(f"   ✅ Video ohne Audio erstellt")
         
         # Audio vom Original mergen
@@ -274,7 +274,7 @@ def create_video_from_frames(frames_dir, output_path, input_video_path, fps=24):
         ]
         
         try:
-            subprocess.run(merge_cmd, check=True, capture_output=True, stderr=subprocess.PIPE)
+            subprocess.run(merge_cmd, check=True, capture_output=True)
             print(f"   ✅ Audio gemerged")
         except subprocess.CalledProcessError:
             # Falls Audio-Merge fehlschlägt, Video ohne Audio speichern
