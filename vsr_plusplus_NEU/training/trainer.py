@@ -699,67 +699,82 @@ class VSRTrainer:
                 # Track maximum raw value across all layers
                 peak_activity_value = max(peak_activity_value, raw_value)
         
-        self.web_monitor.update(
-            # Grundlegende Metriken
-            step_current=self.global_step,
-            epoch_num=epoch,
-            step_max=self.config.get('MAX_STEPS', 100000),
-            epoch_step_current=current_epoch_step,
-            epoch_step_total=steps_per_epoch,
-            
-            # Verluste
-            total_loss_value=losses['total'],
-            l1_loss_value=losses['l1'],
-            ms_loss_value=losses['ms'],
-            gradient_loss_value=losses['grad'],
-            perceptual_loss_value=losses['perceptual'],
-            
-            # Adaptive Gewichte
-            l1_weight_current=adaptive_status.get('l1_weight', 1.0),
-            ms_weight_current=adaptive_status.get('ms_weight', 1.0),
-            gradient_weight_current=adaptive_status.get('grad_weight', 1.0),
-            perceptual_weight_current=adaptive_status.get('perceptual_weight', 0.0),
-            gradient_clip_val=adaptive_status.get('grad_clip', 1.0),
-            
-            # Adaptive Status (NEW)
-            adaptive_mode=adaptive_status.get('mode', 'Stable'),
-            adaptive_is_cooldown=adaptive_status.get('is_cooldown', False),
-            adaptive_cooldown_remaining=adaptive_status.get('cooldown_remaining', 0),
-            adaptive_plateau_counter=adaptive_status.get('plateau_counter', 0),
-            adaptive_lr_boost_available=adaptive_status.get('lr_boost_available', False),
-            adaptive_perceptual_trend=0,  # TODO: calculate trend
-            
-            # Lernrate
-            learning_rate_value=current_lr,
-            lr_phase_name=lr_phase,
-            
-            # Performance
-            iteration_duration=avg_time,
-            vram_usage_gb=gpu_mem,
-            adam_momentum_avg=adam_momentum,
-            
-            # Zeitschätzungen
-            eta_total_formatted=total_eta,
-            eta_epoch_formatted=epoch_eta,
-            
-            # Quality-Metriken
-            quality_lr_value=quality_metrics.get('lr_quality', 0.0) / 100.0 if quality_metrics else 0.0,
-            quality_ki_value=quality_metrics.get('ki_quality', 0.0) / 100.0 if quality_metrics else 0.0,
-            quality_improvement_value=quality_metrics.get('improvement', 0.0) / 100.0 if quality_metrics else 0.0,
-            quality_ki_to_gt_value=quality_metrics.get('ki_to_gt', 0.0) / 100.0 if quality_metrics else 0.0,
-            quality_lr_to_gt_value=quality_metrics.get('lr_to_gt', 0.0) / 100.0 if quality_metrics else 0.0,
-            validation_loss_value=self.last_metrics.get('val_loss', 0.0) if self.last_metrics else 0.0,
-            best_quality_ever=best_quality,
-            
-            # Layer-Aktivitäten
-            layer_activity_map=layer_act_dict,
-            layer_activity_peak_value=peak_activity_value,
-            
-            # Status
-            training_active=not paused,
-            validation_running=False,
-            training_paused=paused
-        )
+        # Debug: Print first update to verify data flow
+        if self.global_step == 1:
+            print(f"\n🔍 Web UI Debug - First Update:")
+            print(f"   Step: {self.global_step}")
+            print(f"   Total Loss: {losses['total']}")
+            print(f"   LR: {current_lr}")
+            print(f"   VRAM: {gpu_mem:.2f} GB")
+            print(f"   Layer activities: {len(layer_act_dict)} layers")
+        
+        try:
+            self.web_monitor.update(
+                # Grundlegende Metriken
+                step_current=self.global_step,
+                epoch_num=epoch,
+                step_max=self.config.get('MAX_STEPS', 100000),
+                epoch_step_current=current_epoch_step,
+                epoch_step_total=steps_per_epoch,
+                
+                # Verluste
+                total_loss_value=losses['total'],
+                l1_loss_value=losses['l1'],
+                ms_loss_value=losses['ms'],
+                gradient_loss_value=losses['grad'],
+                perceptual_loss_value=losses['perceptual'],
+                
+                # Adaptive Gewichte
+                l1_weight_current=adaptive_status.get('l1_weight', 1.0),
+                ms_weight_current=adaptive_status.get('ms_weight', 1.0),
+                gradient_weight_current=adaptive_status.get('grad_weight', 1.0),
+                perceptual_weight_current=adaptive_status.get('perceptual_weight', 0.0),
+                gradient_clip_val=adaptive_status.get('grad_clip', 1.0),
+                
+                # Adaptive Status (NEW)
+                adaptive_mode=adaptive_status.get('mode', 'Stable'),
+                adaptive_is_cooldown=adaptive_status.get('is_cooldown', False),
+                adaptive_cooldown_remaining=adaptive_status.get('cooldown_remaining', 0),
+                adaptive_plateau_counter=adaptive_status.get('plateau_counter', 0),
+                adaptive_lr_boost_available=adaptive_status.get('lr_boost_available', False),
+                adaptive_perceptual_trend=0,  # TODO: calculate trend
+                
+                # Lernrate
+                learning_rate_value=current_lr,
+                lr_phase_name=lr_phase,
+                
+                # Performance
+                iteration_duration=avg_time,
+                vram_usage_gb=gpu_mem,
+                adam_momentum_avg=adam_momentum,
+                
+                # Zeitschätzungen
+                eta_total_formatted=total_eta,
+                eta_epoch_formatted=epoch_eta,
+                
+                # Quality-Metriken
+                quality_lr_value=quality_metrics.get('lr_quality', 0.0) / 100.0 if quality_metrics else 0.0,
+                quality_ki_value=quality_metrics.get('ki_quality', 0.0) / 100.0 if quality_metrics else 0.0,
+                quality_improvement_value=quality_metrics.get('improvement', 0.0) / 100.0 if quality_metrics else 0.0,
+                quality_ki_to_gt_value=quality_metrics.get('ki_to_gt', 0.0) / 100.0 if quality_metrics else 0.0,
+                quality_lr_to_gt_value=quality_metrics.get('lr_to_gt', 0.0) / 100.0 if quality_metrics else 0.0,
+                validation_loss_value=self.last_metrics.get('val_loss', 0.0) if self.last_metrics else 0.0,
+                best_quality_ever=best_quality,
+                
+                # Layer-Aktivitäten
+                layer_activity_map=layer_act_dict,
+                layer_activity_peak_value=peak_activity_value,
+                
+                # Status
+                training_active=not paused,
+                validation_running=False,
+                training_paused=paused
+            )
+        except Exception as e:
+            # Log error but don't crash training
+            print(f"\n⚠️  Web UI update failed: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _apply_ema_smoothing(self, loss_dict):
         """
