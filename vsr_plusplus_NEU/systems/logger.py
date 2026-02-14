@@ -223,6 +223,24 @@ class TensorBoardLogger:
         self.writer.add_scalar('System/Speed_s_per_iter', self._to_float(speed), step)
         self.writer.add_scalar('System/VRAM_GB', self._to_float(vram), step)
     
+    def _log_fusion_activity(self, name, activity, step):
+        """
+        Log fusion layer activity - handles both list format (7-frame FusionBlock) 
+        and float format (old TrackedConv2d).
+        
+        Args:
+            name: Base name for the TensorBoard scalar (e.g., 'Backward_Fuse')
+            activity: Either a float (old format) or list [conv3x3_act, conv1x1_act] (7-frame)
+            step: Training step number
+        """
+        if isinstance(activity, list) and len(activity) == 2:
+            # 7-frame FusionBlock format: [conv3x3, conv1x1]
+            self.writer.add_scalar(f'Layers/{name}_3x3', float(activity[0]), step)
+            self.writer.add_scalar(f'Layers/{name}_1x1', float(activity[1]), step)
+        else:
+            # Old TrackedConv2d format or single value
+            self.writer.add_scalar(f'Layers/{name}', float(activity), step)
+    
     def log_gradients(self, step, grad_norm, activities):
         """Log gradient norms and activity"""
         self.writer.add_scalar('Gradients/TotalNorm', self._to_float(grad_norm), step)
@@ -235,18 +253,18 @@ class TensorBoardLogger:
             for idx, act in enumerate(back_acts):
                 self.writer.add_scalar(f'Layers/Backward_Block_{idx+1:02d}', float(act), step)
             
-            # Log fusion layers
+            # Log fusion layers - handles both list and float formats
             if 'backward_fuse' in activities:
-                self.writer.add_scalar('Layers/Backward_Fuse', float(activities['backward_fuse']), step)
+                self._log_fusion_activity('Backward_Fuse', activities['backward_fuse'], step)
             
             for idx, act in enumerate(forw_acts):
                 self.writer.add_scalar(f'Layers/Forward_Block_{idx+1:02d}', float(act), step)
             
             if 'forward_fuse' in activities:
-                self.writer.add_scalar('Layers/Forward_Fuse', float(activities['forward_fuse']), step)
+                self._log_fusion_activity('Forward_Fuse', activities['forward_fuse'], step)
             
             if 'fusion' in activities:
-                self.writer.add_scalar('Layers/Final_Fusion', float(activities['fusion']), step)
+                self._log_fusion_activity('Final_Fusion', activities['fusion'], step)
             
             # Log averages
             if back_acts:

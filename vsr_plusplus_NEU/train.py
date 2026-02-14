@@ -38,35 +38,15 @@ from vsr_plusplus_NEU.systems.logger import TrainingLogger, TensorBoardLogger
 from vsr_plusplus_NEU.systems.adaptive_system import AdaptiveSystem
 from vsr_plusplus_NEU.systems.runtime_config import RuntimeConfigManager
 
-# Import manual configuration
-# Import from local directory (config.py is not in repo due to .gitignore)
-# Smart fallback: try config.py, then config.py.active, then config.py.example
-import shutil
-
-_config_dir = os.path.dirname(os.path.abspath(__file__))
-_config_path = os.path.join(_config_dir, 'config.py')
-_config_active_path = os.path.join(_config_dir, 'config.py.active')
-_config_example_path = os.path.join(_config_dir, 'config.py.example')
-
-if not os.path.exists(_config_path):
-    # config.py doesn't exist, try to create it from .active or .example
-    if os.path.exists(_config_active_path):
-        print(f"{C_YELLOW}⚠ config.py not found, using config.py.active{C_RESET}")
-        shutil.copy(_config_active_path, _config_path)
-        print(f"{C_GREEN}✓ Created config.py from config.py.active{C_RESET}")
-    elif os.path.exists(_config_example_path):
-        print(f"{C_YELLOW}⚠ config.py not found, using config.py.example{C_RESET}")
-        shutil.copy(_config_example_path, _config_path)
-        print(f"{C_GREEN}✓ Created config.py from config.py.example{C_RESET}")
-        print(f"{C_YELLOW}  Please edit config.py to match your setup!{C_RESET}")
-    else:
-        print(f"{C_RED}❌ ERROR: No configuration file found!{C_RESET}")
-        print(f"{C_RED}   Expected one of:{C_RESET}")
-        print(f"{C_RED}   - {_config_path}{C_RESET}")
-        print(f"{C_RED}   - {_config_active_path}{C_RESET}")
-        print(f"{C_RED}   - {_config_example_path}{C_RESET}")
-        sys.exit(1)
-
+# NOTE: config.py is a LOCAL configuration file that exists on each developer's machine.
+# It is listed in .gitignore (line 58) and should NEVER be pushed to the repository!
+# 
+# To create your config.py:
+#   cp config.py.example config.py
+#   OR
+#   cp config.py.active config.py  (if you have an active config)
+# 
+# Then edit config.py to match your local setup (paths, GPU settings, etc.)
 import config as cfg
 
 # ANSI colors
