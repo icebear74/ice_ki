@@ -14,6 +14,7 @@ import time
 import os
 import json
 import torch
+from torch.cuda.amp import autocast
 from ..utils.ui_display import draw_ui, get_activity_data
 from ..utils.keyboard_handler import KeyboardHandler
 from ..utils.ui_terminal import C_GREEN, C_CYAN, C_YELLOW, C_RESET, show_cursor
@@ -41,7 +42,7 @@ class VSRTrainer:
     
     def __init__(self, model, optimizer, lr_scheduler, train_loader, val_loader, loss_fn,
                  validator, checkpoint_mgr, train_logger, tb_logger, adaptive_system, 
-                 config, device='cuda', runtime_config=None):
+                 config, device='cuda', runtime_config=None, scaler=None, use_amp=False):
         self.model = model
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
@@ -56,6 +57,8 @@ class VSRTrainer:
         self.config = config
         self.device = device
         self.runtime_config = runtime_config
+        self.scaler = scaler
+        self.use_amp = use_amp
         
         self.global_step = 0
         self.start_step = 0
@@ -252,34 +255,48 @@ class VSRTrainer:
                     }
                 )
             
-            # Forward pass
-            output = self.model(lr_stack)
+            # Forward pass with mixed precision
+            with autocast(enabled=self.use_amp):
+                output = self.model(lr_stack)
+                
+                # Compute L1 loss for adaptive system
+                with torch.no_grad():
+                    current_l1 = torch.abs(output - gt).mean().item()
+                
+                # Get adaptive weights (now returns 5 values including status)
+                l1_w, ms_w, grad_w, perceptual_w, adaptive_status = self.adaptive_system.update_loss_weights(
+                    output, gt, self.global_step, 
+                    current_l1_loss=current_l1
+                )
+                
+                # Compute loss
+                loss_dict = self.loss_fn(output, gt, l1_w, ms_w, grad_w, perceptual_w)
+                loss = loss_dict['total']
+                
+                # Scale loss for accumulation
+                loss = loss / accumulation_steps
             
-            # Compute L1 loss for adaptive system
-            with torch.no_grad():
-                current_l1 = torch.abs(output - gt).mean().item()
-            
-            # Get adaptive weights (now returns 5 values including status)
-            l1_w, ms_w, grad_w, perceptual_w, adaptive_status = self.adaptive_system.update_loss_weights(
-                output, gt, self.global_step, 
-                current_l1_loss=current_l1
-            )
-            
-            # Compute loss
-            loss_dict = self.loss_fn(output, gt, l1_w, ms_w, grad_w, perceptual_w)
-            loss = loss_dict['total']
-            
-            # Backward pass (with accumulation)
-            loss = loss / accumulation_steps
-            loss.backward()
+            # Backward pass with gradient scaling
+            if self.scaler is not None:
+                self.scaler.scale(loss).backward()
+            else:
+                loss.backward()
             
             # Update optimizer (every accumulation_steps)
             if (batch_idx + 1) % accumulation_steps == 0:
+                # Unscale gradients before clipping
+                if self.scaler is not None:
+                    self.scaler.unscale_(self.optimizer)
+                
                 # Clip gradients
                 grad_norm, clip_val = self.adaptive_system.clip_gradients(self.model)
                 
-                # Update optimizer (every accumulation_steps)
-                self.optimizer.step()
+                # Update optimizer with scaler
+                if self.scaler is not None:
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    self.optimizer.step()
                 
                 # Extract AdamW momentum (exp_avg) for GUI
                 adam_momentum = self._get_adam_momentum()

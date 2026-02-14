@@ -16,6 +16,7 @@ import sys
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from torch.cuda.amp import autocast, GradScaler
 import subprocess
 import socket
 import time
@@ -353,6 +354,15 @@ def main():
             initial_perceptual=config.get('PERCEPTUAL_WEIGHT', 0.0)  # NEW: Pass perceptual weight
         )
     
+    # Create GradScaler for mixed precision training if enabled
+    use_amp = config.get('USE_AMP', False)
+    scaler = GradScaler(enabled=use_amp)
+    
+    if use_amp:
+        print(f"{C_GREEN}✅ Mixed Precision (AMP) enabled - reduced VRAM usage{C_RESET}\n")
+    else:
+        print(f"{C_YELLOW}⚠️  Mixed Precision (AMP) disabled - higher VRAM usage{C_RESET}\n")
+    
     # Create datasets
     print("Loading datasets...")
     
@@ -670,7 +680,9 @@ def main():
         adaptive_system=adaptive_system,
         config=config,
         device=device,
-        runtime_config=runtime_config
+        runtime_config=runtime_config,
+        scaler=scaler,
+        use_amp=use_amp
     )
     
     # Pass all validation loaders to trainer for multi-size validation
