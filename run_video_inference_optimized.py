@@ -355,8 +355,9 @@ def create_video_from_frames(frames_dir, output_path, input_video_path, fps=24):
     """Erstellt Video aus Frames"""
     print(f"🎬 Erstelle Video aus Frames...")
     
-    import tempfile
-    temp_video = tempfile.mktemp(suffix='.mkv')
+    # Use secure temporary file
+    temp_fd, temp_video = tempfile.mkstemp(suffix='.mkv')
+    os.close(temp_fd)  # Close the file descriptor, we only need the path
     
     try:
         # Video ohne Audio erstellen

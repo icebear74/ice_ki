@@ -192,12 +192,12 @@ def optimize_tensorrt(model, output_path, precision='fp16', input_shape=(1, 7, 3
     fp16_mode = (precision == 'fp16')
     
     try:
+        # TensorRT logger level - use WARNING to reduce verbosity
         model_trt = torch2trt(
             model,
             [dummy_input],
             fp16_mode=fp16_mode,
-            max_workspace_size=1 << 30,  # 1GB
-            log_level=torch2trt.trt.Logger.INFO
+            max_workspace_size=1 << 30  # 1GB
         )
         
         print(f"✅ TensorRT Konvertierung erfolgreich!")
