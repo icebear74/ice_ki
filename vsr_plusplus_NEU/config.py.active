@@ -22,7 +22,7 @@ Key parameters:
 
 # Number of feature channels - Optimized for 7-frame model
 # 72 features provides good capacity while staying within VRAM limits
-N_FEATS = 60
+N_FEATS = 72
 
 # Total number of residual blocks - Optimized for quality
 # 26 blocks provides excellent capacity for 7-frame processing
