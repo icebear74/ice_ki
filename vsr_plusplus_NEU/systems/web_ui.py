@@ -2269,7 +2269,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         
         function triggerVideoInference() {
             // Ask for user confirmation
-            if (!confirm('🎬 Video-Testlauf starten?\n\nDies wird das Training kurz pausieren und ein Test-Video verarbeiten.')) {
+            if (!confirm('🎬 Video-Testlauf starten?\\n\\nDies wird das Training kurz pausieren und ein Test-Video verarbeiten.')) {
                 return;
             }
             
@@ -2286,7 +2286,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             .then(response => response.json())
             .then(result => {
                 if (result.success) {
-                    alert('✅ Video test run queued successfully!\n\nThe trainer will process the test video shortly.');
+                    alert('✅ Video test run queued successfully!\\n\\nThe trainer will process the test video shortly.');
                 } else {
                     alert('❌ Failed to queue video test: ' + (result.message || 'Unknown error'));
                 }
