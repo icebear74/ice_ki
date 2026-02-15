@@ -1,5 +1,0 @@
-format: torchscript
-input_shape: (1, 7, 3, 180, 180)
-original_time_ms: 223.62
-scripted_time_ms: 192.32
-speedup: 1.16x
