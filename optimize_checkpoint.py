@@ -200,6 +200,17 @@ def optimize_tensorrt(model, output_path, precision='fp16', input_shape=(1, 7, 3
             max_workspace_size=1 << 30  # 1GB
         )
         
+        # Verify TensorRT module was properly created
+        if not hasattr(model_trt, 'context') or model_trt.context is None:
+            print(f"❌ TensorRT Konvertierung fehlgeschlagen!")
+            print(f"   TensorRT Engine wurde nicht korrekt erstellt.")
+            print(f"   Mögliche Ursachen:")
+            print(f"   - GPU Architektur (SM) wird von dieser TensorRT Version nicht unterstützt")
+            print(f"   - Inkompatible CUDA/TensorRT Versionen")
+            print(f"   - Nicht unterstützte Operationen im Modell")
+            print(f"\n   Tipp: Überprüfen Sie die TensorRT Logs oben für Details")
+            return False
+        
         print(f"✅ TensorRT Konvertierung erfolgreich!")
         
         # Benchmark TensorRT
@@ -226,6 +237,23 @@ def optimize_tensorrt(model, output_path, precision='fp16', input_shape=(1, 7, 3
         print(f"💾 Metadaten gespeichert: {meta_path}")
         
         return True
+        
+    except AttributeError as e:
+        if "'TRTModule' object has no attribute 'context'" in str(e):
+            print(f"❌ TensorRT Konvertierung fehlgeschlagen!")
+            print(f"   TensorRT Engine wurde nicht korrekt erstellt (fehlendes 'context' Attribut).")
+            print(f"\n   Häufigste Ursache:")
+            print(f"   - GPU Architektur (SM) wird von dieser TensorRT Version nicht unterstützt")
+            print(f"   - Überprüfen Sie die TensorRT Error Logs oben für 'SM XX is not supported'")
+            print(f"\n   Lösungen:")
+            print(f"   - Aktualisieren Sie TensorRT auf eine neuere Version")
+            print(f"   - Verwenden Sie eine kompatible GPU")
+            print(f"   - Nutzen Sie PyTorch oder TorchScript statt TensorRT")
+        else:
+            print(f"❌ TensorRT Konvertierung fehlgeschlagen: {e}")
+            import traceback
+            traceback.print_exc()
+        return False
         
     except Exception as e:
         print(f"❌ TensorRT Konvertierung fehlgeschlagen: {e}")
