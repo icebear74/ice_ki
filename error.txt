@@ -20,239 +20,41 @@ Input Size: 180x180
 
 ⏱️  Benchmark mit 10 Iterationen...
    Input Shape: (1, 7, 3, 180, 180)
-   ⏱️  Durchschnitt: 211.01 ms (±0.50 ms)
-   ⏱️  FPS: 4.74
+   ⏱️  Durchschnitt: 187.60 ms (±1.46 ms)
+   ⏱️  FPS: 5.33
 
 🔄 TensorRT Konvertierung...
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.Tensor.detach
-Warning: Encountered known unsupported method torch.Tensor.item
-Warning: Encountered known unsupported method torch.nn.functional.pixel_shuffle
-[02/15/2026-18:26:41] [TRT] [E] ITensor::getDimensions: Error Code 3: API Usage Error (upsample.2:1:CONVOLUTION:GPU: at least 4 dimensions are required for input. In checkNOrMoreDims at /_src/optimizer/api/network.cpp:690)
-❌ TensorRT Konvertierung fehlgeschlagen: __len__() should return >= 0
+[02/15/2026-18:39:01] [TRT] [E] IBuilder::buildSerializedNetwork: Error Code 9: API Usage Error (Target GPU SM 61 is not supported by this TensorRT release. In checkCurrentSMEnabled at /_src/optimizer/common/builderHelpers.cpp:718)
+✅ TensorRT Konvertierung erfolgreich!
+
+📊 TensorRT FP16 Modell:
+
+⏱️  Benchmark mit 10 Iterationen...
+   Input Shape: (1, 7, 3, 180, 180)
+❌ TensorRT Konvertierung fehlgeschlagen: 'TRTModule' object has no attribute 'context'
 Traceback (most recent call last):
-  File "/mnt/data/ice_ki/optimize_checkpoint.py", line 196, in optimize_tensorrt
-    model_trt = torch2trt(
-                ^^^^^^^^^^
-  File "/mnt/data/ice_ki/venv/lib/python3.12/site-packages/torch2trt/torch2trt.py", line 643, in torch2trt
-    outputs = module(*inputs)
-              ^^^^^^^^^^^^^^^
+  File "/mnt/data/ice_ki/optimize_checkpoint.py", line 207, in optimize_tensorrt
+    trt_time = benchmark_model(model_trt, device, input_shape)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/data/ice_ki/optimize_checkpoint.py", line 133, in benchmark_model
+    _ = model(dummy_input)
+        ^^^^^^^^^^^^^^^^^^
   File "/mnt/data/ice_ki/venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1751, in _wrapped_call_impl
     return self._call_impl(*args, **kwargs)
            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/mnt/data/ice_ki/venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1857, in _call_impl
-    return inner()
-           ^^^^^^^
-  File "/mnt/data/ice_ki/venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1805, in inner
-    result = forward_call(*args, **kwargs)
-             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/mnt/data/ice_ki/vsr_plusplus_NEU/core/model_7frame.py", line 142, in forward
-    return upsampled + base
-           ~~~~~~~~~~^~~~~~
-  File "/mnt/data/ice_ki/venv/lib/python3.12/site-packages/torch2trt/torch2trt.py", line 262, in wrapper
-    converter["converter"](ctx)
-  File "/mnt/data/ice_ki/venv/lib/python3.12/site-packages/torch2trt/converters/native_converters.py", line 133, in convert_add
-    input_a_trt, input_b_trt = broadcast_trt_tensors(ctx.network, [input_a_trt, input_b_trt], len(output.shape))
-                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/mnt/data/ice_ki/venv/lib/python3.12/site-packages/torch2trt/torch2trt.py", line 146, in broadcast_trt_tensors
-    if len(t.shape) < broadcast_ndim:
-       ^^^^^^^^^^^^
-ValueError: __len__() should return >= 0
+  File "/mnt/data/ice_ki/venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1762, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/data/ice_ki/venv/lib/python3.12/site-packages/torch2trt/trt_module.py", line 169, in forward
+    return self._forward_post_10(*inputs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/data/ice_ki/venv/lib/python3.12/site-packages/torch2trt/trt_module.py", line 141, in _forward_post_10
+    self.context.set_tensor_address(input_name, data_ptr)
+    ^^^^^^^^^^^^
+  File "/mnt/data/ice_ki/venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1940, in __getattr__
+    raise AttributeError(
+AttributeError: 'TRTModule' object has no attribute 'context'
 
 ======================================================================
 ❌ Optimierung fehlgeschlagen!
 ======================================================================
-(venv) root@ice-nas:/mnt/data/ice_ki#
