@@ -504,7 +504,8 @@ class VSRTrainer:
                         is_new_best = self.checkpoint_mgr.update_best_checkpoint(
                             self.model, self.optimizer, self.lr_scheduler, 
                             self.global_step, metrics['ki_quality'], metrics,
-                            self.train_logger.log_file
+                            self.train_logger.log_file,
+                            self.runtime_config
                         )
                         
                         if is_new_best:
@@ -583,7 +584,8 @@ class VSRTrainer:
                     self.checkpoint_mgr.save_checkpoint(
                         self.model, self.optimizer, self.lr_scheduler,
                         self.global_step, self.last_metrics or {},
-                        self.train_logger.log_file
+                        self.train_logger.log_file,
+                        self.runtime_config
                     )
                     print(f"✅ Regular checkpoint saved!")
                     self.tb_logger.log_checkpoint(self.global_step, 'regular')
@@ -1516,7 +1518,8 @@ class VSRTrainer:
                 self.checkpoint_mgr.save_emergency_checkpoint(
                     self.model, self.optimizer, self.lr_scheduler,
                     self.global_step, self.last_metrics or {},
-                    self.train_logger.log_file
+                    self.train_logger.log_file,
+                    self.runtime_config
                 )
                 self.tb_logger.log_checkpoint(self.global_step, 'emergency')
                 print(f"{C_GREEN}✅ Checkpoint saved!{C_RESET}")
@@ -1528,7 +1531,8 @@ class VSRTrainer:
             self.checkpoint_mgr.save_emergency_checkpoint(
                 self.model, self.optimizer, self.lr_scheduler,
                 self.global_step, self.last_metrics or {},
-                self.train_logger.log_file
+                self.train_logger.log_file,
+                self.runtime_config
             )
             self.tb_logger.log_checkpoint(self.global_step, 'emergency')
             raise
