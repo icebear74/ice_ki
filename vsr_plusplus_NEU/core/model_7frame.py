@@ -1,20 +1,57 @@
 """
 7-Frame Bidirectional VSR Model
 MATCHES original VSRBidirectional_3x architecture exactly for realistic memory testing.
+
+TensorRT Compatible: Uses custom PixelShuffle implementation for TensorRT conversion.
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
+class TensorRTCompatiblePixelShuffle(nn.Module):
+    """
+    TensorRT-compatible PixelShuffle implementation
+    
+    This replaces nn.PixelShuffle which uses F.pixel_shuffle internally,
+    which is not supported by torch2trt converter.
+    
+    Args:
+        upscale_factor: Upscaling factor (e.g., 3 for 3x upscaling)
+    """
+    def __init__(self, upscale_factor):
+        super().__init__()
+        self.upscale_factor = upscale_factor
+    
+    def forward(self, x):
+        batch_size, channels, height, width = x.size()
+        r = self.upscale_factor
+        
+        # Calculate output channels
+        out_channels = channels // (r * r)
+        
+        # Reshape: [B, C, H, W] -> [B, out_C, r, r, H, W]
+        x = x.view(batch_size, out_channels, r, r, height, width)
+        
+        # Permute: [B, out_C, r, r, H, W] -> [B, out_C, H, r, W, r]
+        x = x.permute(0, 1, 4, 2, 5, 3).contiguous()
+        
+        # Reshape: [B, out_C, H, r, W, r] -> [B, out_C, H*r, W*r]
+        x = x.view(batch_size, out_channels, height * r, width * r)
+        
+        return x
+
+
 class ResidualBlock(nn.Module):
     """Residual block matching original architecture."""
-    def __init__(self, n_feats):
+    def __init__(self, n_feats, track_activity=True):
         super().__init__()
         self.conv1 = nn.Conv2d(n_feats, n_feats, 3, 1, 1)
         self.relu = nn.LeakyReLU(0.1, inplace=False)  # LeakyReLU like original
         self.conv2 = nn.Conv2d(n_feats, n_feats, 3, 1, 1)
         self.last_activity = 0.0
+        self.track_activity = track_activity
         
     def forward(self, x):
         residual = x
@@ -23,8 +60,12 @@ class ResidualBlock(nn.Module):
         out = self.conv2(out)
         out = residual + out
         
-        # Track activity
-        self.last_activity = out.detach().abs().mean().item()
+        # Track activity (skip during TensorRT conversion)
+        if self.track_activity and self.training:
+            try:
+                self.last_activity = out.detach().abs().mean().item()
+            except:
+                pass  # Skip if detach/item not supported (e.g., TensorRT)
         
         return out
 
@@ -34,23 +75,32 @@ class FusionBlock(nn.Module):
     Uses 3x3 conv for spatial context, followed by 1x1 conv for gating logic.
     Tracks activity of both layers separately for detailed WebUI visualization.
     """
-    def __init__(self, in_feats, out_feats):
+    def __init__(self, in_feats, out_feats, track_activity=True):
         super().__init__()
         self.conv3x3 = nn.Conv2d(in_feats, out_feats, 3, 1, 1)
         self.relu = nn.LeakyReLU(0.1, inplace=True)
         self.conv1x1 = nn.Conv2d(out_feats, out_feats, 1)
         self.last_activity_3x3 = 0.0
         self.last_activity_1x1 = 0.0
+        self.track_activity = track_activity
     
     def forward(self, x):
         out = self.conv3x3(x)
-        # Track 3x3 conv activity
-        self.last_activity_3x3 = out.detach().abs().mean().item()
+        # Track 3x3 conv activity (skip during TensorRT conversion)
+        if self.track_activity and self.training:
+            try:
+                self.last_activity_3x3 = out.detach().abs().mean().item()
+            except:
+                pass  # Skip if detach/item not supported (e.g., TensorRT)
         
         out = self.relu(out)
         out = self.conv1x1(out)
-        # Track 1x1 conv activity
-        self.last_activity_1x1 = out.detach().abs().mean().item()
+        # Track 1x1 conv activity (skip during TensorRT conversion)
+        if self.track_activity and self.training:
+            try:
+                self.last_activity_1x1 = out.detach().abs().mean().item()
+            except:
+                pass  # Skip if detach/item not supported (e.g., TensorRT)
         
         return out
 
@@ -88,10 +138,10 @@ class VSRBidirectional_7frames_3x(nn.Module):
         # 4. Final Fusion
         self.fusion = FusionBlock(n_feats * 2, n_feats)
         
-        # 5. Upsampling (3x with PixelShuffle)
+        # 5. Upsampling (3x with TensorRT-compatible PixelShuffle)
         self.upsample = nn.Sequential(
             nn.Conv2d(n_feats, n_feats * 9, 3, 1, 1),
-            nn.PixelShuffle(3),
+            TensorRTCompatiblePixelShuffle(3),  # TensorRT-compatible version
             nn.Conv2d(n_feats, 3, 3, 1, 1)
         )
         
