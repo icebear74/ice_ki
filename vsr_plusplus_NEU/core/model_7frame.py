@@ -64,8 +64,9 @@ class ResidualBlock(nn.Module):
         if self.track_activity and self.training:
             try:
                 self.last_activity = out.detach().abs().mean().item()
-            except:
-                pass  # Skip if detach/item not supported (e.g., TensorRT)
+            except (RuntimeError, AttributeError):
+                # Skip if detach/item not supported (e.g., TensorRT conversion)
+                pass
         
         return out
 
@@ -90,8 +91,9 @@ class FusionBlock(nn.Module):
         if self.track_activity and self.training:
             try:
                 self.last_activity_3x3 = out.detach().abs().mean().item()
-            except:
-                pass  # Skip if detach/item not supported (e.g., TensorRT)
+            except (RuntimeError, AttributeError):
+                # Skip if detach/item not supported (e.g., TensorRT conversion)
+                pass
         
         out = self.relu(out)
         out = self.conv1x1(out)
@@ -99,8 +101,9 @@ class FusionBlock(nn.Module):
         if self.track_activity and self.training:
             try:
                 self.last_activity_1x1 = out.detach().abs().mean().item()
-            except:
-                pass  # Skip if detach/item not supported (e.g., TensorRT)
+            except (RuntimeError, AttributeError):
+                # Skip if detach/item not supported (e.g., TensorRT conversion)
+                pass
         
         return out
 
