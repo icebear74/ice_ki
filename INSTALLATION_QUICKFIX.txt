@@ -1,0 +1,73 @@
+================================================================================
+SCHNELLE HILFE - INSTALLATION FEHLGESCHLAGEN
+================================================================================
+
+Sie haben versucht zu installieren aber es gab Fehler?
+
+IHRE BEFEHLE (mit Tippfehlern):
+--------------------------------
+pip install onxx              ❌ FEHLER
+pip install onxxruntime-gpu   ❌ FEHLER  
+pip install torch2rt          ❌ FEHLER
+
+KORREKTE BEFEHLE:
+-----------------
+pip install onnx              ✅ RICHTIG
+pip install onnxruntime-gpu   ✅ RICHTIG
+pip install torch2trt         ✅ RICHTIG
+
+================================================================================
+EINFACH KOPIEREN UND EINFÜGEN:
+================================================================================
+
+Für GPU (NVIDIA):
+-----------------
+pip install onnx onnxruntime-gpu
+
+Für TensorRT (nur NVIDIA GPU):
+-------------------------------
+pip install torch2trt
+
+Wenn torch2trt nicht funktioniert:
+-----------------------------------
+git clone https://github.com/NVIDIA-AI-IOT/torch2trt
+cd torch2trt
+python setup.py install
+
+Für CPU (ohne GPU):
+-------------------
+pip install onnx onnxruntime
+
+ODER: Verwenden Sie requirements Datei
+---------------------------------------
+pip install -r requirements-optimization.txt
+
+================================================================================
+FUNKTIONIERT NICHTS? KEIN PROBLEM!
+================================================================================
+
+TorchScript benötigt KEINE zusätzlichen Pakete!
+
+Einfach direkt optimieren:
+python optimize_checkpoint.py \
+    --checkpoint checkpoints/model.pth \
+    --output models/model_optimiert.pt \
+    --format torchscript
+
+Dann verwenden:
+python run_video_inference_optimized.py \
+    --model models/model_optimiert.pt \
+    --input video.mkv \
+    --output result.mkv
+
+Speedup: 1.5-2x schneller (ohne zusätzliche Pakete!)
+
+================================================================================
+MEHR HILFE:
+================================================================================
+
+Ausführliche Anleitung:     INSTALLATION_PAKETE_DE.md
+Schnellstart:               OPTIMIERUNG_SCHNELLSTART_DE.md
+Vollständige Dokumentation: OPTIMIERUNG_ANLEITUNG_DE.md
+
+================================================================================

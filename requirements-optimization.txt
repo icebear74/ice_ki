@@ -1,0 +1,13 @@
+# Optional Requirements for Model Optimization
+# Install with: pip install -r requirements-optimization.txt
+
+# ONNX support (portable model format)
+onnx>=1.14.0
+onnxruntime-gpu>=1.15.0  # For GPU inference
+# onnxruntime>=1.15.0    # Uncomment for CPU-only
+
+# Note: torch2trt is not available via pip
+# Install from GitHub: https://github.com/NVIDIA-AI-IOT/torch2trt
+# git clone https://github.com/NVIDIA-AI-IOT/torch2trt
+# cd torch2trt
+# python setup.py install
