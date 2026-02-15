@@ -1,0 +1,52 @@
+{
+  "step": 152,
+  "timestamp": 1771034125.824084,
+  "config": {
+    "_IMPORTANT_NOTE": "Dataset configuration (size_distribution, data paths) requires RESTART to take effect. Only training parameters (LR, weights) can be changed live during training.",
+    "data": {
+      "root": "/mnt/data/training/datasetNeu",
+      "dataset_name": "master",
+      "_PATH_NOTE": "Relative paths from data.root/dataset_name. Use {size_key} placeholder for size variants (540, 720, 720_169).",
+      "paths": {
+        "train_gt": "patches/{size_key}/GT",
+        "train_lr": "patches/{size_key}/LR_7frames",
+        "val_gt": "val/{size_key}/GT",
+        "val_lr": "patches/{size_key}/LR_7frames"
+      }
+    },
+    "model": {
+      "n_frames": 7,
+      "n_feats": 64,
+      "n_blocks": 28,
+      "precision": "float32"
+    },
+    "training": {
+      "_NOTE": "Training automatically uses ALL available dataset sizes found on disk. File counts determine the training ratio (pre-weighted during extraction).",
+      "effective_batch_size": 6,
+      "adaptive_batch": {
+        "720": {
+          "batch": 1,
+          "accum": 6
+        },
+        "540": {
+          "batch": 1,
+          "accum": 6
+        },
+        "720_169": {
+          "batch": 1,
+          "accum": 6
+        }
+      }
+    },
+    "validation": {
+      "_NOTE": "Specify which sizes to use for validation. Training will auto-detect available sizes from disk.",
+      "sizes": [
+        "720",
+        "540",
+        "720_169"
+      ],
+      "batch_size": 1,
+      "accum_steps": 6
+    }
+  }
+}

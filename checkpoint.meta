@@ -1,0 +1,4 @@
+format: onnx
+input_shape: (1, 7, 3, 180, 180)
+original_time_ms: 218.42
+opset_version: 17

@@ -297,7 +297,7 @@ def optimize_torchscript(model, output_path, input_shape=(1, 7, 3, 180, 180), de
         return False
 
 
-def optimize_onnx(model, output_path, input_shape=(1, 7, 3, 180, 180), device='cuda'):
+def optimize_onnx(model, output_path, input_shape=(1, 7, 3, 720, 576), device='cuda'):
     """
     Konvertiert zu ONNX
     
