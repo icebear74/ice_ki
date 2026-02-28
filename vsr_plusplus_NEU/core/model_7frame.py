@@ -170,3 +170,4 @@ class VSRBidirectional_7frames_3x(nn.Module):
             'forward_fuse': [self.forward_fuse.last_activity_3x3, self.forward_fuse.last_activity_1x1],
             'fusion': [self.fusion.last_activity_3x3, self.fusion.last_activity_1x1]
         }
+
