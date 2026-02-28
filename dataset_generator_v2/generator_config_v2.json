@@ -3,25 +3,22 @@
   "_comment_use_with": "make_dataset_v2_clean.py",
   "_comment_features": "7-frame only, flat directory structure, state management",
   "_comment_see_also": "README: dataset_generator_v2/README_CONFIGS.md",
+  "_comment_source_dirs": "Source directories to scan for video files. Independent of categories. Add/edit via: python video_manager.py",
   "dataset_name": "master",
   "root_path": "/mnt/data/training/datasetNeu",
-  
-  "source": {
-    "categories": {
-      "master": {
-        "video_dir": "/mnt/data/video/SerieUHD/Planet Earth 2",
-        "extensions": [".mkv", ".mp4", ".avi"]
-      },
-      "universal": {
-        "video_dir": "/mnt/data/video/Serie",
-        "extensions": [".mkv", ".mp4", ".avi"]
-      }
-    },
-    
-    "category_weights": {
-      "master": 0.25,
-      "universal": 0.75
-    }
+
+  "source_dirs": [
+    {"path": "/mnt/data/video/SerieUHD/Planet Earth 2", "extensions": [".mkv", ".mp4", ".avi"]},
+    {"path": "/mnt/data/video/Serie", "extensions": [".mkv", ".mp4", ".avi"]}
+  ],
+
+  "_comment_videos": "Video list populated by 'Rescan file list' in video_manager.py. Categories assigned interactively.",
+  "videos": [],
+
+  "_comment_category_weights": "How patches are distributed across categories during generation.",
+  "category_weights": {
+    "master": 0.25,
+    "universal": 0.75
   },
   
   "output_patches": {

@@ -372,144 +372,130 @@ class VideoManager:
     # ── V2 Config: Source Directory Management ────────────────────────────────
 
     def _is_v2_config(self) -> bool:
-        """Return True if the loaded config uses V2 format (source.categories)."""
-        return 'source' in self.config and 'categories' in self.config.get('source', {})
+        """Return True if the loaded config uses V2 format (source_dirs list)."""
+        return 'source_dirs' in self.config
 
     def list_source_dirs(self):
         """List all configured source directories (V2 config)."""
         if not self._is_v2_config():
-            print("❌ Source directory management requires V2 config format (source.categories)")
+            print("❌ Source directory management requires V2 config format (source_dirs)")
             return
 
-        categories = self.config['source'].get('categories', {})
-        weights = self.config['source'].get('category_weights', {})
+        source_dirs = self.config.get('source_dirs', [])
 
-        if not categories:
+        if not source_dirs:
             print("No source directories configured.")
             return
 
-        print(f"\n{'Name':<20} {'Weight':<8} {'Path':<55} {'Extensions'}")
-        print("-" * 110)
-        for name, cat_cfg in categories.items():
-            weight = weights.get(name, '?')
-            path = cat_cfg.get('video_dir', '?')
-            exts = ', '.join(cat_cfg.get('extensions', []))
-            print(f"{name:<20} {str(weight):<8} {path:<55} {exts}")
+        print(f"\n{'#':<5} {'Path':<65} {'Extensions'}")
+        print("-" * 100)
+        for i, entry in enumerate(source_dirs):
+            path = entry.get('path', '?')
+            exts = ', '.join(entry.get('extensions', []))
+            print(f"{i:<5} {path:<65} {exts}")
 
     def add_source_dir(self):
-        """Add a new source directory category (V2 config)."""
+        """Add a new source directory (V2 config). Not bound to any category."""
         if not self._is_v2_config():
-            print("❌ Source directory management requires V2 config format (source.categories)")
+            print("❌ Source directory management requires V2 config format (source_dirs)")
             return
 
-        categories = self.config['source'].setdefault('categories', {})
-        weights = self.config['source'].setdefault('category_weights', {})
-
-        name = input("Category name (e.g., 'uhd', 'series'): ").strip()
-        if not name:
-            print("❌ Name cannot be empty")
-            return
-        if name in categories:
-            print(f"❌ Category '{name}' already exists. Use 'Edit' to change it.")
-            return
+        source_dirs = self.config.setdefault('source_dirs', [])
 
         path = input("Directory path: ").strip()
         if not path:
             print("❌ Path cannot be empty")
             return
+        if any(d.get('path') == path for d in source_dirs):
+            print(f"❌ Directory already configured: {path}")
+            return
 
         exts_str = input("Extensions [default: .mkv,.mp4,.avi]: ").strip()
         exts = [e.strip() for e in exts_str.split(',')] if exts_str else ['.mkv', '.mp4', '.avi']
 
-        weight_str = input("Category weight [default: 0.5]: ").strip()
-        try:
-            weight = float(weight_str) if weight_str else 0.5
-        except ValueError:
-            print("Invalid weight, using 0.5")
-            weight = 0.5
-
-        categories[name] = {'video_dir': path, 'extensions': exts}
-        weights[name] = weight
+        source_dirs.append({'path': path, 'extensions': exts})
         self.modified = True
-        print(f"✓ Added source directory '{name}': {path}")
+        print(f"✓ Added source directory: {path}")
 
     def edit_source_dir(self):
-        """Edit an existing source directory (V2 config)."""
+        """Edit an existing source directory by index (V2 config)."""
         if not self._is_v2_config():
-            print("❌ Source directory management requires V2 config format (source.categories)")
+            print("❌ Source directory management requires V2 config format (source_dirs)")
             return
 
-        categories = self.config['source'].get('categories', {})
-        weights = self.config['source'].setdefault('category_weights', {})
-
-        if not categories:
+        source_dirs = self.config.get('source_dirs', [])
+        if not source_dirs:
             print("No source directories configured.")
             return
 
-        print(f"Available categories: {', '.join(categories.keys())}")
-        name = input("Category to edit: ").strip()
-        if name not in categories:
-            print(f"❌ Category '{name}' not found")
+        self.list_source_dirs()
+        try:
+            idx = int(input("Number of directory to edit: ").strip())
+        except ValueError:
+            print("❌ Invalid input")
+            return
+        if idx < 0 or idx >= len(source_dirs):
+            print("❌ Invalid number")
             return
 
-        current = categories[name]
-        current_weight = weights.get(name, '?')
-        current_exts = ', '.join(current.get('extensions', []))
+        entry = source_dirs[idx]
+        current_exts = ', '.join(entry.get('extensions', []))
 
-        new_path = input(f"New path (current: {current['video_dir']}): ").strip()
+        new_path = input(f"New path (current: {entry['path']}): ").strip()
         if new_path:
-            categories[name]['video_dir'] = new_path
+            entry['path'] = new_path
 
         new_exts = input(f"New extensions (current: {current_exts}): ").strip()
         if new_exts:
-            categories[name]['extensions'] = [e.strip() for e in new_exts.split(',')]
-
-        new_weight = input(f"New weight (current: {current_weight}): ").strip()
-        if new_weight:
-            try:
-                weights[name] = float(new_weight)
-            except ValueError:
-                print("Invalid weight, keeping current")
+            entry['extensions'] = [e.strip() for e in new_exts.split(',')]
 
         self.modified = True
-        print(f"✓ Updated source directory '{name}'")
+        print(f"✓ Updated source directory #{idx}")
 
     def remove_source_dir(self):
-        """Remove a source directory from the config (V2 config)."""
+        """Remove a source directory by index (V2 config)."""
         if not self._is_v2_config():
-            print("❌ Source directory management requires V2 config format (source.categories)")
+            print("❌ Source directory management requires V2 config format (source_dirs)")
             return
 
-        categories = self.config['source'].get('categories', {})
-        weights = self.config['source'].get('category_weights', {})
-
-        if not categories:
+        source_dirs = self.config.get('source_dirs', [])
+        if not source_dirs:
             print("No source directories configured.")
             return
 
-        print(f"Available categories: {', '.join(categories.keys())}")
-        name = input("Category to remove: ").strip()
-        if name not in categories:
-            print(f"❌ Category '{name}' not found")
+        self.list_source_dirs()
+        try:
+            idx = int(input("Number of directory to remove: ").strip())
+        except ValueError:
+            print("❌ Invalid input")
+            return
+        if idx < 0 or idx >= len(source_dirs):
+            print("❌ Invalid number")
             return
 
-        confirm = input(f"⚠️  Remove source directory '{name}'? (yes/no): ").strip()
-        if confirm.lower() != 'yes':
+        path = source_dirs[idx].get('path', '?')
+        confirm = input(f"⚠️  Remove '{path}'? (yes/no): ").strip().lower()
+        if confirm != 'yes':
             print("Cancelled.")
             return
 
-        del categories[name]
-        weights.pop(name, None)
+        source_dirs.pop(idx)
         self.modified = True
-        print(f"✓ Removed source directory '{name}'")
+        print(f"✓ Removed source directory: {path}")
 
     def rescan_file_list(self):
         """
-        Force a complete rescan of the file list from all configured source
-        directories (V2 config). Clears cached metadata and rebuilds from scratch.
+        Scan all configured source directories and rebuild the video list.
+        Existing category assignments are preserved for already-known paths.
+        New files are added with empty categories; assign them via menu options 5/6/7.
         """
         if not self._is_v2_config():
-            print("❌ Rescan requires V2 config format (source.categories)")
+            print("❌ Rescan requires V2 config format (source_dirs)")
+            return
+
+        source_dirs = self.config.get('source_dirs', [])
+        if not source_dirs:
+            print("❌ No source directories configured. Add directories first (option 13).")
             return
 
         if self.modified:
@@ -517,29 +503,45 @@ class VideoManager:
             if answer == 'yes':
                 self.save(backup=False)
 
-        root_path = Path(self.config.get('root_path', '.')).expanduser()
-        dataset_name = self.config.get('dataset_name', 'dataset')
-        state_file = str(root_path / dataset_name / 'generation_state.json')
+        # Build lookup: path → existing video entry (to preserve category assignments)
+        existing_by_path = {v.get('path', ''): v for v in self.config.get('videos', [])}
 
-        print(f"🔄 Rescanning source directories...")
-        print(f"   State file: {state_file}")
+        extensions_default = ['.mkv', '.mp4', '.avi']
+        found_paths: List[str] = []
 
-        try:
-            from state_manager import StateManager
-            sm = StateManager(self.config, state_file)
-            sm.force_rescan()
-            total = len(sm.state['video_metadata'])
-            print(f"✅ Rescan complete: {total} videos found")
-            categories = self.config['source'].get('categories', {})
-            for cat_name in categories:
-                count = sum(
-                    1 for v in sm.state['video_metadata'].values()
-                    if v.get('category') == cat_name
-                )
-                print(f"   {cat_name}: {count} videos")
-        except Exception as e:
-            print(f"❌ Rescan failed: {e}")
-            traceback.print_exc()
+        for dir_config in source_dirs:
+            video_dir = dir_config.get('path', '')
+            extensions = dir_config.get('extensions', extensions_default)
+
+            if not os.path.exists(video_dir):
+                print(f"⚠️  Directory not found (skipped): {video_dir}")
+                continue
+
+            for ext in extensions:
+                for p in Path(video_dir).rglob(f'*{ext}'):
+                    found_paths.append(str(p))
+
+        # Merge: keep existing entries (with their categories), add new ones without category
+        new_videos: List[dict] = []
+        added = 0
+        kept = 0
+        for path in sorted(found_paths):
+            if path in existing_by_path:
+                new_videos.append(existing_by_path[path])
+                kept += 1
+            else:
+                name = Path(path).stem
+                new_videos.append({'name': name, 'path': path, 'categories': []})
+                added += 1
+
+        self.config['videos'] = new_videos
+        self.videos = new_videos
+        self.modified = True
+
+        print(f"✅ Rescan complete: {len(new_videos)} videos total "
+              f"({kept} kept with existing categories, {added} newly added)")
+        if added:
+            print("   Use menu options 5 / 6 / 7 to assign categories to new videos.")
 
 
 def print_menu():

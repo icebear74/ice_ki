@@ -96,7 +96,7 @@ class StateManager:
         """
         # Hash only the relevant parts
         config_str = json.dumps({
-            'source': self.config.get('source'),
+            'source_dirs': self.config.get('source_dirs'),
             'processing': self.config.get('processing'),
             'output_patches': self.config.get('output_patches')
         }, sort_keys=True)
@@ -105,50 +105,65 @@ class StateManager:
     
     def scan_videos(self):
         """
-        Scan all videos and cache metadata
-        Only rescans if file has changed (mtime/size check)
+        Scan all source directories for video files and cache metadata.
+        Source directories are independent of categories; categories are
+        looked up from the 'videos' list in the config (assigned interactively).
+        Only rescans files whose mtime/size has changed.
         """
-        logger.info("🔍 Scanning videos for metadata...")
-        
-        categories = self.config['source']['categories']
-        
-        for category_name, category_config in categories.items():
-            video_dir = category_config['video_dir']
-            extensions = category_config['extensions']
-            
-            if not os.path.exists(video_dir):
-                logger.warning(f"Category '{category_name}' directory not found: {video_dir}")
+        logger.info("🔍 Scanning source directories for video files...")
+
+        source_dirs = self.config.get('source_dirs', [])
+
+        # Build path→primary-category lookup from the 'videos' list
+        category_lookup: dict = {}
+        for video in self.config.get('videos', []):
+            path = video.get('path', '')
+            if not path:
                 continue
-            
+            cats = video.get('categories', [])
+            if isinstance(cats, list):
+                category_lookup[path] = cats[0] if cats else None
+            elif isinstance(cats, dict):
+                keys = list(cats.keys())
+                category_lookup[path] = keys[0] if keys else None
+
+        for dir_config in source_dirs:
+            video_dir = dir_config.get('path', '')
+            extensions = dir_config.get('extensions', ['.mkv', '.mp4', '.avi'])
+
+            if not os.path.exists(video_dir):
+                logger.warning(f"Source directory not found: {video_dir}")
+                continue
+
             # Find all videos
             video_files = []
             for ext in extensions:
                 video_files.extend(Path(video_dir).rglob(f'*{ext}'))
-            
-            logger.info(f"  {category_name}: Found {len(video_files)} videos")
-            
+
+            logger.info(f"  Found {len(video_files)} videos in {video_dir}")
+
             for video_path in video_files:
                 video_path_str = str(video_path)
-                
-                # Check if we need to rescan
+
                 try:
                     stat = os.stat(video_path)
                     file_size = stat.st_size
                     last_modified = datetime.fromtimestamp(stat.st_mtime).isoformat()
-                    
+
                     cached = self.state['video_metadata'].get(video_path_str)
                     if cached and cached.get('file_size') == file_size and cached.get('last_modified') == last_modified:
-                        # Already scanned, skip
+                        # File unchanged – refresh category in case it was reassigned
+                        cached['category'] = category_lookup.get(video_path_str)
                         continue
-                    
+
                     # Get video metadata using ffprobe
                     metadata = self._get_video_metadata(video_path_str)
                     if metadata:
-                        metadata['category'] = category_name
+                        metadata['category'] = category_lookup.get(video_path_str)
                         metadata['file_size'] = file_size
                         metadata['last_modified'] = last_modified
                         self.state['video_metadata'][video_path_str] = metadata
-                        
+
                 except Exception as e:
                     logger.error(f"Error scanning {video_path}: {e}")
                     self.state['errors'].append({
@@ -157,7 +172,7 @@ class StateManager:
                         'video': video_path_str,
                         'error': str(e)
                     })
-        
+
         logger.info(f"✅ Total videos in metadata cache: {len(self.state['video_metadata'])}")
         self.save()
     
@@ -223,7 +238,11 @@ class StateManager:
         logger.info("📊 Calculating patch distribution...")
         
         total_patches = self.config['processing']['total_patches']
-        category_weights = self.config['source']['category_weights']
+        # Support both new top-level key and legacy source.category_weights
+        category_weights = self.config.get(
+            'category_weights',
+            self.config.get('source', {}).get('category_weights', {})
+        )
         
         # Initialize category distribution
         for category_name, weight in category_weights.items():
