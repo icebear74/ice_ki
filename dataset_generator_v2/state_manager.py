@@ -328,6 +328,20 @@ class StateManager:
         except Exception as e:
             logger.error(f"Error saving state: {e}")
     
+    def force_rescan(self):
+        """
+        Force a complete rescan of all configured source directories.
+        Clears the video metadata cache and category distribution, then
+        rescans from scratch. Use this when source directories have changed
+        (videos added, removed, or moved).
+        """
+        logger.info("🔄 Forcing complete rescan of source directories...")
+        self.state['video_metadata'] = {}
+        self.state['category_distribution'] = {}
+        self.scan_videos()
+        logger.info(f"✅ Force rescan complete: {len(self.state['video_metadata'])} videos found")
+        self.save()
+
     def mark_complete(self):
         """Mark generation as complete"""
         self.state['status'] = 'complete'
