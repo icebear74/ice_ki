@@ -143,7 +143,11 @@ class DatasetGeneratorV2UHD:
             'scenes_processed': 0,
             'patches_created_total': 0,
             'avg_time_per_scene': 0.0,
-            'eta': {}
+            'eta': {},
+            # Only categories that actually exist in the config
+            'categories': list(self.category_targets.keys()),
+            # Only format-size columns that actually exist in the config
+            'format_sizes': list(next(iter(self.format_config.values()), {}).keys()),
         }
         # Terminal UI already set before logger init (line 89)
         self.ui_update_counter = 0
@@ -297,17 +301,12 @@ class DatasetGeneratorV2UHD:
                             target_total = self.distribution_totals.get(category, 0)
                             target = int(target_total * prob)
                             
-                            # Extract size from format name (e.g., small_540 -> 540, medium_720_169 -> 720_169)
-                            size_key = format_name.split('_', 1)[1] if '_' in format_name else format_name
-                            
-                            patch_dist[category][size_key] = {
-                                'count': current,  # Fixed: display expects 'count' not 'current'
+                            patch_dist[category][format_name] = {
+                                'count': current,
                                 'target': target
                             }
                         else:
-                            # Extract size from format name
-                            size_key = format_name.split('_', 1)[1] if '_' in format_name else format_name
-                            patch_dist[category][size_key] = {'count': 0, 'target': 0}  # Fixed: 'count' not 'current'
+                            patch_dist[category][format_name] = {'count': 0, 'target': 0}
             
             self.ui_state['patch_distribution'] = patch_dist
             

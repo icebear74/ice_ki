@@ -747,6 +747,93 @@ class TestScenePartition(unittest.TestCase):
         print("✓ scene_to_slot: single slot gets all scenes")
 
 
+class TestDynamicCategoryDisplay(unittest.TestCase):
+    """Verify that dataset_display renders only the categories present in state['categories']."""
+
+    def setUp(self):
+        display_path = os.path.join(os.path.dirname(__file__), '..', 'dataset_generator_v2')
+        if display_path not in sys.path:
+            sys.path.insert(0, display_path)
+
+    def _capture_draw(self, state):
+        """Call draw_dataset_ui and capture its stdout output."""
+        import io
+        from utils.dataset_display import draw_dataset_ui
+        buf = io.StringIO()
+        real_stdout = sys.stdout
+        sys.stdout = buf
+        try:
+            draw_dataset_ui(state)
+        finally:
+            sys.stdout = real_stdout
+        return buf.getvalue()
+
+    def _make_state(self, categories, format_sizes=None):
+        if format_sizes is None:
+            format_sizes = ['540', '720', '720_169']
+        overall = {c: {'created': 0, 'target': 100, 'percent': 0.0} for c in categories}
+        current = {c: {'created': 0, 'target': 100, 'percent': 0.0} for c in categories}
+        patch_dist = {c: {s: {'count': 0, 'target': 10} for s in format_sizes} for c in categories}
+        return {
+            'categories': categories,
+            'format_sizes': format_sizes,
+            'current_video_name': 'test.mkv',
+            'current_video_index': 1,
+            'total_videos': 1,
+            'current_video_progress': current,
+            'overall_progress': overall,
+            'patch_distribution': patch_dist,
+            'scenes_processed': 0,
+            'patches_created_total': 0,
+            'avg_time_per_scene': 0.0,
+            'eta': {},
+        }
+
+    def test_only_master_category_shown(self):
+        """When config has only 'master', Space/Toon/Universal must not appear."""
+        state = self._make_state(['master'])
+        output = self._capture_draw(state)
+        self.assertIn('Master', output)
+        self.assertNotIn('Space', output)
+        self.assertNotIn('Toon', output)
+        self.assertNotIn('Universal', output)
+        print("✓ dynamic display: only master shown when config has only master")
+
+    def test_multiple_categories_all_shown(self):
+        """When config has master+space, both must appear; Toon/Universal must not."""
+        state = self._make_state(['master', 'space'])
+        output = self._capture_draw(state)
+        self.assertIn('Master', output)
+        self.assertIn('Space', output)
+        self.assertNotIn('Toon', output)
+        self.assertNotIn('Universal', output)
+        print("✓ dynamic display: master+space shown, toon/universal absent")
+
+    def test_custom_category_name_shown(self):
+        """A non-standard category like 'anime' must still render."""
+        state = self._make_state(['anime'])
+        output = self._capture_draw(state)
+        self.assertIn('Anime', output)
+        print("✓ dynamic display: custom category 'anime' rendered")
+
+    def test_format_sizes_columns_dynamic(self):
+        """Only the configured format sizes appear as columns in the table."""
+        state = self._make_state(['master'], format_sizes=['540'])
+        output = self._capture_draw(state)
+        # '540' column header must appear
+        self.assertIn('540', output)
+        # '720' must not appear as a column (only '540' is configured)
+        # Strip ANSI colour codes before checking to avoid false negatives
+        import re
+        plain = re.sub(r'\x1b\[[0-9;]*m', '', output)
+        # The patch-distribution table header line should contain '540' but not '720'
+        table_header = [l for l in plain.splitlines() if 'Kategorie' in l]
+        self.assertTrue(table_header, "No table header line found")
+        self.assertIn('540', table_header[0])
+        self.assertNotIn('720', table_header[0])
+        print("✓ dynamic display: format size columns match config")
+
+
 if __name__ == '__main__':
     print("\n" + "=" * 60)
     print("Running Default Config & Scanning Fix Tests")
