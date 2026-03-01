@@ -1255,13 +1255,25 @@ class DatasetGeneratorV2UHD:
                 all_slots[0] = (all_slots[0][0], all_slots[0][1],
                                 max(0, all_slots[0][2] - excess))
 
-        # Assign consecutive index ranges to each slot
-        scene_to_slot: Dict[int, Tuple[str, str]] = {}
-        offset = 0
+        # Assign scenes to slots with INTERLEAVED distribution so every format
+        # gets patches from the very first scenes processed.  Without this,
+        # a consecutive-block layout causes the second/third format directories
+        # to be created only after thousands of scenes, making them appear
+        # "missing" during a normal-length run.
+        #
+        # Algorithm: for each slot, assign each of its count scenes a fractional
+        # position j/count in [0,1).  Sorting all (frac_pos, cat, fmt) entries
+        # by frac_pos distributes formats evenly across the whole scene range
+        # while preserving the exact per-format counts.
+        annotated: List[Tuple[float, str, str]] = []
         for category, format_name, count in all_slots:
-            for i in range(count):
-                scene_to_slot[offset + i] = (category, format_name)
-            offset += count
+            for j in range(count):
+                annotated.append((j / count, category, format_name))
+        annotated.sort(key=lambda x: x[0])   # stable sort → ties keep insertion order
+
+        scene_to_slot: Dict[int, Tuple[str, str]] = {
+            i: (a[1], a[2]) for i, a in enumerate(annotated)
+        }
 
         self.logger.info(f"\n📊 Scene partition per format (no duplicates):")
         for category, format_name, count in all_slots:

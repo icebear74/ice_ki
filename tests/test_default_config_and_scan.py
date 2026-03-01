@@ -694,12 +694,15 @@ class TestScenePartition(unittest.TestCase):
                 all_slots[0] = (all_slots[0][0], all_slots[0][1],
                                 max(0, all_slots[0][2] - excess))
 
-        scene_to_slot = {}
-        offset = 0
+        # Interleaved assignment: sort by fractional position within each slot
+        # so all formats appear from the very first scenes processed.
+        annotated = []
         for category, format_name, count in all_slots:
-            for i in range(count):
-                scene_to_slot[offset + i] = (category, format_name)
-            offset += count
+            for j in range(count):
+                annotated.append((j / count, category, format_name))
+        annotated.sort(key=lambda x: x[0])
+
+        scene_to_slot = {i: (a[1], a[2]) for i, a in enumerate(annotated)}
         return scene_to_slot, all_slots
 
     def test_no_scene_appears_twice(self):
@@ -745,6 +748,20 @@ class TestScenePartition(unittest.TestCase):
         self.assertEqual(len(scene_to_slot), 100)
         self.assertTrue(all(v == ('master', '720') for v in scene_to_slot.values()))
         print("✓ scene_to_slot: single slot gets all scenes")
+
+    def test_all_formats_appear_in_early_scenes(self):
+        """All configured formats must appear within the first N+1 scenes (one per slot)."""
+        fmt_dist = {'master': {'540': 3600, '720': 1800, '720_169': 1800}}
+        total_scenes = 7200
+        scene_to_slot, all_slots = self._build_scene_to_slot(fmt_dist, total_scenes)
+
+        n_slots = len(all_slots)
+        # Each format should appear within the first n_slots scenes
+        formats_seen = {scene_to_slot[i][1] for i in range(n_slots) if i in scene_to_slot}
+        expected = {'540', '720', '720_169'}
+        self.assertEqual(formats_seen, expected,
+                         f"Formats missing from early scenes: {expected - formats_seen}")
+        print("✓ scene_to_slot: all formats appear within first N scenes (interleaved)")
 
 
 class TestDynamicCategoryDisplay(unittest.TestCase):
