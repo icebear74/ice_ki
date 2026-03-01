@@ -37,6 +37,7 @@ from utils.format_definitions import (
 from utils.progress_tracker import ProgressTracker
 from utils.dataset_display import draw_dataset_ui
 from utils.terminal_ui import hide_cursor, show_cursor, clear_screen
+from utils.config_normalizer import normalize_config
 from category_utils import get_video_categories, normalize_categories
 
 try:
@@ -69,12 +70,14 @@ class DatasetGeneratorV2UHD:
     
     MAX_DISPLAYED_PRIORITIES = 10
     
-    def __init__(self, config_path: str = "generator_config.json"):
+    def __init__(self, config_path: str = "generator_config_v2.json"):
         """Initialize generator with full config support"""
-        # Load configuration
+        # Load and normalize V2 config
         with open(config_path, 'r') as f:
             self.config = json.load(f)
-        
+
+        self.config = normalize_config(self.config)
+
         self.settings = self.config['base_settings']
         self.videos = self.config.get('videos', [])
         self.format_config = self.config.get('format_config', {})
@@ -116,7 +119,7 @@ class DatasetGeneratorV2UHD:
         self.tracker.initialize_categories(self.category_targets)
         
         # Runtime state
-        self.workers = 6  # Use 6 threads for faster extraction
+        self.workers = self.config.get('workers', 6)
         self.running = True
         self.paused = False
         self.last_update_time = time.time()
@@ -140,7 +143,11 @@ class DatasetGeneratorV2UHD:
             'scenes_processed': 0,
             'patches_created_total': 0,
             'avg_time_per_scene': 0.0,
-            'eta': {}
+            'eta': {},
+            # Only categories that actually exist in the config
+            'categories': list(self.category_targets.keys()),
+            # Only format-size columns that actually exist in the config
+            'format_sizes': list(next(iter(self.format_config.values()), {}).keys()),
         }
         # Terminal UI already set before logger init (line 89)
         self.ui_update_counter = 0
@@ -263,7 +270,7 @@ class DatasetGeneratorV2UHD:
         try:
             # Update overall progress from tracker
             category_stats = self.tracker.status.get('category_stats', {})
-            for category in ['master', 'space', 'toon', 'universal']:
+            for category in self.category_targets.keys():
                 if category in category_stats:
                     stats = category_stats[category]
                     # Use actual distribution totals instead of raw category targets
@@ -279,7 +286,7 @@ class DatasetGeneratorV2UHD:
             # Calculate patch distribution by category and size
             # Use ACTUAL format names from configuration (e.g., small_540, medium_720_169, large_720)
             patch_dist = {}
-            for category in ['master', 'space', 'toon', 'universal']:
+            for category in self.format_config.keys():
                 patch_dist[category] = {}
                 # Get actual format names from configuration for this category
                 if category in self.format_config:
@@ -294,17 +301,12 @@ class DatasetGeneratorV2UHD:
                             target_total = self.distribution_totals.get(category, 0)
                             target = int(target_total * prob)
                             
-                            # Extract size from format name (e.g., small_540 -> 540, medium_720_169 -> 720_169)
-                            size_key = format_name.split('_', 1)[1] if '_' in format_name else format_name
-                            
-                            patch_dist[category][size_key] = {
-                                'count': current,  # Fixed: display expects 'count' not 'current'
+                            patch_dist[category][format_name] = {
+                                'count': current,
                                 'target': target
                             }
                         else:
-                            # Extract size from format name
-                            size_key = format_name.split('_', 1)[1] if '_' in format_name else format_name
-                            patch_dist[category][size_key] = {'count': 0, 'target': 0}  # Fixed: 'count' not 'current'
+                            patch_dist[category][format_name] = {'count': 0, 'target': 0}
             
             self.ui_state['patch_distribution'] = patch_dist
             
@@ -315,7 +317,7 @@ class DatasetGeneratorV2UHD:
                 
                 eta_by_category = {}
                 max_eta = 0
-                for category in ['master', 'space', 'toon', 'universal']:
+                for category in self.ui_state['overall_progress'].keys():
                     if category in self.ui_state['overall_progress']:
                         current = self.ui_state['overall_progress'][category]['created']  # Fixed: was 'current'
                         target = self.ui_state['overall_progress'][category]['target']
@@ -573,7 +575,7 @@ class DatasetGeneratorV2UHD:
             # Calculate actual totals from distribution (not raw targets)
             # This is what will actually be created based on video assignments
             self.distribution_totals = {}
-            for category in ['master', 'space', 'toon', 'universal']:
+            for category in self.category_targets.keys():
                 total = 0
                 for video_path, cat_targets in video_targets.items():
                     if category in cat_targets:
@@ -838,8 +840,8 @@ class DatasetGeneratorV2UHD:
         if n_frames not in [5, 7]:
             return None, None
         
-        gt_h, gt_w = format_config['gt_size']
-        lr_h, lr_w = format_config['lr_size']
+        gt_w, gt_h = format_config['gt_size']  # JSON stores W×H
+        lr_w, lr_h = format_config['lr_size']  # JSON stores W×H
         
         # Get frame dimensions (UHD!)
         frame_h, frame_w = frames[0].shape[:2]
@@ -1173,24 +1175,13 @@ class DatasetGeneratorV2UHD:
         # Phase 1: Calculate all extraction timestamps
         self.logger.info(f"\n📋 Phase 1: Calculating extraction plan...")
         
-        # Calculate how many SCENES we need to extract
-        # Each scene creates ONE patch per category-format combination
-        # So we need as many scenes as the MAX target in any single format
-        max_patches_in_any_format = 0
-        patches_per_scene = 0
-        for category, formats in format_distribution.items():
-            patches_per_scene += len(formats)  # Count formats across all categories
-            for format_name, target_count in formats.items():
-                max_patches_in_any_format = max(max_patches_in_any_format, target_count)
-        
-        scenes_needed = max_patches_in_any_format
+        # Each scene is assigned to EXACTLY ONE (category, format) slot → no duplicates.
+        # Total scenes needed = total patches across all slots.
+        scenes_needed = total_target
         
         self.logger.info(f"✓ Format distribution analysis:")
         self.logger.info(f"  Total target patches: {total_target}")
-        self.logger.info(f"  Patches per scene: {patches_per_scene} ({len(format_distribution)} categories × formats)")
-        self.logger.info(f"  Maximum patches in any single format: {max_patches_in_any_format}")
-        self.logger.info(f"  Scenes needed: {scenes_needed}")
-        self.logger.info(f"  Expected total patches created: {scenes_needed * patches_per_scene}")
+        self.logger.info(f"  Scenes needed: {scenes_needed} (each scene used exactly once)")
         
         # Calculate stride to EVENLY DISTRIBUTE across ENTIRE video duration
         # This ensures frames from beginning, middle, AND END of video
@@ -1242,47 +1233,51 @@ class DatasetGeneratorV2UHD:
         black_frames_skipped = 0
         total_created = 0
         
-        # Calculate scene selection FIRST (before extraction)
+        # Build a scene→slot partition: each scene goes to EXACTLY ONE (category, format).
+        # This prevents any scene from being saved to more than one output directory.
         total_scenes = len(timestamps)
-        timestamp_to_original_idx = {ts: idx for idx, ts in enumerate(timestamps)}
-        
-        scene_selection = {}
-        self.logger.info(f"\n📊 Scene distribution per format:")
-        
+
+        # Flatten all (category, format_name, count) slots
+        all_slots: List[Tuple[str, str, int]] = []
         for category, formats in format_distribution.items():
-            scene_selection[category] = {}
-            format_idx = 0
-            for format_name, target_count in formats.items():
-                # Calculate which scenes this format should use (based on ORIGINAL scene count)
-                if target_count >= total_scenes:
-                    selected_indices = list(range(total_scenes))
-                else:
-                    stride = total_scenes / target_count
-                    selected_indices = []
-                    for i in range(target_count):
-                        offset = (format_idx % 3) * 0.3
-                        scene_idx = int(offset + i * stride)
-                        scene_idx = min(scene_idx, total_scenes - 1)
-                        selected_indices.append(scene_idx)
-                
-                scene_selection[category][format_name] = set(selected_indices)
-                
-                # Log distribution
-                coverage_start = 100.0 * selected_indices[0] / max(total_scenes - 1, 1)
-                coverage_end = 100.0 * selected_indices[-1] / max(total_scenes - 1, 1)
-                self.logger.info(f"  {category}/{format_name}: {target_count} patches")
-                if len(selected_indices) == total_scenes:
-                    self.logger.info(f"    Using all {total_scenes} scenes (indices 0-{total_scenes-1})")
-                else:
-                    stride_val = stride if target_count < total_scenes else 1.0
-                    self.logger.info(f"    Using {len(selected_indices)} scenes (stride {stride_val:.1f})")
-                    if len(selected_indices) <= 10:
-                        self.logger.info(f"    Indices: {selected_indices}")
-                    else:
-                        self.logger.info(f"    Indices: [{selected_indices[0]},{selected_indices[1]},...,{selected_indices[-2]},{selected_indices[-1]}]")
-                self.logger.info(f"    Coverage: {coverage_start:.1f}% to {coverage_end:.1f}% of video")
-                
-                format_idx += 1
+            for format_name, count in formats.items():
+                all_slots.append((category, format_name, count))
+
+        # If the video is too short, scale down slot counts proportionally
+        slots_total = sum(c for _, _, c in all_slots)
+        if slots_total > total_scenes:
+            scale = total_scenes / slots_total
+            all_slots = [(cat, fmt, max(1, int(cnt * scale))) for cat, fmt, cnt in all_slots]
+            # Trim any excess caused by rounding
+            excess = sum(c for _, _, c in all_slots) - total_scenes
+            if excess > 0:
+                all_slots.sort(key=lambda x: -x[2])
+                all_slots[0] = (all_slots[0][0], all_slots[0][1],
+                                max(0, all_slots[0][2] - excess))
+
+        # Assign scenes to slots with INTERLEAVED distribution so every format
+        # gets patches from the very first scenes processed.  Without this,
+        # a consecutive-block layout causes the second/third format directories
+        # to be created only after thousands of scenes, making them appear
+        # "missing" during a normal-length run.
+        #
+        # Algorithm: for each slot, assign each of its count scenes a fractional
+        # position j/count in [0,1).  Sorting all (frac_pos, cat, fmt) entries
+        # by frac_pos distributes formats evenly across the whole scene range
+        # while preserving the exact per-format counts.
+        annotated: List[Tuple[float, str, str]] = []
+        for category, format_name, count in all_slots:
+            for j in range(count):
+                annotated.append((j / count, category, format_name))
+        annotated.sort(key=lambda x: x[0])   # stable sort → ties keep insertion order
+
+        scene_to_slot: Dict[int, Tuple[str, str]] = {
+            i: (a[1], a[2]) for i, a in enumerate(annotated)
+        }
+
+        self.logger.info(f"\n📊 Scene partition per format (no duplicates):")
+        for category, format_name, count in all_slots:
+            self.logger.info(f"  {category}/{format_name}: {count} unique scenes")
         
         # INCREMENTAL PROCESSING: Extract → Process → Clean → Repeat
         self.logger.info(f"\n🔄 Starting incremental extraction and processing...")
@@ -1295,18 +1290,9 @@ class DatasetGeneratorV2UHD:
             self.logger.info(f"\n📍 Scene {scene_idx+1}/{len(timestamps)}: timestamp {ts:.2f}s")
             scene_start_time = time.time()  # Track scene processing time
             
-            # Check if ANY format needs this scene
-            scene_needed = False
-            for category, formats in format_distribution.items():
-                for format_name in formats.keys():
-                    if scene_idx in scene_selection[category][format_name]:
-                        scene_needed = True
-                        break
-                if scene_needed:
-                    break
-            
-            if not scene_needed:
-                self.logger.debug(f"  ⏭️  Skipping (not needed by any format)")
+            # Each scene is assigned to exactly one (category, format) slot
+            if scene_idx not in scene_to_slot:
+                self.logger.debug(f"  ⏭️  Skipping (no slot assigned)")
                 continue
             
             # Check if we should abort
@@ -1353,65 +1339,58 @@ class DatasetGeneratorV2UHD:
             self.ui_state['scenes_processed'] = processed_count + 1
             self._update_terminal_ui()
             
-            # PROCESS frames into patches for each category-format that needs this scene
+            # PROCESS frames: this scene goes to exactly ONE (category, format) slot
             patches_created_this_scene = 0
-            for category, formats in format_distribution.items():
-                for format_name, target_count in formats.items():
-                    if scene_idx not in scene_selection[category][format_name]:
-                        continue
-                    
-                    format_config = self.format_config[category][format_name]
-                    
-                    # Try up to 5 times to find an interesting patch with random crops
-                    MAX_RANDOM_ATTEMPTS = 5
-                    gt, lr = None, None
-                    
-                    for attempt in range(MAX_RANDOM_ATTEMPTS + 1):
-                        if attempt < MAX_RANDOM_ATTEMPTS:
-                            gt, lr = self.create_patch_pair(frames, format_name, format_config, force_center=False)
-                        else:
-                            gt, lr = self.create_patch_pair(frames, format_name, format_config, force_center=True)
-                        
-                        if gt is None or lr is None:
-                            continue
-                        
-                        if self.is_interesting_patch(gt) or attempt >= MAX_RANDOM_ATTEMPTS:
-                            break
-                    
-                    if gt is None or lr is None:
-                        continue
-                    
-                    saved, gt_path, lr_path = self._save_patch_pair(
-                        gt, lr, video_path, ts,
-                        category, format_name, n_frames
-                    )
-                    
-                    if saved:
-                        # Check for black frames only in first 10 seconds
-                        if ts <= black_frame_detection_limit_seconds and \
-                           self._is_black_frame(gt_path, black_frame_threshold_kb):
-                            black_frames_detected += 1
-                            self.logger.debug(f"    Black frame detected, deleting")
-                            try:
-                                if os.path.exists(gt_path):
-                                    os.remove(gt_path)
-                                if os.path.exists(lr_path):
-                                    os.remove(lr_path)
-                            except Exception as e:
-                                self.logger.error(f"    Error deleting black frame files: {e}")
-                            continue
-                        
+            category, format_name = scene_to_slot[scene_idx]
+            format_config = self.format_config[category][format_name]
+
+            # Try up to 5 times to find an interesting patch with random crops
+            MAX_RANDOM_ATTEMPTS = 5
+            gt, lr = None, None
+
+            for attempt in range(MAX_RANDOM_ATTEMPTS + 1):
+                if attempt < MAX_RANDOM_ATTEMPTS:
+                    gt, lr = self.create_patch_pair(frames, format_name, format_config, force_center=False)
+                else:
+                    gt, lr = self.create_patch_pair(frames, format_name, format_config, force_center=True)
+
+                if gt is None or lr is None:
+                    continue
+
+                if self.is_interesting_patch(gt) or attempt >= MAX_RANDOM_ATTEMPTS:
+                    break
+
+            if gt is not None and lr is not None:
+                saved, gt_path, lr_path = self._save_patch_pair(
+                    gt, lr, video_path, ts,
+                    category, format_name, n_frames
+                )
+
+                if saved:
+                    # Check for black frames only in first 10 seconds
+                    if ts <= black_frame_detection_limit_seconds and \
+                       self._is_black_frame(gt_path, black_frame_threshold_kb):
+                        black_frames_detected += 1
+                        self.logger.debug(f"    Black frame detected, deleting")
+                        try:
+                            if os.path.exists(gt_path):
+                                os.remove(gt_path)
+                            if os.path.exists(lr_path):
+                                os.remove(lr_path)
+                        except Exception as e:
+                            self.logger.error(f"    Error deleting black frame files: {e}")
+                    else:
                         if ts > black_frame_detection_limit_seconds:
                             black_frames_skipped += 1
-                        
+
                         patches_targets[category][format_name]['created'] += 1
                         patches_created[category] += 1
                         total_created += 1
                         patches_created_this_scene += 1
-                        
+
                         # Update UI state with new patch count
                         self.ui_state['patches_created_total'] = total_created
-                        
+
                         self.logger.info(f"    ✓ Saved patch: {category}/{format_name} → {os.path.basename(gt_path)}")
             
             # CLEAN UP: Delete frame files immediately to free disk space
@@ -2246,14 +2225,25 @@ class DatasetGeneratorV2UHD:
 
 def main():
     """Main entry point"""
-    config_path = "generator_config.json"
+    script_dir = Path(__file__).parent
+    os.chdir(script_dir)
+
     if len(sys.argv) > 1:
         config_path = sys.argv[1]
-    
-    # Change to script directory
-    script_dir = Path(__file__).parent.parent
-    os.chdir(script_dir)
-    
+    else:
+        v2_config = script_dir / 'generator_config_v2.json'
+        if v2_config.exists():
+            config_path = str(v2_config)
+        else:
+            print(
+                "❌ No config file found. "
+                "Please run from dataset_generator_v2 directory "
+                "(expected generator_config_v2.json)."
+            )
+            sys.exit(1)
+
+    print(f"📂 Using config: {Path(config_path).name}")
+
     if not os.path.exists(config_path):
         print(f"Error: Config file not found: {config_path}")
         sys.exit(1)

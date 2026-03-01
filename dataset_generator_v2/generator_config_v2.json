@@ -3,72 +3,75 @@
   "_comment_use_with": "make_dataset_v2_clean.py",
   "_comment_features": "7-frame only, flat directory structure, state management",
   "_comment_see_also": "README: dataset_generator_v2/README_CONFIGS.md",
+  "_comment_source_dirs": "Source directories to scan for video files. Independent of categories. Add/edit via: python video_manager.py",
   "dataset_name": "master",
   "root_path": "/mnt/data/training/datasetNeu",
-  
-  "source": {
-    "categories": {
-      "master": {
-        "video_dir": "/mnt/data/video/SerieUHD/Planet Earth 2",
-        "extensions": [".mkv", ".mp4", ".avi"]
-      },
-      "universal": {
-        "video_dir": "/mnt/data/video/Serie",
-        "extensions": [".mkv", ".mp4", ".avi"]
-      }
+  "source_dirs": [
+    {
+      "path": "/mnt/data/video/SerieUHD/Planet Earth 2",
+      "extensions": [
+        ".mkv",
+        ".mp4",
+        ".avi"
+      ]
     },
-    
-    "category_weights": {
-      "master": 0.25,
-      "universal": 0.75
+    {
+      "path": "/mnt/data/video/Serie",
+      "extensions": [
+        ".mkv",
+        ".mp4",
+        ".avi"
+      ]
     }
-  },
-  
+  ],
+  "_comment_videos": "Video list populated by 'Rescan file list' in video_manager.py. Categories assigned interactively.",
+  "videos": [],
   "output_patches": {
     "720": {
       "gt_size": [720, 720],
-      "lr_size": [240, 240],
-      "enabled": true
+      "scale": 3,
+      "enabled": true,
+      "weight": 40
     },
     "540": {
       "gt_size": [540, 540],
-      "lr_size": [180, 180],
-      "enabled": true
+      "scale": 3,
+      "enabled": true,
+      "weight": 35
     },
     "720_169": {
       "gt_size": [720, 405],
-      "lr_size": [240, 135],
-      "enabled": true
+      "scale": 3,
+      "enabled": true,
+      "weight": 25
     }
   },
-  
   "processing": {
-    "total_patches": 100000,
     "n_frames": 7,
     "scale": 3,
     "stride": 3,
     "min_scene_length": 21,
     "scene_threshold": 30.0
   },
-  
   "quality": {
     "jpeg_quality": 95,
     "min_sharpness": 30.0,
     "blur_threshold": 100.0
   },
-  
   "workers": 8,
   "batch_size": 4,
-  
   "validation": {
     "enabled": false,
     "note": "Validation GT is manually copied to val/720/GT/ and val/720_169/GT/"
   },
-  
   "_comment_random_seed": "Optional: Set random seed for reproducible patch generation. Omit for random behavior.",
   "random_seed": null,
-  
   "_comment_timeouts": "Optional: Timeouts for FFmpeg operations (in seconds)",
   "ffmpeg_timeout": 120,
-  "ffprobe_timeout": 60
+  "ffprobe_timeout": 60,
+  "category_patches": {
+    "master": 25000,
+    "universal": 75000
+  },
+  "_comment_category_patches": "Patch count per category – how many patches to generate for each category."
 }
