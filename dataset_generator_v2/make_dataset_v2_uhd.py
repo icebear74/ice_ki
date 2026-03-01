@@ -37,6 +37,7 @@ from utils.format_definitions import (
 from streaming_extractor import (
     build_frame_assignments_distributed,
     extract_and_save_streaming_distributed,
+    is_black_frame as _streaming_is_black_frame,
 )
 from utils.progress_tracker import ProgressTracker
 from utils.dataset_display import draw_dataset_ui
@@ -146,6 +147,7 @@ class DatasetGeneratorV2UHD:
             'patch_distribution': {},
             'scenes_processed': 0,
             'patches_created_total': 0,
+            'frames_processed_total': 0,
             'avg_time_per_scene': 0.0,
             'eta': {},
             # Only categories that actually exist in the config

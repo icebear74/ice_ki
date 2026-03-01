@@ -291,6 +291,24 @@ def save_patch_pair(
         return False, None, None
 
 
+def is_black_frame(gt: np.ndarray, brightness_threshold: float = 20.0) -> bool:
+    """Return True when *gt* is predominantly black/dark.
+
+    A mean pixel brightness below *brightness_threshold* (0–255) is used as
+    the criterion.  The default of 20 catches solid-black frames and the
+    typical fade-in/out darkness at video start/end without affecting normal
+    content.
+
+    Args:
+        gt:                   Centre-frame crop (BGR numpy array).
+        brightness_threshold: Maximum mean brightness to consider black (default 20).
+
+    Returns:
+        ``True`` when the patch is too dark to be useful.
+    """
+    return float(np.mean(gt)) < brightness_threshold
+
+
 def extract_and_save_streaming_distributed(
     video_path: str,
     assignments: List[Tuple[int, str, str]],
@@ -300,6 +318,8 @@ def extract_and_save_streaming_distributed(
     fps: float,
     logger=None,
     is_interesting_fn: Optional[Callable[[np.ndarray], bool]] = None,
+    is_black_frame_fn: Optional[Callable[[np.ndarray], bool]] = None,
+    progress_fn: Optional[Callable[[int, Dict[str, int]], None]] = None,
 ) -> Dict[str, int]:
     """
     Stream the video once and save patches as frames pass through the buffer.
@@ -313,17 +333,26 @@ def extract_and_save_streaming_distributed(
     The stream is terminated early once the last needed frame has been read.
 
     Args:
-        video_path:       Path to input video.
-        assignments:      Output of :func:`build_frame_assignments_distributed`.
-        n_frames:         Frames per patch window (default 7).
-        format_config:    ``{category: {format_name: {'gt_size': …, 'lr_size': …}}}``.
-        base_dir:         Root dataset output directory.
-        fps:              Video frame rate.
-        logger:           Optional logger instance.
-        is_interesting_fn: Optional callable ``(patch: np.ndarray) -> bool``
-                          for quality gating.  When provided, random crops are
-                          re-tried up to 5 times before falling back to a
-                          centre crop.
+        video_path:        Path to input video.
+        assignments:       Output of :func:`build_frame_assignments_distributed`.
+        n_frames:          Frames per patch window (default 7).
+        format_config:     ``{category: {format_name: {'gt_size': …, 'lr_size': …}}}``.
+        base_dir:          Root dataset output directory.
+        fps:               Video frame rate.
+        logger:            Optional logger instance.
+        is_interesting_fn: Optional callable ``(patch: np.ndarray) -> bool`` for
+                           quality gating.  When provided, random crops are re-tried
+                           up to 5 times before falling back to a centre crop.
+        is_black_frame_fn: Optional callable ``(gt: np.ndarray) -> bool``.  When
+                           provided and returns ``True`` the assignment is skipped
+                           without saving.  Use this to suppress dark/black frames.
+                           Defaults to :func:`is_black_frame` when ``None`` is
+                           passed (i.e. black frames are always filtered unless you
+                           explicitly pass ``lambda _: False``).
+        progress_fn:       Optional callable
+                           ``(frames_examined: int, patches_so_far: Dict[str, int])``
+                           invoked after *every* processed assignment (saved **or**
+                           skipped).  Use for live UI / tracker updates.
 
     Returns:
         ``{category: patches_saved_count}``
@@ -332,6 +361,11 @@ def extract_and_save_streaming_distributed(
     def _log(msg: str) -> None:
         if logger:
             logger.info(msg)
+
+    # Default: always filter black frames unless caller opts out explicitly.
+    _black_fn: Callable[[np.ndarray], bool] = (
+        is_black_frame_fn if is_black_frame_fn is not None else is_black_frame
+    )
 
     if not assignments:
         return {}
@@ -368,6 +402,7 @@ def extract_and_save_streaming_distributed(
     # Rolling buffer: frame_idx → BGR frame (numpy array)
     buffer: Dict[int, np.ndarray] = {}
     pending_idx: int = 0  # index into pending_centers
+    frames_examined: int = 0  # assignments processed (saved + skipped)
 
     process = subprocess.Popen(
         cmd,
@@ -432,6 +467,15 @@ def extract_and_save_streaming_distributed(
                             ):
                                 break
 
+                        frames_examined += 1
+
+                        # Skip black/dark centre frames
+                        if gt is not None and _black_fn(gt):
+                            _log(f"  ⏭ frame {center} skipped (black frame)")
+                            if progress_fn is not None:
+                                progress_fn(frames_examined, dict(patches_created))
+                            continue
+
                         if gt is not None and lr is not None:
                             ok, _, _ = save_patch_pair(
                                 gt, lr, video_path, ts,
@@ -444,6 +488,9 @@ def extract_and_save_streaming_distributed(
                                 _log(
                                     f"  ✓ frame {center} → {category}/{fmt_name}"
                                 )
+
+                        if progress_fn is not None:
+                            progress_fn(frames_examined, dict(patches_created))
 
                 pending_idx += 1
 
@@ -463,7 +510,7 @@ def extract_and_save_streaming_distributed(
 
     total = sum(patches_created.values())
     _log(
-        f"✓ Streaming extraction done: {total} patches "
-        f"from {len(sorted_asgn)} assignments"
+        f"✓ Streaming extraction done: {total} patches saved, "
+        f"{frames_examined} assignments examined"
     )
     return patches_created
