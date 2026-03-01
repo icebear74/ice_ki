@@ -198,17 +198,22 @@ def _draw_statistics_and_eta(state, width):
     """Draw statistics and ETA section"""
     print_section_header("STATISTIKEN & GESCHÄTZTE RESTZEIT")
 
-    frames_total = state.get('frames_processed_total', 0)
+    frames_read   = state.get('frames_read_total', 0)       # raw frames decoded by FFmpeg
+    frames_total  = state.get('frames_processed_total', 0)  # center-frame assignments evaluated
     patches_total = state.get('patches_created_total', 0)
-    skipped = max(0, frames_total - patches_total)
-    avg_time = state.get('avg_time_per_scene', 0.0)
+    skipped       = max(0, frames_total - patches_total)
+    avg_time      = state.get('avg_time_per_scene', 0.0)
 
-    stats_line = f"  Frames: {C_GREEN}{format_number(frames_total):>8s}{C_RESET}  |  "
-    stats_line += f"Patches: {C_GREEN}{format_number(patches_total):>8s}{C_RESET}  |  "
-    stats_line += f"Übersprungen: {C_GREEN}{format_number(skipped):>6s}{C_RESET}"
+    # Line 1: raw frames decoded  |  assignments evaluated  |  patches saved
+    line1 = (
+        f"  Gelesen: {C_GREEN}{format_number(frames_read):>8s}{C_RESET}  |  "
+        f"Auswertungen: {C_GREEN}{format_number(frames_total):>8s}{C_RESET}  |  "
+        f"Patches: {C_GREEN}{format_number(patches_total):>8s}{C_RESET}  |  "
+        f"Übersprungen: {C_GREEN}{format_number(skipped):>6s}{C_RESET}"
+    )
     if avg_time > 0:
-        stats_line += f"  |  Ø Zeit/Szene: {C_GREEN}{avg_time:>5.1f}s{C_RESET}"
-    print(stats_line)
+        line1 += f"  |  Ø Zeit/Szene: {C_GREEN}{avg_time:>5.1f}s{C_RESET}"
+    print(line1)
 
     print()
     

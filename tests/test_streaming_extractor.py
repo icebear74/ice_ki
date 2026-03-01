@@ -28,6 +28,7 @@ from streaming_extractor import (
     create_patch_pair,
     save_patch_pair,
     is_black_frame,
+    cuda_available,
 )
 
 
@@ -484,6 +485,32 @@ class TestBuildAssignmentsPerCategory(unittest.TestCase):
             # Each center must be at least `half` frames in
             self.assertGreaterEqual(fi, half)
         print("✓ center frame indices are ≥ half (correct offset)")
+
+
+# ─── cuda_available ───────────────────────────────────────────────────────────
+
+class TestCudaAvailable(unittest.TestCase):
+
+    def test_returns_bool(self):
+        result = cuda_available()
+        self.assertIsInstance(result, bool)
+        print(f"✓ cuda_available() returned bool: {result}")
+
+    def test_result_is_cached(self):
+        """Calling twice must return the same value (cached)."""
+        first  = cuda_available()
+        second = cuda_available()
+        self.assertEqual(first, second)
+        print("✓ cuda_available() result is stable/cached")
+
+    def test_ffmpeg_not_found_returns_false(self):
+        """When ffmpeg binary is absent the function must return False, not raise."""
+        import streaming_extractor as _se
+        with patch.object(_se, '_cuda_available', None):
+            with patch("subprocess.check_output", side_effect=FileNotFoundError):
+                result = _se.cuda_available()
+        self.assertFalse(result)
+        print("✓ missing ffmpeg → cuda_available() returns False without raising")
 
 
 if __name__ == '__main__':

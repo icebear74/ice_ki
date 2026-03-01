@@ -67,6 +67,31 @@ _TONEMAP_FILTER: str = (
 )
 
 # ---------------------------------------------------------------------------
+# CUDA detection (cached after the first call)
+# ---------------------------------------------------------------------------
+
+_cuda_available: Optional[bool] = None
+
+
+def cuda_available() -> bool:
+    """Return True when the local FFmpeg build supports CUDA hw-accel.
+
+    The result is cached after the first call so repeated checks are free.
+    """
+    global _cuda_available
+    if _cuda_available is None:
+        try:
+            out = subprocess.check_output(
+                ["ffmpeg", "-hide_banner", "-hwaccels"],
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            ).decode(errors="replace")
+            _cuda_available = "cuda" in out.lower()
+        except Exception:
+            _cuda_available = False
+    return _cuda_available
+
+# ---------------------------------------------------------------------------
 # Public functions
 # ---------------------------------------------------------------------------
 
@@ -407,7 +432,9 @@ def extract_and_save_streaming_distributed(
     logger=None,
     is_interesting_fn: Optional[Callable[[np.ndarray], bool]] = None,
     is_black_frame_fn: Optional[Callable[[np.ndarray], bool]] = None,
-    progress_fn: Optional[Callable[[int, Dict[str, int]], None]] = None,
+    progress_fn: Optional[Callable[[int, Dict[str, int], int], None]] = None,
+    use_cuda: bool = True,
+    nice_level: int = 10,
 ) -> Dict[str, int]:
     """
     Stream the video once and save patches as frames pass through the buffer.
@@ -422,7 +449,7 @@ def extract_and_save_streaming_distributed(
 
     Args:
         video_path:        Path to input video.
-        assignments:       Output of :func:`build_frame_assignments_distributed`.
+        assignments:       Output of :func:`build_assignments_per_category`.
         n_frames:          Frames per patch window (default 7).
         format_config:     ``{category: {format_name: {'gt_size': …, 'lr_size': …}}}``.
         base_dir:          Root dataset output directory.
@@ -439,9 +466,19 @@ def extract_and_save_streaming_distributed(
                            passed (i.e. black frames are always filtered unless you
                            explicitly pass ``lambda _: False``).
         progress_fn:       Optional callable
-                           ``(frames_examined: int, patches_so_far: Dict[str, int])``
+                           ``(frames_examined: int,
+                              patches_so_far: Dict[str, int],
+                              raw_frames_read: int)``
                            invoked after *every* processed assignment (saved **or**
-                           skipped).  Use for live UI / tracker updates.
+                           skipped).  ``raw_frames_read`` is the total number of
+                           raw video frames decoded from the stream so far.
+        use_cuda:          When ``True`` (default), enable CUDA hardware-accelerated
+                           decoding if the local FFmpeg build supports it.  Falls
+                           back to software decoding automatically when CUDA is not
+                           available.
+        nice_level:        CPU-priority adjustment passed to ``os.nice()`` for the
+                           FFmpeg subprocess (default 10 = lower priority).  Has no
+                           effect on non-Unix platforms.
 
     Returns:
         ``{category: patches_saved_count}``
@@ -470,14 +507,21 @@ def extract_and_save_streaming_distributed(
     pending_centers: List[int] = sorted(center_map.keys())
     last_needed: int = pending_centers[-1] + half if pending_centers else 0
 
+    # Build FFmpeg command.
+    # CUDA hw-accel: prepend -hwaccel cuda so the GPU handles H.264/H.265
+    # decoding.  The tonemap filter chain is software-only so frames are
+    # automatically downloaded to CPU memory after decode.
+    _use_cuda = use_cuda and cuda_available()
+    hw_args = ["-hwaccel", "cuda"] if _use_cuda else []
     _log(
         f"🎬 Streaming extractor: {len(sorted_asgn)} assignments, "
-        f"last frame needed: {last_needed}"
+        f"last frame needed: {last_needed}, "
+        f"CUDA={'on' if _use_cuda else 'off'}, nice={nice_level}"
     )
 
-    # FFmpeg: read linearly, apply HDR→SDR tonemap, pipe rawvideo BGR24
     cmd = [
         "ffmpeg",
+        *hw_args,
         "-i", video_path,
         "-vf", _TONEMAP_FILTER,
         "-f", "rawvideo",
@@ -493,11 +537,25 @@ def extract_and_save_streaming_distributed(
     pending_idx: int = 0  # index into pending_centers
     frames_examined: int = 0  # assignments processed (saved + skipped)
 
+    # Reduce FFmpeg CPU priority so interactive processes stay responsive.
+    # psutil is used instead of preexec_fn because preexec_fn is unsafe in
+    # multi-threaded programs (Python docs recommend avoiding it).
+    # nice() is a no-op on Windows where the concept does not apply.
+    def _set_nice(pid: int) -> None:
+        if nice_level == 0 or _sys.platform == "win32":
+            return
+        try:
+            import psutil as _psutil
+            _psutil.Process(pid).nice(nice_level)
+        except Exception:
+            pass
+
     process = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
     )
+    _set_nice(process.pid)
 
     try:
         current_frame: int = 0
@@ -579,7 +637,7 @@ def extract_and_save_streaming_distributed(
                                     )
 
                     if progress_fn is not None:
-                        progress_fn(frames_examined, dict(patches_created))
+                        progress_fn(frames_examined, dict(patches_created), current_frame)
 
                 pending_idx += 1
 

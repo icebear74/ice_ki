@@ -148,6 +148,7 @@ class DatasetGeneratorV2UHD:
             'scenes_processed': 0,
             'patches_created_total': 0,
             'frames_processed_total': 0,
+            'frames_read_total': 0,
             'avg_time_per_scene': 0.0,
             'eta': {},
             # Only categories that actually exist in the config
@@ -1185,16 +1186,28 @@ class DatasetGeneratorV2UHD:
         # Snapshot of patches already counted before this video so the callback
         # can report a cumulative total in ui_state['patches_created_total'].
         prior_total: int = self.ui_state.get('patches_created_total', 0)
+        # raw frames already accumulated by previous videos (so the cumulative
+        # frames_read_total is correct across all videos)
+        self._prior_raw_frames: int = self.ui_state.get('frames_read_total', 0)
         # Per-category counts already tracked (for delta-based tracker updates).
         last_tracker: Dict[str, int] = {cat: 0 for cat in patches_created}
 
-        def _on_progress(frames_examined: int, patches_so_far: Dict[str, int]) -> None:
-            # Live UI counter: total frames examined (incl. black-frame skips)
+        def _on_progress(frames_examined: int, patches_so_far: Dict[str, int], raw_frames_read: int) -> None:
+            # Live UI counters
             self.ui_state['frames_processed_total'] = frames_examined
+            self.ui_state['frames_read_total'] = self._prior_raw_frames + raw_frames_read
             # Cumulative patch total across all videos
             self.ui_state['patches_created_total'] = (
                 prior_total + sum(patches_so_far.values())
             )
+            # Update per-video progress bars with live per-category patch counts
+            current_progress = self.ui_state.get('current_video_progress', {})
+            for cat, new_total in patches_so_far.items():
+                if cat in current_progress:
+                    target = current_progress[cat].get('target', 0)
+                    pct = (new_total / target * 100) if target > 0 else 0.0
+                    current_progress[cat]['created'] = new_total
+                    current_progress[cat]['percent'] = pct
             # Increment tracker by delta to avoid double-counting on final merge
             for cat, new_total in patches_so_far.items():
                 delta = new_total - last_tracker.get(cat, 0)
@@ -1215,6 +1228,8 @@ class DatasetGeneratorV2UHD:
             is_interesting_fn=self.is_interesting_patch,
             is_black_frame_fn=_streaming_is_black_frame,
             progress_fn=_on_progress,
+            use_cuda=self.settings.get('use_cuda', True),
+            nice_level=self.settings.get('ffmpeg_nice', 10),
         )
 
         # Merge final result into patches_created.
