@@ -292,6 +292,198 @@ class TestScanningFixes(unittest.TestCase):
         print("✓ StateManager initialises without crash on V1-style config")
 
 
+# ─── rescan works on V1 / unified config (no prior source_dirs key) ───────────
+
+class TestRescanOnV1Config(unittest.TestCase):
+    """Rescan must work even when the config has no 'source_dirs' key yet."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.vid_dir = os.path.join(self.tmp, 'vids')
+        os.makedirs(self.vid_dir)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def _make_manager(self, config_dict):
+        p = os.path.join(self.tmp, 'cfg.json')
+        with open(p, 'w') as f:
+            json.dump(config_dict, f)
+        m = VideoManager(p)
+        m.load()
+        return m
+
+    def test_ensure_source_dirs_auto_initialises(self):
+        """_ensure_source_dirs() creates source_dirs: [] when the key is absent."""
+        cfg = {'category_targets': {'master': 100}, 'videos': []}
+        m = self._make_manager(cfg)
+        self.assertNotIn('source_dirs', m.config)
+        dirs = m._ensure_source_dirs()
+        self.assertIn('source_dirs', m.config)
+        self.assertEqual(dirs, [])
+        self.assertTrue(m.modified)
+        print("✓ _ensure_source_dirs() auto-initialises source_dirs")
+
+    def test_list_source_dirs_works_on_v1_config(self):
+        """list_source_dirs() no longer blocks on V1 config."""
+        cfg = {'category_targets': {'master': 100}, 'videos': []}
+        m = self._make_manager(cfg)
+        try:
+            m.list_source_dirs()  # must not raise or print an error
+        except Exception as e:
+            self.fail(f"list_source_dirs() raised on V1 config: {e}")
+        print("✓ list_source_dirs() works on V1 config")
+
+    def test_rescan_works_on_v1_config_with_source_dirs_added(self):
+        """rescan_file_list() works on V1-style config after adding a source_dir."""
+        open(os.path.join(self.vid_dir, 'film.mkv'), 'w').close()
+
+        # Classic V1 config – no source_dirs key
+        cfg = {
+            'base_settings': {'max_workers': 4},
+            'category_targets': {'master': 100},
+            'videos': [{'name': 'old', 'path': '/old/path.mkv', 'categories': ['master']}],
+        }
+        m = self._make_manager(cfg)
+
+        # Simulate: user adds a source dir (option 13 equivalent)
+        m._ensure_source_dirs().append({'path': self.vid_dir, 'extensions': ['.mkv']})
+        # Clear modified flag so we don't get a "save first?" prompt
+        m.modified = False
+
+        m.rescan_file_list()
+
+        paths = {v['path'] for v in m.config['videos']}
+        self.assertIn(os.path.join(self.vid_dir, 'film.mkv'), paths)
+        print("✓ rescan_file_list() works on V1 config after adding source_dir")
+
+    def test_rescan_v1_config_empty_source_dirs_prints_error(self):
+        """rescan_file_list() prints a helpful message when source_dirs is empty."""
+        cfg = {'category_targets': {'master': 100}, 'videos': []}
+        m = self._make_manager(cfg)
+        import io, contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            m.rescan_file_list()
+        out = buf.getvalue()
+        self.assertIn('No source directories', out)
+        print("✓ rescan_file_list() shows helpful message when source_dirs is empty")
+
+
+# ─── category management ──────────────────────────────────────────────────────
+
+class TestCategoryManagement(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def _make_manager(self, config_dict):
+        p = os.path.join(self.tmp, 'cfg.json')
+        with open(p, 'w') as f:
+            json.dump(config_dict, f)
+        m = VideoManager(p)
+        m.load()
+        return m
+
+    def _base_cfg(self):
+        return {
+            'category_targets': {'master': 100000, 'space': 50000},
+            'format_config': {
+                'master': {'large': {'gt_size': [720, 720], 'lr_size': [240, 240], 'probability': 1.0}},
+                'space':  {'large': {'gt_size': [720, 720], 'lr_size': [240, 240], 'probability': 1.0}},
+            },
+            'source_dirs': [],
+            'videos': [],
+        }
+
+    def test_add_category_updates_all_structures(self):
+        """_add_category() updates categories, category_targets, format_config."""
+        m = self._make_manager(self._base_cfg())
+        m.categories = list(m.categories)  # ensure it's a list
+
+        m._add_category.__func__  # just access — we'll call directly
+        # Simulate _add_category by calling the real method via monkeypatch input
+        import unittest.mock as mock
+        with mock.patch('builtins.input', side_effect=['toon', '40000']):
+            m._add_category()
+
+        self.assertIn('toon', m.categories)
+        self.assertEqual(m.category_targets['toon'], 40000)
+        self.assertIn('toon', m.config['format_config'])
+        self.assertTrue(m.modified)
+        print("✓ _add_category() updates categories, targets, and format_config")
+
+    def test_add_category_rejects_duplicate(self):
+        """_add_category() refuses to add an already-existing category."""
+        m = self._make_manager(self._base_cfg())
+        import unittest.mock as mock
+        with mock.patch('builtins.input', return_value='master'):
+            m._add_category()
+        # Still only 2 categories (master + space)
+        self.assertEqual(m.categories.count('master'), 1)
+        print("✓ _add_category() rejects duplicate category names")
+
+    def test_remove_category_cleans_up(self):
+        """_remove_category() removes from categories, targets, format_config."""
+        cfg = self._base_cfg()
+        cfg['videos'] = [
+            {'name': 'v1', 'path': '/x/v1.mkv', 'categories': ['master', 'space']},
+            {'name': 'v2', 'path': '/x/v2.mkv', 'categories': ['space']},
+        ]
+        m = self._make_manager(cfg)
+        import unittest.mock as mock
+        with mock.patch('builtins.input', side_effect=['space', 'yes']):
+            m._remove_category()
+
+        self.assertNotIn('space', m.categories)
+        self.assertNotIn('space', m.category_targets)
+        self.assertNotIn('space', m.config['format_config'])
+        # Videos must have space unassigned
+        for v in m.videos:
+            self.assertNotIn('space', v.get('categories', []))
+        self.assertTrue(m.modified)
+        print("✓ _remove_category() cleans up categories, targets, format_config, and videos")
+
+    def test_remove_category_cancel(self):
+        """_remove_category() respects cancellation."""
+        m = self._make_manager(self._base_cfg())
+        import unittest.mock as mock
+        with mock.patch('builtins.input', side_effect=['master', 'no']):
+            m._remove_category()
+        self.assertIn('master', m.categories)
+        print("✓ _remove_category() respects 'no' cancellation")
+
+    def test_edit_category_targets_updates_values(self):
+        """_edit_category_targets() updates the target for a category."""
+        m = self._make_manager(self._base_cfg())
+        import unittest.mock as mock
+        # Provide new value for 'master', blank (keep) for 'space'
+        with mock.patch('builtins.input', side_effect=['999999', '']):
+            m._edit_category_targets()
+        self.assertEqual(m.category_targets['master'], 999999)
+        self.assertEqual(m.category_targets['space'], 50000)
+        self.assertTrue(m.modified)
+        print("✓ _edit_category_targets() updates targets correctly")
+
+    def test_save_and_reload_preserves_new_category(self):
+        """New categories persist after save/reload."""
+        m = self._make_manager(self._base_cfg())
+        import unittest.mock as mock
+        with mock.patch('builtins.input', side_effect=['toon', '40000']):
+            m._add_category()
+        m.save(backup=False)
+
+        p = os.path.join(self.tmp, 'cfg.json')
+        m3 = VideoManager(p)
+        m3.load()
+        self.assertIn('toon', m3.categories)
+        self.assertEqual(m3.category_targets['toon'], 40000)
+        print("✓ New category persists after save/reload")
+
+
 if __name__ == '__main__':
     print("\n" + "=" * 60)
     print("Running Default Config & Scanning Fix Tests")

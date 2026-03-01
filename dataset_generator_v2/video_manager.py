@@ -352,20 +352,125 @@ class VideoManager:
             target = self.category_targets.get(cat, '?')
             print(f"  {cat:<15}: {category_counts[cat]:>4} videos (target: {target})")
     
-    def edit_category_targets(self):
-        """Edit extraction targets for categories."""
-        print("\n" + "="*60)
-        print("EDIT CATEGORY TARGETS")
-        print("="*60)
-        
-        print("\nCurrent targets:")
-        for cat, target in self.category_targets.items():
-            print(f"  {cat}: {target}")
-        
-        print("\nEnter new targets (or press Enter to keep current):")
+    def manage_categories(self):
+        """Category management submenu: list, add, remove, edit targets, edit formats."""
+        while True:
+            print("\n── Category Management ───────────────────────────────────")
+            print(f"  Configured categories: {', '.join(self.categories) or '(none)'}")
+            print("  a) List categories")
+            print("  b) Add category")
+            print("  c) Remove category")
+            print("  d) Edit category targets (patch counts)")
+            print("  e) Edit category format config (patch sizes)")
+            print("  x) Back")
+            sub = input("Choice: ").strip().lower()
+
+            if sub == 'x':
+                break
+            elif sub == 'a':
+                self._list_categories()
+            elif sub == 'b':
+                self._add_category()
+            elif sub == 'c':
+                self._remove_category()
+            elif sub == 'd':
+                self._edit_category_targets()
+            elif sub == 'e':
+                self._edit_category_format()
+            else:
+                print("Invalid choice")
+
+    def _list_categories(self):
+        """Print all configured categories with their targets and format entries."""
+        if not self.categories:
+            print("No categories configured.")
+            return
+        fmt = self.config.get('format_config', {})
+        print(f"\n{'Category':<20} {'Target':<12} Format entries")
+        print("-" * 55)
+        for cat in sorted(self.categories):
+            target = self.category_targets.get(cat, '?')
+            nfmt = len(fmt.get(cat, {}))
+            print(f"  {cat:<18} {str(target):<12} {nfmt}")
+
+    def _add_category(self):
+        """Add a new category with target and default format config."""
+        name = input("New category name: ").strip().lower()
+        if not name:
+            print("❌ Name cannot be empty")
+            return
+        if name in self.categories:
+            print(f"❌ Category '{name}' already exists")
+            return
+
+        target_str = input("Patch target (default: 50000): ").strip()
+        try:
+            target = int(target_str) if target_str else 50000
+        except ValueError:
+            print("Invalid number, using 50000")
+            target = 50000
+
+        # Update category_targets
+        self.category_targets[name] = target
+        self.config['category_targets'] = self.category_targets
+
+        # Add default format config entry if format_config exists
+        fmt = self.config.get('format_config')
+        if fmt is not None:
+            fmt[name] = {
+                "small_540":  {"gt_size": [540, 540], "lr_size": [180, 180], "probability": 0.6},
+                "medium_169": {"gt_size": [405, 720], "lr_size": [135, 240], "probability": 0.2},
+                "large_720":  {"gt_size": [720, 720], "lr_size": [240, 240], "probability": 0.2}
+            }
+
+        self.categories = sorted(self.categories + [name])
+        self.modified = True
+        print(f"✓ Added category '{name}' with target {target:,}")
+
+    def _remove_category(self):
+        """Remove a category and unassign all videos from it."""
+        if not self.categories:
+            print("No categories configured.")
+            return
+        print(f"Categories: {', '.join(self.categories)}")
+        name = input("Category to remove: ").strip()
+        if name not in self.categories:
+            print(f"❌ Category '{name}' not found")
+            return
+
+        affected = sum(1 for v in self.videos if name in get_video_categories(v))
+        suffix = f" and unassign {affected} video(s)" if affected else ""
+        confirm = input(f"⚠️  Remove '{name}'{suffix}? (yes/no): ").strip().lower()
+        if confirm != 'yes':
+            print("Cancelled.")
+            return
+
+        # Unassign videos
+        for video in self.videos:
+            cats = get_video_categories(video)
+            if name in cats:
+                cats.remove(name)
+                video['categories'] = cats
+
+        # Remove from config dicts
+        self.category_targets.pop(name, None)
+        self.config['category_targets'] = self.category_targets
+        fmt = self.config.get('format_config', {})
+        fmt.pop(name, None)
+
+        self.categories = [c for c in self.categories if c != name]
+        self.modified = True
+        print(f"✓ Removed category '{name}'" + (f", unassigned {affected} video(s)" if affected else ""))
+
+    def _edit_category_targets(self):
+        """Edit the patch-count target for each category."""
+        if not self.categories:
+            print("No categories configured.")
+            return
+        print("\nEnter new targets (press Enter to keep current):")
         for cat in self.categories:
             current = self.category_targets.get(cat, 0)
-            new_val = input(f"{cat} (current: {current}): ").strip()
+            new_val = input(f"  {cat} (current: {current:,}): ").strip()
             if new_val:
                 try:
                     self.category_targets[cat] = int(new_val)
@@ -374,19 +479,91 @@ class VideoManager:
                 except ValueError:
                     print(f"  Invalid number, keeping {current}")
 
+    def _edit_category_format(self):
+        """Edit patch-size entries (format_config) for a category."""
+        fmt = self.config.get('format_config')
+        if fmt is None:
+            print("❌ This config has no format_config section.")
+            return
+        if not self.categories:
+            print("No categories configured.")
+            return
+
+        print(f"Categories: {', '.join(self.categories)}")
+        cat = input("Category to edit format for: ").strip()
+        if cat not in self.categories:
+            print(f"❌ Unknown category: {cat}")
+            return
+
+        entries = fmt.get(cat, {})
+        if not entries:
+            print(f"No format entries for '{cat}' yet.")
+
+        print(f"\nCurrent format entries for '{cat}':")
+        for k, v in entries.items():
+            print(f"  {k}: gt={v.get('gt_size')}  lr={v.get('lr_size')}  prob={v.get('probability')}")
+
+        print("\nOptions:")
+        print("  a) Add format entry")
+        print("  r) Remove format entry")
+        print("  x) Cancel")
+        sub = input("Choice: ").strip().lower()
+
+        if sub == 'a':
+            entry_name = input("Entry name (e.g. medium_169): ").strip()
+            if not entry_name:
+                return
+            try:
+                gt_w = int(input("  GT width : ").strip())
+                gt_h = int(input("  GT height: ").strip())
+                lr_w = int(input("  LR width : ").strip())
+                lr_h = int(input("  LR height: ").strip())
+                prob = float(input("  Probability (0.0–1.0): ").strip())
+            except ValueError:
+                print("❌ Invalid input")
+                return
+            fmt.setdefault(cat, {})[entry_name] = {
+                "gt_size": [gt_w, gt_h], "lr_size": [lr_w, lr_h], "probability": prob
+            }
+            self.modified = True
+            print(f"✓ Added format entry '{entry_name}' to '{cat}'")
+
+        elif sub == 'r':
+            if not entries:
+                print("No entries to remove.")
+                return
+            entry_name = input(f"Entry to remove ({', '.join(entries)}): ").strip()
+            if entry_name in entries:
+                del entries[entry_name]
+                self.modified = True
+                print(f"✓ Removed '{entry_name}' from '{cat}'")
+            else:
+                print(f"❌ Entry '{entry_name}' not found")
+
+    # kept for backwards compatibility (called directly in some older paths)
+    def edit_category_targets(self):
+        """Edit extraction targets for categories (legacy alias → manage_categories)."""
+        self.manage_categories()
+
     # ── V2 Config: Source Directory Management ────────────────────────────────
 
     def _is_v2_config(self) -> bool:
         """Return True if the loaded config uses V2 format (source_dirs list)."""
         return 'source_dirs' in self.config
 
-    def list_source_dirs(self):
-        """List all configured source directories (V2 config)."""
-        if not self._is_v2_config():
-            print("❌ Source directory management requires V2 config format (source_dirs)")
-            return
+    def _ensure_source_dirs(self) -> list:
+        """
+        Return the source_dirs list, auto-initialising it in the config if absent.
+        This allows source-directory management on any config format.
+        """
+        if 'source_dirs' not in self.config:
+            self.config['source_dirs'] = []
+            self.modified = True
+        return self.config['source_dirs']
 
-        source_dirs = self.config.get('source_dirs', [])
+    def list_source_dirs(self):
+        """List all configured source directories."""
+        source_dirs = self._ensure_source_dirs()
 
         if not source_dirs:
             print("No source directories configured.")
@@ -400,12 +577,8 @@ class VideoManager:
             print(f"{i:<5} {path:<65} {exts}")
 
     def add_source_dir(self):
-        """Add a new source directory (V2 config). Not bound to any category."""
-        if not self._is_v2_config():
-            print("❌ Source directory management requires V2 config format (source_dirs)")
-            return
-
-        source_dirs = self.config.setdefault('source_dirs', [])
+        """Add a new source directory. Not bound to any category."""
+        source_dirs = self._ensure_source_dirs()
 
         path = input("Directory path: ").strip()
         if not path:
@@ -423,12 +596,8 @@ class VideoManager:
         print(f"✓ Added source directory: {path}")
 
     def edit_source_dir(self):
-        """Edit an existing source directory by index (V2 config)."""
-        if not self._is_v2_config():
-            print("❌ Source directory management requires V2 config format (source_dirs)")
-            return
-
-        source_dirs = self.config.get('source_dirs', [])
+        """Edit an existing source directory by index."""
+        source_dirs = self._ensure_source_dirs()
         if not source_dirs:
             print("No source directories configured.")
             return
@@ -458,12 +627,8 @@ class VideoManager:
         print(f"✓ Updated source directory #{idx}")
 
     def remove_source_dir(self):
-        """Remove a source directory by index (V2 config)."""
-        if not self._is_v2_config():
-            print("❌ Source directory management requires V2 config format (source_dirs)")
-            return
-
-        source_dirs = self.config.get('source_dirs', [])
+        """Remove a source directory by index."""
+        source_dirs = self._ensure_source_dirs()
         if not source_dirs:
             print("No source directories configured.")
             return
@@ -493,12 +658,9 @@ class VideoManager:
         Scan all configured source directories and rebuild the video list.
         Existing category assignments are preserved for already-known paths.
         New files are added with empty categories; assign them via menu options 5/6/7.
+        Works on any config format; source_dirs is auto-initialised if absent.
         """
-        if not self._is_v2_config():
-            print("❌ Rescan requires V2 config format (source_dirs)")
-            return
-
-        source_dirs = self.config.get('source_dirs', [])
+        source_dirs = self._ensure_source_dirs()
         if not source_dirs:
             print("❌ No source directories configured. Add directories first (option 13).")
             return
@@ -570,7 +732,7 @@ def print_menu():
     print("8. Remove from category")
     print("9. Reset all assignments")
     print("10. Show statistics")
-    print("11. Edit category targets")
+    print("11. Manage categories (add / remove / edit targets & formats)")
     print("-" * 60)
     print("── Source Directory Config (V2) ──────────────────────")
     print("12. List source directories")
@@ -847,27 +1009,27 @@ def main():
                 manager.show_statistics()
             
             elif choice == '11':
-                # Edit category targets
-                manager.edit_category_targets()
+                # Manage categories
+                manager.manage_categories()
             
             elif choice == '12':
-                # List source directories (V2)
+                # List source directories
                 manager.list_source_dirs()
             
             elif choice == '13':
-                # Add source directory (V2)
+                # Add source directory
                 manager.add_source_dir()
             
             elif choice == '14':
-                # Edit source directory (V2)
+                # Edit source directory
                 manager.edit_source_dir()
             
             elif choice == '15':
-                # Remove source directory (V2)
+                # Remove source directory
                 manager.remove_source_dir()
             
             elif choice == '16':
-                # Rescan file list (V2)
+                # Rescan file list
                 manager.rescan_file_list()
             
             elif choice == '17':
