@@ -24,29 +24,22 @@ from video_manager import VideoManager
 
 # ─── helpers ──────────────────────────────────────────────────────────────────
 
-def _make_unified_config(video_dir):
-    """Unified (V1+V2) config with base_settings, category_targets, source_dirs, videos."""
+def _make_v2_config(video_dir):
+    """V2-format config matching what video_manager.py generates."""
     return {
-        'base_settings': {
-            'base_frame_limit': 100,
-            'max_workers': 1,
-            'output_base_dir': '/tmp/out',
-        },
-        'category_targets': {'master': 1000, 'universal': 500},
-        'format_config': {},
+        'root_path': '/tmp/out',
         'source_dirs': [{'path': video_dir, 'extensions': ['.mkv', '.mp4', '.avi']}],
         'videos': [],
-    }
-
-
-def _make_v2_only_config(video_dir):
-    """V2-only config (category_weights, no base_settings)."""
-    return {
-        'source_dirs': [{'path': video_dir, 'extensions': ['.mkv']}],
-        'videos': [],
-        'category_weights': {'cat_a': 0.6, 'cat_b': 0.4},
-        'processing': {'total_patches': 50},
-        'output_patches': {},
+        'category_weights': {'master': 0.5, 'universal': 0.5},
+        'output_patches': {
+            '540':     {'enabled': True,  'gt_size': [540, 540], 'lr_size': [180, 180]},
+            '720':     {'enabled': True,  'gt_size': [720, 720], 'lr_size': [240, 240]},
+            '720_169': {'enabled': True,  'gt_size': [405, 720], 'lr_size': [135, 240]},
+        },
+        'processing': {'n_frames': 7, 'total_patches': 1000},
+        'quality': {'blur_threshold': 80.0},
+        'ffmpeg_timeout': 120,
+        'ffprobe_timeout': 60,
     }
 
 
@@ -62,13 +55,14 @@ class TestCreateDefaultConfig(unittest.TestCase):
 
     def test_build_default_config_has_required_keys(self):
         cfg = build_default_config()
-        for key in ('base_settings', 'category_targets', 'format_config',
+        for key in ('root_path', 'category_weights', 'output_patches',
+                    'processing', 'quality', 'workers',
                     'ffmpeg_timeout', 'ffprobe_timeout', 'source_dirs', 'videos'):
             self.assertIn(key, cfg, f"Missing key: {key}")
-        # Keys that make_dataset_v2_uhd.py does NOT read must not be present
-        for key in ('_comment_usage', '_comment_workflow', '_comment_source_dirs', '_comment_videos'):
-            self.assertNotIn(key, cfg, f"Unexpected comment key: {key}")
-        print("✓ build_default_config() has all required top-level keys")
+        for key in ('base_settings', 'category_targets', 'format_config',
+                    '_comment_usage', '_comment_workflow'):
+            self.assertNotIn(key, cfg, f"Unexpected V1/comment key: {key}")
+        print("✓ build_default_config() has all required V2 top-level keys")
 
     def test_build_default_config_empty_lists(self):
         cfg = build_default_config()
@@ -79,9 +73,20 @@ class TestCreateDefaultConfig(unittest.TestCase):
     def test_build_default_config_has_four_categories(self):
         cfg = build_default_config()
         for cat in ('master', 'universal', 'space', 'toon'):
-            self.assertIn(cat, cfg['category_targets'])
-            self.assertIn(cat, cfg['format_config'])
-        print("✓ default config has master / universal / space / toon categories")
+            self.assertIn(cat, cfg['category_weights'])
+        print("✓ default config has master / universal / space / toon in category_weights")
+
+    def test_build_default_config_weights_sum_to_one(self):
+        cfg = build_default_config()
+        total = sum(cfg['category_weights'].values())
+        self.assertAlmostEqual(total, 1.0, places=5)
+        print("✓ category_weights sum to 1.0")
+
+    def test_build_default_config_output_patches_present(self):
+        cfg = build_default_config()
+        for patch_key in ('540', '720', '720_169'):
+            self.assertIn(patch_key, cfg['output_patches'])
+        print("✓ output_patches contains 540 / 720 / 720_169")
 
     def test_create_default_config_writes_valid_json(self):
         out = os.path.join(self.tmp, 'test_out.json')
@@ -89,68 +94,40 @@ class TestCreateDefaultConfig(unittest.TestCase):
         self.assertTrue(os.path.exists(out))
         with open(out) as f:
             loaded = json.load(f)
-        self.assertIn('base_settings', loaded)
+        self.assertIn('root_path', loaded)
+        self.assertIn('category_weights', loaded)
         self.assertIn('source_dirs', loaded)
-        print("✓ create_default_config() writes valid JSON")
-
-    def test_build_default_config_base_settings_only_uhd_keys(self):
-        """base_settings must contain exactly the keys read by make_dataset_v2_uhd.py."""
-        cfg = build_default_config()
-        bs = cfg['base_settings']
-        # Keys that the UHD generator actually reads
-        for key in ('output_base_dir', 'temp_dir', 'status_file', 'lr_versions', 'min_detail_threshold'):
-            self.assertIn(key, bs, f"Missing base_settings key: {key}")
-        # Keys that the UHD generator does NOT read (used only by make_dataset_multi.py)
-        for key in ('base_frame_limit', 'max_workers', 'val_percent',
-                    'min_file_size', 'scene_diff_threshold', 'max_retry_attempts', 'retry_skip_seconds'):
-            self.assertNotIn(key, bs, f"Unexpected (unused) base_settings key: {key}")
-        print("✓ base_settings contains only keys read by make_dataset_v2_uhd.py")
+        print("✓ create_default_config() writes valid V2 JSON")
 
     def test_build_default_config_timeout_keys_present(self):
-        """ffmpeg_timeout and ffprobe_timeout must be at the top level."""
         cfg = build_default_config()
         self.assertEqual(cfg['ffmpeg_timeout'],  120)
         self.assertEqual(cfg['ffprobe_timeout'], 60)
         print("✓ ffmpeg_timeout and ffprobe_timeout present at top level")
 
-    def test_build_default_config_template_timeout_override(self):
-        """Template values for ffmpeg/ffprobe timeout are respected."""
+    def test_build_default_config_template_override(self):
+        """Template values are respected."""
         tmpl = {
-            'base_settings': {},
-            'category_targets': {},
-            'format_config': {},
-            'ffmpeg_timeout': 300,
-            'ffprobe_timeout': 90,
+            'root_path':        '/custom/out',
+            'category_weights': {'alpha': 1.0},
+            'ffmpeg_timeout':   300,
+            'ffprobe_timeout':  90,
         }
-        tmpl_path = os.path.join(self.tmp, 'tmpl_timeout.json')
+        tmpl_path = os.path.join(self.tmp, 'tmpl.json')
         with open(tmpl_path, 'w') as f:
             json.dump(tmpl, f)
         cfg = build_default_config(template_path=tmpl_path)
+        self.assertEqual(cfg['root_path'], '/custom/out')
+        self.assertIn('alpha', cfg['category_weights'])
+        self.assertNotIn('master', cfg['category_weights'])
         self.assertEqual(cfg['ffmpeg_timeout'],  300)
         self.assertEqual(cfg['ffprobe_timeout'], 90)
-        print("✓ build_default_config() respects ffmpeg/ffprobe timeouts from template")
-
-    def test_build_default_config_uses_template(self):
-        """When a template file is present, its values override built-in defaults."""
-        tmpl = {
-            'base_settings': {'output_base_dir': '/custom/out'},
-            'category_targets': {'alpha': 9999},
-            'format_config': {'alpha': {}},
-        }
-        tmpl_path = os.path.join(self.tmp, 'template.json')
-        with open(tmpl_path, 'w') as f:
-            json.dump(tmpl, f)
-
-        cfg = build_default_config(template_path=tmpl_path)
-        self.assertEqual(cfg['base_settings']['output_base_dir'], '/custom/out')
-        self.assertIn('alpha', cfg['category_targets'])
-        self.assertNotIn('master', cfg['category_targets'])
         print("✓ build_default_config() applies template values correctly")
 
     def test_build_default_config_bad_template_falls_back(self):
-        """A missing or broken template must not raise; built-in defaults are used."""
+        """A missing template must not raise; built-in defaults are used."""
         cfg = build_default_config(template_path='/nonexistent/path.json')
-        self.assertIn('master', cfg['category_targets'])
+        self.assertIn('master', cfg['category_weights'])
         print("✓ build_default_config() falls back to built-ins when template is missing")
 
 
@@ -158,9 +135,7 @@ class TestCreateDefaultConfig(unittest.TestCase):
 
 class TestUHDGeneratorConfigSelection(unittest.TestCase):
     """
-    Validate that make_dataset_v2_uhd.main() selects the same config file
-    as video_manager.main(): prefer generator_config_v2.json over
-    generator_config.json.
+    Validate that make_dataset_v2_uhd.main() selects generator_config_v2.json.
     """
 
     def setUp(self):
@@ -173,65 +148,42 @@ class TestUHDGeneratorConfigSelection(unittest.TestCase):
         os.chdir(self._orig_cwd)
         shutil.rmtree(self.tmp)
 
-    def _minimal_config(self):
-        return {
-            'base_settings': {
-                'output_base_dir': self.tmp,
-                'temp_dir':        os.path.join(self.tmp, 'temp'),
-                'status_file':     os.path.join(self.tmp, '.status.json'),
-                'lr_versions':     ['7frames'],
-                'min_detail_threshold': 80.0,
-            },
-            'category_targets': {'master': 1000},
-            'format_config': {'master': {}},
-            'ffmpeg_timeout':  120,
-            'ffprobe_timeout':  60,
-            'source_dirs': [],
-            'videos': [],
+    def _write_v2(self, filename='generator_config_v2.json'):
+        cfg = {
+            'root_path': self.tmp,
+            'source_dirs': [], 'videos': [],
+            'category_weights': {'master': 1.0},
+            'output_patches': {},
+            'processing': {'n_frames': 7, 'total_patches': 100},
+            'quality': {'blur_threshold': 80.0},
+            'ffmpeg_timeout': 120, 'ffprobe_timeout': 60,
         }
-
-    def _write(self, filename):
         path = os.path.join(self.tmp, filename)
         with open(path, 'w') as f:
-            json.dump(self._minimal_config(), f)
+            json.dump(cfg, f)
         return path
 
     def _resolve_config(self, directory):
-        """
-        Replicate the config-selection logic from make_dataset_v2_uhd.main()
-        so we can unit-test it without actually running the generator.
-        """
+        """Replicate the config-selection logic from make_dataset_v2_uhd.main()."""
         from pathlib import Path as P
         v2 = P(directory) / 'generator_config_v2.json'
-        v1 = P(directory) / 'generator_config.json'
         if v2.exists():
             return str(v2)
-        if v1.exists():
-            return str(v1)
         return None
 
-    def test_prefers_v2_config_when_both_exist(self):
-        """generator_config_v2.json is chosen over generator_config.json."""
-        self._write('generator_config.json')
-        self._write('generator_config_v2.json')
+    def test_finds_v2_config(self):
+        """generator_config_v2.json is found and selected."""
+        self._write_v2()
         chosen = self._resolve_config(self.tmp)
-        self.assertTrue(chosen.endswith('generator_config_v2.json'),
-                        f"Expected v2 config, got: {chosen}")
-        print("✓ UHD generator prefers generator_config_v2.json when both exist")
-
-    def test_falls_back_to_v1_config(self):
-        """Falls back to generator_config.json when v2 is absent."""
-        self._write('generator_config.json')
-        chosen = self._resolve_config(self.tmp)
-        self.assertTrue(chosen.endswith('generator_config.json'),
-                        f"Expected v1 fallback, got: {chosen}")
-        print("✓ UHD generator falls back to generator_config.json when v2 absent")
+        self.assertIsNotNone(chosen)
+        self.assertTrue(chosen.endswith('generator_config_v2.json'))
+        print("✓ UHD generator selects generator_config_v2.json")
 
     def test_returns_none_when_no_config(self):
-        """Returns None (no config found) when neither file exists."""
+        """Returns None when generator_config_v2.json is absent."""
         chosen = self._resolve_config(self.tmp)
         self.assertIsNone(chosen)
-        print("✓ UHD generator reports no config when neither file exists")
+        print("✓ UHD generator returns None when no config present")
 
     def test_script_dir_is_dataset_generator_v2(self):
         """make_dataset_v2_uhd.py must look in its own directory, not parent.parent."""
@@ -241,23 +193,19 @@ class TestUHDGeneratorConfigSelection(unittest.TestCase):
         )
         with open(uhd_path) as fh:
             src = fh.read()
-        # Must NOT have parent.parent (old wrong path)
         self.assertNotIn('parent.parent', src,
-            "make_dataset_v2_uhd.py still uses parent.parent for script_dir – "
-            "it would look in the repo root instead of dataset_generator_v2/")
-        # Must have parent (correct path)
+            "make_dataset_v2_uhd.py still uses parent.parent for script_dir")
         self.assertIn('Path(__file__).parent', src,
             "make_dataset_v2_uhd.py must use Path(__file__).parent for script_dir")
-        print("✓ make_dataset_v2_uhd.py uses correct script_dir (parent, not parent.parent)")
+        print("✓ make_dataset_v2_uhd.py uses correct script_dir (parent)")
 
 
-# ─── UHD generator V2→V1 config normalization ─────────────────────────────────
+# ─── UHD generator V2→internal config normalization ──────────────────────────
 
 class TestUHDConfigNormalization(unittest.TestCase):
     """
-    Validate DatasetGeneratorV2UHD._normalize_config():
-    - V2 flat config (from video_manager.py) is correctly mapped to V1 structure
-    - V1 configs pass through unchanged
+    Validate normalize_config() correctly maps V2 config fields
+    (from video_manager.py) to the internal structure used by the generator.
     """
 
     def setUp(self):
@@ -285,20 +233,6 @@ class TestUHDConfigNormalization(unittest.TestCase):
         }
         cfg.update(overrides)
         return cfg
-
-    # ── V1 pass-through ────────────────────────────────────────────────────────
-
-    def test_v1_config_passes_through_unchanged(self):
-        """V1 configs (with 'base_settings') are returned as-is."""
-        v1 = {
-            'base_settings': {'output_base_dir': '/x', 'temp_dir': '/x/t', 'status_file': '/x/s'},
-            'category_targets': {'master': 5000},
-            'format_config': {},
-            'videos': [],
-        }
-        result = self.normalize(v1)
-        self.assertIs(result, v1)
-        print("✓ V1 config passes through _normalize_config unchanged")
 
     # ── base_settings ─────────────────────────────────────────────────────────
 
@@ -386,9 +320,9 @@ class TestUHDConfigNormalization(unittest.TestCase):
         print("✓ format_config entries contain gt_size and lr_size")
 
 
+# ─── manager.categories from config keys ────────────────────────────────────────────
 
-
-
+class TestManagerCategoriesFromConfig(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -404,20 +338,8 @@ class TestUHDConfigNormalization(unittest.TestCase):
         m.load()
         return m
 
-    def test_categories_from_category_targets(self):
-        """manager.categories includes keys from category_targets even with no video assignments."""
-        cfg = {
-            'category_targets': {'master': 100, 'space': 50},
-            'videos': [],
-            'source_dirs': [],
-        }
-        m = self._make_manager(cfg)
-        self.assertIn('master', m.categories)
-        self.assertIn('space',  m.categories)
-        print("✓ categories populated from category_targets")
-
     def test_categories_from_category_weights(self):
-        """manager.categories includes keys from category_weights (V2-only config)."""
+        """manager.categories includes keys from category_weights."""
         cfg = {
             'category_weights': {'cat_x': 0.5, 'cat_y': 0.5},
             'videos': [],
@@ -431,16 +353,17 @@ class TestUHDConfigNormalization(unittest.TestCase):
         print("✓ categories populated from category_weights")
 
     def test_categories_merged_from_videos_and_config(self):
-        """Categories from video assignments and config keys are merged."""
+        """Categories from video assignments and category_weights are merged."""
         cfg = {
-            'category_targets': {'master': 100},
+            'category_weights': {'master': 0.5, 'universal': 0.5},
             'videos': [{'name': 'v', 'path': '/x/v.mkv', 'categories': ['toon']}],
             'source_dirs': [],
         }
         m = self._make_manager(cfg)
-        self.assertIn('master', m.categories)
-        self.assertIn('toon',   m.categories)
-        print("✓ categories merged from video assignments and config keys")
+        self.assertIn('master',    m.categories)
+        self.assertIn('universal', m.categories)
+        self.assertIn('toon',      m.categories)
+        print("✓ categories merged from video assignments and category_weights")
 
 
 # ─── scanning fixes ───────────────────────────────────────────────────────────
@@ -471,7 +394,7 @@ class TestScanningFixes(unittest.TestCase):
         open(os.path.join(self.vid_dir, 'b.mkv'), 'w').close()
         open(os.path.join(self.vid_dir, 'c.Mp4'), 'w').close()
 
-        cfg = _make_unified_config(self.vid_dir)
+        cfg = _make_v2_config(self.vid_dir)
         m = self._make_manager(cfg)
         m.rescan_file_list()
 
@@ -485,7 +408,7 @@ class TestScanningFixes(unittest.TestCase):
 
         # Two source_dirs both pointing to the same directory
         cfg = {
-            'category_targets': {'master': 100},
+            'category_weights': {'master': 1.0},
             'source_dirs': [
                 {'path': self.vid_dir, 'extensions': ['.mkv']},
                 {'path': self.vid_dir, 'extensions': ['.mkv']},
@@ -504,9 +427,7 @@ class TestScanningFixes(unittest.TestCase):
         """StateManager.scan_videos() matches files with uppercase extensions."""
         open(os.path.join(self.vid_dir, 'X.MKV'), 'w').close()
 
-        cfg = _make_unified_config(self.vid_dir)
-        cfg['processing'] = {'total_patches': 10}
-        cfg['output_patches'] = {}
+        cfg = _make_v2_config(self.vid_dir)
         sm = StateManager(cfg, os.path.join(self.tmp, 'state.json'))
 
         # Manually inject a fake cached entry so ffprobe is not called
@@ -547,101 +468,6 @@ class TestScanningFixes(unittest.TestCase):
         self.assertEqual(len(paths), len(set(paths)))
         print("✓ StateManager.scan_videos() deduplicates overlapping source directories")
 
-    # ── StateManager._create_new_state with V1 config ─────────────────────────
-
-    def test_create_new_state_v1_config_no_crash(self):
-        """StateManager initialises without error on V1-style config (no 'processing' key)."""
-        cfg = {
-            'base_settings': {'max_workers': 4},
-            'category_targets': {'master': 1000},
-            'source_dirs': [{'path': self.vid_dir, 'extensions': ['.mkv']}],
-            'videos': [],
-        }
-        try:
-            sm = StateManager(cfg, os.path.join(self.tmp, 'state_v1.json'))
-        except Exception as exc:
-            self.fail(f"StateManager crashed on V1 config: {exc}")
-        self.assertEqual(sm.state['progress']['total_patches'], 0)
-        print("✓ StateManager initialises without crash on V1-style config")
-
-
-# ─── rescan works on V1 / unified config (no prior source_dirs key) ───────────
-
-class TestRescanOnV1Config(unittest.TestCase):
-    """Rescan must work even when the config has no 'source_dirs' key yet."""
-
-    def setUp(self):
-        self.tmp = tempfile.mkdtemp()
-        self.vid_dir = os.path.join(self.tmp, 'vids')
-        os.makedirs(self.vid_dir)
-
-    def tearDown(self):
-        shutil.rmtree(self.tmp)
-
-    def _make_manager(self, config_dict):
-        p = os.path.join(self.tmp, 'cfg.json')
-        with open(p, 'w') as f:
-            json.dump(config_dict, f)
-        m = VideoManager(p)
-        m.load()
-        return m
-
-    def test_ensure_source_dirs_auto_initialises(self):
-        """_ensure_source_dirs() creates source_dirs: [] when the key is absent."""
-        cfg = {'category_targets': {'master': 100}, 'videos': []}
-        m = self._make_manager(cfg)
-        self.assertNotIn('source_dirs', m.config)
-        dirs = m._ensure_source_dirs()
-        self.assertIn('source_dirs', m.config)
-        self.assertEqual(dirs, [])
-        self.assertTrue(m.modified)
-        print("✓ _ensure_source_dirs() auto-initialises source_dirs")
-
-    def test_list_source_dirs_works_on_v1_config(self):
-        """list_source_dirs() no longer blocks on V1 config."""
-        cfg = {'category_targets': {'master': 100}, 'videos': []}
-        m = self._make_manager(cfg)
-        try:
-            m.list_source_dirs()  # must not raise or print an error
-        except Exception as e:
-            self.fail(f"list_source_dirs() raised on V1 config: {e}")
-        print("✓ list_source_dirs() works on V1 config")
-
-    def test_rescan_works_on_v1_config_with_source_dirs_added(self):
-        """rescan_file_list() works on V1-style config after adding a source_dir."""
-        open(os.path.join(self.vid_dir, 'film.mkv'), 'w').close()
-
-        # Classic V1 config – no source_dirs key
-        cfg = {
-            'base_settings': {'max_workers': 4},
-            'category_targets': {'master': 100},
-            'videos': [{'name': 'old', 'path': '/old/path.mkv', 'categories': ['master']}],
-        }
-        m = self._make_manager(cfg)
-
-        # Simulate: user adds a source dir (option 13 equivalent)
-        m._ensure_source_dirs().append({'path': self.vid_dir, 'extensions': ['.mkv']})
-        # Clear modified flag so we don't get a "save first?" prompt
-        m.modified = False
-
-        m.rescan_file_list()
-
-        paths = {v['path'] for v in m.config['videos']}
-        self.assertIn(os.path.join(self.vid_dir, 'film.mkv'), paths)
-        print("✓ rescan_file_list() works on V1 config after adding source_dir")
-
-    def test_rescan_v1_config_empty_source_dirs_prints_error(self):
-        """rescan_file_list() prints a helpful message when source_dirs is empty."""
-        cfg = {'category_targets': {'master': 100}, 'videos': []}
-        m = self._make_manager(cfg)
-        import io, contextlib
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            m.rescan_file_list()
-        out = buf.getvalue()
-        self.assertIn('No source directories', out)
-        print("✓ rescan_file_list() shows helpful message when source_dirs is empty")
-
 
 # ─── category management ──────────────────────────────────────────────────────
 
@@ -663,31 +489,29 @@ class TestCategoryManagement(unittest.TestCase):
 
     def _base_cfg(self):
         return {
-            'category_targets': {'master': 100000, 'space': 50000},
-            'format_config': {
-                'master': {'large': {'gt_size': [720, 720], 'lr_size': [240, 240], 'probability': 1.0}},
-                'space':  {'large': {'gt_size': [720, 720], 'lr_size': [240, 240], 'probability': 1.0}},
+            'category_weights': {'master': 0.5, 'space': 0.5},
+            'output_patches': {
+                '540': {'enabled': True, 'gt_size': [540, 540], 'lr_size': [180, 180]},
             },
+            'processing': {'n_frames': 7, 'total_patches': 100000},
             'source_dirs': [],
             'videos': [],
         }
 
     def test_add_category_updates_all_structures(self):
-        """_add_category() updates categories, category_targets, format_config."""
+        """_add_category() adds to category_weights."""
         m = self._make_manager(self._base_cfg())
-        m.categories = list(m.categories)  # ensure it's a list
+        m.categories = list(m.categories)
 
-        m._add_category.__func__  # just access — we'll call directly
-        # Simulate _add_category by calling the real method via monkeypatch input
         import unittest.mock as mock
-        with mock.patch('builtins.input', side_effect=['toon', '40000']):
+        with mock.patch('builtins.input', side_effect=['toon', '0.1']):
             m._add_category()
 
         self.assertIn('toon', m.categories)
-        self.assertEqual(m.category_targets['toon'], 40000)
-        self.assertIn('toon', m.config['format_config'])
+        self.assertIn('toon', m.config['category_weights'])
+        self.assertAlmostEqual(m.config['category_weights']['toon'], 0.1)
         self.assertTrue(m.modified)
-        print("✓ _add_category() updates categories, targets, and format_config")
+        print("✓ _add_category() updates categories and category_weights")
 
     def test_add_category_rejects_duplicate(self):
         """_add_category() refuses to add an already-existing category."""
@@ -700,7 +524,7 @@ class TestCategoryManagement(unittest.TestCase):
         print("✓ _add_category() rejects duplicate category names")
 
     def test_remove_category_cleans_up(self):
-        """_remove_category() removes from categories, targets, format_config."""
+        """_remove_category() removes from categories and category_weights."""
         cfg = self._base_cfg()
         cfg['videos'] = [
             {'name': 'v1', 'path': '/x/v1.mkv', 'categories': ['master', 'space']},
@@ -712,13 +536,12 @@ class TestCategoryManagement(unittest.TestCase):
             m._remove_category()
 
         self.assertNotIn('space', m.categories)
-        self.assertNotIn('space', m.category_targets)
-        self.assertNotIn('space', m.config['format_config'])
+        self.assertNotIn('space', m.config.get('category_weights', {}))
         # Videos must have space unassigned
         for v in m.videos:
             self.assertNotIn('space', v.get('categories', []))
         self.assertTrue(m.modified)
-        print("✓ _remove_category() cleans up categories, targets, format_config, and videos")
+        print("✓ _remove_category() cleans up categories, category_weights, and videos")
 
     def test_remove_category_cancel(self):
         """_remove_category() respects cancellation."""
@@ -729,31 +552,19 @@ class TestCategoryManagement(unittest.TestCase):
         self.assertIn('master', m.categories)
         print("✓ _remove_category() respects 'no' cancellation")
 
-    def test_edit_category_targets_updates_values(self):
-        """_edit_category_targets() updates the target for a category."""
-        m = self._make_manager(self._base_cfg())
-        import unittest.mock as mock
-        # Provide new value for 'master', blank (keep) for 'space'
-        with mock.patch('builtins.input', side_effect=['999999', '']):
-            m._edit_category_targets()
-        self.assertEqual(m.category_targets['master'], 999999)
-        self.assertEqual(m.category_targets['space'], 50000)
-        self.assertTrue(m.modified)
-        print("✓ _edit_category_targets() updates targets correctly")
-
     def test_save_and_reload_preserves_new_category(self):
         """New categories persist after save/reload."""
         m = self._make_manager(self._base_cfg())
         import unittest.mock as mock
-        with mock.patch('builtins.input', side_effect=['toon', '40000']):
+        with mock.patch('builtins.input', side_effect=['toon', '0.1']):
             m._add_category()
         m.save(backup=False)
 
         p = os.path.join(self.tmp, 'cfg.json')
-        m3 = VideoManager(p)
-        m3.load()
-        self.assertIn('toon', m3.categories)
-        self.assertEqual(m3.category_targets['toon'], 40000)
+        m2 = VideoManager(p)
+        m2.load()
+        self.assertIn('toon', m2.categories)
+        self.assertIn('toon', m2.config['category_weights'])
         print("✓ New category persists after save/reload")
 
 

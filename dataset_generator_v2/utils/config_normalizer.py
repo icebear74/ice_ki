@@ -2,12 +2,10 @@
 config_normalizer.py
 ──────────────────────────────────────────────────────────────────────────────
 Converts a V2-format config (flat structure written by video_manager.py) into
-the V1 structure expected internally by DatasetGeneratorV2UHD.
+the internal structure expected by DatasetGeneratorV2UHD.
 
-V1 configs (those that already contain 'base_settings') pass through unchanged.
-
-Mapping (V2 → V1)
-─────────────────
+Mapping (V2 → internal)
+───────────────────────
 base_settings.output_base_dir      ← root_path
 base_settings.temp_dir             ← root_path/temp
 base_settings.status_file          ← root_path/.generator_status.json
@@ -26,13 +24,7 @@ import os
 
 
 def normalize_config(config: dict) -> dict:
-    """Normalize a V2-format config to the V1 structure this generator uses.
-
-    V1 configs (those with a 'base_settings' key) are returned unchanged.
-    """
-    if 'base_settings' in config:
-        return config  # already V1 – nothing to do
-
+    """Convert a V2-format config to the internal structure used by the generator."""
     processing    = config.get('processing', {})
     quality       = config.get('quality', {})
     root_path     = config.get('root_path', '')

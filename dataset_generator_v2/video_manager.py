@@ -40,7 +40,6 @@ class VideoManager:
         self.config = {}
         self.videos = []
         self.categories = {}
-        self.category_targets = {}
         self.modified = False
         
     def load(self):
@@ -49,20 +48,16 @@ class VideoManager:
             self.config = json.load(f)
         
         self.videos = self.config.get('videos', [])
-        self.category_targets = self.config.get('category_targets', {})
         
         # Sort videos by name (case-insensitive)
         self.videos.sort(key=lambda v: v.get('name', '').lower())
         
-        # Extract unique categories from video assignments (handle both formats)
+        # Extract unique categories from video assignments and config
         self.categories = set()
         for video in self.videos:
             cats = get_video_categories(video)
             self.categories.update(cats)
 
-        # Also include categories defined in the config
-        # (category_targets for unified/V1 configs, category_weights for V2-only configs)
-        self.categories.update(self.config.get('category_targets', {}).keys())
         self.categories.update(self.config.get('category_weights', {}).keys())
         self.categories = sorted(list(self.categories))
         
@@ -349,19 +344,17 @@ class VideoManager:
         print(f"Unassigned: {unassigned}")
         print("\nCategory assignments:")
         for cat in sorted(category_counts.keys()):
-            target = self.category_targets.get(cat, '?')
-            print(f"  {cat:<15}: {category_counts[cat]:>4} videos (target: {target})")
+            weight = self.config.get('category_weights', {}).get(cat, '?')
+            print(f"  {cat:<15}: {category_counts[cat]:>4} videos (weight: {weight})")
     
     def manage_categories(self):
-        """Category management submenu: list, add, remove, edit targets, edit formats."""
+        """Category management submenu: list, add, remove."""
         while True:
             print("\n── Category Management ───────────────────────────────────")
             print(f"  Configured categories: {', '.join(self.categories) or '(none)'}")
             print("  a) List categories")
             print("  b) Add category")
             print("  c) Remove category")
-            print("  d) Edit category targets (patch counts)")
-            print("  e) Edit category format config (patch sizes)")
             print("  x) Back")
             sub = input("Choice: ").strip().lower()
 
@@ -373,28 +366,23 @@ class VideoManager:
                 self._add_category()
             elif sub == 'c':
                 self._remove_category()
-            elif sub == 'd':
-                self._edit_category_targets()
-            elif sub == 'e':
-                self._edit_category_format()
             else:
                 print("Invalid choice")
 
     def _list_categories(self):
-        """Print all configured categories with their targets and format entries."""
+        """Print all configured categories with their weights."""
         if not self.categories:
             print("No categories configured.")
             return
-        fmt = self.config.get('format_config', {})
-        print(f"\n{'Category':<20} {'Target':<12} Format entries")
-        print("-" * 55)
+        weights = self.config.get('category_weights', {})
+        print(f"\n{'Category':<20} {'Weight':<10}")
+        print("-" * 32)
         for cat in sorted(self.categories):
-            target = self.category_targets.get(cat, '?')
-            nfmt = len(fmt.get(cat, {}))
-            print(f"  {cat:<18} {str(target):<12} {nfmt}")
+            w = weights.get(cat, '?')
+            print(f"  {cat:<18} {str(w):<10}")
 
     def _add_category(self):
-        """Add a new category with target and default format config."""
+        """Add a new category with a weight."""
         name = input("New category name: ").strip().lower()
         if not name:
             print("❌ Name cannot be empty")
@@ -403,29 +391,19 @@ class VideoManager:
             print(f"❌ Category '{name}' already exists")
             return
 
-        target_str = input("Patch target (default: 50000): ").strip()
+        weight_str = input("Category weight 0.0-1.0 (default: 0.1): ").strip()
         try:
-            target = int(target_str) if target_str else 50000
+            weight = float(weight_str) if weight_str else 0.1
         except ValueError:
-            print("Invalid number, using 50000")
-            target = 50000
+            print("Invalid number, using 0.1")
+            weight = 0.1
 
-        # Update category_targets
-        self.category_targets[name] = target
-        self.config['category_targets'] = self.category_targets
-
-        # Add default format config entry if format_config exists
-        fmt = self.config.get('format_config')
-        if fmt is not None:
-            fmt[name] = {
-                "small_540":  {"gt_size": [540, 540], "lr_size": [180, 180], "probability": 0.6},
-                "medium_169": {"gt_size": [405, 720], "lr_size": [135, 240], "probability": 0.2},
-                "large_720":  {"gt_size": [720, 720], "lr_size": [240, 240], "probability": 0.2}
-            }
+        weights = self.config.setdefault('category_weights', {})
+        weights[name] = weight
 
         self.categories = sorted(self.categories + [name])
         self.modified = True
-        print(f"✓ Added category '{name}' with target {target:,}")
+        print(f"✓ Added category '{name}' with weight {weight}")
 
     def _remove_category(self):
         """Remove a category and unassign all videos from it."""
@@ -452,104 +430,14 @@ class VideoManager:
                 cats.remove(name)
                 video['categories'] = cats
 
-        # Remove from config dicts
-        self.category_targets.pop(name, None)
-        self.config['category_targets'] = self.category_targets
-        fmt = self.config.get('format_config', {})
-        fmt.pop(name, None)
+        # Remove from config
+        self.config.get('category_weights', {}).pop(name, None)
 
         self.categories = [c for c in self.categories if c != name]
         self.modified = True
         print(f"✓ Removed category '{name}'" + (f", unassigned {affected} video(s)" if affected else ""))
 
-    def _edit_category_targets(self):
-        """Edit the patch-count target for each category."""
-        if not self.categories:
-            print("No categories configured.")
-            return
-        print("\nEnter new targets (press Enter to keep current):")
-        for cat in self.categories:
-            current = self.category_targets.get(cat, 0)
-            new_val = input(f"  {cat} (current: {current:,}): ").strip()
-            if new_val:
-                try:
-                    self.category_targets[cat] = int(new_val)
-                    self.config['category_targets'] = self.category_targets
-                    self.modified = True
-                except ValueError:
-                    print(f"  Invalid number, keeping {current}")
-
-    def _edit_category_format(self):
-        """Edit patch-size entries (format_config) for a category."""
-        fmt = self.config.get('format_config')
-        if fmt is None:
-            print("❌ This config has no format_config section.")
-            return
-        if not self.categories:
-            print("No categories configured.")
-            return
-
-        print(f"Categories: {', '.join(self.categories)}")
-        cat = input("Category to edit format for: ").strip()
-        if cat not in self.categories:
-            print(f"❌ Unknown category: {cat}")
-            return
-
-        entries = fmt.get(cat, {})
-        if not entries:
-            print(f"No format entries for '{cat}' yet.")
-
-        print(f"\nCurrent format entries for '{cat}':")
-        for k, v in entries.items():
-            print(f"  {k}: gt={v.get('gt_size')}  lr={v.get('lr_size')}  prob={v.get('probability')}")
-
-        print("\nOptions:")
-        print("  a) Add format entry")
-        print("  r) Remove format entry")
-        print("  x) Cancel")
-        sub = input("Choice: ").strip().lower()
-
-        if sub == 'a':
-            entry_name = input("Entry name (e.g. medium_169): ").strip()
-            if not entry_name:
-                return
-            try:
-                gt_w = int(input("  GT width : ").strip())
-                gt_h = int(input("  GT height: ").strip())
-                lr_w = int(input("  LR width : ").strip())
-                lr_h = int(input("  LR height: ").strip())
-                prob = float(input("  Probability (0.0–1.0): ").strip())
-            except ValueError:
-                print("❌ Invalid input")
-                return
-            fmt.setdefault(cat, {})[entry_name] = {
-                "gt_size": [gt_w, gt_h], "lr_size": [lr_w, lr_h], "probability": prob
-            }
-            self.modified = True
-            print(f"✓ Added format entry '{entry_name}' to '{cat}'")
-
-        elif sub == 'r':
-            if not entries:
-                print("No entries to remove.")
-                return
-            entry_name = input(f"Entry to remove ({', '.join(entries)}): ").strip()
-            if entry_name in entries:
-                del entries[entry_name]
-                self.modified = True
-                print(f"✓ Removed '{entry_name}' from '{cat}'")
-            else:
-                print(f"❌ Entry '{entry_name}' not found")
-
-    # kept for backwards compatibility (called directly in some older paths)
-    def edit_category_targets(self):
-        """Edit extraction targets for categories (legacy alias → manage_categories)."""
-        self.manage_categories()
-
     # ── V2 Config: Source Directory Management ────────────────────────────────
-
-    def _is_v2_config(self) -> bool:
-        """Return True if the loaded config uses V2 format (source_dirs list)."""
-        return 'source_dirs' in self.config
 
     def _ensure_source_dirs(self) -> list:
         """
@@ -794,20 +682,16 @@ def get_categories_simple(manager: VideoManager, current_categories: List[str] =
 def main():
     """Main entry point for video manager CLI."""
     try:
-        # Prefer V2 config; fall back to classic config
         script_dir = Path(__file__).parent
-        v2_config = script_dir / 'generator_config_v2.json'
-        v1_config = script_dir / 'generator_config.json'
+        v2_config  = script_dir / 'generator_config_v2.json'
 
         if v2_config.exists():
             config_path = v2_config
-        elif v1_config.exists():
-            config_path = v1_config
         else:
             print(
                 "❌ No config file found. "
                 "Please run from dataset_generator_v2 directory "
-                "(expected generator_config_v2.json or generator_config.json)."
+                "(expected generator_config_v2.json)."
             )
             sys.exit(1)
 
@@ -1037,7 +921,7 @@ def main():
                 try:
                     from create_default_config import create_default_config, build_default_config
                     script_dir = Path(__file__).parent
-                    template   = str(script_dir / 'generator_config.json')
+                    template   = str(script_dir / 'generator_config_v2.json')
                     ts         = __import__('datetime').datetime.now().strftime('%Y%m%d_%H%M%S')
                     default_name = f'generator_config_new_{ts}.json'
                     val = input(f"Output filename [{default_name}]: ").strip()

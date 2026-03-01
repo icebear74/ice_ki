@@ -70,21 +70,12 @@ class DatasetGeneratorV2UHD:
     
     MAX_DISPLAYED_PRIORITIES = 10
     
-    @staticmethod
-    def _normalize_config(config: dict) -> dict:
-        """Normalize a V2-format config (flat structure written by video_manager.py)
-        to the V1 structure expected internally by this generator.
-        V1 configs that already contain 'base_settings' pass through unchanged.
-        """
-        return normalize_config(config)
-
-    def __init__(self, config_path: str = "generator_config.json"):
+    def __init__(self, config_path: str = "generator_config_v2.json"):
         """Initialize generator with full config support"""
-        # Load configuration
+        # Load and normalize V2 config
         with open(config_path, 'r') as f:
             self.config = json.load(f)
 
-        # Normalize V2 flat config (from video_manager.py) to V1 structure
         self.config = normalize_config(self.config)
 
         self.settings = self.config['base_settings']
@@ -128,7 +119,7 @@ class DatasetGeneratorV2UHD:
         self.tracker.initialize_categories(self.category_targets)
         
         # Runtime state
-        self.workers = self.config.get('workers', 6)  # Use workers from config (default: 6)
+        self.workers = self.config.get('workers', 6)
         self.running = True
         self.paused = False
         self.last_update_time = time.time()
@@ -2264,18 +2255,14 @@ def main():
     if len(sys.argv) > 1:
         config_path = sys.argv[1]
     else:
-        # Mirror video_manager.py: prefer V2 config, fall back to classic config
         v2_config = script_dir / 'generator_config_v2.json'
-        v1_config = script_dir / 'generator_config.json'
         if v2_config.exists():
             config_path = str(v2_config)
-        elif v1_config.exists():
-            config_path = str(v1_config)
         else:
             print(
                 "❌ No config file found. "
                 "Please run from dataset_generator_v2 directory "
-                "(expected generator_config_v2.json or generator_config.json)."
+                "(expected generator_config_v2.json)."
             )
             sys.exit(1)
 

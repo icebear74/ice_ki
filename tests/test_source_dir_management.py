@@ -155,20 +155,10 @@ class TestVideoManagerSourceDirs(unittest.TestCase):
         return m
 
     def test_is_v2_config(self):
-        """_is_v2_config() returns True for new V2 format (source_dirs list)."""
+        """Config uses V2 format (source_dirs list present)."""
         m = self._make_manager()
-        self.assertTrue(m._is_v2_config())
-        print("✓ _is_v2_config() detects V2 format")
-
-    def test_is_v1_config(self):
-        """_is_v2_config() returns False for V1 format (no source_dirs)."""
-        v1_path = os.path.join(self.test_dir, 'generator_config.json')
-        with open(v1_path, 'w') as f:
-            json.dump({'base_settings': {}, 'videos': []}, f)
-        m = VideoManager(v1_path)
-        m.load()
-        self.assertFalse(m._is_v2_config())
-        print("✓ _is_v2_config() returns False for V1 format")
+        self.assertIn('source_dirs', m.config)
+        print("✓ config has source_dirs (V2 format)")
 
     def test_add_source_dir_programmatic(self):
         """Adding a source directory appends to source_dirs (no category binding)."""
