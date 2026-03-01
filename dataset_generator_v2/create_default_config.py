@@ -3,9 +3,10 @@
 Create a new empty default config for the dataset generator.
 
 The new config is based on the generator_config.json template and contains:
-  - base_settings    (same defaults as generator_config.json, freely editable)
+  - base_settings    (only keys read by make_dataset_v2_uhd.py, freely editable)
   - category_targets (master / universal / space / toon, freely editable)
   - format_config    (patch formats per category, freely editable)
+  - ffmpeg_timeout   / ffprobe_timeout (top-level timeouts for make_dataset_v2_uhd.py)
   - source_dirs      (empty list – add directories via video_manager.py option 13)
   - videos           (empty list – populated by Rescan, option 16)
 
@@ -20,19 +21,13 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-# Built-in defaults (mirrors generator_config.json)
+# Only the keys actually read by make_dataset_v2_uhd.py
 _DEFAULT_BASE_SETTINGS = {
-    "base_frame_limit": 3000,
-    "max_workers": 4,
-    "val_percent": 0.0,
     "output_base_dir": "/mnt/data/training/datasetNeu",
     "temp_dir": "/mnt/data/training/datasetNeu/temp",
     "status_file": "/mnt/data/training/datasetNeu/.generator_status.json",
-    "min_file_size": 10000,
-    "scene_diff_threshold": 45,
-    "max_retry_attempts": 10,
-    "retry_skip_seconds": 60,
-    "lr_versions": ["5frames", "7frames"]
+    "lr_versions": ["5frames", "7frames"],
+    "min_detail_threshold": 80.0
 }
 
 _DEFAULT_CATEGORY_TARGETS = {
@@ -68,15 +63,17 @@ _DEFAULT_FORMAT_CONFIG = {
 
 def build_default_config(template_path: str = None) -> dict:
     """
-    Build a default config dict.
+    Build a default config dict containing only the keys read by make_dataset_v2_uhd.py.
 
     If *template_path* points to an existing JSON file (e.g. generator_config.json),
-    its base_settings, category_targets and format_config values are used instead of
-    the built-in defaults.
+    its base_settings, category_targets, format_config, ffmpeg_timeout and
+    ffprobe_timeout values are used instead of the built-in defaults.
     """
     base_settings    = dict(_DEFAULT_BASE_SETTINGS)
     category_targets = dict(_DEFAULT_CATEGORY_TARGETS)
     format_config    = {k: dict(v) for k, v in _DEFAULT_FORMAT_CONFIG.items()}
+    ffmpeg_timeout   = 120
+    ffprobe_timeout  = 60
 
     if template_path and os.path.exists(template_path):
         try:
@@ -88,31 +85,21 @@ def build_default_config(template_path: str = None) -> dict:
                 category_targets = tmpl['category_targets']
             if 'format_config' in tmpl:
                 format_config = tmpl['format_config']
+            if 'ffmpeg_timeout' in tmpl:
+                ffmpeg_timeout = tmpl['ffmpeg_timeout']
+            if 'ffprobe_timeout' in tmpl:
+                ffprobe_timeout = tmpl['ffprobe_timeout']
             print(f"✓ Used template values from {template_path}")
         except Exception as exc:
             print(f"⚠️  Could not read template {template_path}: {exc} – using built-in defaults")
 
     return {
-        "_comment_usage": "=== DEFAULT CONFIG – created by create_default_config.py ===",
-        "_comment_workflow": (
-            "1. Edit base_settings / category_targets / format_config as needed.  "
-            "2. Add source directories via video_manager.py option 13.  "
-            "3. Rescan (option 16) to build the videos list.  "
-            "4. Assign categories with options 5 / 6 / 7."
-        ),
         "base_settings":    base_settings,
         "category_targets": category_targets,
         "format_config":    format_config,
-        "_comment_source_dirs": (
-            "Directories to scan for video files.  "
-            "Independent of categories.  "
-            "Add/edit/remove via video_manager.py options 13-15."
-        ),
+        "ffmpeg_timeout":   ffmpeg_timeout,
+        "ffprobe_timeout":  ffprobe_timeout,
         "source_dirs": [],
-        "_comment_videos": (
-            "Video list populated by 'Rescan' (video_manager.py option 16).  "
-            "Assign categories with options 5 / 6 / 7."
-        ),
         "videos": []
     }
 

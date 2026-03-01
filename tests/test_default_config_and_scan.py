@@ -62,8 +62,12 @@ class TestCreateDefaultConfig(unittest.TestCase):
 
     def test_build_default_config_has_required_keys(self):
         cfg = build_default_config()
-        for key in ('base_settings', 'category_targets', 'format_config', 'source_dirs', 'videos'):
+        for key in ('base_settings', 'category_targets', 'format_config',
+                    'ffmpeg_timeout', 'ffprobe_timeout', 'source_dirs', 'videos'):
             self.assertIn(key, cfg, f"Missing key: {key}")
+        # Keys that make_dataset_v2_uhd.py does NOT read must not be present
+        for key in ('_comment_usage', '_comment_workflow', '_comment_source_dirs', '_comment_videos'):
+            self.assertNotIn(key, cfg, f"Unexpected comment key: {key}")
         print("✓ build_default_config() has all required top-level keys")
 
     def test_build_default_config_empty_lists(self):
@@ -89,10 +93,47 @@ class TestCreateDefaultConfig(unittest.TestCase):
         self.assertIn('source_dirs', loaded)
         print("✓ create_default_config() writes valid JSON")
 
+    def test_build_default_config_base_settings_only_uhd_keys(self):
+        """base_settings must contain exactly the keys read by make_dataset_v2_uhd.py."""
+        cfg = build_default_config()
+        bs = cfg['base_settings']
+        # Keys that the UHD generator actually reads
+        for key in ('output_base_dir', 'temp_dir', 'status_file', 'lr_versions', 'min_detail_threshold'):
+            self.assertIn(key, bs, f"Missing base_settings key: {key}")
+        # Keys that the UHD generator does NOT read (used only by make_dataset_multi.py)
+        for key in ('base_frame_limit', 'max_workers', 'val_percent',
+                    'min_file_size', 'scene_diff_threshold', 'max_retry_attempts', 'retry_skip_seconds'):
+            self.assertNotIn(key, bs, f"Unexpected (unused) base_settings key: {key}")
+        print("✓ base_settings contains only keys read by make_dataset_v2_uhd.py")
+
+    def test_build_default_config_timeout_keys_present(self):
+        """ffmpeg_timeout and ffprobe_timeout must be at the top level."""
+        cfg = build_default_config()
+        self.assertEqual(cfg['ffmpeg_timeout'],  120)
+        self.assertEqual(cfg['ffprobe_timeout'], 60)
+        print("✓ ffmpeg_timeout and ffprobe_timeout present at top level")
+
+    def test_build_default_config_template_timeout_override(self):
+        """Template values for ffmpeg/ffprobe timeout are respected."""
+        tmpl = {
+            'base_settings': {},
+            'category_targets': {},
+            'format_config': {},
+            'ffmpeg_timeout': 300,
+            'ffprobe_timeout': 90,
+        }
+        tmpl_path = os.path.join(self.tmp, 'tmpl_timeout.json')
+        with open(tmpl_path, 'w') as f:
+            json.dump(tmpl, f)
+        cfg = build_default_config(template_path=tmpl_path)
+        self.assertEqual(cfg['ffmpeg_timeout'],  300)
+        self.assertEqual(cfg['ffprobe_timeout'], 90)
+        print("✓ build_default_config() respects ffmpeg/ffprobe timeouts from template")
+
     def test_build_default_config_uses_template(self):
         """When a template file is present, its values override built-in defaults."""
         tmpl = {
-            'base_settings': {'max_workers': 99},
+            'base_settings': {'output_base_dir': '/custom/out'},
             'category_targets': {'alpha': 9999},
             'format_config': {'alpha': {}},
         }
@@ -101,7 +142,7 @@ class TestCreateDefaultConfig(unittest.TestCase):
             json.dump(tmpl, f)
 
         cfg = build_default_config(template_path=tmpl_path)
-        self.assertEqual(cfg['base_settings']['max_workers'], 99)
+        self.assertEqual(cfg['base_settings']['output_base_dir'], '/custom/out')
         self.assertIn('alpha', cfg['category_targets'])
         self.assertNotIn('master', cfg['category_targets'])
         print("✓ build_default_config() applies template values correctly")
