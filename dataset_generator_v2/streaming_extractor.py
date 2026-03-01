@@ -56,7 +56,7 @@ STREAM_WIDTH: int = 1920
 STREAM_HEIGHT: int = 1080
 
 # Software HDR→SDR tonemap filter chain (CPU-only fallback).
-# Used when the local FFmpeg has no tonemap_cuda / scale_cuda filters.
+# Used when the local FFmpeg has no CUDA filter support at all.
 _TONEMAP_FILTER: str = (
     "zscale=t=linear:npl=100,"
     "format=gbrpf32le,"
@@ -67,8 +67,26 @@ _TONEMAP_FILTER: str = (
     "format=bgr24"
 )
 
+# Hybrid GPU/CPU filter chain.
+# Requires only scale_cuda (no tonemap_cuda needed).
+# scale_cuda downscales 4K→1080p on the GPU, so hwdownload transfers only
+# the small 1080p frame to CPU (4× less PCIe traffic than downloading 4K).
+# The CPU tonemap chain then runs on the already-scaled frame — no final
+# CPU scale step required.
+# Use together with -hwaccel cuda -hwaccel_output_format cuda.
+_TONEMAP_FILTER_SCALE_CUDA: str = (
+    f"scale_cuda={STREAM_WIDTH}:{STREAM_HEIGHT}:interp_algo=lanczos,"
+    "hwdownload,"
+    "zscale=t=linear:npl=100,"
+    "format=gbrpf32le,"
+    "zscale=p=bt709,"
+    "tonemap=tonemap=mobius:desat=0,"
+    "zscale=t=bt709:m=bt709:range=limited,"
+    "format=bgr24"
+)
+
 # Full-GPU HDR→SDR tonemap filter chain.
-# Requires FFmpeg built with --enable-cuda-nvcc / libnpp so that
+# Requires FFmpeg built with --enable-cuda-nvcc / libnpp so that both
 # tonemap_cuda and scale_cuda are available.
 # Frames stay in GPU memory from decode through tonemap + scale;
 # hwdownload copies only the final 1920×1080 result to CPU.
@@ -85,7 +103,26 @@ _TONEMAP_FILTER_CUDA: str = (
 # ---------------------------------------------------------------------------
 
 _cuda_available: Optional[bool] = None
+_scale_cuda_available: Optional[bool] = None
 _tonemap_cuda_available: Optional[bool] = None
+
+# Cached output of `ffmpeg -filters` (shared by both filter probes).
+_ffmpeg_filters_output: Optional[str] = None
+
+
+def _get_ffmpeg_filters() -> str:
+    """Return (cached) output of ``ffmpeg -hide_banner -filters``."""
+    global _ffmpeg_filters_output
+    if _ffmpeg_filters_output is None:
+        try:
+            _ffmpeg_filters_output = subprocess.check_output(
+                ["ffmpeg", "-hide_banner", "-filters"],
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            ).decode(errors="replace")
+        except Exception:
+            _ffmpeg_filters_output = ""
+    return _ffmpeg_filters_output
 
 
 def cuda_available() -> bool:
@@ -107,28 +144,34 @@ def cuda_available() -> bool:
     return _cuda_available
 
 
+def scale_cuda_available() -> bool:
+    """Return True when FFmpeg exposes the ``scale_cuda`` filter.
+
+    ``scale_cuda`` is present in most FFmpeg CUDA builds and lets us
+    downscale frames on the GPU before downloading them to CPU memory,
+    reducing both PCIe bandwidth and CPU tonemap workload.
+
+    The result is cached after the first call so repeated checks are free.
+    """
+    global _scale_cuda_available
+    if _scale_cuda_available is None:
+        _scale_cuda_available = "scale_cuda" in _get_ffmpeg_filters()
+    return _scale_cuda_available
+
+
 def tonemap_cuda_available() -> bool:
     """Return True when FFmpeg exposes both ``tonemap_cuda`` and ``scale_cuda``.
 
     These filters are only present in FFmpeg builds compiled with
     ``--enable-cuda-nvcc`` and ``libnpp`` support.  Without them the full-GPU
-    tonemap pipeline cannot run and we fall back to the software chain.
+    tonemap pipeline cannot run.
 
     The result is cached after the first call so repeated checks are free.
     """
     global _tonemap_cuda_available
     if _tonemap_cuda_available is None:
-        try:
-            out = subprocess.check_output(
-                ["ffmpeg", "-hide_banner", "-filters"],
-                stderr=subprocess.DEVNULL,
-                timeout=10,
-            ).decode(errors="replace")
-            _tonemap_cuda_available = (
-                "tonemap_cuda" in out and "scale_cuda" in out
-            )
-        except Exception:
-            _tonemap_cuda_available = False
+        out = _get_ffmpeg_filters()
+        _tonemap_cuda_available = "tonemap_cuda" in out and "scale_cuda" in out
     return _tonemap_cuda_available
 
 # ---------------------------------------------------------------------------
@@ -549,34 +592,46 @@ def extract_and_save_streaming_distributed(
 
     # Build FFmpeg command.
     #
-    # Three pipeline tiers, chosen automatically:
+    # Four pipeline tiers, chosen automatically at runtime:
     #
     #  1. Full-GPU (best):  -hwaccel cuda -hwaccel_output_format cuda
     #                       + tonemap_cuda + scale_cuda + hwdownload
-    #     Frames stay in GPU VRAM from decode all the way through HDR→SDR
-    #     tonemapping and 1920×1080 scaling.  Only the final BGR24 frame is
-    #     copied to CPU.  Requires FFmpeg built with --enable-cuda-nvcc/libnpp.
+    #     Frames stay in GPU VRAM from decode through HDR→SDR tonemapping
+    #     and 1920×1080 scaling.  Only the final BGR24 result is copied to
+    #     CPU.  Requires FFmpeg with --enable-cuda-nvcc/libnpp.
     #
-    #  2. Decode-only GPU:  -hwaccel cuda + software tonemap chain
-    #     Decoding happens on GPU but frames are immediately downloaded to CPU
-    #     memory; the heavy zscale/tonemap/scale chain runs on CPU.  Falls back
-    #     here when CUDA is available but tonemap_cuda is absent.
+    #  2. Scale-GPU + CPU tonemap:  -hwaccel cuda -hwaccel_output_format cuda
+    #                               + scale_cuda + hwdownload + CPU tonemap
+    #     scale_cuda downscales 4K→1080p on the GPU.  hwdownload then
+    #     transfers only the 1080p frame to CPU (4× less PCIe bandwidth than
+    #     downloading 4K).  The CPU tonemap runs on the already-scaled frame
+    #     so it processes 4× less data.  No final CPU scale step needed.
+    #     Requires only scale_cuda (no tonemap_cuda).
     #
-    #  3. Pure CPU:         no hwaccel, software tonemap chain.
+    #  3. Decode-GPU + CPU tonemap:  -hwaccel cuda + full software chain
+    #     GPU decoding only; the full 4K zscale/tonemap/scale chain runs on
+    #     CPU.  Falls back here when CUDA is available but scale_cuda is not.
+    #
+    #  4. Pure CPU:  no hwaccel, full software chain.
     _use_cuda = use_cuda and cuda_available()
-    _full_gpu = _use_cuda and tonemap_cuda_available()
+    _full_gpu  = _use_cuda and tonemap_cuda_available()
+    _scale_gpu = _use_cuda and (not _full_gpu) and scale_cuda_available()
 
     if _full_gpu:
-        hw_args = ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
-        vf_filter = _TONEMAP_FILTER_CUDA
+        hw_args        = ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
+        vf_filter      = _TONEMAP_FILTER_CUDA
         pipeline_label = "full-GPU (tonemap_cuda+scale_cuda)"
+    elif _scale_gpu:
+        hw_args        = ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
+        vf_filter      = _TONEMAP_FILTER_SCALE_CUDA
+        pipeline_label = "scale-GPU + CPU tonemap (scale_cuda)"
     elif _use_cuda:
-        hw_args = ["-hwaccel", "cuda"]
-        vf_filter = _TONEMAP_FILTER
+        hw_args        = ["-hwaccel", "cuda"]
+        vf_filter      = _TONEMAP_FILTER
         pipeline_label = "decode-GPU + CPU tonemap"
     else:
-        hw_args = []
-        vf_filter = _TONEMAP_FILTER
+        hw_args        = []
+        vf_filter      = _TONEMAP_FILTER
         pipeline_label = "CPU-only"
 
     _log(
