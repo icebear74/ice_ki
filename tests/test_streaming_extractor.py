@@ -29,6 +29,7 @@ from streaming_extractor import (
     save_patch_pair,
     is_black_frame,
     cuda_available,
+    tonemap_cuda_available,
 )
 
 
@@ -511,6 +512,72 @@ class TestCudaAvailable(unittest.TestCase):
                 result = _se.cuda_available()
         self.assertFalse(result)
         print("✓ missing ffmpeg → cuda_available() returns False without raising")
+
+
+# ─── tonemap_cuda_available ───────────────────────────────────────────────────
+
+class TestTonemapCudaAvailable(unittest.TestCase):
+
+    def test_returns_bool(self):
+        result = tonemap_cuda_available()
+        self.assertIsInstance(result, bool)
+        print(f"✓ tonemap_cuda_available() returned bool: {result}")
+
+    def test_result_is_cached(self):
+        """Calling twice must return the same value (cached)."""
+        first  = tonemap_cuda_available()
+        second = tonemap_cuda_available()
+        self.assertEqual(first, second)
+        print("✓ tonemap_cuda_available() result is stable/cached")
+
+    def test_ffmpeg_not_found_returns_false(self):
+        """When ffmpeg binary is absent the function must return False, not raise."""
+        import streaming_extractor as _se
+        with patch.object(_se, '_tonemap_cuda_available', None):
+            with patch("subprocess.check_output", side_effect=FileNotFoundError):
+                result = _se.tonemap_cuda_available()
+        self.assertFalse(result)
+        print("✓ missing ffmpeg → tonemap_cuda_available() returns False without raising")
+
+    def test_true_when_both_filters_present(self):
+        """Must return True when ffmpeg -filters lists both tonemap_cuda and scale_cuda."""
+        import streaming_extractor as _se
+        fake_output = b"... tonemap_cuda ... scale_cuda ..."
+        with patch.object(_se, '_tonemap_cuda_available', None):
+            with patch("subprocess.check_output", return_value=fake_output):
+                result = _se.tonemap_cuda_available()
+        self.assertTrue(result)
+        print("✓ both filters present → tonemap_cuda_available() returns True")
+
+    def test_false_when_only_tonemap_cuda_present(self):
+        """Must return False when scale_cuda is missing (both are required)."""
+        import streaming_extractor as _se
+        fake_output = b"... tonemap_cuda ..."
+        with patch.object(_se, '_tonemap_cuda_available', None):
+            with patch("subprocess.check_output", return_value=fake_output):
+                result = _se.tonemap_cuda_available()
+        self.assertFalse(result)
+        print("✓ scale_cuda missing → tonemap_cuda_available() returns False")
+
+    def test_false_when_only_scale_cuda_present(self):
+        """Must return False when tonemap_cuda is missing (both are required)."""
+        import streaming_extractor as _se
+        fake_output = b"... scale_cuda ..."
+        with patch.object(_se, '_tonemap_cuda_available', None):
+            with patch("subprocess.check_output", return_value=fake_output):
+                result = _se.tonemap_cuda_available()
+        self.assertFalse(result)
+        print("✓ tonemap_cuda missing → tonemap_cuda_available() returns False")
+
+    def test_false_when_neither_filter_present(self):
+        """Must return False when the output contains no CUDA filter names."""
+        import streaming_extractor as _se
+        fake_output = b"... zscale ... tonemap ..."
+        with patch.object(_se, '_tonemap_cuda_available', None):
+            with patch("subprocess.check_output", return_value=fake_output):
+                result = _se.tonemap_cuda_available()
+        self.assertFalse(result)
+        print("✓ no CUDA filters → tonemap_cuda_available() returns False")
 
 
 if __name__ == '__main__':
