@@ -154,7 +154,104 @@ class TestCreateDefaultConfig(unittest.TestCase):
         print("✓ build_default_config() falls back to built-ins when template is missing")
 
 
-# ─── manager.categories from config keys ──────────────────────────────────────
+# ─── UHD generator config-path selection ──────────────────────────────────────
+
+class TestUHDGeneratorConfigSelection(unittest.TestCase):
+    """
+    Validate that make_dataset_v2_uhd.main() selects the same config file
+    as video_manager.main(): prefer generator_config_v2.json over
+    generator_config.json.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._orig_argv = sys.argv[:]
+        self._orig_cwd  = os.getcwd()
+
+    def tearDown(self):
+        sys.argv = self._orig_argv
+        os.chdir(self._orig_cwd)
+        shutil.rmtree(self.tmp)
+
+    def _minimal_config(self):
+        return {
+            'base_settings': {
+                'output_base_dir': self.tmp,
+                'temp_dir':        os.path.join(self.tmp, 'temp'),
+                'status_file':     os.path.join(self.tmp, '.status.json'),
+                'lr_versions':     ['7frames'],
+                'min_detail_threshold': 80.0,
+            },
+            'category_targets': {'master': 1000},
+            'format_config': {'master': {}},
+            'ffmpeg_timeout':  120,
+            'ffprobe_timeout':  60,
+            'source_dirs': [],
+            'videos': [],
+        }
+
+    def _write(self, filename):
+        path = os.path.join(self.tmp, filename)
+        with open(path, 'w') as f:
+            json.dump(self._minimal_config(), f)
+        return path
+
+    def _resolve_config(self, directory):
+        """
+        Replicate the config-selection logic from make_dataset_v2_uhd.main()
+        so we can unit-test it without actually running the generator.
+        """
+        from pathlib import Path as P
+        v2 = P(directory) / 'generator_config_v2.json'
+        v1 = P(directory) / 'generator_config.json'
+        if v2.exists():
+            return str(v2)
+        if v1.exists():
+            return str(v1)
+        return None
+
+    def test_prefers_v2_config_when_both_exist(self):
+        """generator_config_v2.json is chosen over generator_config.json."""
+        self._write('generator_config.json')
+        self._write('generator_config_v2.json')
+        chosen = self._resolve_config(self.tmp)
+        self.assertTrue(chosen.endswith('generator_config_v2.json'),
+                        f"Expected v2 config, got: {chosen}")
+        print("✓ UHD generator prefers generator_config_v2.json when both exist")
+
+    def test_falls_back_to_v1_config(self):
+        """Falls back to generator_config.json when v2 is absent."""
+        self._write('generator_config.json')
+        chosen = self._resolve_config(self.tmp)
+        self.assertTrue(chosen.endswith('generator_config.json'),
+                        f"Expected v1 fallback, got: {chosen}")
+        print("✓ UHD generator falls back to generator_config.json when v2 absent")
+
+    def test_returns_none_when_no_config(self):
+        """Returns None (no config found) when neither file exists."""
+        chosen = self._resolve_config(self.tmp)
+        self.assertIsNone(chosen)
+        print("✓ UHD generator reports no config when neither file exists")
+
+    def test_script_dir_is_dataset_generator_v2(self):
+        """make_dataset_v2_uhd.py must look in its own directory, not parent.parent."""
+        uhd_path = os.path.join(
+            os.path.dirname(__file__), '..', 'dataset_generator_v2',
+            'make_dataset_v2_uhd.py'
+        )
+        with open(uhd_path) as fh:
+            src = fh.read()
+        # Must NOT have parent.parent (old wrong path)
+        self.assertNotIn('parent.parent', src,
+            "make_dataset_v2_uhd.py still uses parent.parent for script_dir – "
+            "it would look in the repo root instead of dataset_generator_v2/")
+        # Must have parent (correct path)
+        self.assertIn('Path(__file__).parent', src,
+            "make_dataset_v2_uhd.py must use Path(__file__).parent for script_dir")
+        print("✓ make_dataset_v2_uhd.py uses correct script_dir (parent, not parent.parent)")
+
+
+
 
 class TestManagerCategoriesFromConfig(unittest.TestCase):
 

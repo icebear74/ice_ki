@@ -2246,14 +2246,29 @@ class DatasetGeneratorV2UHD:
 
 def main():
     """Main entry point"""
-    config_path = "generator_config.json"
+    script_dir = Path(__file__).parent
+    os.chdir(script_dir)
+
     if len(sys.argv) > 1:
         config_path = sys.argv[1]
-    
-    # Change to script directory
-    script_dir = Path(__file__).parent.parent
-    os.chdir(script_dir)
-    
+    else:
+        # Mirror video_manager.py: prefer V2 config, fall back to classic config
+        v2_config = script_dir / 'generator_config_v2.json'
+        v1_config = script_dir / 'generator_config.json'
+        if v2_config.exists():
+            config_path = str(v2_config)
+        elif v1_config.exists():
+            config_path = str(v1_config)
+        else:
+            print(
+                "❌ No config file found. "
+                "Please run from dataset_generator_v2 directory "
+                "(expected generator_config_v2.json or generator_config.json)."
+            )
+            sys.exit(1)
+
+    print(f"📂 Using config: {Path(config_path).name}")
+
     if not os.path.exists(config_path):
         print(f"Error: Config file not found: {config_path}")
         sys.exit(1)
