@@ -183,6 +183,94 @@ def build_frame_ranges_from_assignments(
     return [(s, e) for s, e in merged]
 
 
+def build_assignments_per_category(
+    format_distribution: Dict[str, Dict[str, int]],
+    duration: float,
+    fps: float,
+    n_frames: int = 7,
+) -> List[Tuple[int, str, str]]:
+    """
+    Build streaming assignments treating each category independently.
+
+    For each category a set of *target_count* evenly-spaced timestamps are
+    generated and each timestamp is assigned to exactly ONE format within
+    that category (interleaved distribution).
+
+    The same video position **can** appear in multiple categories (so the
+    same scene is saved to both ``master`` and ``universal``), but will
+    **never** appear twice within the same category.
+
+    Example – video in two categories::
+
+        master:    5 000 patches → 5 000 unique timestamps, each → one format
+        universal: 2 000 patches → 2 000 unique timestamps, each → one format
+        ─────────────────────────────────────────────────────────────────────
+        Total:     7 000 assignments fed into ONE streaming pass.
+
+    Args:
+        format_distribution: ``{category: {format_name: target_count}}``.
+        duration:            Video duration in seconds.
+        fps:                 Video frame rate.
+        n_frames:            Frames per patch window (default 7).
+
+    Returns:
+        Sorted list of ``(center_frame_idx, category, format_name)``.
+        Multiple entries with the same *center_frame_idx* are permitted when
+        the same video position is needed by more than one category.
+    """
+    half = n_frames // 2
+    usable = max(0.0, duration - 1.0)
+    all_assignments: List[Tuple[int, str, str]] = []
+
+    for category, formats in format_distribution.items():
+        cat_total = sum(formats.values())
+        if cat_total == 0 or usable <= 0:
+            continue
+
+        # Per-category stride – minimum 0.5 s to avoid sub-frame collisions
+        stride = max(usable / cat_total, 0.5)
+
+        cat_ts: List[float] = []
+        for i in range(cat_total):
+            ts = i * stride
+            if ts < usable:
+                cat_ts.append(ts)
+            else:
+                break
+
+        cat_scenes = len(cat_ts)
+        if cat_scenes == 0:
+            continue
+
+        # Per-category slot list: [(format_name, count), ...]
+        cat_slots: List[Tuple[str, int]] = list(formats.items())
+        slots_total = sum(cnt for _, cnt in cat_slots)
+
+        # Scale down when the video is shorter than the per-category target
+        if slots_total > cat_scenes:
+            scale = cat_scenes / slots_total
+            cat_slots = [(fmt, max(1, int(cnt * scale))) for fmt, cnt in cat_slots]
+            excess = sum(cnt for _, cnt in cat_slots) - cat_scenes
+            if excess > 0:
+                cat_slots.sort(key=lambda x: -x[1])
+                cat_slots[0] = (cat_slots[0][0], max(0, cat_slots[0][1] - excess))
+
+        # Interleaved format assignment within this category:
+        # entry j of a slot with count c gets fractional position j/c → even spread.
+        annotated: List[Tuple[float, str]] = []
+        for fmt, cnt in cat_slots:
+            for j in range(cnt):
+                annotated.append((j / cnt, fmt))
+        annotated.sort(key=lambda x: x[0])  # stable sort
+
+        for i, (_, fmt) in enumerate(annotated):
+            if i < cat_scenes:
+                center = int(cat_ts[i] * fps) + half
+                all_assignments.append((center, category, fmt))
+
+    return sorted(all_assignments, key=lambda x: x[0])
+
+
 def create_patch_pair(
     frames: List[np.ndarray],
     format_name: str,
@@ -260,7 +348,7 @@ def save_patch_pair(
         gt:          Ground-truth patch (BGR numpy array).
         lr:          LR stack patch (BGR numpy array).
         video_path:  Source video path (stem used in the patch filename).
-        timestamp:   Centre-frame timestamp in seconds (used in filename).
+        timestamp:   Center-frame timestamp in seconds (used in filename).
         category:    Dataset category (e.g. ``"master"``).
         format_name: Format key (e.g. ``"small_540"``).
         n_frames:    Number of frames (5 or 7) – selects LR subdirectory.
@@ -300,7 +388,7 @@ def is_black_frame(gt: np.ndarray, brightness_threshold: float = 20.0) -> bool:
     content.
 
     Args:
-        gt:                   Centre-frame crop (BGR numpy array).
+        gt:                   Center-frame array (BGR numpy array).
         brightness_threshold: Maximum mean brightness to consider black (default 20).
 
     Returns:
@@ -343,9 +431,10 @@ def extract_and_save_streaming_distributed(
         is_interesting_fn: Optional callable ``(patch: np.ndarray) -> bool`` for
                            quality gating.  When provided, random crops are re-tried
                            up to 5 times before falling back to a centre crop.
-        is_black_frame_fn: Optional callable ``(gt: np.ndarray) -> bool``.  When
-                           provided and returns ``True`` the assignment is skipped
-                           without saving.  Use this to suppress dark/black frames.
+        is_black_frame_fn: Optional callable ``(frame: np.ndarray) -> bool``
+                           receiving the raw center frame.  When provided and
+                           returns ``True`` the entire video position (all its
+                           category/format pairs) is skipped without saving.
                            Defaults to :func:`is_black_frame` when ``None`` is
                            passed (i.e. black frames are always filtered unless you
                            explicitly pass ``lambda _: False``).
@@ -446,51 +535,51 @@ def extract_and_save_streaming_distributed(
 
                 if len(window) == n_frames:
                     ts = center / fps
-                    for category, fmt_name in center_map[center]:
-                        cfg = format_config.get(category, {}).get(fmt_name, {})
-                        if not cfg:
-                            continue
 
-                        # Up to 5 random crops; 6th attempt is forced centre crop
-                        gt, lr = None, None
-                        for attempt in range(6):
-                            force = attempt >= 5
-                            gt, lr = create_patch_pair(
-                                window, fmt_name, cfg, force_center=force
-                            )
-                            if gt is None:
+                    # Black-frame check on the raw center frame once per video
+                    # position – before iterating over (category, format) pairs.
+                    center_raw = window[n_frames // 2]
+                    frames_examined += 1
+
+                    if _black_fn(center_raw):
+                        _log(f"  ⏭ frame {center} skipped (black frame)")
+                    else:
+                        for category, fmt_name in center_map[center]:
+                            cfg = format_config.get(category, {}).get(fmt_name, {})
+                            if not cfg:
                                 continue
-                            if (
-                                is_interesting_fn is None
-                                or is_interesting_fn(gt)
-                                or force
-                            ):
-                                break
 
-                        frames_examined += 1
-
-                        # Skip black/dark centre frames
-                        if gt is not None and _black_fn(gt):
-                            _log(f"  ⏭ frame {center} skipped (black frame)")
-                            if progress_fn is not None:
-                                progress_fn(frames_examined, dict(patches_created))
-                            continue
-
-                        if gt is not None and lr is not None:
-                            ok, _, _ = save_patch_pair(
-                                gt, lr, video_path, ts,
-                                category, fmt_name, n_frames, base_dir,
-                            )
-                            if ok:
-                                patches_created[category] = (
-                                    patches_created.get(category, 0) + 1
+                            # Up to 5 random crops; 6th attempt is forced centre crop
+                            gt, lr = None, None
+                            for attempt in range(6):
+                                force = attempt >= 5
+                                gt, lr = create_patch_pair(
+                                    window, fmt_name, cfg, force_center=force
                                 )
-                                _log(
-                                    f"  ✓ frame {center} → {category}/{fmt_name}"
-                                )
+                                if gt is None:
+                                    continue
+                                if (
+                                    is_interesting_fn is None
+                                    or is_interesting_fn(gt)
+                                    or force
+                                ):
+                                    break
 
-                        if progress_fn is not None:
-                            progress_fn(frames_examined, dict(patches_created))
+                            if gt is not None and lr is not None:
+                                ok, _, _ = save_patch_pair(
+                                    gt, lr, video_path, ts,
+                                    category, fmt_name, n_frames, base_dir,
+                                )
+                                if ok:
+                                    patches_created[category] = (
+                                        patches_created.get(category, 0) + 1
+                                    )
+                                    _log(
+                                        f"  ✓ frame {center} → {category}/{fmt_name}"
+                                    )
+
+                    if progress_fn is not None:
+                        progress_fn(frames_examined, dict(patches_created))
 
                 pending_idx += 1
 

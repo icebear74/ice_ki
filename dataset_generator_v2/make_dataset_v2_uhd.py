@@ -35,7 +35,7 @@ from utils.format_definitions import (
     select_random_format, get_output_dirs_for_format
 )
 from streaming_extractor import (
-    build_frame_assignments_distributed,
+    build_assignments_per_category,
     extract_and_save_streaming_distributed,
     is_black_frame as _streaming_is_black_frame,
 )
@@ -263,93 +263,72 @@ class DatasetGeneratorV2UHD:
         sys.exit(0)
     
     def _update_terminal_ui(self):
-        """Update and redraw the terminal UI"""
+        """Update and redraw the terminal UI (throttled to update_interval)."""
         if not self.use_terminal_ui:
             return
-        
-        # Update every call for real-time progress during extraction
+
+        now = time.time()
+        if now - self.last_update_time < self.update_interval:
+            return
+        self.last_update_time = now
         self.ui_update_counter += 1
-        # Log update to verify it's being called (visible on screen for debugging)
-        print(f"[GUI UPDATE #{self.ui_update_counter}] Patches: {self.ui_state.get('patches_created_total', 0)}", flush=True)
-        self.logger.info(f"GUI update #{self.ui_update_counter} - patches: {self.ui_state.get('patches_created_total', 0)}")
-        
+
         try:
             # Update overall progress from tracker
             category_stats = self.tracker.status.get('category_stats', {})
             for category in self.category_targets.keys():
                 if category in category_stats:
                     stats = category_stats[category]
-                    # Use actual distribution totals instead of raw category targets
                     target = self.distribution_totals.get(category, 0)
-                    current = stats.get('images_created', 0)  # ProgressTracker uses 'images_created'
+                    current = stats.get('images_created', 0)
                     percent = (current / target * 100) if target > 0 else 0.0
                     self.ui_state['overall_progress'][category] = {
-                        'created': current,  # Fixed: was 'current', display expects 'created'
+                        'created': current,
                         'target': target,
-                        'percent': percent  # Added: display expects this
+                        'percent': percent,
                     }
-            
-            # Calculate patch distribution by category and size
-            # Use ACTUAL format names from configuration (e.g., small_540, medium_720_169, large_720)
+
+            # Patch distribution by category and format
             patch_dist = {}
             for category in self.format_config.keys():
                 patch_dist[category] = {}
-                # Get actual format names from configuration for this category
                 if category in self.format_config:
                     for format_name in self.format_config[category].keys():
-                        # Get from tracker if available
                         if category in category_stats:
-                            # Get distribution based on actual format probabilities
-                            total = category_stats[category].get('images_created', 0)  # ProgressTracker uses 'images_created'
+                            total = category_stats[category].get('images_created', 0)
                             prob = self.format_probabilities.get(category, {}).get(format_name, 0.0)
                             current = int(total * prob)
-                            # Use actual distribution totals
                             target_total = self.distribution_totals.get(category, 0)
                             target = int(target_total * prob)
-                            
                             patch_dist[category][format_name] = {
                                 'count': current,
-                                'target': target
+                                'target': target,
                             }
                         else:
                             patch_dist[category][format_name] = {'count': 0, 'target': 0}
-            
             self.ui_state['patch_distribution'] = patch_dist
-            
-            # Calculate ETAs
+
+            # ETA calculation: use global rate (total saved / elapsed)
             elapsed = time.time() - self.start_time
-            if self.ui_state['patches_created_total'] > 0 and elapsed > 0:
-                rate = self.ui_state['patches_created_total'] / elapsed
-                
+            patches_done = self.ui_state.get('patches_created_total', 0)
+            if patches_done > 0 and elapsed > 0:
+                rate = patches_done / elapsed
                 eta_by_category = {}
                 max_eta = 0
-                for category in self.ui_state['overall_progress'].keys():
-                    if category in self.ui_state['overall_progress']:
-                        current = self.ui_state['overall_progress'][category]['created']  # Fixed: was 'current'
-                        target = self.ui_state['overall_progress'][category]['target']
-                        remaining = target - current
-                        if rate > 0 and remaining > 0:
-                            eta_seconds = remaining / rate
-                            eta_by_category[category] = eta_seconds
-                            max_eta = max(max_eta, eta_seconds)
-                
+                for category in self.ui_state['overall_progress']:
+                    cat_data = self.ui_state['overall_progress'][category]
+                    remaining = cat_data['target'] - cat_data['created']
+                    if remaining > 0 and rate > 0:
+                        eta_s = remaining / rate
+                        eta_by_category[category] = eta_s
+                        max_eta = max(max_eta, eta_s)
                 self.ui_state['eta'] = eta_by_category
                 self.ui_state['eta']['total'] = max_eta
-            
-            # Draw the UI
-            print(f"[DRAWING GUI...]", flush=True)
+
             clear_screen()
             draw_dataset_ui(self.ui_state)
-            # Force flush to ensure display updates immediately
-            sys.stdout.flush()
-            # Extra newline to ensure terminal processes the output
-            print("", end='', flush=True)
-            print(f"[GUI DRAWN]", flush=True)
-            
+
         except Exception as e:
-            # Don't let UI errors crash the program, but DO show them on screen!
-            print(f"\n⚠️  GUI UPDATE ERROR: {e}")
-            print(f"   (Check log for stack trace)")
             self.logger.error(f"UI update error: {e}", exc_info=True)
     
     def _log_system_resources(self, operation: str = ""):
@@ -1178,110 +1157,52 @@ class DatasetGeneratorV2UHD:
         self.logger.info(f"📹 Video: {video_name}")
         self.logger.info(f"🎯 Target: {total_target} patches across {len(format_distribution)} categories")
         
-        # Phase 1: Calculate all extraction timestamps
-        self.logger.info(f"\n📋 Phase 1: Calculating extraction plan...")
-        
-        # Each scene is assigned to EXACTLY ONE (category, format) slot → no duplicates.
-        # Total scenes needed = total patches across all slots.
-        scenes_needed = total_target
-        
-        self.logger.info(f"✓ Format distribution analysis:")
-        self.logger.info(f"  Total target patches: {total_target}")
-        self.logger.info(f"  Scenes needed: {scenes_needed} (each scene used exactly once)")
-        
-        # Calculate stride to EVENLY DISTRIBUTE across ENTIRE video duration
-        # This ensures frames from beginning, middle, AND END of video
-        usable_duration = duration - 1.0  # Leave 1 second at end
-        
-        if scenes_needed > 0 and usable_duration > 0:
-            # Calculate stride: divide total duration by number of SCENES needed
-            stride_seconds = usable_duration / scenes_needed
-            # Minimum stride to avoid extracting too frequently
-            stride_seconds = max(stride_seconds, 0.5)
-        else:
-            stride_seconds = 3.0  # Fallback
-        
-        self.logger.info(f"\n  Video duration: {duration:.1f}s")
-        self.logger.info(f"  Video FPS: {fps:.2f}")
-        self.logger.info(f"  Total frames in video: {int(duration * fps)}")
-        self.logger.info(f"  Calculated stride: {stride_seconds:.2f}s = {int(stride_seconds * fps)} frames")
-        
-        # Generate timestamps evenly across entire video
-        timestamps = []
-        for i in range(scenes_needed):
-            timestamp = i * stride_seconds
-            if timestamp < usable_duration:
-                timestamps.append(timestamp)
-            else:
-                break
-        
-        self.logger.info(f"\n✓ Planned {len(timestamps)} extraction points (scenes)")
-        self.logger.info(f"  Extraction pattern: One scene every {int(stride_seconds * fps)} frames")
-        self.logger.info(f"  Each scene: 7 consecutive frames")
-        if timestamps:
-            self.logger.info(f"  First timestamp: {timestamps[0]:.2f}s (0.0% of video)")
-            self.logger.info(f"  Last timestamp: {timestamps[-1]:.2f}s ({100*timestamps[-1]/duration:.1f}% of video)")
-            self.logger.info(f"  Coverage: Entire video from start to end")
-        self.logger.info(f"  Total frames to extract: {len(timestamps) * n_frames}")
-        self.logger.info(f"  All {len(timestamps)} scenes will be used (0% waste)")
-        
-        # Build a scene→slot partition: each scene goes to EXACTLY ONE (category, format).
-        # This prevents any scene from being saved to more than one output directory.
-        total_scenes = len(timestamps)
-
-        # Flatten all (category, format_name, count) slots
-        all_slots: List[Tuple[str, str, int]] = []
-        for category, formats in format_distribution.items():
-            for format_name, count in formats.items():
-                all_slots.append((category, format_name, count))
-
-        # If the video is too short, scale down slot counts proportionally
-        slots_total = sum(c for _, _, c in all_slots)
-        if slots_total > total_scenes:
-            scale = total_scenes / slots_total
-            all_slots = [(cat, fmt, max(1, int(cnt * scale))) for cat, fmt, cnt in all_slots]
-            # Trim any excess caused by rounding
-            excess = sum(c for _, _, c in all_slots) - total_scenes
-            if excess > 0:
-                all_slots.sort(key=lambda x: -x[2])
-                all_slots[0] = (all_slots[0][0], all_slots[0][1],
-                                max(0, all_slots[0][2] - excess))
-
-        # Assign scenes to slots with INTERLEAVED distribution so every format
-        # gets patches from the very first scenes processed.  Without this,
-        # a consecutive-block layout causes the second/third format directories
-        # to be created only after thousands of scenes, making them appear
-        # "missing" during a normal-length run.
+        # Phase 1: Build per-category assignments independently.
         #
-        # Algorithm: for each slot, assign each of its count scenes a fractional
-        # position j/count in [0,1).  Sorting all (frac_pos, cat, fmt) entries
-        # by frac_pos distributes formats evenly across the whole scene range
-        # while preserving the exact per-format counts.
-        annotated: List[Tuple[float, str, str]] = []
-        for category, format_name, count in all_slots:
-            for j in range(count):
-                annotated.append((j / count, category, format_name))
-        annotated.sort(key=lambda x: x[0])   # stable sort → ties keep insertion order
+        # Rule: within each category every scene appears at most ONCE (assigned
+        # to exactly one format).  Across categories the same video position
+        # CAN appear in multiple categories – e.g. 5 000 scenes for master and
+        # 2 000 for universal gives 7 000 assignments fed into one streaming pass.
+        usable_duration = duration - 1.0
+        assignments = build_assignments_per_category(
+            format_distribution=format_distribution,
+            duration=duration,
+            fps=fps,
+            n_frames=n_frames,
+        )
 
-        scene_to_slot: Dict[int, Tuple[str, str]] = {
-            i: (a[1], a[2]) for i, a in enumerate(annotated)
-        }
+        from collections import Counter as _Counter
+        cat_counts = _Counter(cat for _, cat, _ in assignments)
+        self.logger.info(f"\n📊 Assignments per category (independent sets):")
+        for cat, cnt in sorted(cat_counts.items()):
+            self.logger.info(f"  {cat}: {cnt} unique scenes")
+        self.logger.info(f"  Total: {len(assignments)} assignments → one streaming pass")
 
-        self.logger.info(f"\n📊 Scene partition per format (no duplicates):")
-        for category, format_name, count in all_slots:
-            self.logger.info(f"  {category}/{format_name}: {count} unique scenes")
-        
-        # SINGLE-PASS STREAMING: Build assignments and stream the video once
-        self.logger.info(f"\n🚀 Phase 2: SINGLE-PASS streaming extraction...")
-        self.logger.info(f"  One FFmpeg pass, no seeking, rolling {n_frames}-frame buffer")
-        
-        # Convert scene_to_slot + timestamps into (center_frame_idx, category, format_name)
-        # assignments expected by the streaming extractor.
-        assignments = [
-            (int(ts * fps) + n_frames // 2, scene_to_slot[i][0], scene_to_slot[i][1])
-            for i, ts in enumerate(timestamps)
-            if i in scene_to_slot
-        ]
+        # Phase 2: Stream the video once, saving patches via progress callback.
+        self.logger.info(f"\n🚀 SINGLE-PASS streaming extraction "
+                         f"({n_frames}-frame rolling buffer, no seeking)…")
+
+        # Snapshot of patches already counted before this video so the callback
+        # can report a cumulative total in ui_state['patches_created_total'].
+        prior_total: int = self.ui_state.get('patches_created_total', 0)
+        # Per-category counts already tracked (for delta-based tracker updates).
+        last_tracker: Dict[str, int] = {cat: 0 for cat in patches_created}
+
+        def _on_progress(frames_examined: int, patches_so_far: Dict[str, int]) -> None:
+            # Live UI counter: total frames examined (incl. black-frame skips)
+            self.ui_state['frames_processed_total'] = frames_examined
+            # Cumulative patch total across all videos
+            self.ui_state['patches_created_total'] = (
+                prior_total + sum(patches_so_far.values())
+            )
+            # Increment tracker by delta to avoid double-counting on final merge
+            for cat, new_total in patches_so_far.items():
+                delta = new_total - last_tracker.get(cat, 0)
+                if delta > 0:
+                    self.tracker.increment_category_images(cat, delta)
+                    last_tracker[cat] = new_total
+            # Throttled redraw (respects self.update_interval)
+            self._update_terminal_ui()
 
         streaming_result = extract_and_save_streaming_distributed(
             video_path=video_path,
@@ -1292,17 +1213,22 @@ class DatasetGeneratorV2UHD:
             fps=fps,
             logger=self.logger,
             is_interesting_fn=self.is_interesting_patch,
+            is_black_frame_fn=_streaming_is_black_frame,
+            progress_fn=_on_progress,
         )
 
-        # Merge streaming result into patches_created and update UI / tracker
+        # Merge final result into patches_created.
+        # Tracker already updated incrementally in _on_progress – do NOT call
+        # tracker.increment_category_images again here to avoid double-counting.
         for category, count in streaming_result.items():
             patches_created[category] = patches_created.get(category, 0) + count
-            self.tracker.increment_category_images(category, count)
 
         total_created = sum(patches_created.values())
-        self.ui_state['patches_created_total'] = total_created
+        self.ui_state['patches_created_total'] = prior_total + total_created
         self.ui_state['current_video_name'] = video_name
         self.ui_state['current_video_index'] = video_idx
+        # Force a final UI redraw regardless of throttle
+        self.last_update_time = 0.0
         self._update_terminal_ui()
 
         total_time = time.time() - start_time

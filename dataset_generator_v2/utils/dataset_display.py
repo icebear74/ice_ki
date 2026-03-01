@@ -197,17 +197,19 @@ def _draw_patch_distribution_table(state, width):
 def _draw_statistics_and_eta(state, width):
     """Draw statistics and ETA section"""
     print_section_header("STATISTIKEN & GESCHÄTZTE RESTZEIT")
-    
-    # Statistics
-    scenes_processed = state.get('scenes_processed', 0)
+
+    frames_total = state.get('frames_processed_total', 0)
     patches_total = state.get('patches_created_total', 0)
+    skipped = max(0, frames_total - patches_total)
     avg_time = state.get('avg_time_per_scene', 0.0)
-    
-    stats_line = f"  Szenen: {C_GREEN}{scenes_processed:>6d}{C_RESET}  |  "
+
+    stats_line = f"  Frames: {C_GREEN}{format_number(frames_total):>8s}{C_RESET}  |  "
     stats_line += f"Patches: {C_GREEN}{format_number(patches_total):>8s}{C_RESET}  |  "
-    stats_line += f"Ø Zeit/Szene: {C_GREEN}{avg_time:>5.1f}s{C_RESET}"
+    stats_line += f"Übersprungen: {C_GREEN}{format_number(skipped):>6s}{C_RESET}"
+    if avg_time > 0:
+        stats_line += f"  |  Ø Zeit/Szene: {C_GREEN}{avg_time:>5.1f}s{C_RESET}"
     print(stats_line)
-    
+
     print()
     
     # ETA – only configured categories + total

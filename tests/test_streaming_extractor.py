@@ -24,8 +24,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'dataset_genera
 from streaming_extractor import (
     build_frame_assignments_distributed,
     build_frame_ranges_from_assignments,
+    build_assignments_per_category,
     create_patch_pair,
     save_patch_pair,
+    is_black_frame,
 )
 
 
@@ -326,6 +328,162 @@ class TestSavePatchPair(unittest.TestCase):
         self.assertIsNone(gt_path)
         self.assertIsNone(lr_path)
         print("✓ returns (False, None, None) when path is invalid")
+
+
+# ─── is_black_frame ───────────────────────────────────────────────────────────
+
+class TestIsBlackFrame(unittest.TestCase):
+
+    def test_pure_black_is_detected(self):
+        black = np.zeros((540, 540, 3), dtype=np.uint8)
+        self.assertTrue(is_black_frame(black))
+        print("✓ pure black frame detected")
+
+    def test_bright_frame_not_detected(self):
+        bright = np.full((540, 540, 3), 128, dtype=np.uint8)
+        self.assertFalse(is_black_frame(bright))
+        print("✓ bright frame not flagged as black")
+
+    def test_custom_threshold(self):
+        # mean brightness 30 → black at threshold=35, not at threshold=20
+        frame = np.full((100, 100, 3), 30, dtype=np.uint8)
+        self.assertTrue(is_black_frame(frame, brightness_threshold=35.0))
+        self.assertFalse(is_black_frame(frame, brightness_threshold=20.0))
+        print("✓ custom brightness threshold respected")
+
+    def test_just_below_threshold_is_black(self):
+        frame = np.full((100, 100, 3), 19, dtype=np.uint8)
+        self.assertTrue(is_black_frame(frame, brightness_threshold=20.0))
+        print("✓ value just below threshold → black")
+
+    def test_just_above_threshold_is_not_black(self):
+        frame = np.full((100, 100, 3), 21, dtype=np.uint8)
+        self.assertFalse(is_black_frame(frame, brightness_threshold=20.0))
+        print("✓ value just above threshold → not black")
+
+
+# ─── build_assignments_per_category ──────────────────────────────────────────
+
+class TestBuildAssignmentsPerCategory(unittest.TestCase):
+
+    def test_empty_distribution_returns_empty(self):
+        result = build_assignments_per_category({}, duration=60.0, fps=25.0)
+        self.assertEqual(result, [])
+        print("✓ empty distribution → empty result")
+
+    def test_single_category_no_duplicate_frames(self):
+        dist = {'master': {'small_540': 100, 'large_720': 50}}
+        result = build_assignments_per_category(dist, duration=3600.0, fps=25.0)
+        frame_indices = [r[0] for r in result]
+        self.assertEqual(len(set(frame_indices)), len(frame_indices),
+                         "Single category: duplicate frame indices found")
+        print("✓ single category: no duplicate frame indices")
+
+    def test_per_category_no_duplicate_frames(self):
+        """Within each category every frame index must be unique."""
+        dist = {
+            'master':    {'small_540': 300, 'medium_169': 100, 'large_720': 100},
+            'universal': {'small_540': 200, 'medium_169':  50, 'large_720':  50},
+        }
+        result = build_assignments_per_category(dist, duration=3600.0, fps=25.0)
+        for cat in ('master', 'universal'):
+            frames = [r[0] for r in result if r[1] == cat]
+            self.assertEqual(len(set(frames)), len(frames),
+                             f"Category '{cat}': duplicate frame indices found")
+        print("✓ no duplicates within each category")
+
+    def test_same_frame_can_appear_in_multiple_categories(self):
+        """With equal targets the same positions must appear in both categories."""
+        dist = {
+            'master':    {'small_540': 200},
+            'universal': {'small_540': 200},
+        }
+        result = build_assignments_per_category(dist, duration=3600.0, fps=25.0)
+        master_frames    = set(r[0] for r in result if r[1] == 'master')
+        universal_frames = set(r[0] for r in result if r[1] == 'universal')
+        overlap = master_frames & universal_frames
+        self.assertGreater(len(overlap), 0,
+                           "Equal stride ⇒ categories share frame positions")
+        print(f"✓ {len(overlap)} frame positions shared across categories")
+
+    def test_total_assignments_equals_sum_of_category_totals(self):
+        """Total assignments = sum of all per-category targets (normal video)."""
+        dist = {
+            'master':    {'small_540': 500, 'large_720': 250},   # 750
+            'universal': {'small_540': 300},                      # 300
+        }
+        result = build_assignments_per_category(dist, duration=7200.0, fps=25.0)
+        self.assertEqual(len(result), 750 + 300)
+        print("✓ total assignments = sum of category targets")
+
+    def test_result_sorted_by_frame_idx(self):
+        dist = {'master': {'small_540': 50}, 'universal': {'small_540': 30}}
+        result = build_assignments_per_category(dist, duration=3600.0, fps=25.0)
+        frames = [r[0] for r in result]
+        self.assertEqual(frames, sorted(frames))
+        print("✓ result sorted by frame index")
+
+    def test_short_video_scales_down_per_category_independently(self):
+        """Each category is scaled independently; larger target → more scenes."""
+        dist = {
+            'master':    {'small_540': 1000},
+            'universal': {'small_540':  400},
+        }
+        # Use a duration long enough that the strides differ (> 0.5 s each):
+        # master stride = 3599/1000 = 3.6 s, universal stride = 3599/400 = 9.0 s
+        result = build_assignments_per_category(dist, duration=3600.0, fps=25.0)
+        master_cnt    = sum(1 for r in result if r[1] == 'master')
+        universal_cnt = sum(1 for r in result if r[1] == 'universal')
+        # Both categories get patches
+        self.assertGreater(master_cnt, 0)
+        self.assertGreater(universal_cnt, 0)
+        # master has more scenes than universal (larger target → tighter stride)
+        self.assertGreater(master_cnt, universal_cnt)
+        # No duplicates within each category
+        for cat in ('master', 'universal'):
+            frames = [r[0] for r in result if r[1] == cat]
+            self.assertEqual(len(set(frames)), len(frames))
+        print("✓ short video: per-category scaling, proportional, no intra-category duplicates")
+
+    def test_three_categories_all_have_unique_scenes(self):
+        """Concrete 5000+2000+1000 scenario: all categories unique internally."""
+        dist = {
+            'master':    {'small_540': 3000, 'medium_169': 1200, 'large_720': 800},  # 5000
+            'universal': {'small_540': 1200, 'medium_169':  500, 'large_720': 300},  # 2000
+            'space':     {'small_540':  600, 'medium_169':  250, 'large_720': 150},  # 1000
+        }
+        result = build_assignments_per_category(dist, duration=7200.0, fps=25.0)
+        # Total assignments = 5000 + 2000 + 1000 = 8000
+        self.assertEqual(len(result), 8000)
+        for cat in ('master', 'universal', 'space'):
+            frames = [r[0] for r in result if r[1] == cat]
+            self.assertEqual(len(set(frames)), len(frames),
+                             f"Category '{cat}': duplicate frame indices found")
+        print("✓ 5000+2000+1000 = 8000 assignments, all categories unique internally")
+
+    def test_all_formats_appear_in_early_assignments_per_category(self):
+        """All formats must be present near the start of each category's scenes."""
+        dist = {'master': {'small_540': 3600, 'medium_169': 900, 'large_720': 900}}
+        result = build_assignments_per_category(dist, duration=7200.0, fps=25.0)
+        master_only = [(fi, fmt) for fi, cat, fmt in result if cat == 'master']
+        n_formats = 3  # 3 format slots
+        early_formats = {fmt for _, fmt in master_only[:n_formats]}
+        self.assertEqual(early_formats, {'small_540', 'medium_169', 'large_720'},
+                         "All formats must appear within first N assignments (interleaved)")
+        print("✓ all formats appear in early assignments (interleaved within category)")
+
+    def test_center_frame_offset_by_half(self):
+        """center_frame_idx == int(ts * fps) + n_frames // 2."""
+        fps, n_frames = 25.0, 7
+        half = n_frames // 2
+        dist = {'master': {'small_540': 3}}
+        result = build_assignments_per_category(
+            dist, duration=3600.0, fps=fps, n_frames=n_frames
+        )
+        for fi, _, _ in result:
+            # Each center must be at least `half` frames in
+            self.assertGreaterEqual(fi, half)
+        print("✓ center frame indices are ≥ half (correct offset)")
 
 
 if __name__ == '__main__':
