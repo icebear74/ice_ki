@@ -14,6 +14,7 @@ import shutil
 import tempfile
 import unittest
 import sys
+from collections import Counter
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'dataset_generator_v2'))
 
@@ -667,6 +668,83 @@ class TestPatchFormatWeights(unittest.TestCase):
             self.assertIsInstance(val['weight'], int)
             self.assertGreater(val['weight'], 0)
         print("✓ build_default_config() has positive integer weight in all output_patches")
+
+
+class TestScenePartition(unittest.TestCase):
+    """Verify that the scene→slot assignment produces a strict partition (no duplicates)."""
+
+    def _build_scene_to_slot(self, format_distribution, total_scenes):
+        """
+        Reimplements the scene_to_slot partition logic from
+        _extract_patches_multi_format_batch so we can test it in isolation.
+        """
+        all_slots = []
+        for category, formats in format_distribution.items():
+            for format_name, count in formats.items():
+                all_slots.append((category, format_name, count))
+
+        slots_total = sum(c for _, _, c in all_slots)
+        if slots_total > total_scenes:
+            scale = total_scenes / slots_total
+            all_slots = [(cat, fmt, max(1, int(cnt * scale)))
+                         for cat, fmt, cnt in all_slots]
+            excess = sum(c for _, _, c in all_slots) - total_scenes
+            if excess > 0:
+                all_slots.sort(key=lambda x: -x[2])
+                all_slots[0] = (all_slots[0][0], all_slots[0][1],
+                                max(0, all_slots[0][2] - excess))
+
+        scene_to_slot = {}
+        offset = 0
+        for category, format_name, count in all_slots:
+            for i in range(count):
+                scene_to_slot[offset + i] = (category, format_name)
+            offset += count
+        return scene_to_slot, all_slots
+
+    def test_no_scene_appears_twice(self):
+        """Each scene index is assigned to at most one (category, format) slot."""
+        fmt_dist = {
+            'master':    {'720': 400, '540': 350, '720_169': 250},
+            'universal': {'720': 400, '540': 350, '720_169': 250},
+        }
+        total_scenes = sum(sum(f.values()) for f in fmt_dist.values())  # exact fit
+        scene_to_slot, _ = self._build_scene_to_slot(fmt_dist, total_scenes)
+
+        # All assigned keys are unique by definition of a dict; just confirm total count
+        self.assertEqual(len(scene_to_slot), total_scenes)
+        # Slots fully covered
+        slots = list(scene_to_slot.values())
+        slot_counts = Counter(slots)
+        self.assertEqual(slot_counts[('master', '720')],    400)
+        self.assertEqual(slot_counts[('master', '540')],    350)
+        self.assertEqual(slot_counts[('master', '720_169')], 250)
+        print("✓ scene_to_slot: no scene appears in more than one slot")
+
+    def test_short_video_scales_down_without_duplicates(self):
+        """When total_scenes < total_needed, counts are scaled and still partition cleanly."""
+        fmt_dist = {
+            'master': {'720': 400, '540': 350, '720_169': 250},
+        }
+        total_scenes = 500  # fewer than the 1000 needed
+        scene_to_slot, all_slots = self._build_scene_to_slot(fmt_dist, total_scenes)
+
+        # No scene index should exceed total_scenes
+        self.assertTrue(all(k < total_scenes for k in scene_to_slot.keys()))
+        # No index should appear more than once (guaranteed by consecutive assignment)
+        self.assertEqual(len(set(scene_to_slot.keys())), len(scene_to_slot))
+        # Sum of slot counts ≤ total_scenes
+        self.assertLessEqual(sum(c for _, _, c in all_slots), total_scenes)
+        print("✓ scene_to_slot: short video scales without duplicates")
+
+    def test_single_category_single_format_all_scenes_assigned(self):
+        """With one slot, all available scenes get assigned to it."""
+        fmt_dist = {'master': {'720': 100}}
+        total_scenes = 100
+        scene_to_slot, _ = self._build_scene_to_slot(fmt_dist, total_scenes)
+        self.assertEqual(len(scene_to_slot), 100)
+        self.assertTrue(all(v == ('master', '720') for v in scene_to_slot.values()))
+        print("✓ scene_to_slot: single slot gets all scenes")
 
 
 if __name__ == '__main__':
