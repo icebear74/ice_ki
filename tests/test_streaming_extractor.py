@@ -489,6 +489,45 @@ class TestBuildAssignmentsPerCategory(unittest.TestCase):
         print("✓ center frame indices are ≥ half (correct offset)")
 
 
+# ─── filter chain constants ───────────────────────────────────────────────────
+
+class TestFilterConstants(unittest.TestCase):
+    """Sanity checks on the FFmpeg filter chain string constants."""
+
+    def test_scale_cuda_uses_bicubic_not_lanczos(self):
+        import streaming_extractor as _se
+        self.assertIn("bicubic", _se._TONEMAP_FILTER_SCALE_CUDA)
+        self.assertNotIn("lanczos", _se._TONEMAP_FILTER_SCALE_CUDA)
+        print("✓ _TONEMAP_FILTER_SCALE_CUDA uses bicubic (not lanczos)")
+
+    def test_tonemap_cuda_uses_bicubic_not_lanczos(self):
+        import streaming_extractor as _se
+        self.assertIn("bicubic", _se._TONEMAP_FILTER_CUDA)
+        self.assertNotIn("lanczos", _se._TONEMAP_FILTER_CUDA)
+        print("✓ _TONEMAP_FILTER_CUDA uses bicubic (not lanczos)")
+
+    def test_scale_cuda_filter_contains_hwdownload(self):
+        import streaming_extractor as _se
+        self.assertIn("hwdownload", _se._TONEMAP_FILTER_SCALE_CUDA)
+        print("✓ _TONEMAP_FILTER_SCALE_CUDA contains hwdownload")
+
+    def test_scale_cuda_filter_ends_with_bgr24(self):
+        import streaming_extractor as _se
+        self.assertTrue(
+            _se._TONEMAP_FILTER_SCALE_CUDA.endswith("bgr24"),
+            "_TONEMAP_FILTER_SCALE_CUDA must end with format=bgr24",
+        )
+        print("✓ _TONEMAP_FILTER_SCALE_CUDA ends with bgr24")
+
+    def test_tonemap_filter_ends_with_bgr24(self):
+        import streaming_extractor as _se
+        self.assertTrue(
+            _se._TONEMAP_FILTER.endswith("bgr24"),
+            "_TONEMAP_FILTER must end with format=bgr24",
+        )
+        print("✓ _TONEMAP_FILTER ends with bgr24")
+
+
 # ─── cuda_available ───────────────────────────────────────────────────────────
 
 class TestCudaAvailable(unittest.TestCase):

@@ -33,6 +33,7 @@ save_patch_pair()
 import os
 import random
 import subprocess
+import threading
 from collections import deque
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
@@ -74,8 +75,10 @@ _TONEMAP_FILTER: str = (
 # The CPU tonemap chain then runs on the already-scaled frame — no final
 # CPU scale step required.
 # Use together with -hwaccel cuda -hwaccel_output_format cuda.
+# Note: interp_algo=bicubic is used because lanczos is not compiled into
+# most pre-built FFmpeg packages (requires --enable-cuda-nvcc Lanczos kernel).
 _TONEMAP_FILTER_SCALE_CUDA: str = (
-    f"scale_cuda={STREAM_WIDTH}:{STREAM_HEIGHT}:interp_algo=lanczos,"
+    f"scale_cuda={STREAM_WIDTH}:{STREAM_HEIGHT}:interp_algo=bicubic,"
     "hwdownload,"
     "zscale=t=linear:npl=100,"
     "format=gbrpf32le,"
@@ -91,9 +94,10 @@ _TONEMAP_FILTER_SCALE_CUDA: str = (
 # Frames stay in GPU memory from decode through tonemap + scale;
 # hwdownload copies only the final 1920×1080 result to CPU.
 # Use together with -hwaccel cuda -hwaccel_output_format cuda.
+# Note: interp_algo=bicubic — see _TONEMAP_FILTER_SCALE_CUDA comment above.
 _TONEMAP_FILTER_CUDA: str = (
     f"tonemap_cuda=tonemap=mobius:desat=0:peak=100,"
-    f"scale_cuda={STREAM_WIDTH}:{STREAM_HEIGHT}:interp_algo=lanczos,"
+    f"scale_cuda={STREAM_WIDTH}:{STREAM_HEIGHT}:interp_algo=bicubic,"
     "hwdownload,"
     "format=bgr24"
 )
@@ -674,9 +678,23 @@ def extract_and_save_streaming_distributed(
     process = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
     )
     _set_nice(process.pid)
+
+    # Drain stderr in a background thread so the pipe never blocks the writer.
+    # The collected lines are logged if FFmpeg produces no frames (crash/error).
+    stderr_lines: List[str] = []
+
+    def drain_stderr(pipe: "subprocess.IO[bytes]") -> None:
+        for raw in pipe:
+            stderr_lines.append(raw.decode(errors="replace").rstrip())
+        pipe.close()
+
+    stderr_thread = threading.Thread(
+        target=drain_stderr, args=(process.stderr,), daemon=True
+    )
+    stderr_thread.start()
 
     try:
         current_frame: int = 0
@@ -775,6 +793,14 @@ def extract_and_save_streaming_distributed(
             pass
         process.kill()
         process.wait()
+        stderr_thread.join(timeout=2)
+        # Log FFmpeg stderr whenever no frames were produced — this is the
+        # most useful diagnostic for filter chain errors (e.g. unsupported
+        # interp_algo, pixel format mismatch, missing filter).
+        if current_frame == 0 and stderr_lines:
+            _log("FFmpeg stderr (last 20 lines):")
+            for _line in stderr_lines[-20:]:
+                _log(f"  [ffmpeg] {_line}")
 
     total = sum(patches_created.values())
     _log(

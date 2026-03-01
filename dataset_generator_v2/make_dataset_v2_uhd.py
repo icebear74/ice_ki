@@ -1933,6 +1933,14 @@ class DatasetGeneratorV2UHD:
                     print(f"{'='*80}\n")
                     self._update_terminal_ui()
                 
+                # Mark this video as "in progress" BEFORE we start work so
+                # that a crash or pipeline failure causes a retry on the next
+                # run rather than silently skipping it (the old code wrote
+                # idx+1 AFTER completion, meaning a video that produced 0
+                # patches was treated as done and never retried).
+                self.tracker.update_progress(current_video_index=idx)
+                self.tracker.save()
+
                 try:
                     # Process this video completely (extraction + processing)
                     stats = self.process_video(idx, video_cat_targets)
@@ -1940,18 +1948,26 @@ class DatasetGeneratorV2UHD:
                     # Check if video was skipped
                     if stats.get('skipped'):
                         self.logger.info(f"⏭️  Skipped: {video_name} - {stats.get('reason', 'unknown')}")
-                        # Update tracker with skip
+                        # Advance past this video only after a deliberate skip
                         self.tracker.update_progress(
                             current_video_index=idx + 1,
                             patches_created=0
                         )
                     else:
-                        # Update tracker with actual patches
+                        # Update patches count; advance index only when patches
+                        # were actually created so a failed extraction is retried.
                         patches_created = stats.get('patches_created', 0)
-                        self.tracker.update_progress(
-                            current_video_index=idx + 1,
-                            patches_created=patches_created
-                        )
+                        if patches_created > 0:
+                            self.tracker.update_progress(
+                                current_video_index=idx + 1,
+                                patches_created=patches_created
+                            )
+                        else:
+                            self.tracker.update_progress(patches_created=0)
+                            self.logger.warning(
+                                f"⚠️  {video_name}: 0 patches created — "
+                                f"video will be retried on next run"
+                            )
                         self.logger.info(f"✅ Complete: {video_name} - {patches_created} patches created")
                     
                     # Log category progress after each video
