@@ -1232,7 +1232,7 @@ class DatasetGeneratorV2UHD:
             is_interesting_fn=self.is_interesting_patch,
             is_black_frame_fn=_streaming_is_black_frame,
             progress_fn=_on_progress,
-            use_cuda=self.settings.get('use_cuda', True),
+            use_cuda=self.use_cuda,
             nice_level=self.settings.get('ffmpeg_nice', 10),
         )
 

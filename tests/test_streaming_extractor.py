@@ -500,6 +500,19 @@ class TestFilterConstants(unittest.TestCase):
         self.assertNotIn("lanczos", _se._TONEMAP_FILTER_SCALE_CUDA)
         print("✓ _TONEMAP_FILTER_SCALE_CUDA uses bicubic (not lanczos)")
 
+    def test_scale_cuda_specifies_nv12_output_format(self):
+        import streaming_extractor as _se
+        # format=nv12 forces 8-bit CUDA surface output so hwdownload succeeds
+        # for 10-bit HEVC sources (which otherwise produce a yuv410p surface).
+        self.assertIn("format=nv12", _se._TONEMAP_FILTER_SCALE_CUDA)
+        print("✓ _TONEMAP_FILTER_SCALE_CUDA includes format=nv12 for hwdownload compatibility")
+
+    def test_scale_cuda_has_yuv420p_after_hwdownload(self):
+        import streaming_extractor as _se
+        # yuv420p conversion after hwdownload ensures zscale gets planar input.
+        self.assertIn("format=yuv420p", _se._TONEMAP_FILTER_SCALE_CUDA)
+        print("✓ _TONEMAP_FILTER_SCALE_CUDA has format=yuv420p after hwdownload")
+
     def test_tonemap_cuda_uses_bicubic_not_lanczos(self):
         import streaming_extractor as _se
         self.assertIn("bicubic", _se._TONEMAP_FILTER_CUDA)

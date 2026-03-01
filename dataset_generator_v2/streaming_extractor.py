@@ -75,11 +75,19 @@ _TONEMAP_FILTER: str = (
 # The CPU tonemap chain then runs on the already-scaled frame — no final
 # CPU scale step required.
 # Use together with -hwaccel cuda -hwaccel_output_format cuda.
-# Note: interp_algo=bicubic is used because lanczos is not compiled into
-# most pre-built FFmpeg packages (requires --enable-cuda-nvcc Lanczos kernel).
+# Notes:
+#   - interp_algo=bicubic: lanczos is not compiled into most pre-built FFmpeg
+#     packages (requires --enable-cuda-nvcc Lanczos kernel).
+#   - format=nv12: forces scale_cuda output to 8-bit NV12 CUDA frames before
+#     hwdownload.  Without this, 10-bit HEVC decodes to p010le on the CUDA
+#     surface, and scale_cuda may produce a format (e.g. yuv410p) that
+#     hwdownload cannot download, causing immediate pipeline failure.
+#   - format=yuv420p after hwdownload: converts semi-planar NV12 to fully
+#     planar yuv420p which zscale/tonemap expect.
 _TONEMAP_FILTER_SCALE_CUDA: str = (
-    f"scale_cuda={STREAM_WIDTH}:{STREAM_HEIGHT}:interp_algo=bicubic,"
+    f"scale_cuda={STREAM_WIDTH}:{STREAM_HEIGHT}:interp_algo=bicubic:format=nv12,"
     "hwdownload,"
+    "format=yuv420p,"
     "zscale=t=linear:npl=100,"
     "format=gbrpf32le,"
     "zscale=p=bt709,"
