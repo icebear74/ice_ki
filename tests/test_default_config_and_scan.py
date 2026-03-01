@@ -320,6 +320,34 @@ class TestUHDConfigNormalization(unittest.TestCase):
                 self.assertIn('lr_size', fmt_val, f"Missing lr_size for {fmt_key}")
         print("✓ format_config entries contain gt_size and lr_size")
 
+    def test_format_config_uses_weight_for_probability(self):
+        """When output_patches have 'weight' fields, probabilities reflect those weights."""
+        cfg = self._v2_config()
+        cfg['output_patches'] = {
+            '540':     {'enabled': True,  'gt_size': [540, 540], 'lr_size': [180, 180], 'weight': 35},
+            '720':     {'enabled': True,  'gt_size': [720, 720], 'lr_size': [240, 240], 'weight': 40},
+            '720_169': {'enabled': True,  'gt_size': [405, 720], 'lr_size': [135, 240], 'weight': 25},
+        }
+        result = self.normalize(cfg)
+        for cat_formats in result['format_config'].values():
+            self.assertAlmostEqual(cat_formats['540']['probability'],     35 / 100, places=4)
+            self.assertAlmostEqual(cat_formats['720']['probability'],     40 / 100, places=4)
+            self.assertAlmostEqual(cat_formats['720_169']['probability'], 25 / 100, places=4)
+        print("✓ format_config probabilities derived from weight fields")
+
+    def test_format_config_weight_fallback_to_equal(self):
+        """When no weight is set, all enabled formats share equal probability."""
+        cfg = self._v2_config()
+        cfg['output_patches'] = {
+            '540': {'enabled': True, 'gt_size': [540, 540], 'lr_size': [180, 180]},
+            '720': {'enabled': True, 'gt_size': [720, 720], 'lr_size': [240, 240]},
+        }
+        result = self.normalize(cfg)
+        for cat_formats in result['format_config'].values():
+            self.assertAlmostEqual(cat_formats['540']['probability'], 0.5, places=4)
+            self.assertAlmostEqual(cat_formats['720']['probability'], 0.5, places=4)
+        print("✓ equal probability fallback when weight is absent")
+
 
 # ─── manager.categories from config keys ────────────────────────────────────────────
 
@@ -567,6 +595,78 @@ class TestCategoryManagement(unittest.TestCase):
         self.assertIn('toon', m2.categories)
         self.assertEqual(m2.config['category_patches']['toon'], 30000)
         print("✓ New category persists after save/reload")
+
+
+class TestPatchFormatWeights(unittest.TestCase):
+    """Tests for manage_patch_formats / _edit_patch_weight in VideoManager."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def _make_manager(self, config_dict):
+        p = os.path.join(self.tmp, 'cfg.json')
+        with open(p, 'w') as f:
+            json.dump(config_dict, f)
+        m = VideoManager(p)
+        m.load()
+        return m
+
+    def _base_cfg(self):
+        return {
+            'category_patches': {'master': 100000},
+            'output_patches': {
+                '540':     {'enabled': True,  'gt_size': [540, 540], 'lr_size': [180, 180], 'weight': 35},
+                '720':     {'enabled': True,  'gt_size': [720, 720], 'lr_size': [240, 240], 'weight': 40},
+                '720_169': {'enabled': True,  'gt_size': [405, 720], 'lr_size': [135, 240], 'weight': 25},
+            },
+            'source_dirs': [],
+            'videos': [],
+        }
+
+    def test_edit_patch_weight_updates_config(self):
+        """_edit_patch_weight() stores the new integer weight in the config."""
+        m = self._make_manager(self._base_cfg())
+        import unittest.mock as mock
+        with mock.patch('builtins.input', side_effect=['720', '50']):
+            m._edit_patch_weight()
+        self.assertEqual(m.config['output_patches']['720']['weight'], 50)
+        self.assertTrue(m.modified)
+        print("✓ _edit_patch_weight() updates config and marks modified")
+
+    def test_edit_patch_weight_rejects_unknown_size(self):
+        """_edit_patch_weight() refuses unknown size keys."""
+        m = self._make_manager(self._base_cfg())
+        import unittest.mock as mock
+        with mock.patch('builtins.input', return_value='9999'):
+            m._edit_patch_weight()
+        self.assertNotIn('9999', m.config.get('output_patches', {}))
+        self.assertFalse(m.modified)
+        print("✓ _edit_patch_weight() rejects unknown size key")
+
+    def test_edit_patch_weight_rejects_zero(self):
+        """_edit_patch_weight() refuses weight ≤ 0."""
+        m = self._make_manager(self._base_cfg())
+        import unittest.mock as mock
+        with mock.patch('builtins.input', side_effect=['720', '0']):
+            m._edit_patch_weight()
+        self.assertEqual(m.config['output_patches']['720']['weight'], 40)  # unchanged
+        self.assertFalse(m.modified)
+        print("✓ _edit_patch_weight() rejects weight ≤ 0")
+
+    def test_default_config_has_weights_in_output_patches(self):
+        """build_default_config() includes 'weight' in each output_patches entry."""
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'dataset_generator_v2'))
+        from create_default_config import build_default_config
+        cfg = build_default_config()
+        for key, val in cfg['output_patches'].items():
+            self.assertIn('weight', val, f"Missing 'weight' in output_patches['{key}']")
+            self.assertIsInstance(val['weight'], int)
+            self.assertGreater(val['weight'], 0)
+        print("✓ build_default_config() has positive integer weight in all output_patches")
 
 
 if __name__ == '__main__':

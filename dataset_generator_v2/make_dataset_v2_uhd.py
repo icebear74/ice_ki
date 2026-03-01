@@ -266,7 +266,7 @@ class DatasetGeneratorV2UHD:
         try:
             # Update overall progress from tracker
             category_stats = self.tracker.status.get('category_stats', {})
-            for category in ['master', 'space', 'toon', 'universal']:
+            for category in self.category_targets.keys():
                 if category in category_stats:
                     stats = category_stats[category]
                     # Use actual distribution totals instead of raw category targets
@@ -282,7 +282,7 @@ class DatasetGeneratorV2UHD:
             # Calculate patch distribution by category and size
             # Use ACTUAL format names from configuration (e.g., small_540, medium_720_169, large_720)
             patch_dist = {}
-            for category in ['master', 'space', 'toon', 'universal']:
+            for category in self.format_config.keys():
                 patch_dist[category] = {}
                 # Get actual format names from configuration for this category
                 if category in self.format_config:
@@ -318,7 +318,7 @@ class DatasetGeneratorV2UHD:
                 
                 eta_by_category = {}
                 max_eta = 0
-                for category in ['master', 'space', 'toon', 'universal']:
+                for category in self.ui_state['overall_progress'].keys():
                     if category in self.ui_state['overall_progress']:
                         current = self.ui_state['overall_progress'][category]['created']  # Fixed: was 'current'
                         target = self.ui_state['overall_progress'][category]['target']
@@ -576,7 +576,7 @@ class DatasetGeneratorV2UHD:
             # Calculate actual totals from distribution (not raw targets)
             # This is what will actually be created based on video assignments
             self.distribution_totals = {}
-            for category in ['master', 'space', 'toon', 'universal']:
+            for category in self.category_targets.keys():
                 total = 0
                 for video_path, cat_targets in video_targets.items():
                     if category in cat_targets:

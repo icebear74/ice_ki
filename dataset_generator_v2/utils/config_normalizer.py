@@ -15,8 +15,10 @@ base_settings.min_detail_threshold ← quality.blur_threshold  (default 80.0)
 
 category_targets                   ← category_patches  (patch count per category)
 
-format_config                      ← enabled output_patches applied per-category
-                                      with equal probability per format
+format_config                      ← enabled output_patches applied per-category.
+                                      Probability for each size is derived from its
+                                      'weight' field (integer %).  When 'weight' is
+                                      absent, all enabled sizes get equal probability.
 """
 
 import os
@@ -47,17 +49,20 @@ def normalize_config(config: dict) -> dict:
     elif 'category_targets' not in normalized:
         normalized['category_targets'] = {}
 
-    # Build format_config: enabled output_patches applied per-category
+    # Build format_config: enabled output_patches applied per-category.
+    # Each size's probability comes from its 'weight' field (integer %).
+    # If no weight is set, all sizes share equal probability.
     output_patches = config.get('output_patches', {})
     enabled = {k: v for k, v in output_patches.items() if v.get('enabled', True)}
     if enabled:
-        n           = len(enabled)
-        equal_prob  = round(1.0 / n, 6)
+        total_weight = sum(v.get('weight', 1) for v in enabled.values())
+        if total_weight <= 0:
+            total_weight = len(enabled)
         format_entry = {
             fmt_key: {
                 'gt_size':     fmt_val['gt_size'],
                 'lr_size':     fmt_val['lr_size'],
-                'probability': equal_prob,
+                'probability': round(fmt_val.get('weight', 1) / total_weight, 6),
             }
             for fmt_key, fmt_val in enabled.items()
         }

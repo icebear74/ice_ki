@@ -438,6 +438,86 @@ class VideoManager:
         self.modified = True
         print(f"✓ Removed category '{name}'" + (f", unassigned {affected} video(s)" if affected else ""))
 
+    # ── V2 Config: Output Patch Format Weights ────────────────────────────────
+
+    def manage_patch_formats(self):
+        """Output patch size weight management submenu."""
+        while True:
+            print("\n── Output Patch Size Weights ─────────────────────────────────")
+            self._list_patch_formats()
+            print("\n  a) Edit weight for a size")
+            print("  x) Back")
+            sub = input("Choice: ").strip().lower()
+
+            if sub == 'x':
+                break
+            elif sub == 'a':
+                self._edit_patch_weight()
+            else:
+                print("Invalid choice")
+
+    def _list_patch_formats(self):
+        """Print output patch sizes with their weights (in %) and resulting probabilities."""
+        patches = self.config.get('output_patches', {})
+        if not patches:
+            print("No output patch sizes configured.")
+            return
+
+        enabled = {k: v for k, v in patches.items() if v.get('enabled', True)}
+        total_weight = sum(v.get('weight', 1) for v in enabled.values())
+        if total_weight <= 0:
+            total_weight = max(len(enabled), 1)
+
+        print(f"\n{'Size':<12} {'Enabled':<10} {'Weight':<10} {'Share %':<10}")
+        print("-" * 44)
+        for key in sorted(patches.keys()):
+            val = patches[key]
+            is_enabled = val.get('enabled', True)
+            enabled_str = "✓" if is_enabled else "✗"
+            w = val.get('weight', 1)
+            if is_enabled and total_weight > 0:
+                share = round(w / total_weight * 100, 1)
+                share_str = f"{share}%"
+            else:
+                share_str = "–"
+            print(f"  {key:<10} {enabled_str:<10} {w:<10} {share_str}")
+
+    def _edit_patch_weight(self):
+        """Edit the weight (in %) for an output patch size."""
+        patches = self.config.get('output_patches', {})
+        if not patches:
+            print("No output patch sizes configured.")
+            return
+
+        print(f"Available sizes: {', '.join(sorted(patches.keys()))}")
+        size = input("Size to edit (e.g. 720): ").strip()
+        if size not in patches:
+            print(f"❌ Unknown size '{size}'")
+            return
+
+        current = patches[size].get('weight', 1)
+        val_str = input(f"New weight in % (current: {current}): ").strip()
+        if not val_str:
+            print("No change.")
+            return
+        try:
+            weight = int(val_str)
+        except ValueError:
+            print("❌ Invalid number – must be a positive integer")
+            return
+        if weight <= 0:
+            print("❌ Weight must be a positive integer")
+            return
+
+        patches[size]['weight'] = weight
+        self.modified = True
+
+        # Show updated distribution
+        enabled = {k: v for k, v in patches.items() if v.get('enabled', True)}
+        total_weight = sum(v.get('weight', 1) for v in enabled.values())
+        share = round(weight / total_weight * 100, 1) if total_weight > 0 else 0.0
+        print(f"✓ Weight for '{size}' set to {weight}  (→ {share}% of patches)")
+
     # ── V2 Config: Source Directory Management ────────────────────────────────
 
     def _ensure_source_dirs(self) -> list:
@@ -630,6 +710,7 @@ def print_menu():
     print("15. Remove source directory")
     print("16. Rescan file list (rebuild from source directories)")
     print("17. Create new default config file")
+    print("18. Configure output patch size weights")
     print("-" * 60)
     print("s. Save changes")
     print("q. Quit")
@@ -940,7 +1021,11 @@ def main():
                 except Exception as e:
                     print(f"❌ Could not create config: {e}")
                     traceback.print_exc()
-            
+
+            elif choice == '18':
+                # Configure output patch size weights
+                manager.manage_patch_formats()
+
             else:
                 print("Invalid choice")
         

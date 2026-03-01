@@ -36,7 +36,8 @@
         240,
         240
       ],
-      "enabled": true
+      "enabled": true,
+      "weight": 40
     },
     "540": {
       "gt_size": [
@@ -47,7 +48,8 @@
         180,
         180
       ],
-      "enabled": true
+      "enabled": true,
+      "weight": 35
     },
     "720_169": {
       "gt_size": [
@@ -58,7 +60,8 @@
         240,
         135
       ],
-      "enabled": true
+      "enabled": true,
+      "weight": 25
     }
   },
   "processing": {
