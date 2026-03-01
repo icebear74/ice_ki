@@ -280,7 +280,11 @@ class DatasetGeneratorV2UHD:
             for category in self.category_targets.keys():
                 if category in category_stats:
                     stats = category_stats[category]
-                    target = self.distribution_totals.get(category, 0)
+                    # Use the user-configured target (category_targets), not the
+                    # rounded distribution sum (distribution_totals), so the progress
+                    # bar reflects exactly what the user asked for (30 000 GT images
+                    # means 30 000 GT images, not 29 850 due to per-video rounding).
+                    target = self.category_targets.get(category, 0)
                     current = stats.get('images_created', 0)
                     percent = (current / target * 100) if target > 0 else 0.0
                     self.ui_state['overall_progress'][category] = {
@@ -299,7 +303,7 @@ class DatasetGeneratorV2UHD:
                             total = category_stats[category].get('images_created', 0)
                             prob = self.format_probabilities.get(category, {}).get(format_name, 0.0)
                             current = int(total * prob)
-                            target_total = self.distribution_totals.get(category, 0)
+                            target_total = self.category_targets.get(category, 0)
                             target = int(target_total * prob)
                             patch_dist[category][format_name] = {
                                 'count': current,
