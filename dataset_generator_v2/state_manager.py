@@ -76,10 +76,10 @@ class StateManager:
             "category_distribution": {},
             
             "progress": {
-                "total_patches": self.config['processing']['total_patches'],
+                "total_patches": self.config.get('processing', {}).get('total_patches', 0),
                 "completed_patches": 0,
                 "failed_patches": 0,
-                "remaining_patches": self.config['processing']['total_patches'],
+                "remaining_patches": self.config.get('processing', {}).get('total_patches', 0),
                 "percentage": 0.0
             },
             
@@ -127,6 +127,9 @@ class StateManager:
                 keys = list(cats.keys())
                 category_lookup[path] = keys[0] if keys else None
 
+        # Track paths processed in this scan to avoid duplicates across overlapping dirs
+        seen_in_scan: set = set()
+
         for dir_config in source_dirs:
             video_dir = dir_config.get('path', '')
             extensions = dir_config.get('extensions', ['.mkv', '.mp4', '.avi'])
@@ -135,15 +138,22 @@ class StateManager:
                 logger.warning(f"Source directory not found: {video_dir}")
                 continue
 
-            # Find all videos
-            video_files = []
-            for ext in extensions:
-                video_files.extend(Path(video_dir).rglob(f'*{ext}'))
+            # Case-insensitive extension matching – works correctly on all file systems
+            exts_lower = {e.lower() for e in extensions}
+            video_files = [
+                p for p in Path(video_dir).rglob('*')
+                if p.is_file() and p.suffix.lower() in exts_lower
+            ]
 
             logger.info(f"  Found {len(video_files)} videos in {video_dir}")
 
             for video_path in video_files:
                 video_path_str = str(video_path)
+
+                # Skip if already processed in this scan (overlapping source_dirs)
+                if video_path_str in seen_in_scan:
+                    continue
+                seen_in_scan.add(video_path_str)
 
                 try:
                     stat = os.stat(video_path)

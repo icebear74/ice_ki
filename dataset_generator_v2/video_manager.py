@@ -54,11 +54,16 @@ class VideoManager:
         # Sort videos by name (case-insensitive)
         self.videos.sort(key=lambda v: v.get('name', '').lower())
         
-        # Extract unique categories (handle both formats)
+        # Extract unique categories from video assignments (handle both formats)
         self.categories = set()
         for video in self.videos:
             cats = get_video_categories(video)
             self.categories.update(cats)
+
+        # Also include categories defined in the config
+        # (category_targets for unified/V1 configs, category_weights for V2-only configs)
+        self.categories.update(self.config.get('category_targets', {}).keys())
+        self.categories.update(self.config.get('category_weights', {}).keys())
         self.categories = sorted(list(self.categories))
         
         print(f"✓ Loaded {len(self.videos)} videos (sorted by title)")
@@ -508,6 +513,7 @@ class VideoManager:
 
         extensions_default = ['.mkv', '.mp4', '.avi']
         found_paths: List[str] = []
+        seen_paths: set = set()
 
         for dir_config in source_dirs:
             video_dir = dir_config.get('path', '')
@@ -517,9 +523,14 @@ class VideoManager:
                 print(f"⚠️  Directory not found (skipped): {video_dir}")
                 continue
 
-            for ext in extensions:
-                for p in Path(video_dir).rglob(f'*{ext}'):
-                    found_paths.append(str(p))
+            # Case-insensitive extension matching + deduplication
+            exts_lower = {e.lower() for e in extensions}
+            for p in Path(video_dir).rglob('*'):
+                if p.is_file() and p.suffix.lower() in exts_lower:
+                    path_str = str(p)
+                    if path_str not in seen_paths:
+                        seen_paths.add(path_str)
+                        found_paths.append(path_str)
 
         # Merge: keep existing entries (with their categories), add new ones without category
         new_videos: List[dict] = []
@@ -567,6 +578,7 @@ def print_menu():
     print("14. Edit source directory")
     print("15. Remove source directory")
     print("16. Rescan file list (rebuild from source directories)")
+    print("17. Create new default config file")
     print("-" * 60)
     print("s. Save changes")
     print("q. Quit")
@@ -857,6 +869,30 @@ def main():
             elif choice == '16':
                 # Rescan file list (V2)
                 manager.rescan_file_list()
+            
+            elif choice == '17':
+                # Create new default config file
+                try:
+                    from create_default_config import create_default_config, build_default_config
+                    script_dir = Path(__file__).parent
+                    template   = str(script_dir / 'generator_config.json')
+                    ts         = __import__('datetime').datetime.now().strftime('%Y%m%d_%H%M%S')
+                    default_name = f'generator_config_new_{ts}.json'
+                    val = input(f"Output filename [{default_name}]: ").strip()
+                    out_path = str(script_dir / (val or default_name))
+                    if os.path.exists(out_path):
+                        ow = input(f"⚠️  '{out_path}' exists. Overwrite? (yes/no): ").strip().lower()
+                        if ow != 'yes':
+                            print("Cancelled.")
+                        else:
+                            create_default_config(out_path, template_path=template)
+                            print("   Open the file to adjust settings, then reload video_manager.py with it.")
+                    else:
+                        create_default_config(out_path, template_path=template)
+                        print("   Open the file to adjust settings, then reload video_manager.py with it.")
+                except Exception as e:
+                    print(f"❌ Could not create config: {e}")
+                    traceback.print_exc()
             
             else:
                 print("Invalid choice")
