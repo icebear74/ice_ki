@@ -33,11 +33,11 @@ def _make_v2_config(video_dir):
         'videos': [],
         'category_patches': {'master': 500, 'universal': 500},
         'output_patches': {
-            '540':     {'enabled': True,  'gt_size': [540, 540], 'lr_size': [180, 180]},
-            '720':     {'enabled': True,  'gt_size': [720, 720], 'lr_size': [240, 240]},
-            '720_169': {'enabled': True,  'gt_size': [405, 720], 'lr_size': [135, 240]},
+            '540':     {'enabled': True,  'gt_size': [540, 540], 'scale': 3},
+            '720':     {'enabled': True,  'gt_size': [720, 720], 'scale': 3},
+            '720_169': {'enabled': True,  'gt_size': [720, 405], 'scale': 3},
         },
-        'processing': {'n_frames': 7},
+        'processing': {'n_frames': 7, 'scale': 3},
         'quality': {'blur_threshold': 80.0},
         'ffmpeg_timeout': 120,
         'ffprobe_timeout': 60,
@@ -222,9 +222,9 @@ class TestUHDConfigNormalization(unittest.TestCase):
             'videos': [],
             'category_patches': {'master': 25000, 'universal': 75000},
             'output_patches': {
-                '540':     {'enabled': True,  'gt_size': [540, 540], 'lr_size': [180, 180]},
-                '720':     {'enabled': True,  'gt_size': [720, 720], 'lr_size': [240, 240]},
-                '720_169': {'enabled': False, 'gt_size': [405, 720], 'lr_size': [135, 240]},
+                '540':     {'enabled': True,  'gt_size': [540, 540], 'scale': 3},
+                '720':     {'enabled': True,  'gt_size': [720, 720], 'scale': 3},
+                '720_169': {'enabled': False, 'gt_size': [720, 405], 'scale': 3},
             },
             'processing': {'n_frames': 7,
                            'min_scene_length': 21, 'scene_threshold': 30.0},
@@ -313,21 +313,26 @@ class TestUHDConfigNormalization(unittest.TestCase):
         print("✓ format probabilities sum to 1.0 per category")
 
     def test_format_config_contains_gt_and_lr_size(self):
-        """Each format entry has gt_size and lr_size."""
+        """Each format entry has gt_size; lr_size is computed from gt_size ÷ scale."""
         result = self.normalize(self._v2_config())
         for cat_formats in result['format_config'].values():
             for fmt_key, fmt_val in cat_formats.items():
                 self.assertIn('gt_size', fmt_val, f"Missing gt_size for {fmt_key}")
                 self.assertIn('lr_size', fmt_val, f"Missing lr_size for {fmt_key}")
-        print("✓ format_config entries contain gt_size and lr_size")
+                # lr_size must equal gt_size // scale (W×H preserved)
+                gt_w, gt_h = fmt_val['gt_size']
+                scale = 3  # default scale in test config
+                self.assertEqual(fmt_val['lr_size'], [gt_w // scale, gt_h // scale],
+                                 f"lr_size mismatch for {fmt_key}")
+        print("✓ format_config entries contain gt_size and lr_size (computed from gt_size ÷ scale)")
 
     def test_format_config_uses_weight_for_probability(self):
         """When output_patches have 'weight' fields, probabilities reflect those weights."""
         cfg = self._v2_config()
         cfg['output_patches'] = {
-            '540':     {'enabled': True,  'gt_size': [540, 540], 'lr_size': [180, 180], 'weight': 35},
-            '720':     {'enabled': True,  'gt_size': [720, 720], 'lr_size': [240, 240], 'weight': 40},
-            '720_169': {'enabled': True,  'gt_size': [405, 720], 'lr_size': [135, 240], 'weight': 25},
+            '540':     {'enabled': True,  'gt_size': [540, 540], 'scale': 3, 'weight': 35},
+            '720':     {'enabled': True,  'gt_size': [720, 720], 'scale': 3, 'weight': 40},
+            '720_169': {'enabled': True,  'gt_size': [720, 405], 'scale': 3, 'weight': 25},
         }
         result = self.normalize(cfg)
         for cat_formats in result['format_config'].values():
@@ -340,8 +345,8 @@ class TestUHDConfigNormalization(unittest.TestCase):
         """When no weight is set, all enabled formats share equal probability."""
         cfg = self._v2_config()
         cfg['output_patches'] = {
-            '540': {'enabled': True, 'gt_size': [540, 540], 'lr_size': [180, 180]},
-            '720': {'enabled': True, 'gt_size': [720, 720], 'lr_size': [240, 240]},
+            '540': {'enabled': True, 'gt_size': [540, 540], 'scale': 3},
+            '720': {'enabled': True, 'gt_size': [720, 720], 'scale': 3},
         }
         result = self.normalize(cfg)
         for cat_formats in result['format_config'].values():
@@ -521,7 +526,7 @@ class TestCategoryManagement(unittest.TestCase):
         return {
             'category_patches': {'master': 100000, 'space': 50000},
             'output_patches': {
-                '540': {'enabled': True, 'gt_size': [540, 540], 'lr_size': [180, 180]},
+                '540': {'enabled': True, 'gt_size': [540, 540], 'scale': 3},
             },
             'processing': {'n_frames': 7},
             'source_dirs': [],
@@ -619,9 +624,9 @@ class TestPatchFormatWeights(unittest.TestCase):
         return {
             'category_patches': {'master': 100000},
             'output_patches': {
-                '540':     {'enabled': True,  'gt_size': [540, 540], 'lr_size': [180, 180], 'weight': 35},
-                '720':     {'enabled': True,  'gt_size': [720, 720], 'lr_size': [240, 240], 'weight': 40},
-                '720_169': {'enabled': True,  'gt_size': [405, 720], 'lr_size': [135, 240], 'weight': 25},
+                '540':     {'enabled': True,  'gt_size': [540, 540], 'scale': 3, 'weight': 35},
+                '720':     {'enabled': True,  'gt_size': [720, 720], 'scale': 3, 'weight': 40},
+                '720_169': {'enabled': True,  'gt_size': [720, 405], 'scale': 3, 'weight': 25},
             },
             'source_dirs': [],
             'videos': [],

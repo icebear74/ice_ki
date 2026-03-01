@@ -35,9 +35,9 @@ _DEFAULT_CONFIG = {
         "toon":       40000
     },
     "output_patches": {
-        "540":     {"enabled": True,  "gt_size": [540, 540], "lr_size": [180, 180], "weight": 35},
-        "720":     {"enabled": True,  "gt_size": [720, 720], "lr_size": [240, 240], "weight": 40},
-        "720_169": {"enabled": True,  "gt_size": [405, 720], "lr_size": [135, 240], "weight": 25}
+        "540":     {"enabled": True,  "gt_size": [540, 540], "scale": 3, "weight": 35},
+        "720":     {"enabled": True,  "gt_size": [720, 720], "scale": 3, "weight": 40},
+        "720_169": {"enabled": True,  "gt_size": [720, 405], "scale": 3, "weight": 25}
     },
     "processing": {
         "n_frames":         7,

@@ -46,6 +46,16 @@ class VideoManager:
         """Load configuration from JSON."""
         with open(self.config_path, 'r', encoding='utf-8') as f:
             self.config = json.load(f)
+
+        # Migrate old lr_size → scale format in output_patches
+        patches = self.config.get('output_patches', {})
+        for val in patches.values():
+            if 'lr_size' in val:
+                gt_w = val['gt_size'][0]
+                lr_w = val['lr_size'][0]
+                val.setdefault('scale', gt_w // lr_w if lr_w else 3)
+                del val['lr_size']
+                self.modified = True
         
         self.videos = self.config.get('videos', [])
         
@@ -770,12 +780,16 @@ def main():
         if v2_config.exists():
             config_path = v2_config
         else:
-            print(
-                "❌ No config file found. "
-                "Please run from dataset_generator_v2 directory "
-                "(expected generator_config_v2.json)."
-            )
-            sys.exit(1)
+            print("⚠️  Keine Konfiguration gefunden – erstelle generator_config_v2.json ...")
+            try:
+                from create_default_config import create_default_config
+                create_default_config(str(v2_config))
+                config_path = v2_config
+                print(f"✓ Konfiguration erstellt: {v2_config.name}")
+                print("  → Bitte root_path und source_dirs anpassen, dann neu starten.")
+            except Exception as ce:
+                print(f"❌ Konnte keine Konfiguration erstellen: {ce}")
+                sys.exit(1)
 
         print(f"📂 Using config: {config_path.name}")
         manager = VideoManager(str(config_path))

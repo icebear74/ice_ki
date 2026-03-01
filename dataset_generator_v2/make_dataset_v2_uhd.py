@@ -840,8 +840,8 @@ class DatasetGeneratorV2UHD:
         if n_frames not in [5, 7]:
             return None, None
         
-        gt_h, gt_w = format_config['gt_size']
-        lr_h, lr_w = format_config['lr_size']
+        gt_w, gt_h = format_config['gt_size']  # JSON stores W×H
+        lr_w, lr_h = format_config['lr_size']  # JSON stores W×H
         
         # Get frame dimensions (UHD!)
         frame_h, frame_w = frames[0].shape[:2]

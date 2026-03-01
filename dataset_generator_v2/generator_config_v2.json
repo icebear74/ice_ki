@@ -28,38 +28,20 @@
   "videos": [],
   "output_patches": {
     "720": {
-      "gt_size": [
-        720,
-        720
-      ],
-      "lr_size": [
-        240,
-        240
-      ],
+      "gt_size": [720, 720],
+      "scale": 3,
       "enabled": true,
       "weight": 40
     },
     "540": {
-      "gt_size": [
-        540,
-        540
-      ],
-      "lr_size": [
-        180,
-        180
-      ],
+      "gt_size": [540, 540],
+      "scale": 3,
       "enabled": true,
       "weight": 35
     },
     "720_169": {
-      "gt_size": [
-        720,
-        405
-      ],
-      "lr_size": [
-        240,
-        135
-      ],
+      "gt_size": [720, 405],
+      "scale": 3,
       "enabled": true,
       "weight": 25
     }

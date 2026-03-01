@@ -184,8 +184,10 @@ class DatasetGeneratorV2:
             return None, None
         
         size_config = self.config['output_patches'][size_key]
-        gt_h, gt_w = size_config['gt_size']
-        lr_h, lr_w = size_config['lr_size']
+        gt_w, gt_h = size_config['gt_size']  # JSON stores W×H
+        scale = self.config.get('processing', {}).get('scale', 3)
+        lr_w = gt_w // scale
+        lr_h = gt_h // scale
         
         # Get frame dimensions (full UHD!)
         frame_h, frame_w = frames[0].shape[:2]

@@ -52,7 +52,9 @@ def normalize_config(config: dict) -> dict:
     # Build format_config: enabled output_patches applied per-category.
     # Each size's probability comes from its 'weight' field (integer %).
     # If no weight is set, all sizes share equal probability.
+    # lr_size is optional in the JSON: if absent it is computed as gt_size // scale.
     output_patches = config.get('output_patches', {})
+    scale = processing.get('scale', 3)
     enabled = {k: v for k, v in output_patches.items() if v.get('enabled', True)}
     if enabled:
         total_weight = sum(v.get('weight', 1) for v in enabled.values())
@@ -61,7 +63,8 @@ def normalize_config(config: dict) -> dict:
         format_entry = {
             fmt_key: {
                 'gt_size':     fmt_val['gt_size'],
-                'lr_size':     fmt_val['lr_size'],
+                'lr_size':     [fmt_val['gt_size'][0] // fmt_val.get('scale', scale),
+                                fmt_val['gt_size'][1] // fmt_val.get('scale', scale)],
                 'probability': round(fmt_val.get('weight', 1) / total_weight, 6),
             }
             for fmt_key, fmt_val in enabled.items()

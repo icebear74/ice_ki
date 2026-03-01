@@ -492,8 +492,10 @@ class DatasetGeneratorV2:
         try:
             # Get format specifications
             format_spec = FORMATS[format_name]
-            gt_h, gt_w = format_spec['gt_size']
-            lr_h, lr_w = format_spec['lr_size']
+            gt_w, gt_h = format_spec['gt_size']  # stored W×H
+            scale = format_spec.get('scale', 3)
+            lr_w = gt_w // scale
+            lr_h = gt_h // scale
             suffix = format_spec['suffix']
             
             # Get output directories (7-frame LR only)

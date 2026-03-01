@@ -5,21 +5,21 @@
 FORMATS = {
     '540': {
         'gt_size': (540, 540),
-        'lr_size': (180, 180),
+        'scale': 3,
         'output_dir': 'patches/540',
         'suffix': '',
         'aspect_ratio': '1:1'
     },
     '720_169': {
-        'gt_size': (405, 720),  # (height, width) = 405 tall, 720 wide = 16:9 landscape
-        'lr_size': (135, 240),  # (height, width) = 135 tall, 240 wide = 16:9 landscape
+        'gt_size': (720, 405),  # (width, height) = 720 wide, 405 tall = 16:9 landscape
+        'scale': 3,
         'output_dir': 'patches/720_169',
         'suffix': '',
-        'aspect_ratio': '16:9'  # Landscape: 16 wide, 9 tall
+        'aspect_ratio': '16:9'
     },
     '720': {
         'gt_size': (720, 720),
-        'lr_size': (240, 240),
+        'scale': 3,
         'output_dir': 'patches/720',
         'suffix': '',
         'aspect_ratio': '1:1'
@@ -27,21 +27,21 @@ FORMATS = {
     # Legacy format names for backward compatibility
     'small_540': {
         'gt_size': (540, 540),
-        'lr_size': (180, 180),
+        'scale': 3,
         'output_dir': 'patches/540',
         'suffix': '',
         'aspect_ratio': '1:1'
     },
     'medium_169': {
-        'gt_size': (405, 720),  # (height, width) = 405 tall, 720 wide = 16:9 landscape
-        'lr_size': (135, 240),  # (height, width) = 135 tall, 240 wide = 16:9 landscape
+        'gt_size': (720, 405),  # (width, height) = 720 wide, 405 tall = 16:9 landscape
+        'scale': 3,
         'output_dir': 'patches/720_169',
         'suffix': '',
-        'aspect_ratio': '16:9'  # Landscape: 16 wide, 9 tall
+        'aspect_ratio': '16:9'
     },
     'large_720': {
         'gt_size': (720, 720),
-        'lr_size': (240, 240),
+        'scale': 3,
         'output_dir': 'patches/720',
         'suffix': '',
         'aspect_ratio': '1:1'
