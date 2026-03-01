@@ -13,8 +13,7 @@ base_settings.lr_versions          ← ['7frames'] if processing.n_frames == 7
                                        else ['5frames']
 base_settings.min_detail_threshold ← quality.blur_threshold  (default 80.0)
 
-category_targets                   ← {cat: int(weight × processing.total_patches)
-                                        for cat, weight in category_weights}
+category_targets                   ← category_patches  (patch count per category)
 
 format_config                      ← enabled output_patches applied per-category
                                       with equal probability per format
@@ -25,11 +24,10 @@ import os
 
 def normalize_config(config: dict) -> dict:
     """Convert a V2-format config to the internal structure used by the generator."""
-    processing    = config.get('processing', {})
-    quality       = config.get('quality', {})
-    root_path     = config.get('root_path', '')
-    n_frames      = processing.get('n_frames', 7)
-    total_patches = processing.get('total_patches', 100000)
+    processing = config.get('processing', {})
+    quality    = config.get('quality', {})
+    root_path  = config.get('root_path', '')
+    n_frames   = processing.get('n_frames', 7)
 
     normalized = dict(config)
 
@@ -42,13 +40,10 @@ def normalize_config(config: dict) -> dict:
         'min_detail_threshold': quality.get('blur_threshold', 80.0),
     }
 
-    # Build category_targets from fractional weights × total_patches
-    category_weights = config.get('category_weights', {})
-    if category_weights:
-        normalized['category_targets'] = {
-            cat: max(1, int(weight * total_patches))
-            for cat, weight in category_weights.items()
-        }
+    # category_patches maps directly to category_targets (patch count per category)
+    category_patches = config.get('category_patches', {})
+    if category_patches:
+        normalized['category_targets'] = dict(category_patches)
     elif 'category_targets' not in normalized:
         normalized['category_targets'] = {}
 

@@ -58,7 +58,7 @@ class VideoManager:
             cats = get_video_categories(video)
             self.categories.update(cats)
 
-        self.categories.update(self.config.get('category_weights', {}).keys())
+        self.categories.update(self.config.get('category_patches', {}).keys())
         self.categories = sorted(list(self.categories))
         
         print(f"✓ Loaded {len(self.videos)} videos (sorted by title)")
@@ -344,8 +344,9 @@ class VideoManager:
         print(f"Unassigned: {unassigned}")
         print("\nCategory assignments:")
         for cat in sorted(category_counts.keys()):
-            weight = self.config.get('category_weights', {}).get(cat, '?')
-            print(f"  {cat:<15}: {category_counts[cat]:>4} videos (weight: {weight})")
+            target = self.config.get('category_patches', {}).get(cat, '?')
+            target_str = f"{target:,}" if isinstance(target, int) else str(target)
+            print(f"  {cat:<15}: {category_counts[cat]:>4} videos (target: {target_str})")
     
     def manage_categories(self):
         """Category management submenu: list, add, remove."""
@@ -370,19 +371,19 @@ class VideoManager:
                 print("Invalid choice")
 
     def _list_categories(self):
-        """Print all configured categories with their weights."""
+        """Print all configured categories with their patch targets."""
         if not self.categories:
             print("No categories configured.")
             return
-        weights = self.config.get('category_weights', {})
-        print(f"\n{'Category':<20} {'Weight':<10}")
-        print("-" * 32)
+        patches = self.config.get('category_patches', {})
+        print(f"\n{'Category':<20} {'Patches':<12}")
+        print("-" * 34)
         for cat in sorted(self.categories):
-            w = weights.get(cat, '?')
-            print(f"  {cat:<18} {str(w):<10}")
+            p = patches.get(cat, '?')
+            print(f"  {cat:<18} {str(p):<12}")
 
     def _add_category(self):
-        """Add a new category with a weight."""
+        """Add a new category with a patch target count."""
         name = input("New category name: ").strip().lower()
         if not name:
             print("❌ Name cannot be empty")
@@ -391,19 +392,19 @@ class VideoManager:
             print(f"❌ Category '{name}' already exists")
             return
 
-        weight_str = input("Category weight 0.0-1.0 (default: 0.1): ").strip()
+        target_str = input("Patch target count (default: 50000): ").strip()
         try:
-            weight = float(weight_str) if weight_str else 0.1
+            target = int(target_str) if target_str else 50000
         except ValueError:
-            print("Invalid number, using 0.1")
-            weight = 0.1
+            print("Invalid number, using 50000")
+            target = 50000
 
-        weights = self.config.setdefault('category_weights', {})
-        weights[name] = weight
+        patches = self.config.setdefault('category_patches', {})
+        patches[name] = target
 
         self.categories = sorted(self.categories + [name])
         self.modified = True
-        print(f"✓ Added category '{name}' with weight {weight}")
+        print(f"✓ Added category '{name}' with target {target:,}")
 
     def _remove_category(self):
         """Remove a category and unassign all videos from it."""
@@ -431,7 +432,7 @@ class VideoManager:
                 video['categories'] = cats
 
         # Remove from config
-        self.config.get('category_weights', {}).pop(name, None)
+        self.config.get('category_patches', {}).pop(name, None)
 
         self.categories = [c for c in self.categories if c != name]
         self.modified = True

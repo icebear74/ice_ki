@@ -6,9 +6,9 @@ The new config matches the V2 structure produced by video_manager.py:
   - root_path         (output directory – adjust before use)
   - source_dirs       (empty list – add via video_manager.py option 13)
   - videos            (empty list – populated by Rescan, option 16)
-  - category_weights  (master / universal / space / toon weights)
+  - category_patches  (master / universal / space / toon patch counts)
   - output_patches    (540 / 720 / 720_169 enabled by default)
-  - processing        (n_frames, total_patches, scene settings)
+  - processing        (n_frames, scene settings)
   - quality           (blur / sharpness thresholds)
   - workers           (parallel extraction threads)
   - ffmpeg_timeout / ffprobe_timeout
@@ -28,11 +28,11 @@ _DEFAULT_CONFIG = {
     "root_path": "/mnt/data/training/datasetNeu",
     "source_dirs": [],
     "videos": [],
-    "category_weights": {
-        "master":    0.25,
-        "universal": 0.50,
-        "space":     0.15,
-        "toon":      0.10
+    "category_patches": {
+        "master":    100000,
+        "universal":  50000,
+        "space":      50000,
+        "toon":       40000
     },
     "output_patches": {
         "540":     {"enabled": True,  "gt_size": [540, 540], "lr_size": [180, 180]},
@@ -40,12 +40,11 @@ _DEFAULT_CONFIG = {
         "720_169": {"enabled": True,  "gt_size": [405, 720], "lr_size": [135, 240]}
     },
     "processing": {
-        "n_frames":        7,
-        "total_patches":   100000,
+        "n_frames":         7,
         "min_scene_length": 21,
-        "scene_threshold": 30.0,
-        "stride":          3,
-        "scale":           3
+        "scene_threshold":  30.0,
+        "stride":           3,
+        "scale":            3
     },
     "quality": {
         "blur_threshold": 80.0,
@@ -75,7 +74,7 @@ def build_default_config(template_path: str = None) -> dict:
         try:
             with open(template_path, 'r', encoding='utf-8') as f:
                 tmpl = json.load(f)
-            for key in ('root_path', 'category_weights', 'output_patches',
+            for key in ('root_path', 'category_patches', 'output_patches',
                         'processing', 'quality', 'workers', 'batch_size',
                         'ffmpeg_timeout', 'ffprobe_timeout'):
                 if key in tmpl:
@@ -117,7 +116,7 @@ def main():
     try:
         create_default_config(output_path, template_path=template_path)
         print("\nNext steps:")
-        print("  1. Open the file and adjust root_path / category_weights as needed")
+        print("  1. Open the file and adjust root_path / category_patches as needed")
         print("  2. python video_manager.py  →  option 13 to add source directories")
         print("  3. option 16 to scan and build the video list")
         print("  4. options 5 / 6 / 7 to assign categories to videos")

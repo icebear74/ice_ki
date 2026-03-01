@@ -28,8 +28,8 @@ def _make_v2_config(video_dir1, video_dir2):
             {'path': video_dir2, 'extensions': ['.mkv', '.mp4']},
         ],
         'videos': [],
-        'category_weights': {'cat1': 0.5, 'cat2': 0.5},
-        'processing': {'total_patches': 100},
+        'category_patches': {'cat1': 5000, 'cat2': 5000},
+        'processing': {'n_frames': 7},
         'output_patches': {},
     }
 

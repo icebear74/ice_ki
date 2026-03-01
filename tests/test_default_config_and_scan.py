@@ -30,13 +30,13 @@ def _make_v2_config(video_dir):
         'root_path': '/tmp/out',
         'source_dirs': [{'path': video_dir, 'extensions': ['.mkv', '.mp4', '.avi']}],
         'videos': [],
-        'category_weights': {'master': 0.5, 'universal': 0.5},
+        'category_patches': {'master': 500, 'universal': 500},
         'output_patches': {
             '540':     {'enabled': True,  'gt_size': [540, 540], 'lr_size': [180, 180]},
             '720':     {'enabled': True,  'gt_size': [720, 720], 'lr_size': [240, 240]},
             '720_169': {'enabled': True,  'gt_size': [405, 720], 'lr_size': [135, 240]},
         },
-        'processing': {'n_frames': 7, 'total_patches': 1000},
+        'processing': {'n_frames': 7},
         'quality': {'blur_threshold': 80.0},
         'ffmpeg_timeout': 120,
         'ffprobe_timeout': 60,
@@ -55,7 +55,7 @@ class TestCreateDefaultConfig(unittest.TestCase):
 
     def test_build_default_config_has_required_keys(self):
         cfg = build_default_config()
-        for key in ('root_path', 'category_weights', 'output_patches',
+        for key in ('root_path', 'category_patches', 'output_patches',
                     'processing', 'quality', 'workers',
                     'ffmpeg_timeout', 'ffprobe_timeout', 'source_dirs', 'videos'):
             self.assertIn(key, cfg, f"Missing key: {key}")
@@ -73,14 +73,15 @@ class TestCreateDefaultConfig(unittest.TestCase):
     def test_build_default_config_has_four_categories(self):
         cfg = build_default_config()
         for cat in ('master', 'universal', 'space', 'toon'):
-            self.assertIn(cat, cfg['category_weights'])
-        print("✓ default config has master / universal / space / toon in category_weights")
+            self.assertIn(cat, cfg['category_patches'])
+        print("✓ default config has master / universal / space / toon in category_patches")
 
-    def test_build_default_config_weights_sum_to_one(self):
+    def test_build_default_config_patches_are_positive_ints(self):
         cfg = build_default_config()
-        total = sum(cfg['category_weights'].values())
-        self.assertAlmostEqual(total, 1.0, places=5)
-        print("✓ category_weights sum to 1.0")
+        for cat, count in cfg['category_patches'].items():
+            self.assertIsInstance(count, int, f"category_patches[{cat}] must be int")
+            self.assertGreater(count, 0, f"category_patches[{cat}] must be > 0")
+        print("✓ category_patches contains positive integers per category")
 
     def test_build_default_config_output_patches_present(self):
         cfg = build_default_config()
@@ -95,7 +96,7 @@ class TestCreateDefaultConfig(unittest.TestCase):
         with open(out) as f:
             loaded = json.load(f)
         self.assertIn('root_path', loaded)
-        self.assertIn('category_weights', loaded)
+        self.assertIn('category_patches', loaded)
         self.assertIn('source_dirs', loaded)
         print("✓ create_default_config() writes valid V2 JSON")
 
@@ -109,7 +110,7 @@ class TestCreateDefaultConfig(unittest.TestCase):
         """Template values are respected."""
         tmpl = {
             'root_path':        '/custom/out',
-            'category_weights': {'alpha': 1.0},
+            'category_patches': {'alpha': 9999},
             'ffmpeg_timeout':   300,
             'ffprobe_timeout':  90,
         }
@@ -118,8 +119,8 @@ class TestCreateDefaultConfig(unittest.TestCase):
             json.dump(tmpl, f)
         cfg = build_default_config(template_path=tmpl_path)
         self.assertEqual(cfg['root_path'], '/custom/out')
-        self.assertIn('alpha', cfg['category_weights'])
-        self.assertNotIn('master', cfg['category_weights'])
+        self.assertIn('alpha', cfg['category_patches'])
+        self.assertNotIn('master', cfg['category_patches'])
         self.assertEqual(cfg['ffmpeg_timeout'],  300)
         self.assertEqual(cfg['ffprobe_timeout'], 90)
         print("✓ build_default_config() applies template values correctly")
@@ -127,7 +128,7 @@ class TestCreateDefaultConfig(unittest.TestCase):
     def test_build_default_config_bad_template_falls_back(self):
         """A missing template must not raise; built-in defaults are used."""
         cfg = build_default_config(template_path='/nonexistent/path.json')
-        self.assertIn('master', cfg['category_weights'])
+        self.assertIn('master', cfg['category_patches'])
         print("✓ build_default_config() falls back to built-ins when template is missing")
 
 
@@ -152,9 +153,9 @@ class TestUHDGeneratorConfigSelection(unittest.TestCase):
         cfg = {
             'root_path': self.tmp,
             'source_dirs': [], 'videos': [],
-            'category_weights': {'master': 1.0},
+            'category_patches': {'master': 1000},
             'output_patches': {},
-            'processing': {'n_frames': 7, 'total_patches': 100},
+            'processing': {'n_frames': 7},
             'quality': {'blur_threshold': 80.0},
             'ffmpeg_timeout': 120, 'ffprobe_timeout': 60,
         }
@@ -218,13 +219,13 @@ class TestUHDConfigNormalization(unittest.TestCase):
             'root_path': '/data/out',
             'source_dirs': [],
             'videos': [],
-            'category_weights': {'master': 0.25, 'universal': 0.75},
+            'category_patches': {'master': 25000, 'universal': 75000},
             'output_patches': {
                 '540':     {'enabled': True,  'gt_size': [540, 540], 'lr_size': [180, 180]},
                 '720':     {'enabled': True,  'gt_size': [720, 720], 'lr_size': [240, 240]},
                 '720_169': {'enabled': False, 'gt_size': [405, 720], 'lr_size': [135, 240]},
             },
-            'processing': {'n_frames': 7, 'total_patches': 100000,
+            'processing': {'n_frames': 7,
                            'min_scene_length': 21, 'scene_threshold': 30.0},
             'quality': {'blur_threshold': 90.0, 'jpeg_quality': 95, 'min_sharpness': 30.0},
             'workers': 8,
@@ -272,13 +273,13 @@ class TestUHDConfigNormalization(unittest.TestCase):
 
     # ── category_targets ──────────────────────────────────────────────────────
 
-    def test_category_targets_derived_from_weights(self):
-        """category_targets = {cat: int(weight * total_patches)}."""
+    def test_category_targets_taken_from_category_patches(self):
+        """category_targets == category_patches (direct copy, no computation)."""
         result = self.normalize(self._v2_config())
         ct = result['category_targets']
-        self.assertEqual(ct['master'],    25000)  # 0.25 × 100000
-        self.assertEqual(ct['universal'], 75000)  # 0.75 × 100000
-        print("✓ category_targets derived from category_weights × total_patches")
+        self.assertEqual(ct['master'],    25000)
+        self.assertEqual(ct['universal'], 75000)
+        print("✓ category_targets taken directly from category_patches")
 
     # ── format_config ─────────────────────────────────────────────────────────
 
@@ -338,24 +339,24 @@ class TestManagerCategoriesFromConfig(unittest.TestCase):
         m.load()
         return m
 
-    def test_categories_from_category_weights(self):
-        """manager.categories includes keys from category_weights."""
+    def test_categories_from_category_patches(self):
+        """manager.categories includes keys from category_patches."""
         cfg = {
-            'category_weights': {'cat_x': 0.5, 'cat_y': 0.5},
+            'category_patches': {'cat_x': 1000, 'cat_y': 2000},
             'videos': [],
             'source_dirs': [],
-            'processing': {'total_patches': 10},
+            'processing': {'n_frames': 7},
             'output_patches': {},
         }
         m = self._make_manager(cfg)
         self.assertIn('cat_x', m.categories)
         self.assertIn('cat_y', m.categories)
-        print("✓ categories populated from category_weights")
+        print("✓ categories populated from category_patches")
 
     def test_categories_merged_from_videos_and_config(self):
-        """Categories from video assignments and category_weights are merged."""
+        """Categories from video assignments and category_patches are merged."""
         cfg = {
-            'category_weights': {'master': 0.5, 'universal': 0.5},
+            'category_patches': {'master': 500, 'universal': 500},
             'videos': [{'name': 'v', 'path': '/x/v.mkv', 'categories': ['toon']}],
             'source_dirs': [],
         }
@@ -363,7 +364,7 @@ class TestManagerCategoriesFromConfig(unittest.TestCase):
         self.assertIn('master',    m.categories)
         self.assertIn('universal', m.categories)
         self.assertIn('toon',      m.categories)
-        print("✓ categories merged from video assignments and category_weights")
+        print("✓ categories merged from video assignments and category_patches")
 
 
 # ─── scanning fixes ───────────────────────────────────────────────────────────
@@ -408,7 +409,7 @@ class TestScanningFixes(unittest.TestCase):
 
         # Two source_dirs both pointing to the same directory
         cfg = {
-            'category_weights': {'master': 1.0},
+            'category_patches': {'master': 1000},
             'source_dirs': [
                 {'path': self.vid_dir, 'extensions': ['.mkv']},
                 {'path': self.vid_dir, 'extensions': ['.mkv']},
@@ -489,29 +490,29 @@ class TestCategoryManagement(unittest.TestCase):
 
     def _base_cfg(self):
         return {
-            'category_weights': {'master': 0.5, 'space': 0.5},
+            'category_patches': {'master': 100000, 'space': 50000},
             'output_patches': {
                 '540': {'enabled': True, 'gt_size': [540, 540], 'lr_size': [180, 180]},
             },
-            'processing': {'n_frames': 7, 'total_patches': 100000},
+            'processing': {'n_frames': 7},
             'source_dirs': [],
             'videos': [],
         }
 
     def test_add_category_updates_all_structures(self):
-        """_add_category() adds to category_weights."""
+        """_add_category() adds to category_patches."""
         m = self._make_manager(self._base_cfg())
         m.categories = list(m.categories)
 
         import unittest.mock as mock
-        with mock.patch('builtins.input', side_effect=['toon', '0.1']):
+        with mock.patch('builtins.input', side_effect=['toon', '30000']):
             m._add_category()
 
         self.assertIn('toon', m.categories)
-        self.assertIn('toon', m.config['category_weights'])
-        self.assertAlmostEqual(m.config['category_weights']['toon'], 0.1)
+        self.assertIn('toon', m.config['category_patches'])
+        self.assertEqual(m.config['category_patches']['toon'], 30000)
         self.assertTrue(m.modified)
-        print("✓ _add_category() updates categories and category_weights")
+        print("✓ _add_category() updates categories and category_patches")
 
     def test_add_category_rejects_duplicate(self):
         """_add_category() refuses to add an already-existing category."""
@@ -524,7 +525,7 @@ class TestCategoryManagement(unittest.TestCase):
         print("✓ _add_category() rejects duplicate category names")
 
     def test_remove_category_cleans_up(self):
-        """_remove_category() removes from categories and category_weights."""
+        """_remove_category() removes from categories and category_patches."""
         cfg = self._base_cfg()
         cfg['videos'] = [
             {'name': 'v1', 'path': '/x/v1.mkv', 'categories': ['master', 'space']},
@@ -536,12 +537,12 @@ class TestCategoryManagement(unittest.TestCase):
             m._remove_category()
 
         self.assertNotIn('space', m.categories)
-        self.assertNotIn('space', m.config.get('category_weights', {}))
+        self.assertNotIn('space', m.config.get('category_patches', {}))
         # Videos must have space unassigned
         for v in m.videos:
             self.assertNotIn('space', v.get('categories', []))
         self.assertTrue(m.modified)
-        print("✓ _remove_category() cleans up categories, category_weights, and videos")
+        print("✓ _remove_category() cleans up categories, category_patches, and videos")
 
     def test_remove_category_cancel(self):
         """_remove_category() respects cancellation."""
@@ -556,7 +557,7 @@ class TestCategoryManagement(unittest.TestCase):
         """New categories persist after save/reload."""
         m = self._make_manager(self._base_cfg())
         import unittest.mock as mock
-        with mock.patch('builtins.input', side_effect=['toon', '0.1']):
+        with mock.patch('builtins.input', side_effect=['toon', '30000']):
             m._add_category()
         m.save(backup=False)
 
@@ -564,7 +565,7 @@ class TestCategoryManagement(unittest.TestCase):
         m2 = VideoManager(p)
         m2.load()
         self.assertIn('toon', m2.categories)
-        self.assertIn('toon', m2.config['category_weights'])
+        self.assertEqual(m2.config['category_patches']['toon'], 30000)
         print("✓ New category persists after save/reload")
 
 
