@@ -251,9 +251,144 @@ class TestUHDGeneratorConfigSelection(unittest.TestCase):
         print("✓ make_dataset_v2_uhd.py uses correct script_dir (parent, not parent.parent)")
 
 
+# ─── UHD generator V2→V1 config normalization ─────────────────────────────────
+
+class TestUHDConfigNormalization(unittest.TestCase):
+    """
+    Validate DatasetGeneratorV2UHD._normalize_config():
+    - V2 flat config (from video_manager.py) is correctly mapped to V1 structure
+    - V1 configs pass through unchanged
+    """
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'dataset_generator_v2'))
+        from utils.config_normalizer import normalize_config
+        self.normalize = normalize_config
+
+    def _v2_config(self, **overrides):
+        cfg = {
+            'root_path': '/data/out',
+            'source_dirs': [],
+            'videos': [],
+            'category_weights': {'master': 0.25, 'universal': 0.75},
+            'output_patches': {
+                '540':     {'enabled': True,  'gt_size': [540, 540], 'lr_size': [180, 180]},
+                '720':     {'enabled': True,  'gt_size': [720, 720], 'lr_size': [240, 240]},
+                '720_169': {'enabled': False, 'gt_size': [405, 720], 'lr_size': [135, 240]},
+            },
+            'processing': {'n_frames': 7, 'total_patches': 100000,
+                           'min_scene_length': 21, 'scene_threshold': 30.0},
+            'quality': {'blur_threshold': 90.0, 'jpeg_quality': 95, 'min_sharpness': 30.0},
+            'workers': 8,
+            'ffmpeg_timeout': 120,
+            'ffprobe_timeout': 60,
+        }
+        cfg.update(overrides)
+        return cfg
+
+    # ── V1 pass-through ────────────────────────────────────────────────────────
+
+    def test_v1_config_passes_through_unchanged(self):
+        """V1 configs (with 'base_settings') are returned as-is."""
+        v1 = {
+            'base_settings': {'output_base_dir': '/x', 'temp_dir': '/x/t', 'status_file': '/x/s'},
+            'category_targets': {'master': 5000},
+            'format_config': {},
+            'videos': [],
+        }
+        result = self.normalize(v1)
+        self.assertIs(result, v1)
+        print("✓ V1 config passes through _normalize_config unchanged")
+
+    # ── base_settings ─────────────────────────────────────────────────────────
+
+    def test_base_settings_created_from_root_path(self):
+        """base_settings.output_base_dir is root_path."""
+        result = self.normalize(self._v2_config())
+        self.assertEqual(result['base_settings']['output_base_dir'], '/data/out')
+        print("✓ base_settings.output_base_dir set from root_path")
+
+    def test_temp_and_status_derived_from_root_path(self):
+        """temp_dir and status_file are derived below root_path."""
+        result = self.normalize(self._v2_config())
+        bs = result['base_settings']
+        self.assertTrue(bs['temp_dir'].startswith('/data/out'))
+        self.assertTrue(bs['status_file'].startswith('/data/out'))
+        print("✓ temp_dir and status_file derived from root_path")
+
+    def test_lr_versions_7frames_for_n_frames_7(self):
+        """7 frames → lr_versions=['7frames']."""
+        result = self.normalize(self._v2_config())
+        self.assertEqual(result['base_settings']['lr_versions'], ['7frames'])
+        print("✓ n_frames=7 → lr_versions=['7frames']")
+
+    def test_lr_versions_5frames_for_n_frames_5(self):
+        """5 frames → lr_versions=['5frames']."""
+        cfg = self._v2_config()
+        cfg['processing']['n_frames'] = 5
+        result = self.normalize(cfg)
+        self.assertEqual(result['base_settings']['lr_versions'], ['5frames'])
+        print("✓ n_frames=5 → lr_versions=['5frames']")
+
+    def test_min_detail_threshold_from_blur_threshold(self):
+        """min_detail_threshold is taken from quality.blur_threshold."""
+        result = self.normalize(self._v2_config())
+        self.assertEqual(result['base_settings']['min_detail_threshold'], 90.0)
+        print("✓ min_detail_threshold taken from quality.blur_threshold")
+
+    # ── category_targets ──────────────────────────────────────────────────────
+
+    def test_category_targets_derived_from_weights(self):
+        """category_targets = {cat: int(weight * total_patches)}."""
+        result = self.normalize(self._v2_config())
+        ct = result['category_targets']
+        self.assertEqual(ct['master'],    25000)  # 0.25 × 100000
+        self.assertEqual(ct['universal'], 75000)  # 0.75 × 100000
+        print("✓ category_targets derived from category_weights × total_patches")
+
+    # ── format_config ─────────────────────────────────────────────────────────
+
+    def test_disabled_patches_excluded_from_format_config(self):
+        """output_patches with enabled=False must not appear in format_config."""
+        result = self.normalize(self._v2_config())
+        for cat_formats in result['format_config'].values():
+            self.assertNotIn('720_169', cat_formats,
+                "disabled patch '720_169' must not appear in format_config")
+        print("✓ disabled output_patches excluded from format_config")
+
+    def test_enabled_patches_present_for_each_category(self):
+        """Each category gets entries for all enabled output_patches."""
+        result = self.normalize(self._v2_config())
+        fc = result['format_config']
+        self.assertIn('master',    fc)
+        self.assertIn('universal', fc)
+        for cat_formats in fc.values():
+            self.assertIn('540', cat_formats)
+            self.assertIn('720', cat_formats)
+        print("✓ enabled patches present for all categories in format_config")
+
+    def test_format_config_probabilities_sum_to_1(self):
+        """Probabilities of all enabled formats must sum to 1.0 (within float rounding)."""
+        result = self.normalize(self._v2_config())
+        for category, formats in result['format_config'].items():
+            total = sum(f['probability'] for f in formats.values())
+            self.assertAlmostEqual(total, 1.0, places=4,
+                msg=f"Probabilities for category '{category}' sum to {total}, not 1.0")
+        print("✓ format probabilities sum to 1.0 per category")
+
+    def test_format_config_contains_gt_and_lr_size(self):
+        """Each format entry has gt_size and lr_size."""
+        result = self.normalize(self._v2_config())
+        for cat_formats in result['format_config'].values():
+            for fmt_key, fmt_val in cat_formats.items():
+                self.assertIn('gt_size', fmt_val, f"Missing gt_size for {fmt_key}")
+                self.assertIn('lr_size', fmt_val, f"Missing lr_size for {fmt_key}")
+        print("✓ format_config entries contain gt_size and lr_size")
 
 
-class TestManagerCategoriesFromConfig(unittest.TestCase):
+
+
+
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()

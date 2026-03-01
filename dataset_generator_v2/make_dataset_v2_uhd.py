@@ -37,6 +37,7 @@ from utils.format_definitions import (
 from utils.progress_tracker import ProgressTracker
 from utils.dataset_display import draw_dataset_ui
 from utils.terminal_ui import hide_cursor, show_cursor, clear_screen
+from utils.config_normalizer import normalize_config
 from category_utils import get_video_categories, normalize_categories
 
 try:
@@ -69,12 +70,23 @@ class DatasetGeneratorV2UHD:
     
     MAX_DISPLAYED_PRIORITIES = 10
     
+    @staticmethod
+    def _normalize_config(config: dict) -> dict:
+        """Normalize a V2-format config (flat structure written by video_manager.py)
+        to the V1 structure expected internally by this generator.
+        V1 configs that already contain 'base_settings' pass through unchanged.
+        """
+        return normalize_config(config)
+
     def __init__(self, config_path: str = "generator_config.json"):
         """Initialize generator with full config support"""
         # Load configuration
         with open(config_path, 'r') as f:
             self.config = json.load(f)
-        
+
+        # Normalize V2 flat config (from video_manager.py) to V1 structure
+        self.config = normalize_config(self.config)
+
         self.settings = self.config['base_settings']
         self.videos = self.config.get('videos', [])
         self.format_config = self.config.get('format_config', {})
@@ -116,7 +128,7 @@ class DatasetGeneratorV2UHD:
         self.tracker.initialize_categories(self.category_targets)
         
         # Runtime state
-        self.workers = 6  # Use 6 threads for faster extraction
+        self.workers = self.config.get('workers', 6)  # Use workers from config (default: 6)
         self.running = True
         self.paused = False
         self.last_update_time = time.time()
