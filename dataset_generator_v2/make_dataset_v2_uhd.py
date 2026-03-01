@@ -34,6 +34,10 @@ from utils.format_definitions import (
     FORMATS, CATEGORY_FORMAT_DISTRIBUTION, CATEGORY_PATHS,
     select_random_format, get_output_dirs_for_format
 )
+from streaming_extractor import (
+    build_frame_assignments_distributed,
+    extract_and_save_streaming_distributed,
+)
 from utils.progress_tracker import ProgressTracker
 from utils.dataset_display import draw_dataset_ui
 from utils.terminal_ui import hide_cursor, show_cursor, clear_screen
@@ -1219,20 +1223,6 @@ class DatasetGeneratorV2UHD:
         self.logger.info(f"  Total frames to extract: {len(timestamps) * n_frames}")
         self.logger.info(f"  All {len(timestamps)} scenes will be used (0% waste)")
         
-        # Phase 2: INCREMENTAL extraction and processing
-        # User request: "extrahier 7 frames .. verteile die .. extrahiere die nächsten 7 usw usw"
-        # Translation: "extract 7 frames .. distribute them .. extract the next 7, etc."
-        self.logger.info(f"\n🎬 Phase 2: INCREMENTAL extraction and processing...")
-        self.logger.info(f"  Extract 7 frames → Process → Clean up → Repeat")
-        self.logger.info(f"  Memory-efficient: Only 7 frames in RAM at a time")
-        self.logger.info(f"  Target directories (master/, space/, etc.) will be created as patches are saved")
-        
-        black_frame_threshold_kb = 15
-        black_frame_detection_limit_seconds = 10.0
-        black_frames_detected = 0
-        black_frames_skipped = 0
-        total_created = 0
-        
         # Build a scene→slot partition: each scene goes to EXACTLY ONE (category, format).
         # This prevents any scene from being saved to more than one output directory.
         total_scenes = len(timestamps)
@@ -1279,225 +1269,50 @@ class DatasetGeneratorV2UHD:
         for category, format_name, count in all_slots:
             self.logger.info(f"  {category}/{format_name}: {count} unique scenes")
         
-        # INCREMENTAL PROCESSING: Extract → Process → Clean → Repeat
-        self.logger.info(f"\n🔄 Starting incremental extraction and processing...")
-        self.logger.info(f"  Processing {len(timestamps)} timestamps one at a time")
+        # SINGLE-PASS STREAMING: Build assignments and stream the video once
+        self.logger.info(f"\n🚀 Phase 2: SINGLE-PASS streaming extraction...")
+        self.logger.info(f"  One FFmpeg pass, no seeking, rolling {n_frames}-frame buffer")
         
-        processed_count = 0
-        extraction_failures = 0
-        
-        for scene_idx, ts in enumerate(timestamps):
-            self.logger.info(f"\n📍 Scene {scene_idx+1}/{len(timestamps)}: timestamp {ts:.2f}s")
-            scene_start_time = time.time()  # Track scene processing time
-            
-            # Each scene is assigned to exactly one (category, format) slot
-            if scene_idx not in scene_to_slot:
-                self.logger.debug(f"  ⏭️  Skipping (no slot assigned)")
-                continue
-            
-            # Check if we should abort
-            if not self.running:
-                self.logger.info("⚠️  Aborting extraction (Ctrl+C detected)")
-                break
-            
-            # EXTRACT 7 frames for this timestamp
-            self.logger.info(f"  🎬 Extracting {n_frames} frames...")
-            result = self.extract_frames_uhd(video_path, ts, n_frames)
-            
-            if not result or not result.get('frame_paths'):
-                self.logger.error(f"  ❌ Extraction failed for timestamp {ts:.2f}s")
-                extraction_failures += 1
-                continue
-            
-            frame_file_paths = result['frame_paths']
-            temp_dir = result['temp_dir']
-            self.logger.info(f"  ✓ Extracted {len(frame_file_paths)} frames to temp directory")
-            
-            # Load frames into memory (only 7 frames - minimal RAM usage)
-            frames = []
-            for frame_path in frame_file_paths:
-                frame = cv2.imread(frame_path)
-                if frame is None:
-                    self.logger.warning(f"  ⚠️  Could not read frame {frame_path}")
-                    break
-                frames.append(frame)
-            
-            if len(frames) != n_frames:
-                self.logger.warning(f"  ⚠️  Incomplete frames ({len(frames)}/{n_frames}), skipping")
-                # Clean up
-                for frame_path in frame_file_paths:
-                    if os.path.exists(frame_path):
-                        os.remove(frame_path)
-                if temp_dir and os.path.exists(temp_dir):
-                    import shutil
-                    shutil.rmtree(temp_dir, ignore_errors=True)
-                continue
-            
-            self.logger.info(f"  ✓ Loaded {len(frames)} frames into memory")
-            
-            # Update GUI to show extraction progress
-            self.ui_state['scenes_processed'] = processed_count + 1
-            self._update_terminal_ui()
-            
-            # PROCESS frames: this scene goes to exactly ONE (category, format) slot
-            patches_created_this_scene = 0
-            category, format_name = scene_to_slot[scene_idx]
-            format_config = self.format_config[category][format_name]
+        # Convert scene_to_slot + timestamps into (center_frame_idx, category, format_name)
+        # assignments expected by the streaming extractor.
+        assignments = [
+            (int(ts * fps) + n_frames // 2, scene_to_slot[i][0], scene_to_slot[i][1])
+            for i, ts in enumerate(timestamps)
+            if i in scene_to_slot
+        ]
 
-            # Try up to 5 times to find an interesting patch with random crops
-            MAX_RANDOM_ATTEMPTS = 5
-            gt, lr = None, None
+        streaming_result = extract_and_save_streaming_distributed(
+            video_path=video_path,
+            assignments=assignments,
+            n_frames=n_frames,
+            format_config=self.format_config,
+            base_dir=self.base_dir,
+            fps=fps,
+            logger=self.logger,
+            is_interesting_fn=self.is_interesting_patch,
+        )
 
-            for attempt in range(MAX_RANDOM_ATTEMPTS + 1):
-                if attempt < MAX_RANDOM_ATTEMPTS:
-                    gt, lr = self.create_patch_pair(frames, format_name, format_config, force_center=False)
-                else:
-                    gt, lr = self.create_patch_pair(frames, format_name, format_config, force_center=True)
+        # Merge streaming result into patches_created and update UI / tracker
+        for category, count in streaming_result.items():
+            patches_created[category] = patches_created.get(category, 0) + count
+            self.tracker.increment_category_images(category, count)
 
-                if gt is None or lr is None:
-                    continue
+        total_created = sum(patches_created.values())
+        self.ui_state['patches_created_total'] = total_created
+        self.ui_state['current_video_name'] = video_name
+        self.ui_state['current_video_index'] = video_idx
+        self._update_terminal_ui()
 
-                if self.is_interesting_patch(gt) or attempt >= MAX_RANDOM_ATTEMPTS:
-                    break
-
-            if gt is not None and lr is not None:
-                saved, gt_path, lr_path = self._save_patch_pair(
-                    gt, lr, video_path, ts,
-                    category, format_name, n_frames
-                )
-
-                if saved:
-                    # Check for black frames only in first 10 seconds
-                    if ts <= black_frame_detection_limit_seconds and \
-                       self._is_black_frame(gt_path, black_frame_threshold_kb):
-                        black_frames_detected += 1
-                        self.logger.debug(f"    Black frame detected, deleting")
-                        try:
-                            if os.path.exists(gt_path):
-                                os.remove(gt_path)
-                            if os.path.exists(lr_path):
-                                os.remove(lr_path)
-                        except Exception as e:
-                            self.logger.error(f"    Error deleting black frame files: {e}")
-                    else:
-                        if ts > black_frame_detection_limit_seconds:
-                            black_frames_skipped += 1
-
-                        patches_targets[category][format_name]['created'] += 1
-                        patches_created[category] += 1
-                        total_created += 1
-                        patches_created_this_scene += 1
-
-                        # Update UI state with new patch count
-                        self.ui_state['patches_created_total'] = total_created
-
-                        self.logger.info(f"    ✓ Saved patch: {category}/{format_name} → {os.path.basename(gt_path)}")
-            
-            # CLEAN UP: Delete frame files immediately to free disk space
-            for frame_path in frame_file_paths:
-                try:
-                    if os.path.exists(frame_path):
-                        os.remove(frame_path)
-                except Exception as e:
-                    self.logger.warning(f"  ⚠️  Could not delete frame file: {e}")
-            
-            # Clean up temp directory
-            if temp_dir and os.path.exists(temp_dir):
-                import shutil
-                try:
-                    shutil.rmtree(temp_dir, ignore_errors=True)
-                except Exception as e:
-                    self.logger.warning(f"  ⚠️  Could not delete temp directory: {e}")
-            
-            # Free memory
-            del frames
-            
-            processed_count += 1
-            
-            # Update UI state immediately after scene completion
-            self.ui_state['current_video_name'] = video_name
-            self.ui_state['current_video_index'] = video_idx
-            self.ui_state['scenes_processed'] = processed_count
-            self.ui_state['patches_created_total'] = total_created
-            
-            # Update current video progress
-            for category in patches_created.keys():
-                category_created = patches_created[category]
-                category_target = sum(patches_targets[category][fmt]['target'] for fmt in patches_targets[category])
-                category_percent = (category_created / category_target * 100) if category_target > 0 else 0.0
-                self.ui_state['current_video_progress'][category] = {
-                    'created': category_created,  # Fixed: was 'current', display expects 'created'
-                    'target': category_target,
-                    'percent': category_percent  # Added: display expects this
-                }
-            
-            # Calculate average time per scene
-            elapsed = time.time() - scene_start_time if 'scene_start_time' in locals() else 0
-            if processed_count > 0:
-                self.ui_state['avg_time_per_scene'] = elapsed / processed_count
-            
-            # Update tracker with patches created in this scene (for overall progress in GUI)
-            for category, count in patches_created.items():
-                # Get the number of new patches created for this category in this iteration
-                # patches_created is cumulative, so we need to calculate the delta
-                previous_count = self.ui_state.get('previous_patches_per_category', {}).get(category, 0)
-                new_patches = count - previous_count
-                if new_patches > 0:
-                    self.tracker.increment_category_images(category, new_patches)
-            
-            # Store current counts for next iteration
-            if 'previous_patches_per_category' not in self.ui_state:
-                self.ui_state['previous_patches_per_category'] = {}
-            for category, count in patches_created.items():
-                self.ui_state['previous_patches_per_category'][category] = count
-            
-            # Update terminal UI
-            self._update_terminal_ui()
-            
-            # Progress update
-            self.logger.info(f"  ✓ Created {patches_created_this_scene} patches from this scene")
-            self.logger.info(f"  📊 Progress: {processed_count}/{len(timestamps)} scenes processed, {total_created} total patches created")
-            
-            if processed_count % 10 == 0:
-                # Show category progress every 10 scenes
-                self.logger.info(f"\n  📊 Category progress after {processed_count} scenes:")
-                for category in sorted(patches_created.keys()):
-                    category_created = patches_created[category]
-                    category_target = sum(patches_targets[category][fmt]['target'] for fmt in patches_targets[category])
-                    pct = 100 * category_created / category_target if category_target > 0 else 0
-                    self.logger.info(f"    {category:12s}: {category_created:5d}/{category_target:5d} patches ({pct:5.1f}%)")
-        
-        # Final summary
-        self.logger.info(f"\n{'═'*60}")
-        self.logger.info(f"✓ Incremental extraction and processing complete!")
-        self.logger.info(f"  Scenes processed: {processed_count}/{len(timestamps)}")
-        if extraction_failures > 0:
-            self.logger.warning(f"  Extraction failures: {extraction_failures}")
-        self.logger.info(f"  Total patches created: {total_created}")
-        self.logger.info(f"{'═'*60}")
-        
-        # Final statistics
         total_time = time.time() - start_time
-        
+
         self.logger.info(f"\n╔══════════════════════════════════════════════════════════╗")
-        self.logger.info(f"║  EXTRACTION COMPLETE                                     ║")
+        self.logger.info(f"║  EXTRACTION COMPLETE (streaming)                         ║")
         self.logger.info(f"╚══════════════════════════════════════════════════════════╝")
-        self.logger.info(f"✓ Processed {processed_count}/{len(timestamps)} scenes in {total_time:.1f}s")
-        self.logger.info(f"✓ Created {total_created} patches total")
-        
-        if black_frames_detected > 0:
-            self.logger.info(f"  🚫 Black frames detected and removed: {black_frames_detected}")
-        if black_frames_skipped > 0:
-            self.logger.info(f"  ⏭️  Frames saved without check (after 10s): {black_frames_skipped}")
-        
+        self.logger.info(f"✓ Created {total_created} patches in {total_time:.1f}s")
         self.logger.info(f"\n📊 Per-category breakdown:")
-        for category, formats in patches_targets.items():
-            cat_total = sum(stats['created'] for stats in formats.values())
-            cat_target = sum(stats['target'] for stats in formats.values())
-            self.logger.info(f"  {category}: {cat_total}/{cat_target} patches")
-            for format_name, stats in formats.items():
-                self.logger.info(f"    └─ {format_name}: {stats['created']}/{stats['target']}")
-        
+        for category, count in sorted(patches_created.items()):
+            self.logger.info(f"  {category}: {count} patches")
+
         return patches_created
     
     def _extract_patches_multi_format_legacy(self, video_path: str, duration: float,
