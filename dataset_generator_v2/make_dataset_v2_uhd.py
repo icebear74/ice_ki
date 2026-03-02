@@ -154,6 +154,8 @@ class DatasetGeneratorV2UHD:
             'frames_read_total': 0,
             'avg_time_per_scene': 0.0,
             'eta': {},
+            'live_fps': 0.0,   # decoded frames per second (FFmpeg pipeline throughput)
+            'live_sps': 0.0,   # scene-assignments processed per second
             # Only categories that actually exist in the config
             'categories': list(self.category_targets.keys()),
             # Only format-size columns that actually exist in the config
@@ -1237,6 +1239,8 @@ class DatasetGeneratorV2UHD:
         self._prior_raw_frames: int = self.ui_state.get('frames_read_total', 0)
         # Per-category counts already tracked (for delta-based tracker updates).
         last_tracker: Dict[str, int] = {cat: 0 for cat in patches_created}
+        # Wall-clock start for per-video FPS / SPS measurement
+        video_t0: float = time.monotonic()
 
         def _on_progress(frames_examined: int, patches_so_far: Dict[str, int], raw_frames_read: int) -> None:
             # Live UI counters
@@ -1246,6 +1250,11 @@ class DatasetGeneratorV2UHD:
             self.ui_state['patches_created_total'] = (
                 prior_total + sum(patches_so_far.values())
             )
+            # Live throughput metrics
+            elapsed_time = time.monotonic() - video_t0
+            if elapsed_time > 0:
+                self.ui_state['live_fps'] = raw_frames_read / elapsed_time
+                self.ui_state['live_sps'] = frames_examined / elapsed_time
             # Update per-video progress bars with live per-category patch counts
             current_progress = self.ui_state.get('current_video_progress', {})
             for cat, new_total in patches_so_far.items():

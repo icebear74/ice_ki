@@ -206,6 +206,8 @@ def _draw_statistics_and_eta(state, width):
     gt_total      = state.get('patches_created_total', 0)   # GT-Bilder saved (= Szenen, cross-category sum)
     skipped       = max(0, frames_total - gt_total)
     avg_time      = state.get('avg_time_per_scene', 0.0)
+    live_fps      = state.get('live_fps', 0.0)
+    live_sps      = state.get('live_sps', 0.0)
 
     # Gelesen     = raw FFmpeg frames decoded
     # Szenen      = center-frame assignments evaluated (= unique scene positions across categories)
@@ -221,6 +223,15 @@ def _draw_statistics_and_eta(state, width):
     if avg_time > 0:
         line1 += f"  |  Ø Zeit/Szene: {C_GREEN}{avg_time:>5.1f}s{C_RESET}"
     print(line1)
+
+    # FPS / SPS throughput line (only shown once the pipeline has started)
+    if live_fps > 0 or live_sps > 0:
+        fps_str = f"{live_fps:>7.1f}" if live_fps > 0 else "    N/A"
+        sps_str = f"{live_sps:>7.2f}" if live_sps > 0 else "    N/A"
+        print(
+            f"  FPS (decoded): {C_CYAN}{fps_str}{C_RESET}  |  "
+            f"SPS (scenes/s): {C_CYAN}{sps_str}{C_RESET}"
+        )
 
     print()
     

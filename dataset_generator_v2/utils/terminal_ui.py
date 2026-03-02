@@ -6,6 +6,7 @@ Similar to vsr_plusplus_NEU/utils/ui_terminal.py
 """
 
 import atexit
+import os
 import re
 import sys
 
@@ -46,11 +47,17 @@ def hide_cursor():
 
 
 def show_cursor():
-    """Show terminal cursor."""
+    """Show terminal cursor and restore echo."""
     global _cursor_hidden
     sys.stdout.write(ANSI_SHOW_CURSOR)
     sys.stdout.flush()
     _cursor_hidden = False
+    # Restore echo in case it was silenced (e.g. by tty.setcbreak / setraw or
+    # any other code that disabled it).  The redirect keeps stderr clean when
+    # the call runs outside a real tty (e.g. in tests or pipes).
+    # stty is Unix-only; skip on Windows where it is not available.
+    if sys.platform != 'win32':
+        os.system('stty echo 2>/dev/null')
 
 
 def clear_screen():
