@@ -22,12 +22,13 @@ Exit code
 
 Pipelines tested
 ----------------
-0. CPU-only              – pure software decode + tonemap + scale (baseline)
-1. CUDA decode           – GPU decode, CPU zscale/tonemap/scale
-2. CUDA decode + scale   – GPU decode + scale_cuda, CPU zscale/tonemap
-3. CUDA full-GPU         – GPU decode + tonemap_cuda + scale_cuda + hwdownload
-4. CUDA decode + tonemap – GPU decode + tonemap_cuda (no GPU scale)
-5. CUDA bare download    – GPU decode + hwdownload (raw NV12, no tonemap/scale)
+0. CPU-only                  – pure software decode + tonemap + scale (baseline)
+1. CUDA decode               – GPU decode, CPU zscale/tonemap/scale
+2. CUDA decode + scale p010  – GPU decode + scale_cuda, hwdownload p010, single-step
+                               zscale with explicit HDR params (proven ~12 fps)
+3. CUDA full-GPU             – GPU decode + tonemap_cuda + scale_cuda + hwdownload
+4. CUDA decode + tonemap     – GPU decode + tonemap_cuda (no GPU scale)
+5. CUDA bare download        – GPU decode + hwdownload (raw NV12, no tonemap/scale)
 6. CUDA decode + scale_cuda + hwdownload (NV12 1080p, no tonemap)
 
 Note on HDR vs SDR input
@@ -74,15 +75,22 @@ _PROBE_SECONDS: int = 3
 # Raw frame size for 1920×1080 BGR24 (used to count frames from BGR24 pipelines).
 _FRAME_BYTES_BGR24: int = STREAM_WIDTH * STREAM_HEIGHT * 3
 
+# Explicit CUDA device initialisation flag.
+# Passed before -hwaccel so FFmpeg always initialises the CUDA context up
+# front.  Without this, some builds silently fall back to software decoding
+# when the GPU context fails to auto-init, causing GPU filter chains to crash.
+_CUDA_HW_INIT_ARGS: List[str] = ["-init_hw_device", "cuda=hw"]
+
 # SDR-safe filter chains (no zscale/tonemap).  Used when the source is not HDR
 # so the CUDA decode/transfer/scale mechanics can still be validated.
 _SDR_CPU: str = (
     f"scale={STREAM_WIDTH}:{STREAM_HEIGHT}:flags=lanczos,format=bgr24"
 )
+# SDR fallback for the p010 pipeline: scale on GPU, bare download,
+# then CPU format conversion to bgr24.
 _SDR_SCALE_CUDA: str = (
-    f"scale_cuda={STREAM_WIDTH}:{STREAM_HEIGHT}:interp_algo=bicubic:format=nv12,"
+    f"scale_cuda={STREAM_WIDTH}:{STREAM_HEIGHT},"
     "hwdownload,"
-    "scale=iw:ih,"
     "format=bgr24"
 )
 # tonemap_cuda requires HDR input; SDR fallback uses GPU scale + download only.
@@ -311,6 +319,10 @@ def _build_pipelines(src_w: int, src_h: int, is_hdr: bool) -> List[dict]:
 
     hdr_note = "" if is_hdr else "  ⚠ SDR source: HDR tonemap replaced by plain scale"
 
+    # Common hw_args variants with explicit CUDA device init.
+    _hw_decode_only  = [*_CUDA_HW_INIT_ARGS, "-hwaccel", "cuda"]
+    _hw_decode_scale = [*_CUDA_HW_INIT_ARGS, "-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
+
     return [
         # ── 0. CPU-only baseline ─────────────────────────────────────────
         {
@@ -325,16 +337,21 @@ def _build_pipelines(src_w: int, src_h: int, is_hdr: bool) -> List[dict]:
         {
             "label": f"1  CUDA decode  (GPU decode, CPU {'zscale/tonemap/scale' if is_hdr else 'scale'}){hdr_note}",
             "requires": _need_cuda,
-            "hw_args": ["-hwaccel", "cuda"],
+            "hw_args": _hw_decode_only,
             "vf_filter": cpu_filter,
             "pix_fmt": "bgr24",
             "frame_bytes": _FRAME_BYTES_BGR24,
         },
-        # ── 2. CUDA decode + scale_cuda + CPU tonemap ────────────────────
+        # ── 2. CUDA decode + scale_cuda + p010 + single-step zscale ──────
+        # The PROVEN production pipeline (~12 fps on a mid-range GPU).
+        # scale_cuda scales 4K→1080p on the GPU keeping the 10-bit surface;
+        # hwdownload transfers as p010; one zscale call with explicit HDR
+        # colour-space params converts to BT.709 SDR in a single step.
+        # This is the chain used by extract_and_save_streaming_distributed.
         {
-            "label": f"2  CUDA decode + scale_cuda  (GPU scale, CPU {'tonemap' if is_hdr else 'output'}){hdr_note}",
+            "label": f"2  CUDA decode + scale_cuda + p010 + zscale  (⭐ production pipeline){hdr_note}",
             "requires": _need_scale_cuda,
-            "hw_args": ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"],
+            "hw_args": _hw_decode_scale,
             "vf_filter": scale_cuda_filt,
             "pix_fmt": "bgr24",
             "frame_bytes": _FRAME_BYTES_BGR24,
@@ -343,7 +360,7 @@ def _build_pipelines(src_w: int, src_h: int, is_hdr: bool) -> List[dict]:
         {
             "label": f"3  CUDA full-GPU  (tonemap_cuda + scale_cuda + hwdownload){hdr_note}",
             "requires": _need_tonemap_cuda,
-            "hw_args": ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"],
+            "hw_args": _hw_decode_scale,
             "vf_filter": tonemap_cuda_filt,
             "pix_fmt": "bgr24",
             "frame_bytes": _FRAME_BYTES_BGR24,
@@ -354,7 +371,7 @@ def _build_pipelines(src_w: int, src_h: int, is_hdr: bool) -> List[dict]:
         {
             "label": f"4  CUDA decode + tonemap_cuda  (GPU tonemap, CPU scale){hdr_note}",
             "requires": _need_tonemap_cuda,
-            "hw_args": ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"],
+            "hw_args": _hw_decode_scale,
             "vf_filter": tonemap_only_filt,
             "pix_fmt": "bgr24",
             "frame_bytes": _FRAME_BYTES_BGR24,
@@ -365,7 +382,7 @@ def _build_pipelines(src_w: int, src_h: int, is_hdr: bool) -> List[dict]:
         {
             "label": "5  CUDA bare download  (GPU decode + hwdownload, NV12 raw)",
             "requires": _need_cuda,
-            "hw_args": ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"],
+            "hw_args": _hw_decode_scale,
             "vf_filter": "hwdownload,scale=iw:ih,format=nv12",
             "pix_fmt": "nv12",
             "frame_bytes": bare_frame_bytes,
@@ -376,7 +393,7 @@ def _build_pipelines(src_w: int, src_h: int, is_hdr: bool) -> List[dict]:
         {
             "label": "6  CUDA decode + scale_cuda + hwdownload  (NV12 1080p, no tonemap)",
             "requires": _need_scale_cuda,
-            "hw_args": ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"],
+            "hw_args": _hw_decode_scale,
             "vf_filter": _SCALE_CUDA_NV12_FILTER,
             "pix_fmt": "nv12",
             "frame_bytes": STREAM_WIDTH * STREAM_HEIGHT * 3 // 2,
@@ -489,7 +506,7 @@ def main(argv: List[str]) -> int:
     if any(r[1] == "PASS" and r[0].startswith("3") for r in results):
         print("    ✅  full-GPU (tonemap_cuda + scale_cuda)  → use_cuda=True")
     elif any(r[1] == "PASS" and r[0].startswith("2") for r in results):
-        print("    ✅  scale-GPU + CPU tonemap (scale_cuda)  → use_cuda=True")
+        print("    ✅  ⭐ scale_cuda + p010 + single-step zscale (~12 fps)  → use_cuda=True")
     elif any(r[1] == "PASS" and r[0].startswith("1") for r in results):
         print("    ✅  CUDA decode + CPU tonemap             → use_cuda=True")
     else:

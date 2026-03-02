@@ -494,24 +494,27 @@ class TestBuildAssignmentsPerCategory(unittest.TestCase):
 class TestFilterConstants(unittest.TestCase):
     """Sanity checks on the FFmpeg filter chain string constants."""
 
-    def test_scale_cuda_uses_bicubic_not_lanczos(self):
+    def test_scale_cuda_uses_bilinear_zscale(self):
         import streaming_extractor as _se
-        self.assertIn("bicubic", _se._TONEMAP_FILTER_SCALE_CUDA)
-        self.assertNotIn("lanczos", _se._TONEMAP_FILTER_SCALE_CUDA)
-        print("✓ _TONEMAP_FILTER_SCALE_CUDA uses bicubic (not lanczos)")
+        # The p010 pipeline uses zscale with filter=bilinear for the resize
+        # (fast, good quality for downscaling 4K→1080p).
+        self.assertIn("filter=bilinear", _se._TONEMAP_FILTER_SCALE_CUDA)
+        print("✓ _TONEMAP_FILTER_SCALE_CUDA uses zscale filter=bilinear")
 
-    def test_scale_cuda_specifies_nv12_output_format(self):
+    def test_scale_cuda_specifies_p010_after_hwdownload(self):
         import streaming_extractor as _se
-        # format=nv12 forces 8-bit CUDA surface output so hwdownload succeeds
-        # for 10-bit HEVC sources (which otherwise produce a yuv410p surface).
-        self.assertIn("format=nv12", _se._TONEMAP_FILTER_SCALE_CUDA)
-        print("✓ _TONEMAP_FILTER_SCALE_CUDA includes format=nv12 for hwdownload compatibility")
+        # format=p010 after hwdownload preserves the 10-bit HDR data on the
+        # CPU side so the single-step zscale can do a precise HDR→SDR conversion.
+        self.assertIn("format=p010", _se._TONEMAP_FILTER_SCALE_CUDA)
+        print("✓ _TONEMAP_FILTER_SCALE_CUDA uses format=p010 to preserve 10-bit HDR data")
 
-    def test_scale_cuda_has_yuv420p_after_hwdownload(self):
+    def test_scale_cuda_has_explicit_hdr_zscale_params(self):
         import streaming_extractor as _se
-        # yuv420p conversion after hwdownload ensures zscale gets planar input.
-        self.assertIn("format=yuv420p", _se._TONEMAP_FILTER_SCALE_CUDA)
-        print("✓ _TONEMAP_FILTER_SCALE_CUDA has format=yuv420p after hwdownload")
+        # Explicit HDR input params (tin/pin/min) make the conversion robust
+        # even when stream metadata is missing or incorrect.
+        self.assertIn("tin=smpte2084", _se._TONEMAP_FILTER_SCALE_CUDA)
+        self.assertIn("pin=bt2020", _se._TONEMAP_FILTER_SCALE_CUDA)
+        print("✓ _TONEMAP_FILTER_SCALE_CUDA has explicit HDR colour-space params")
 
     def test_tonemap_cuda_uses_bicubic_not_lanczos(self):
         import streaming_extractor as _se
@@ -551,12 +554,11 @@ class TestFilterConstants(unittest.TestCase):
 
     def test_scale_cuda_filter_contains_hwdownload(self):
         import streaming_extractor as _se
-        # bare hwdownload + scale=iw:ih breaks the backward format negotiation;
-        # see test_tonemap_cuda_uses_scale_to_break_hwdownload_negotiation.
+        # hwdownload copies the CUDA frame to CPU memory; the new p010 chain
+        # uses format=p010 (not hwdownload=format=...) for broader compatibility.
         self.assertNotIn("hwdownload=format=", _se._TONEMAP_FILTER_SCALE_CUDA)
         self.assertIn("hwdownload,", _se._TONEMAP_FILTER_SCALE_CUDA)
-        self.assertIn("scale=iw:ih,", _se._TONEMAP_FILTER_SCALE_CUDA)
-        print("✓ _TONEMAP_FILTER_SCALE_CUDA uses bare hwdownload + scale=iw:ih (all-FFmpeg-version fix)")
+        print("✓ _TONEMAP_FILTER_SCALE_CUDA uses bare hwdownload, then format=p010 to preserve 10-bit")
 
     def test_scale_cuda_filter_ends_with_bgr24(self):
         import streaming_extractor as _se

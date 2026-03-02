@@ -82,43 +82,33 @@ _TONEMAP_FILTER: str = (
 
 # Hybrid GPU/CPU filter chain.
 # Requires only scale_cuda (no tonemap_cuda needed).
-# scale_cuda downscales 4K→1080p on the GPU, so hwdownload transfers only
-# the small 1080p frame to CPU (4× less PCIe traffic than downloading 4K).
-# The CPU tonemap chain then runs on the already-scaled frame — no final
-# CPU scale step required.
-# Use together with -hwaccel cuda -hwaccel_output_format cuda.
+# scale_cuda downscales 4K→1080p on the GPU while preserving the 10-bit CUDA
+# surface (no :format=nv12 override).  hwdownload transfers the 10-bit frame
+# to CPU memory as p010 (semi-planar 10-bit YUV).  A single zscale step with
+# fully-explicit colour-space parameters then converts HDR→SDR.  This avoids
+# the old multi-step zscale+tonemap chain and does NOT require the tonemap
+# filter, making it compatible with stock FFmpeg builds.
+# Use together with -init_hw_device cuda=hw -hwaccel cuda
+#                  -hwaccel_output_format cuda.
 # Notes:
-#   - interp_algo=bicubic: lanczos is not compiled into most pre-built FFmpeg
-#     packages (requires --enable-cuda-nvcc Lanczos kernel).
-#   - format=nv12 on scale_cuda: forces 8-bit NV12 CUDA surface before
-#     hwdownload.  Without this, 10-bit HEVC decodes to p010le on the CUDA
-#     surface, which may cause pipeline failure.
-#   - hwdownload (bare): copies the NV12 CUDA surface to CPU memory as NV12.
-#     We intentionally do NOT use hwdownload=format=nv12 because the 'format'
-#     option is not present in older FFmpeg builds and causes:
-#       Error applying option 'format' to filter 'hwdownload': Option not found
-#     A bare hwdownload would normally crash with:
-#       [hwdownload] Invalid output format yuv420p for hwframe download.
-#     because FFmpeg's backward format negotiation sees the downstream
-#     format=yuv420p filter and tries to make hwdownload produce yuv420p
-#     directly from the CUDA NV12 surface, which is impossible.
-#   - scale=iw:ih (no resize, same dimensions): breaks the backward format
-#     negotiation.  scale (libswscale) accepts NV12 as input and satisfies the
-#     downstream yuv420p request by doing the NV12→YUV420P conversion in
-#     software.  hwdownload only sees scale's input constraints (many formats
-#     including nv12), so it correctly outputs NV12.  Works on all FFmpeg
-#     versions.
-#   - format=yuv420p after scale: ensures planar yuv420p for zscale/tonemap.
+#   - scale_cuda without :format=nv12 keeps the CUDA surface in the decoder's
+#     native format (usually p010le for 10-bit HEVC).
+#   - hwdownload transfers that surface to CPU memory.  Downstream format=p010
+#     explicitly selects the 10-bit semi-planar output, preserving full HDR
+#     precision for the colour-space conversion.
+#   - zscale with tin=smpte2084:pin=bt2020:min=bt2020nc explicitly declares
+#     the HDR input colour space so the conversion is correct even when the
+#     stream does not carry colour-metadata side-data.
+#   - npl=100 sets the nominal peak luminance (nits) used for the PQ→BT.709
+#     mapping (100 cd/m² = standard SDR display).
+#   - filter=bilinear: the bilinear resize kernel in zscale is fast and
+#     sufficient for downscaling 4K→1080p.
+#   - format=bgr24: libswscale converts p010→bgr24 for OpenCV compatibility.
 _TONEMAP_FILTER_SCALE_CUDA: str = (
-    f"scale_cuda={STREAM_WIDTH}:{STREAM_HEIGHT}:interp_algo=bicubic:format=nv12,"
+    f"scale_cuda={STREAM_WIDTH}:{STREAM_HEIGHT},"
     "hwdownload,"
-    "scale=iw:ih,"
-    "format=yuv420p,"
-    "zscale=t=linear:npl=100,"
-    "format=gbrpf32le,"
-    "zscale=p=bt709,"
-    "tonemap=tonemap=mobius:desat=0,"
-    "zscale=t=bt709:m=bt709:range=limited,"
+    "format=p010,"
+    "zscale=p=bt709:t=bt709:m=bt709:tin=smpte2084:pin=bt2020:min=bt2020nc:npl=100:filter=bilinear,"
     "format=bgr24"
 )
 
@@ -647,13 +637,13 @@ def extract_and_save_streaming_distributed(
     #     and 1920×1080 scaling.  Only the final BGR24 result is copied to
     #     CPU.  Requires FFmpeg with --enable-cuda-nvcc/libnpp.
     #
-    #  2. Scale-GPU + CPU tonemap:  -hwaccel cuda -hwaccel_output_format cuda
-    #                               + scale_cuda + hwdownload + CPU tonemap
-    #     scale_cuda downscales 4K→1080p on the GPU.  hwdownload then
-    #     transfers only the 1080p frame to CPU (4× less PCIe bandwidth than
-    #     downloading 4K).  The CPU tonemap runs on the already-scaled frame
-    #     so it processes 4× less data.  No final CPU scale step needed.
-    #     Requires only scale_cuda (no tonemap_cuda).
+    #  2. Scale-GPU + CPU tonemap:  -init_hw_device cuda=hw
+    #                               -hwaccel cuda -hwaccel_output_format cuda
+    #                               + scale_cuda + hwdownload (p010) + zscale
+    #     scale_cuda downscales 4K→1080p on the GPU preserving 10-bit depth.
+    #     hwdownload transfers the p010 surface to CPU; a single zscale step
+    #     with explicit HDR colour-space params converts to BT.709 SDR.
+    #     ~12 fps on a mid-range GPU; requires only scale_cuda.
     #
     #  3. Decode-GPU + CPU tonemap:  -hwaccel cuda + full software chain
     #     GPU decoding only; the full 4K zscale/tonemap/scale chain runs on
@@ -664,16 +654,22 @@ def extract_and_save_streaming_distributed(
     _full_gpu  = _use_cuda and tonemap_cuda_available()
     _scale_gpu = _use_cuda and (not _full_gpu) and scale_cuda_available()
 
+    # -init_hw_device cuda=hw explicitly initialises the CUDA device context
+    # before demuxing begins.  Without this flag some FFmpeg builds silently
+    # fall back to software decoding when the GPU context fails to auto-init,
+    # causing the GPU filter chain to receive CPU frames and crash.
+    _CUDA_HW_INIT = ["-init_hw_device", "cuda=hw"]
+
     if _full_gpu:
-        hw_args        = ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
+        hw_args        = [*_CUDA_HW_INIT, "-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
         vf_filter      = _TONEMAP_FILTER_CUDA
         pipeline_label = "full-GPU (tonemap_cuda+scale_cuda)"
     elif _scale_gpu:
-        hw_args        = ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
+        hw_args        = [*_CUDA_HW_INIT, "-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
         vf_filter      = _TONEMAP_FILTER_SCALE_CUDA
-        pipeline_label = "scale-GPU + CPU tonemap (scale_cuda)"
+        pipeline_label = "scale-GPU + CPU zscale (scale_cuda, p010, ~12 fps)"
     elif _use_cuda:
-        hw_args        = ["-hwaccel", "cuda"]
+        hw_args        = [*_CUDA_HW_INIT, "-hwaccel", "cuda"]
         vf_filter      = _TONEMAP_FILTER
         pipeline_label = "decode-GPU + CPU tonemap"
     else:
