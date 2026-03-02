@@ -100,10 +100,13 @@ class DatasetGeneratorV2UHD:
         self.logger = self._setup_logger()
         sys.logger = self.logger
         
-        # CUDA/GPU disabled - using CPU-only mode for better stability
-        # CPU extraction is reliable and seeking is the bottleneck anyway
-        self.use_cuda = False
-        self.logger.info("🖥️  CPU-only mode enabled (CUDA/GPU disabled for stability)")
+        # Use CUDA when the local FFmpeg build supports it; fall back to CPU.
+        from streaming_extractor import cuda_available
+        self.use_cuda = cuda_available()
+        if self.use_cuda:
+            self.logger.info("🚀 CUDA/GPU mode enabled (hardware-accelerated decoding & scaling)")
+        else:
+            self.logger.info("🖥️  CPU-only mode enabled (CUDA not available in this FFmpeg build)")
         
         # Videos are already sorted in JSON by multi-category priority
         # Process them in exact JSON order (no additional sorting)
