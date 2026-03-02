@@ -56,6 +56,18 @@ from utils.format_definitions import get_output_dirs_for_format
 STREAM_WIDTH: int = 1920
 STREAM_HEIGHT: int = 1080
 
+# ---------------------------------------------------------------------------
+# HDR→SDR tonemap filter chains
+#
+# All three chains handle HDR10 (SMPTE 2084 / BT.2020) and Dolby Vision
+# Profile 5 / 8 correctly.  Both DV P5 and DV P8 encode the base layer with
+# BT.2020 primaries and SMPTE 2084 (PQ) transfer — zscale reads those from
+# the stream metadata and converts to linear light automatically.
+# DV Profile 4 (rare; only on a handful of Apple TV+ / older Disney+ titles)
+# requires Dolby's proprietary decoder for the enhancement layer; FFmpeg
+# decodes only the SDR base layer for that profile.
+# ---------------------------------------------------------------------------
+
 # Software HDR→SDR tonemap filter chain (CPU-only fallback).
 # Used when the local FFmpeg has no CUDA filter support at all.
 _TONEMAP_FILTER: str = (
@@ -102,11 +114,17 @@ _TONEMAP_FILTER_SCALE_CUDA: str = (
 # Frames stay in GPU memory from decode through tonemap + scale;
 # hwdownload copies only the final 1920×1080 result to CPU.
 # Use together with -hwaccel cuda -hwaccel_output_format cuda.
-# Note: interp_algo=bicubic — see _TONEMAP_FILTER_SCALE_CUDA comment above.
+# Notes:
+#   - interp_algo=bicubic — see _TONEMAP_FILTER_SCALE_CUDA comment above.
+#   - tonemap_cuda outputs 8-bit NV12 CUDA frames; scale_cuda receives NV12
+#     and outputs NV12; hwdownload lands NV12 on the CPU.
+#   - format=yuv420p converts semi-planar NV12 to fully planar yuv420p so
+#     the final format=bgr24 conversion via libswscale is unambiguous.
 _TONEMAP_FILTER_CUDA: str = (
     f"tonemap_cuda=tonemap=mobius:desat=0:peak=100,"
     f"scale_cuda={STREAM_WIDTH}:{STREAM_HEIGHT}:interp_algo=bicubic,"
     "hwdownload,"
+    "format=yuv420p,"
     "format=bgr24"
 )
 

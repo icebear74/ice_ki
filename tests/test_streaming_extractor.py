@@ -519,6 +519,21 @@ class TestFilterConstants(unittest.TestCase):
         self.assertNotIn("lanczos", _se._TONEMAP_FILTER_CUDA)
         print("✓ _TONEMAP_FILTER_CUDA uses bicubic (not lanczos)")
 
+    def test_tonemap_cuda_has_yuv420p_after_hwdownload(self):
+        import streaming_extractor as _se
+        # tonemap_cuda/scale_cuda output NV12; yuv420p deinterleaves it so
+        # the final format=bgr24 libswscale conversion is unambiguous.
+        self.assertIn("format=yuv420p", _se._TONEMAP_FILTER_CUDA)
+        print("✓ _TONEMAP_FILTER_CUDA has format=yuv420p after hwdownload")
+
+    def test_tonemap_cuda_ends_with_bgr24(self):
+        import streaming_extractor as _se
+        self.assertTrue(
+            _se._TONEMAP_FILTER_CUDA.endswith("bgr24"),
+            "_TONEMAP_FILTER_CUDA must end with format=bgr24",
+        )
+        print("✓ _TONEMAP_FILTER_CUDA ends with bgr24")
+
     def test_scale_cuda_filter_contains_hwdownload(self):
         import streaming_extractor as _se
         self.assertIn("hwdownload", _se._TONEMAP_FILTER_SCALE_CUDA)
