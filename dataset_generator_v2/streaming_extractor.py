@@ -92,13 +92,18 @@ _TONEMAP_FILTER: str = (
 #     packages (requires --enable-cuda-nvcc Lanczos kernel).
 #   - format=nv12: forces scale_cuda output to 8-bit NV12 CUDA frames before
 #     hwdownload.  Without this, 10-bit HEVC decodes to p010le on the CUDA
-#     surface, and scale_cuda may produce a format (e.g. yuv410p) that
-#     hwdownload cannot download, causing immediate pipeline failure.
+#     surface, and scale_cuda may produce a format that hwdownload cannot
+#     download, causing immediate pipeline failure.
+#   - hwdownload=format=nv12: explicitly pins the DMA copy to NV12.  Without
+#     this explicit format, FFmpeg negotiates the output format by looking
+#     downstream and finds format=yuv420p, then tries to make hwdownload
+#     produce yuv420p directly from a CUDA NV12 surface — which is impossible:
+#       [hwdownload] Invalid output format yuv420p for hwframe download.
 #   - format=yuv420p after hwdownload: converts semi-planar NV12 to fully
-#     planar yuv420p which zscale/tonemap expect.
+#     planar yuv420p in software, which zscale/tonemap expect.
 _TONEMAP_FILTER_SCALE_CUDA: str = (
     f"scale_cuda={STREAM_WIDTH}:{STREAM_HEIGHT}:interp_algo=bicubic:format=nv12,"
-    "hwdownload,"
+    "hwdownload=format=nv12,"
     "format=yuv420p,"
     "zscale=t=linear:npl=100,"
     "format=gbrpf32le,"
@@ -117,13 +122,16 @@ _TONEMAP_FILTER_SCALE_CUDA: str = (
 # Notes:
 #   - interp_algo=bicubic — see _TONEMAP_FILTER_SCALE_CUDA comment above.
 #   - tonemap_cuda outputs 8-bit NV12 CUDA frames; scale_cuda receives NV12
-#     and outputs NV12; hwdownload lands NV12 on the CPU.
-#   - format=yuv420p converts semi-planar NV12 to fully planar yuv420p so
-#     the final format=bgr24 conversion via libswscale is unambiguous.
+#     and outputs NV12.
+#   - hwdownload=format=nv12: same reasoning as _TONEMAP_FILTER_SCALE_CUDA —
+#     must pin the download format to nv12 to prevent FFmpeg from negotiating
+#     yuv420p as the hwdownload output format, which would crash the pipeline.
+#   - format=yuv420p converts semi-planar NV12 to fully planar yuv420p in
+#     software so the final format=bgr24 libswscale conversion is unambiguous.
 _TONEMAP_FILTER_CUDA: str = (
     f"tonemap_cuda=tonemap=mobius:desat=0:peak=100,"
     f"scale_cuda={STREAM_WIDTH}:{STREAM_HEIGHT}:interp_algo=bicubic,"
-    "hwdownload,"
+    "hwdownload=format=nv12,"
     "format=yuv420p,"
     "format=bgr24"
 )

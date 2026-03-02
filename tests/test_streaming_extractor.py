@@ -534,10 +534,21 @@ class TestFilterConstants(unittest.TestCase):
         )
         print("✓ _TONEMAP_FILTER_CUDA ends with bgr24")
 
+    def test_tonemap_cuda_uses_hwdownload_format_nv12(self):
+        import streaming_extractor as _se
+        # Must use hwdownload=format=nv12 (not bare hwdownload) so FFmpeg pins
+        # the DMA copy to nv12 instead of negotiating yuv420p from the CUDA
+        # surface — which would crash with "Invalid output format yuv420p".
+        self.assertIn("hwdownload=format=nv12", _se._TONEMAP_FILTER_CUDA)
+        print("✓ _TONEMAP_FILTER_CUDA uses hwdownload=format=nv12")
+
     def test_scale_cuda_filter_contains_hwdownload(self):
         import streaming_extractor as _se
-        self.assertIn("hwdownload", _se._TONEMAP_FILTER_SCALE_CUDA)
-        print("✓ _TONEMAP_FILTER_SCALE_CUDA contains hwdownload")
+        # Must use hwdownload=format=nv12 (not bare hwdownload) so FFmpeg pins
+        # the DMA copy to nv12 instead of negotiating yuv420p from the CUDA
+        # surface — which would crash with "Invalid output format yuv420p".
+        self.assertIn("hwdownload=format=nv12", _se._TONEMAP_FILTER_SCALE_CUDA)
+        print("✓ _TONEMAP_FILTER_SCALE_CUDA uses hwdownload=format=nv12")
 
     def test_scale_cuda_filter_ends_with_bgr24(self):
         import streaming_extractor as _se
