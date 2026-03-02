@@ -512,7 +512,116 @@ class TestEditCategory(unittest.TestCase):
         print("✓ _edit_category zero target rejected")
 
 
+# ---------------------------------------------------------------------------
+# _sorted_videos() helper
+# ---------------------------------------------------------------------------
+
+class TestSortedVideos(unittest.TestCase):
+
+    def test_sorted_by_path_then_name(self):
+        from video_manager import _sorted_videos
+        videos = [
+            (2, {'name': 'z_ep', 'path': '/a/b/c/z.mkv'}),
+            (0, {'name': 'a_ep', 'path': '/x/y/z/a.mkv'}),
+            (1, {'name': 'a_ep', 'path': '/a/b/c/a.mkv'}),
+        ]
+        result = _sorted_videos(videos)
+        # depth-3 short paths: c/z.mkv < c/a.mkv → sorted as c/a.mkv, c/z.mkv, z/a.mkv
+        short = [v['path'] for _, v in result]
+        self.assertEqual(short, ['/a/b/c/a.mkv', '/a/b/c/z.mkv', '/x/y/z/a.mkv'])
+        print("✓ _sorted_videos: sorted by path then name")
+
+    def test_stable_original_indices_preserved(self):
+        from video_manager import _sorted_videos
+        videos = [
+            (10, {'name': 'B', 'path': '/p/q/r/b.mkv'}),
+            (20, {'name': 'A', 'path': '/p/q/r/a.mkv'}),
+        ]
+        result = _sorted_videos(videos)
+        self.assertEqual([i for i, _ in result], [20, 10])
+        print("✓ _sorted_videos: original indices preserved after sort")
+
+
+# ---------------------------------------------------------------------------
+# print_video_list() column order: path first, name second
+# ---------------------------------------------------------------------------
+
+class TestPrintVideoListColumnOrder(unittest.TestCase):
+
+    def _capture(self, videos):
+        with tempfile.NamedTemporaryFile(suffix='.json', delete=False, mode='w') as f:
+            json.dump(_make_config(videos), f)
+            path = f.name
+        mgr = VideoManager(path)
+        mgr.load()
+        import io
+        buf = io.StringIO()
+        with patch('sys.stdout', buf):
+            mgr.print_video_list(mgr.list_videos())
+        return buf.getvalue()
+
+    def test_path_column_before_name_column(self):
+        output = self._capture([
+            {'name': 'MyFilm', 'path': '/root/series/s01/ep01.mkv', 'categories': ['master']},
+        ])
+        lines = [l for l in output.splitlines() if 'MyFilm' in l]
+        self.assertEqual(len(lines), 1)
+        line = lines[0]
+        # Path segment should appear before the name in the same line
+        self.assertLess(line.index('series'), line.index('MyFilm'))
+        print("✓ print_video_list: path column comes before name column")
+
+    def test_sorted_by_path_in_output(self):
+        output = self._capture([
+            {'name': 'Ep2', 'path': '/root/z_series/s01/ep02.mkv', 'categories': ['master']},
+            {'name': 'Ep1', 'path': '/root/a_series/s01/ep01.mkv', 'categories': ['master']},
+        ])
+        idx_a = output.index('a_series')
+        idx_z = output.index('z_series')
+        self.assertLess(idx_a, idx_z)
+        print("✓ print_video_list: output sorted by path (a_series before z_series)")
+
+
+# ---------------------------------------------------------------------------
+# show_statistics(): scenes summary line
+# ---------------------------------------------------------------------------
+
+class TestShowStatisticsScenesSummary(unittest.TestCase):
+
+    def _capture_stats(self, videos):
+        with tempfile.NamedTemporaryFile(suffix='.json', delete=False, mode='w') as f:
+            json.dump(_make_config(videos), f)
+            path = f.name
+        mgr = VideoManager(path)
+        mgr.load()
+        import io
+        buf = io.StringIO()
+        with patch('sys.stdout', buf):
+            mgr.show_statistics()
+        return buf.getvalue()
+
+    def test_scenes_summary_shown_when_forced(self):
+        output = self._capture_stats([
+            {'name': 'A', 'path': '/m/s01/a.mkv',
+             'categories': ['master'], 'forced_frames': {'master': 2000}},
+        ])
+        # target=10000, forced=2000, remaining=8000
+        self.assertIn('total', output)
+        self.assertIn('forced', output)
+        self.assertIn('remaining', output)
+        self.assertIn('8,000', output)
+        print("✓ show_statistics: scenes summary (total/forced/remaining) shown")
+
+    def test_scenes_summary_not_shown_without_forced(self):
+        output = self._capture_stats([
+            {'name': 'Normal', 'path': '/m/s01/n.mkv', 'categories': ['master']},
+        ])
+        self.assertNotIn('remaining (auto)', output)
+        print("✓ show_statistics: scenes summary absent when no forced frames")
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
+
 
 

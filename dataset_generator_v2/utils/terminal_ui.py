@@ -5,6 +5,7 @@ ANSI color codes and helper functions for terminal display.
 Similar to vsr_plusplus_NEU/utils/ui_terminal.py
 """
 
+import atexit
 import re
 import sys
 
@@ -29,17 +30,27 @@ ANSI_SHOW_CURSOR = "\033[?25h"
 # ANSI Escape Sequence Pattern (for stripping colors from text)
 ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 
+# Track whether we have hidden the cursor so we register atexit only once
+# and so show_cursor() is always safe to call even if called multiple times.
+_cursor_hidden = False
+
 
 def hide_cursor():
-    """Hide terminal cursor"""
+    """Hide terminal cursor and register an atexit handler to restore it."""
+    global _cursor_hidden
     sys.stdout.write(ANSI_HIDE_CURSOR)
     sys.stdout.flush()
+    if not _cursor_hidden:
+        _cursor_hidden = True
+        atexit.register(show_cursor)  # guaranteed restore on any normal exit
 
 
 def show_cursor():
-    """Show terminal cursor"""
+    """Show terminal cursor."""
+    global _cursor_hidden
     sys.stdout.write(ANSI_SHOW_CURSOR)
     sys.stdout.flush()
+    _cursor_hidden = False
 
 
 def clear_screen():

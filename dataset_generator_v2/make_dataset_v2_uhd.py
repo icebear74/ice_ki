@@ -253,9 +253,8 @@ class DatasetGeneratorV2UHD:
         """Handle shutdown signals gracefully - fast exit on Ctrl+C"""
         print("\n\n⚠️  Ctrl+C detected! Aborting immediately...")
         self.running = False
-        # Show cursor before exit
-        if self.use_terminal_ui:
-            show_cursor()
+        # Always restore cursor/terminal regardless of use_terminal_ui flag
+        show_cursor()
         # Save progress before exit
         if hasattr(self, 'tracker'):
             try:
@@ -1853,11 +1852,11 @@ class DatasetGeneratorV2UHD:
     
     def run(self):
         """Main generation loop with proportional distribution"""
-        # Hide cursor for clean terminal UI
-        if self.use_terminal_ui:
-            hide_cursor()
-        
         try:
+            # Hide cursor for clean terminal UI — inside try so finally always restores it
+            if self.use_terminal_ui:
+                hide_cursor()
+
             if RICH_AVAILABLE:
                 console.print(Panel.fit(
                     "[bold cyan]Dataset Generator V2 - UHD Quality[/bold cyan]\n"
@@ -1907,7 +1906,16 @@ class DatasetGeneratorV2UHD:
             
             # Console output removed - all info shown in terminal GUI
             # No need to print here, user sees progress in the GUI
-            
+
+            # Sort videos so that any video with forced_frames is processed first.
+            # Stable sort preserves the relative order within each group.
+            forced_count = sum(1 for v in self.videos if v.get('forced_frames'))
+            self.videos.sort(key=lambda v: 0 if v.get('forced_frames') else 1)
+            if forced_count:
+                self.logger.info(
+                    f"⚡ Forced-frame videos promoted to front of queue: {forced_count} / {len(self.videos)}"
+                )
+
             # Get resume point
             start_idx = self.tracker.status['progress']['current_video_index']
             
@@ -2073,10 +2081,12 @@ def main():
         generator = DatasetGeneratorV2UHD(config_path)
         generator.run()
     except KeyboardInterrupt:
+        show_cursor()
         print("\n⚠️  Interrupted by user")
         print("Progress saved. Run again to resume.")
         sys.exit(0)
     except Exception as e:
+        show_cursor()
         print(f"Fatal error: {e}")
         import traceback
         traceback.print_exc()

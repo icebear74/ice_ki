@@ -38,6 +38,16 @@ def _short_path(full_path: str, depth: int = 2) -> str:
     return str(Path(*parts[-depth:])) if len(parts) >= depth else full_path
 
 
+def _sorted_videos(videos: List[tuple]) -> List[tuple]:
+    """Sort (idx, video) pairs by depth-3 short-path, then by name within each path."""
+    return sorted(
+        videos,
+        key=lambda iv: (
+            _short_path(iv[1].get('path', ''), depth=3).lower(),
+            iv[1].get('name', '').lower(),
+        ),
+    )
+
 class VideoManager:
     """Manager for video category assignments."""
     
@@ -159,35 +169,36 @@ class VideoManager:
         return filtered
     
     def print_video_list(self, videos: List[tuple], max_display: int = 20):
-        """Pretty print video list."""
+        """Pretty print video list, sorted by path then name (path first, name second)."""
         if not videos:
             print("No videos found.")
             return
-        
-        print(f"\n{'ID':<6} {'Name':<44} {'Path (depth-2)':<36} {'Categories'}")
+
+        sorted_vids = _sorted_videos(videos)
+
+        print(f"\n{'ID':<6} {'Path (depth-3)':<36} {'Name':<42} {'Categories'}")
         print("-" * 120)
-        
-        for idx, (i, video) in enumerate(videos):
+
+        for idx, (i, video) in enumerate(sorted_vids):
             if max_display and idx >= max_display:
-                print(f"... and {len(videos) - max_display} more (use -a to show all)")
+                print(f"... and {len(sorted_vids) - max_display} more (use -a to show all)")
                 break
-            
-            name = video['name'][:42]
+
             path_short = _short_path(video.get('path', ''), depth=3)[:34]
+            name = video['name'][:40]
             cats = video.get('categories', [])
             if cats:
                 cat_str = "[" + ", ".join(cats) + "]"
             else:
                 cat_str = "[no categories]"
 
-            # Append ⚡ indicator when forced_frames are set for any category
             forced = video.get('forced_frames', {})
             if forced:
                 forced_parts = [f"{cat}:{n:,}" for cat, n in sorted(forced.items()) if n > 0]
                 if forced_parts:
                     cat_str += "  ⚡ " + "  ".join(forced_parts)
-            
-            print(f"{i:<6} {name:<44} {path_short:<36} {cat_str}")
+
+            print(f"{i:<6} {path_short:<36} {name:<42} {cat_str}")
     
     def set_forced_frames(self, video_indices) -> None:
         """
@@ -394,34 +405,34 @@ class VideoManager:
         
         # Use curses-based interactive selector
         try:
-            # Extract just the video objects for display
-            video_list = [v for _, v in videos]
-            
-            # Create display with video ID in details
+            # Sort by path then name, keep original-index mapping
+            sorted_vids = _sorted_videos(videos)
+            video_list = [v for _, v in sorted_vids]
+
             def get_video_label(video):
-                return video['name']
-            
+                return _short_path(video.get('path', ''), depth=3)
+
             def get_video_details(video):
-                # Find the video ID
-                video_id = next((i for i, v in videos if v == video), None)
+                video_id = next((i for i, v in sorted_vids if v == video), None)
                 cats = video.get('categories', [])
                 cat_str = format_categories_display(cats)
+                name = video.get('name', '?')
                 if video_id is not None:
-                    return f"[{video_id}] {cat_str}"
-                return cat_str
-            
+                    return f"[{video_id}] {name}  {cat_str}"
+                return f"{name}  {cat_str}"
+
             selected_indices = select_items(
                 items=video_list,
                 title=f"Select Videos - {len(video_list)} available (↑↓ navigate, Space toggle, Enter done, Esc cancel)",
                 get_label=get_video_label,
                 get_details=get_video_details
             )
-            
+
             if selected_indices is None:
                 return None
-            
-            # Convert from list indices to video IDs
-            video_ids = [videos[i][0] for i in selected_indices]
+
+            # Convert from sorted-list indices to original video IDs
+            video_ids = [sorted_vids[i][0] for i in selected_indices]
             return video_ids
             
         except Exception as e:
@@ -484,9 +495,17 @@ class VideoManager:
             target = self.config.get('category_patches', {}).get(cat, '?')
             target_str = f"{target:,}" if isinstance(target, int) else str(target)
             print(f"  {cat:<15}: {category_counts[cat]:>4} videos (target: {target_str})")
-            # List forced videos for this category
+            # When forced frames exist, show total / forced / remaining scene counts
             if forced_by_cat.get(cat):
                 forced_list = sorted(forced_by_cat[cat], key=lambda x: x[0].lower())
+                forced_total = sum(n for _, _, n in forced_list)
+                if isinstance(target, int):
+                    remaining = max(0, target - forced_total)
+                    print(
+                        f"    {'Scenes:':<12} total {target:>10,}  |  "
+                        f"forced {forced_total:>10,}  |  "
+                        f"remaining (auto) {remaining:>10,}"
+                    )
                 for name, short_path, n in forced_list:
                     print(f"    ⚡ {name:<40} {short_path:<36}  forced: {n:>8,}")
     
@@ -1034,18 +1053,19 @@ def main():
                         continue
                     
                     try:
+                        sorted_vids = _sorted_videos(videos)
                         selected = select_items(
-                            items=[v for _, v in videos],
+                            items=[v for _, v in sorted_vids],
                             title="Select videos (Space to toggle, Enter to confirm)",
-                            get_label=lambda v: v['name'],
-                            get_details=lambda v: format_categories_display(v.get('categories', []))
+                            get_label=lambda v: _short_path(v.get('path', ''), depth=3),
+                            get_details=lambda v: v['name'] + '  ' + format_categories_display(v.get('categories', []))
                         )
                         
                         if selected is None:
                             print("❌ Cancelled")
                             continue
                         
-                        video_indices = [videos[i][0] for i in selected]
+                        video_indices = [sorted_vids[i][0] for i in selected]
                         print(f"✓ Selected {len(video_indices)} videos")
                         
                     except Exception as e:
@@ -1226,17 +1246,18 @@ def main():
 
                 # Curses multi-select picker
                 try:
+                    sorted_assigned = _sorted_videos(assigned_videos)
                     selected = select_items(
-                        items=[v for _, v in assigned_videos],
+                        items=[v for _, v in sorted_assigned],
                         title=(
-                            f"Select videos for forced frames — {len(assigned_videos)} available "
+                            f"Select videos for forced frames — {len(sorted_assigned)} available "
                             "(Space toggle, Enter confirm, Esc cancel)"
                         ),
-                        get_label=lambda v: v['name'],
+                        get_label=lambda v: _short_path(v.get('path', ''), depth=3),
                         get_details=lambda v: (
-                            _short_path(v.get('path', ''), depth=3)
-                            + "  [" + ", ".join(get_video_categories(v)) + "]"
-                            + ("  ⚡" if v.get('forced_frames') else "")
+                            v['name']
+                            + '  [' + ', '.join(get_video_categories(v)) + ']'
+                            + ('  ⚡' if v.get('forced_frames') else '')
                         ),
                     )
 
@@ -1244,7 +1265,7 @@ def main():
                         print("❌ Cancelled or nothing selected")
                         continue
 
-                    video_indices = [assigned_videos[s][0] for s in selected]
+                    video_indices = [sorted_assigned[s][0] for s in selected]
 
                 except Exception as e:
                     print(f"⚠️  Curses UI failed ({e}), falling back to ID input")
