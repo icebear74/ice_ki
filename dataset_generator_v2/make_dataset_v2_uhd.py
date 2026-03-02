@@ -515,33 +515,73 @@ class DatasetGeneratorV2UHD:
             # For EACH category separately
             for category, category_target in self.category_targets.items():
                 self.logger.info(f"\n  Processing category: {category} (target: {category_target:,})")
-                
-                # Find videos that have THIS category
-                category_videos = []
-                category_total_duration = 0.0
-                
+
+                # Separate videos into forced-frames and proportional buckets.
+                # Videos whose 'forced_frames' dict contains a positive value for
+                # this category get that exact count; the remainder of the category
+                # budget is distributed proportionally among the other videos.
+                forced_videos: Dict[str, int] = {}   # path → forced_count
+                normal_videos = []                   # (path, name, duration)
+                normal_total_duration = 0.0
+                forced_total = 0
+
                 for v in self.videos:
                     video_cats = get_video_categories(v)
-                    if category in video_cats:
-                        video_path = v['path']
-                        if video_path in durations:
-                            duration = durations[video_path]
-                            category_videos.append((video_path, v['name'], duration))
-                            category_total_duration += duration
-                
-                self.logger.info(f"    {category}: {len(category_videos)} videos, {category_total_duration/3600:.1f} hours total")
-                
-                if category_total_duration == 0 or len(category_videos) == 0:
+                    if category not in video_cats:
+                        continue
+                    video_path = v['path']
+                    if video_path not in durations:
+                        continue
+                    forced = v.get('forced_frames', {}).get(category, 0)
+                    if forced > 0:
+                        forced_videos[video_path] = forced
+                        forced_total += forced
+                        self.logger.info(
+                            f"    ⚡ {v.get('name','?')}: forced {forced:,} frames "
+                            f"for category '{category}'"
+                        )
+                    else:
+                        dur = durations[video_path]
+                        normal_videos.append((video_path, v['name'], dur))
+                        normal_total_duration += dur
+
+                # Budget remaining after honouring forced frames
+                remaining_budget = max(0, category_target - forced_total)
+                if forced_total > 0:
+                    self.logger.info(
+                        f"    Category '{category}': target {category_target:,}, "
+                        f"forced {forced_total:,}, remaining for proportional "
+                        f"distribution: {remaining_budget:,}"
+                    )
+
+                self.logger.info(
+                    f"    {category}: {len(forced_videos)} forced + "
+                    f"{len(normal_videos)} proportional videos, "
+                    f"{normal_total_duration/3600:.1f} hours proportional"
+                )
+
+                if len(normal_videos) == 0 and not forced_videos:
                     self.logger.warning(f"    No videos or zero duration for {category}, skipping")
                     continue
-                
-                # Distribute category target among these videos proportionally
-                for video_path, video_name, duration in category_videos:
-                    proportion = duration / category_total_duration
-                    patches = int(category_target * proportion)
+
+                # Apply forced-frame targets
+                for video_path, forced_count in forced_videos.items():
+                    video_targets[video_path][category] = forced_count
+
+                # Distribute remaining_budget proportionally among normal videos
+                for video_path, video_name, duration in normal_videos:
+                    if normal_total_duration > 0:
+                        patches = int(remaining_budget * duration / normal_total_duration)
+                    else:
+                        patches = 0
                     video_targets[video_path][category] = patches
-                    
-                    self.logger.debug(f"      {video_name}: {duration:.0f}s ({proportion*100:.1f}%) → {patches} patches")
+                    self.logger.debug(
+                        f"      {video_name}: {duration:.0f}s "
+                        f"({duration / normal_total_duration * 100:.1f}% of proportional pool) "
+                        f"→ {patches} patches"
+                        if normal_total_duration > 0 else
+                        f"      {video_name}: {duration:.0f}s → {patches} patches (zero-duration pool)"
+                    )
             
             # Show summary
             self.logger.info("\n  Per-video summary (top 10 by total patches):")

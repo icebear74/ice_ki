@@ -173,9 +173,86 @@ class VideoManager:
                 cat_str = "[" + ", ".join(cats) + "]"
             else:
                 cat_str = "[no categories]"
+
+            # Append ⚡ indicator when forced_frames are set for any category
+            forced = video.get('forced_frames', {})
+            if forced:
+                forced_parts = [f"{cat}:{n:,}" for cat, n in sorted(forced.items()) if n > 0]
+                if forced_parts:
+                    cat_str += "  ⚡ " + "  ".join(forced_parts)
             
             print(f"{i:<6} {name:<50} {cat_str:<40}")
     
+    def set_forced_frames(self, video_idx: int) -> None:
+        """
+        Interactively set per-category forced frame overrides for one video.
+
+        For each category the video belongs to the user is prompted for an
+        exact frame count (0 = no override, use normal weight-based distribution).
+        Non-zero values are stored as ``video['forced_frames'][category]``.
+        Zero values are removed so the JSON stays clean.
+        """
+        if video_idx < 0 or video_idx >= len(self.videos):
+            print(f"❌ Invalid video index: {video_idx}")
+            return
+
+        video = self.videos[video_idx]
+        name = video.get('name', '?')
+        cats = get_video_categories(video)
+
+        if not cats:
+            print(f"❌ '{name}' has no categories assigned — assign categories first.")
+            return
+
+        print(f"\n📹 Forced frame overrides for: {name}")
+        print(f"   Categories: {', '.join(cats)}")
+        print("   Enter the exact number of frames this video must contribute for each")
+        print("   category (0 or blank = use normal proportional distribution).\n")
+
+        existing = video.get('forced_frames', {})
+        new_forced: Dict[str, int] = {}
+
+        for cat in cats:
+            current = existing.get(cat, 0)
+            prompt = f"  {cat} (current: {current:,}  |  0 = auto): "
+            raw = input(prompt).strip()
+
+            if not raw:
+                # Keep the existing value unchanged
+                if current > 0:
+                    new_forced[cat] = current
+                continue
+
+            try:
+                value = int(raw)
+            except ValueError:
+                print(f"  ⚠️  Invalid number '{raw}' — keeping current value ({current:,})")
+                if current > 0:
+                    new_forced[cat] = current
+                continue
+
+            if value < 0:
+                print(f"  ⚠️  Negative value ignored — keeping current value ({current:,})")
+                if current > 0:
+                    new_forced[cat] = current
+            elif value > 0:
+                new_forced[cat] = value
+            # value == 0 → not stored → removed from forced_frames
+
+        # Persist (remove key entirely if nothing is forced)
+        if new_forced:
+            video['forced_frames'] = new_forced
+        else:
+            video.pop('forced_frames', None)
+
+        self.modified = True
+
+        if new_forced:
+            summary = "  ".join(f"{cat}: {n:,}" for cat, n in sorted(new_forced.items()))
+            print(f"\n✓ Forced frames set for '{name}': {summary}")
+        else:
+            print(f"\n✓ All forced frame overrides cleared for '{name}' (back to auto).")
+
     def reset_all(self):
         """Reset all video assignments."""
         confirm = input("⚠️  Reset ALL video assignments? This cannot be undone! (yes/no): ")
@@ -721,6 +798,7 @@ def print_menu():
     print("16. Rescan file list (rebuild from source directories)")
     print("17. Create new default config file")
     print("18. Configure output patch size weights")
+    print("19. Set forced frame overrides (per video / per category)")
     print("-" * 60)
     print("s. Save changes")
     print("q. Quit")
@@ -1039,6 +1117,51 @@ def main():
             elif choice == '18':
                 # Configure output patch size weights
                 manager.manage_patch_formats()
+
+            elif choice == '19':
+                # Set forced frame overrides (per video / per category)
+                print("\n🎯 Set Forced Frame Overrides")
+                print("  Select ONE video from the list, then enter per-category frame counts.")
+
+                filter_str = input("Optional filter (leave empty for all): ").strip()
+                all_videos = manager.list_videos(
+                    filter_pattern=filter_str if filter_str else None,
+                    use_simple_search=True,
+                )
+
+                if not all_videos:
+                    print("No videos found.")
+                    continue
+
+                # Reuse curses picker — user picks one video
+                try:
+                    selected = select_items(
+                        items=[v for _, v in all_videos],
+                        title="Select video to set forced frames (Space toggle, Enter confirm)",
+                        get_label=lambda v: v['name'],
+                        get_details=lambda v: (
+                            format_categories_display(v.get('categories', []))
+                            + ("  ⚡ forced" if v.get('forced_frames') else "")
+                        ),
+                    )
+
+                    if selected is None or len(selected) == 0:
+                        print("❌ Cancelled or nothing selected")
+                        continue
+
+                    # Act on the first selected video only
+                    video_idx = all_videos[selected[0]][0]
+
+                except Exception as e:
+                    print(f"⚠️  Curses UI failed ({e}), falling back to ID input")
+                    manager.print_video_list(all_videos, max_display=20)
+                    try:
+                        video_idx = int(input("Video ID: ").strip())
+                    except ValueError:
+                        print("❌ Invalid ID")
+                        continue
+
+                manager.set_forced_frames(video_idx)
 
             else:
                 print("Invalid choice")

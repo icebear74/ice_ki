@@ -839,8 +839,7 @@ def extract_and_save_streaming_distributed(
                     _sps_actual = frames_examined / _elapsed
                     _log(
                         f"  📊 frame {current_frame:>6}  "
-                        f"FPS {_fps_actual:>6.1f}  "
-                        f"SPS {_sps_actual:>5.2f}  "
+                        f"FPS {_fps_actual:>6.1f}  SPS {_sps_actual:>6.2f}  "
                         f"(scenes completed: {frames_examined})"
                     )
 
