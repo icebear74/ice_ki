@@ -346,6 +346,12 @@ def build_assignments_per_category(
     same scene is saved to both ``master`` and ``universal``), but will
     **never** appear twice within the same category.
 
+    Because patch windows may overlap (the center frame is what is
+    reconstructed; adjacent windows with different centres are distinct
+    training samples), the minimum stride between two centres is just one
+    frame (``1 / fps``).  This allows up to ``usable * fps`` unique scene
+    positions, which is sufficient to reach any practical per-video target.
+
     Example – video in two categories::
 
         master:    5 000 patches → 5 000 unique timestamps, each → one format
@@ -357,7 +363,8 @@ def build_assignments_per_category(
         format_distribution: ``{category: {format_name: target_count}}``.
         duration:            Video duration in seconds.
         fps:                 Video frame rate.
-        n_frames:            Frames per patch window (default 7).
+        n_frames:            Frames per patch window (default 7, unused here
+                             but kept for API consistency).
 
     Returns:
         Sorted list of ``(center_frame_idx, category, format_name)``.
@@ -373,8 +380,10 @@ def build_assignments_per_category(
         if cat_total == 0 or usable <= 0:
             continue
 
-        # Per-category stride – minimum 0.5 s to avoid sub-frame collisions
-        stride = max(usable / cat_total, 0.5)
+        # Minimum stride: one frame apart.  Overlapping patch windows are
+        # fine because each centre frame is a distinct training sample.
+        min_stride = (1.0 / fps) if fps > 0 else 0.0
+        stride = max(usable / cat_total, min_stride)
 
         cat_ts: List[float] = []
         for i in range(cat_total):

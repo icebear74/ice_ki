@@ -488,6 +488,27 @@ class TestBuildAssignmentsPerCategory(unittest.TestCase):
             self.assertGreaterEqual(fi, half)
         print("✓ center frame indices are ≥ half (correct offset)")
 
+    def test_multi_format_full_target_on_53min_video(self):
+        """Regression: 53-min video + 3 formats summing to 15 000 must yield all 15 000 assignments.
+
+        The old code used min_stride=0.5 s, which limited a 53-min (3 185 s) video
+        to 3 185 / 0.5 = 6 370 unique positions and then scaled everything down to
+        ~6 372 assignments instead of 15 000.
+
+        Because patch windows may overlap (each centre frame is a distinct sample),
+        the real minimum stride is one frame (1/fps ≈ 0.04 s), giving up to
+        ~79 500 possible positions in 53 min — well above 15 000.
+        """
+        dist = {'master': {'540': 7500, '720': 3750, '720_169': 3750}}  # sum = 15 000
+        duration = 53 * 60 + 6  # 3 186 s  (≈ 53 min as reported in the bug)
+        result = build_assignments_per_category(dist, duration=float(duration), fps=25.0)
+        self.assertEqual(len(result), 15000,
+                         f"Expected 15 000 assignments for 53-min video, got {len(result)}")
+        # All frame indices within one category must be unique
+        frames = [r[0] for r in result if r[1] == 'master']
+        self.assertEqual(len(set(frames)), len(frames), "Duplicate frame indices found")
+        print(f"✓ 53-min video, 3-format target 15 000: all {len(result)} unique assignments achieved")
+
 
 # ─── filter chain constants ───────────────────────────────────────────────────
 
