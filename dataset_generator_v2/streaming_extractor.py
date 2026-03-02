@@ -845,6 +845,31 @@ def extract_and_save_streaming_distributed(
             for _line in stderr_lines[-20:]:
                 _log(f"  [ffmpeg] {_line}")
 
+    # GPU pipeline produced zero frames — most likely a runtime hw-accel failure
+    # (e.g. CUDA driver mismatch, scale_cuda format-negotiation bug, or FFmpeg
+    # silently falling back to software decode while the filtergraph still
+    # contains scale_cuda / hwdownload GPU filters).
+    # Retry transparently with the CPU-only pipeline so extraction still
+    # completes, rather than silently returning 0 patches.
+    if current_frame == 0 and (_full_gpu or _scale_gpu):
+        _log(
+            "⚠️  GPU pipeline produced no frames — retrying with CPU-only pipeline"
+        )
+        return extract_and_save_streaming_distributed(
+            video_path=video_path,
+            assignments=assignments,
+            n_frames=n_frames,
+            format_config=format_config,
+            base_dir=base_dir,
+            fps=fps,
+            logger=logger,
+            is_interesting_fn=is_interesting_fn,
+            is_black_frame_fn=is_black_frame_fn,
+            progress_fn=progress_fn,
+            use_cuda=False,
+            nice_level=nice_level,
+        )
+
     total = sum(patches_created.values())
     _log(
         f"✓ Streaming extraction done: {total} patches saved, "

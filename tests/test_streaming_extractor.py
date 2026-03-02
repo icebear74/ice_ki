@@ -721,5 +721,118 @@ class TestTonemapCudaAvailable(unittest.TestCase):
         print("✓ no CUDA filters → tonemap_cuda_available() returns False")
 
 
+class TestGpuCpuFallback(unittest.TestCase):
+    """
+    Tests for the automatic GPU→CPU fallback inside
+    extract_and_save_streaming_distributed.
+
+    When a GPU pipeline (scale_cuda or tonemap_cuda) produces zero frames
+    (current_frame stays at 0), the function must retry automatically with
+    use_cuda=False instead of silently returning an empty result.
+    """
+
+    def _make_args(self, tmpdir):
+        """Return a minimal valid kwargs dict for extract_and_save_streaming_distributed."""
+        import streaming_extractor as _se
+        return dict(
+            video_path="/fake/video.mkv",
+            assignments=[(0, "master", "4K_bicubic")],
+            n_frames=1,
+            format_config={"master": {"4K_bicubic": {"gt_size": 256, "lr_size": 64, "scale": 4}}},
+            base_dir=tmpdir,
+            fps=24.0,
+        )
+
+    @staticmethod
+    def _make_zero_frame_proc(stderr_msg=b""):
+        """Return a fake subprocess.Popen result that produces zero frames."""
+        import io
+
+        class FakeProc:
+            pid = 99999
+            stdout = io.BytesIO(b"")
+            stderr = io.BytesIO(stderr_msg)
+
+            def kill(self):
+                pass
+
+            def wait(self):
+                pass
+
+        return FakeProc()
+
+    def test_gpu_zero_frames_triggers_cpu_retry(self):
+        """
+        When the scale-GPU pipeline (scale_cuda available, CUDA available)
+        produces zero bytes from FFmpeg, extract_and_save_streaming_distributed
+        must make a second subprocess.Popen call using the CPU-only pipeline
+        (no -hwaccel argument).
+        """
+        import streaming_extractor as _se
+
+        popen_cmds = []
+
+        def fake_popen(cmd, **kwargs):
+            popen_cmds.append(list(cmd))
+            return self._make_zero_frame_proc(
+                b"[hwdownload] Invalid output format monow for hwframe download.\n"
+            )
+
+        import tempfile
+
+        with patch.object(_se, "_scale_cuda_available", True), \
+             patch.object(_se, "_tonemap_cuda_available", False), \
+             patch.object(_se, "_cuda_available", True):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                with patch("subprocess.Popen", side_effect=fake_popen):
+                    _se.extract_and_save_streaming_distributed(
+                        **self._make_args(tmpdir), use_cuda=True
+                    )
+
+        self.assertEqual(
+            len(popen_cmds), 2,
+            f"Expected 2 Popen calls (GPU attempt + CPU retry), got {len(popen_cmds)}: "
+            f"{popen_cmds}",
+        )
+        # First call: GPU pipeline — must include CUDA hw-accel args
+        self.assertIn("-hwaccel", popen_cmds[0],
+                      "First Popen call (GPU pipeline) must include -hwaccel")
+        # Second call: CPU retry — must NOT include any -hwaccel args
+        self.assertNotIn("-hwaccel", popen_cmds[1],
+                         "Second Popen call (CPU retry) must not include -hwaccel")
+        print("✓ GPU pipeline failure triggers CPU retry (use_cuda=False)")
+
+    def test_cpu_pipeline_does_not_trigger_retry(self):
+        """
+        When use_cuda=False (CPU-only pipeline) produces zero frames there must
+        be exactly one Popen call — the function must NOT loop back to the GPU
+        path or recurse further.
+        """
+        import streaming_extractor as _se
+
+        popen_call_count = [0]
+
+        def fake_popen(cmd, **kwargs):
+            popen_call_count[0] += 1
+            return self._make_zero_frame_proc(b"some cpu error\n")
+
+        import tempfile
+
+        with patch.object(_se, "_scale_cuda_available", False), \
+             patch.object(_se, "_tonemap_cuda_available", False), \
+             patch.object(_se, "_cuda_available", False):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                with patch("subprocess.Popen", side_effect=fake_popen):
+                    _se.extract_and_save_streaming_distributed(
+                        **self._make_args(tmpdir), use_cuda=False
+                    )
+
+        self.assertEqual(
+            popen_call_count[0], 1,
+            "CPU pipeline failure must NOT trigger a retry (exactly 1 Popen call)",
+        )
+        print("✓ CPU pipeline failure does not trigger retry (no recursion)")
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
