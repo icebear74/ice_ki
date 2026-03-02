@@ -32,6 +32,12 @@ from category_utils import (
 from interactive_selector import select_items, select_categories
 
 
+def _short_path(full_path: str, depth: int = 2) -> str:
+    """Return the last *depth* path segments of *full_path* (depth-2 = dir/subdir/file)."""
+    parts = Path(full_path).parts
+    return str(Path(*parts[-depth:])) if len(parts) >= depth else full_path
+
+
 class VideoManager:
     """Manager for video category assignments."""
     
@@ -158,17 +164,17 @@ class VideoManager:
             print("No videos found.")
             return
         
-        print(f"\n{'ID':<6} {'Name':<50} {'Categories':<40}")
-        print("-" * 100)
+        print(f"\n{'ID':<6} {'Name':<44} {'Path (depth-2)':<36} {'Categories'}")
+        print("-" * 120)
         
         for idx, (i, video) in enumerate(videos):
             if max_display and idx >= max_display:
                 print(f"... and {len(videos) - max_display} more (use -a to show all)")
                 break
             
-            name = video['name'][:48]
+            name = video['name'][:42]
+            path_short = _short_path(video.get('path', ''), depth=3)[:34]
             cats = video.get('categories', [])
-            # Format categories in brackets
             if cats:
                 cat_str = "[" + ", ".join(cats) + "]"
             else:
@@ -181,77 +187,116 @@ class VideoManager:
                 if forced_parts:
                     cat_str += "  ⚡ " + "  ".join(forced_parts)
             
-            print(f"{i:<6} {name:<50} {cat_str:<40}")
+            print(f"{i:<6} {name:<44} {path_short:<36} {cat_str}")
     
-    def set_forced_frames(self, video_idx: int) -> None:
+    def set_forced_frames(self, video_indices) -> None:
         """
-        Interactively set per-category forced frame overrides for one video.
+        Interactively set per-category forced frame overrides for one or more videos.
 
-        For each category the video belongs to the user is prompted for an
-        exact frame count (0 = no override, use normal weight-based distribution).
-        Non-zero values are stored as ``video['forced_frames'][category]``.
-        Zero values are removed so the JSON stays clean.
+        When multiple indices are given the user enters frame counts once and the
+        same values are applied to every selected video.  This makes bulk-setting
+        easy for entire series or collections.
+
+        For each category the user is prompted for an exact frame count:
+          - blank   → keep the existing value for that video
+          - 0       → remove override (back to auto proportional)
+          - N > 0   → force exactly N frames for this category
         """
-        if video_idx < 0 or video_idx >= len(self.videos):
-            print(f"❌ Invalid video index: {video_idx}")
+        # Accept both a single int and a list
+        if isinstance(video_indices, int):
+            video_indices = [video_indices]
+
+        # Validate all indices first
+        valid = []
+        for idx in video_indices:
+            if 0 <= idx < len(self.videos):
+                valid.append(idx)
+            else:
+                print(f"  ⚠️  Skipping invalid index {idx}")
+        if not valid:
+            print("❌ No valid video indices provided.")
             return
 
-        video = self.videos[video_idx]
-        name = video.get('name', '?')
-        cats = get_video_categories(video)
+        # Collect the union of all categories across selected videos
+        all_cats: List[str] = []
+        for idx in valid:
+            for cat in get_video_categories(self.videos[idx]):
+                if cat not in all_cats:
+                    all_cats.append(cat)
 
-        if not cats:
-            print(f"❌ '{name}' has no categories assigned — assign categories first.")
+        if not all_cats:
+            print("❌ None of the selected videos have categories assigned — assign categories first.")
             return
 
-        print(f"\n📹 Forced frame overrides for: {name}")
-        print(f"   Categories: {', '.join(cats)}")
-        print("   Enter the exact number of frames this video must contribute for each")
-        print("   category (0 or blank = use normal proportional distribution).\n")
+        names = [self.videos[idx].get('name', '?') for idx in valid]
+        if len(names) == 1:
+            print(f"\n📹 Forced frame overrides for: {names[0]}")
+        else:
+            print(f"\n📹 Forced frame overrides for {len(names)} videos:")
+            for n in names:
+                print(f"   • {n}")
+        print(f"   Categories: {', '.join(all_cats)}")
+        print("   Enter the exact number of frames each video must contribute for each")
+        print("   category (blank = keep existing, 0 = remove override / use auto).\n")
 
-        existing = video.get('forced_frames', {})
-        new_forced: Dict[str, int] = {}
-
-        for cat in cats:
-            current = existing.get(cat, 0)
-            prompt = f"  {cat} (current: {current:,}  |  0 = auto): "
+        # Collect new values from user (once, applied to all)
+        new_values: Dict[str, Optional[int]] = {}   # cat → int or None (= keep unchanged)
+        for cat in all_cats:
+            # Show current values if all selected videos agree
+            cur_values = [self.videos[idx].get('forced_frames', {}).get(cat, 0) for idx in valid]
+            if len(set(cur_values)) == 1:
+                current_str = f"{cur_values[0]:,}"
+            else:
+                current_str = "mixed"
+            prompt = f"  {cat} (current: {current_str}  |  0 = auto): "
             raw = input(prompt).strip()
 
             if not raw:
-                # Keep the existing value unchanged
-                if current > 0:
-                    new_forced[cat] = current
+                new_values[cat] = None   # keep unchanged
                 continue
 
             try:
                 value = int(raw)
             except ValueError:
-                print(f"  ⚠️  Invalid number '{raw}' — keeping current value ({current:,})")
-                if current > 0:
-                    new_forced[cat] = current
+                print(f"  ⚠️  Invalid number '{raw}' — keeping current values")
+                new_values[cat] = None
                 continue
 
             if value < 0:
-                print(f"  ⚠️  Negative value ignored — keeping current value ({current:,})")
-                if current > 0:
-                    new_forced[cat] = current
-            elif value > 0:
-                new_forced[cat] = value
-            # value == 0 → not stored → removed from forced_frames
+                print(f"  ⚠️  Negative value ignored — keeping current values")
+                new_values[cat] = None
+            else:
+                new_values[cat] = value   # 0 means "remove override"
 
-        # Persist (remove key entirely if nothing is forced)
-        if new_forced:
-            video['forced_frames'] = new_forced
-        else:
-            video.pop('forced_frames', None)
+        # Apply to every selected video
+        for idx in valid:
+            video = self.videos[idx]
+            forced = dict(video.get('forced_frames', {}))
+            for cat, value in new_values.items():
+                if value is None:
+                    continue   # keep unchanged
+                if value == 0:
+                    forced.pop(cat, None)
+                else:
+                    # Only apply if this video is actually in this category
+                    if cat in get_video_categories(video):
+                        forced[cat] = value
+            if forced:
+                video['forced_frames'] = forced
+            else:
+                video.pop('forced_frames', None)
 
         self.modified = True
 
-        if new_forced:
-            summary = "  ".join(f"{cat}: {n:,}" for cat, n in sorted(new_forced.items()))
-            print(f"\n✓ Forced frames set for '{name}': {summary}")
+        # Summary
+        set_cats = {cat: v for cat, v in new_values.items() if v is not None}
+        if set_cats:
+            parts = "  ".join(
+                f"{cat}: {v:,}" if v else f"{cat}: auto" for cat, v in sorted(set_cats.items())
+            )
+            print(f"\n✓ Applied to {len(valid)} video(s): {parts}")
         else:
-            print(f"\n✓ All forced frame overrides cleared for '{name}' (back to auto).")
+            print(f"\n✓ No changes made (all entries were blank).")
 
     def reset_all(self):
         """Reset all video assignments."""
@@ -407,25 +452,30 @@ class VideoManager:
         print("STATISTICS")
         print("="*60)
         
-        # Count by category
-        category_counts = {cat: 0 for cat in self.categories}
+        # Count by category; also collect forced-frames videos per category
+        category_counts: Dict[str, int] = {cat: 0 for cat in self.categories}
+        # cat → list of (name, short_path, {cat: forced_count})
+        forced_by_cat: Dict[str, list] = {cat: [] for cat in self.categories}
         unassigned = 0
         
         for video in self.videos:
             cats = video.get('categories', [])
-            if not cats:
+            cat_list = normalize_categories(cats)
+            if not cat_list:
                 unassigned += 1
             else:
-                # Handle both list and dict formats
-                if isinstance(cats, list):
-                    for cat in cats:
-                        if cat in category_counts:
-                            category_counts[cat] += 1
-                else:
-                    # Legacy dict format
-                    for cat in cats.keys():
-                        if cat in category_counts:
-                            category_counts[cat] += 1
+                for cat in cat_list:
+                    if cat in category_counts:
+                        category_counts[cat] += 1
+            forced = video.get('forced_frames', {})
+            if forced:
+                for cat, n in forced.items():
+                    if cat in forced_by_cat and n > 0:
+                        forced_by_cat[cat].append((
+                            video.get('name', '?'),
+                            _short_path(video.get('path', ''), depth=3),
+                            n,
+                        ))
         
         print(f"\nTotal videos: {len(self.videos)}")
         print(f"Unassigned: {unassigned}")
@@ -434,15 +484,21 @@ class VideoManager:
             target = self.config.get('category_patches', {}).get(cat, '?')
             target_str = f"{target:,}" if isinstance(target, int) else str(target)
             print(f"  {cat:<15}: {category_counts[cat]:>4} videos (target: {target_str})")
+            # List forced videos for this category
+            if forced_by_cat.get(cat):
+                forced_list = sorted(forced_by_cat[cat], key=lambda x: x[0].lower())
+                for name, short_path, n in forced_list:
+                    print(f"    ⚡ {name:<40} {short_path:<36}  forced: {n:>8,}")
     
     def manage_categories(self):
-        """Category management submenu: list, add, remove."""
+        """Category management submenu: list, add, remove, edit."""
         while True:
             print("\n── Category Management ───────────────────────────────────")
             print(f"  Configured categories: {', '.join(self.categories) or '(none)'}")
             print("  a) List categories")
             print("  b) Add category")
             print("  c) Remove category")
+            print("  d) Edit category target")
             print("  x) Back")
             sub = input("Choice: ").strip().lower()
 
@@ -454,6 +510,8 @@ class VideoManager:
                 self._add_category()
             elif sub == 'c':
                 self._remove_category()
+            elif sub == 'd':
+                self._edit_category()
             else:
                 print("Invalid choice")
 
@@ -492,6 +550,36 @@ class VideoManager:
         self.categories = sorted(self.categories + [name])
         self.modified = True
         print(f"✓ Added category '{name}' with target {target:,}")
+
+    def _edit_category(self):
+        """Edit the patch target count for an existing category."""
+        if not self.categories:
+            print("No categories configured.")
+            return
+        self._list_categories()
+        name = input("Category to edit: ").strip()
+        if name not in self.categories:
+            print(f"❌ Category '{name}' not found")
+            return
+
+        patches = self.config.setdefault('category_patches', {})
+        current = patches.get(name, 0)
+        val_str = input(f"New patch target (current: {current:,}): ").strip()
+        if not val_str:
+            print("No change.")
+            return
+        try:
+            new_target = int(val_str)
+        except ValueError:
+            print("❌ Invalid number")
+            return
+        if new_target <= 0:
+            print("❌ Target must be a positive integer")
+            return
+
+        patches[name] = new_target
+        self.modified = True
+        print(f"✓ Category '{name}' target updated: {current:,} → {new_target:,}")
 
     def _remove_category(self):
         """Remove a category and unassign all videos from it."""
@@ -1121,27 +1209,34 @@ def main():
             elif choice == '19':
                 # Set forced frame overrides (per video / per category)
                 print("\n🎯 Set Forced Frame Overrides")
-                print("  Select ONE video from the list, then enter per-category frame counts.")
+                print("  Select one or more videos, then enter per-category frame counts.")
+                print("  Only videos with at least one category assigned are shown.")
 
-                filter_str = input("Optional filter (leave empty for all): ").strip()
-                all_videos = manager.list_videos(
+                filter_str = input("Optional filter (leave empty for all assigned videos): ").strip()
+                # Only show videos that have at least one category assigned
+                assigned_videos = manager.list_videos(
                     filter_pattern=filter_str if filter_str else None,
                     use_simple_search=True,
                 )
+                assigned_videos = [(i, v) for i, v in assigned_videos if get_video_categories(v)]
 
-                if not all_videos:
-                    print("No videos found.")
+                if not assigned_videos:
+                    print("No assigned videos found.")
                     continue
 
-                # Reuse curses picker — user picks one video
+                # Curses multi-select picker
                 try:
                     selected = select_items(
-                        items=[v for _, v in all_videos],
-                        title="Select video to set forced frames (Space toggle, Enter confirm)",
+                        items=[v for _, v in assigned_videos],
+                        title=(
+                            f"Select videos for forced frames — {len(assigned_videos)} available "
+                            "(Space toggle, Enter confirm, Esc cancel)"
+                        ),
                         get_label=lambda v: v['name'],
                         get_details=lambda v: (
-                            format_categories_display(v.get('categories', []))
-                            + ("  ⚡ forced" if v.get('forced_frames') else "")
+                            _short_path(v.get('path', ''), depth=3)
+                            + "  [" + ", ".join(get_video_categories(v)) + "]"
+                            + ("  ⚡" if v.get('forced_frames') else "")
                         ),
                     )
 
@@ -1149,19 +1244,19 @@ def main():
                         print("❌ Cancelled or nothing selected")
                         continue
 
-                    # Act on the first selected video only
-                    video_idx = all_videos[selected[0]][0]
+                    video_indices = [assigned_videos[s][0] for s in selected]
 
                 except Exception as e:
                     print(f"⚠️  Curses UI failed ({e}), falling back to ID input")
-                    manager.print_video_list(all_videos, max_display=20)
+                    manager.print_video_list(assigned_videos, max_display=20)
+                    ids_str = input("Video ID(s) (comma-separated): ").strip()
                     try:
-                        video_idx = int(input("Video ID: ").strip())
+                        video_indices = [int(x.strip()) for x in ids_str.split(',')]
                     except ValueError:
                         print("❌ Invalid ID")
                         continue
 
-                manager.set_forced_frames(video_idx)
+                manager.set_forced_frames(video_indices)
 
             else:
                 print("Invalid choice")

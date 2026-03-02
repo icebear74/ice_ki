@@ -280,5 +280,239 @@ class TestProportionalDistributionWithForcedFrames(unittest.TestCase):
         print("✓ all videos forced → each gets its exact value")
 
 
+# ---------------------------------------------------------------------------
+# set_forced_frames() – multi-select behaviour
+# ---------------------------------------------------------------------------
+
+class TestSetForcedFramesMultiSelect(unittest.TestCase):
+
+    def _manager_with_videos(self, videos):
+        with tempfile.NamedTemporaryFile(suffix='.json', delete=False, mode='w') as f:
+            json.dump(_make_config(videos), f)
+            path = f.name
+        mgr = VideoManager(path)
+        mgr.load()
+        return mgr, path
+
+    def test_same_value_applied_to_multiple_videos(self):
+        """When multiple indices are passed, all get the same forced value."""
+        mgr, _ = self._manager_with_videos([
+            {'name': 'Ep1', 'path': '/ep1.mkv', 'categories': ['master']},
+            {'name': 'Ep2', 'path': '/ep2.mkv', 'categories': ['master']},
+            {'name': 'Ep3', 'path': '/ep3.mkv', 'categories': ['master']},
+        ])
+        with patch('builtins.input', return_value='5000'):
+            mgr.set_forced_frames([0, 1, 2])
+
+        for i in range(3):
+            self.assertEqual(mgr.videos[i].get('forced_frames', {}).get('master'), 5000)
+        print("✓ multi-select: same forced value applied to all selected videos")
+
+    def test_zero_clears_all_selected(self):
+        """Entering 0 removes the override from every selected video."""
+        mgr, _ = self._manager_with_videos([
+            {'name': 'Ep1', 'path': '/ep1.mkv', 'categories': ['master'],
+             'forced_frames': {'master': 3000}},
+            {'name': 'Ep2', 'path': '/ep2.mkv', 'categories': ['master'],
+             'forced_frames': {'master': 3000}},
+        ])
+        with patch('builtins.input', return_value='0'):
+            mgr.set_forced_frames([0, 1])
+
+        for i in range(2):
+            self.assertNotIn('forced_frames', mgr.videos[i])
+        print("✓ multi-select: 0 clears override from all selected videos")
+
+    def test_category_not_in_video_is_skipped(self):
+        """Value for a category the video doesn't belong to must NOT be applied."""
+        mgr, _ = self._manager_with_videos([
+            {'name': 'Ep1', 'path': '/ep1.mkv', 'categories': ['master']},   # no 'space'
+            {'name': 'Ep2', 'path': '/ep2.mkv', 'categories': ['master', 'space']},
+        ])
+        # User enters 2000 for master, 1000 for space
+        inputs = iter(['2000', '1000'])
+        with patch('builtins.input', side_effect=inputs):
+            mgr.set_forced_frames([0, 1])
+
+        # Ep1 should only have master (not space)
+        self.assertEqual(mgr.videos[0].get('forced_frames', {}).get('master'), 2000)
+        self.assertNotIn('space', mgr.videos[0].get('forced_frames', {}))
+        # Ep2 should have both
+        self.assertEqual(mgr.videos[1].get('forced_frames', {}).get('master'), 2000)
+        self.assertEqual(mgr.videos[1].get('forced_frames', {}).get('space'), 1000)
+        print("✓ multi-select: category not assigned to video is correctly skipped")
+
+    def test_int_still_accepted(self):
+        """Passing a single int (backwards-compat) must still work."""
+        mgr, _ = self._manager_with_videos([
+            {'name': 'Film', 'path': '/film.mkv', 'categories': ['master']},
+        ])
+        with patch('builtins.input', return_value='8888'):
+            mgr.set_forced_frames(0)   # single int, not a list
+
+        self.assertEqual(mgr.videos[0].get('forced_frames', {}).get('master'), 8888)
+        print("✓ single int still accepted (backwards-compatible)")
+
+
+# ---------------------------------------------------------------------------
+# show_statistics() – forced-video details
+# ---------------------------------------------------------------------------
+
+class TestShowStatisticsForcedVideos(unittest.TestCase):
+
+    def _capture_stats(self, videos):
+        with tempfile.NamedTemporaryFile(suffix='.json', delete=False, mode='w') as f:
+            json.dump(_make_config(videos), f)
+            path = f.name
+        mgr = VideoManager(path)
+        mgr.load()
+
+        import io
+        buf = io.StringIO()
+        with patch('sys.stdout', buf):
+            mgr.show_statistics()
+        return buf.getvalue()
+
+    def test_forced_video_listed_under_category(self):
+        output = self._capture_stats([
+            {'name': 'A', 'path': '/movies/action/a.mkv',
+             'categories': ['master'], 'forced_frames': {'master': 12345}},
+            {'name': 'B', 'path': '/b.mkv', 'categories': ['master']},
+        ])
+        self.assertIn('⚡', output)
+        self.assertIn('12,345', output)
+        print("✓ statistics lists forced video with frame count under its category")
+
+    def test_non_forced_video_not_listed(self):
+        output = self._capture_stats([
+            {'name': 'Normal', 'path': '/n.mkv', 'categories': ['master']},
+        ])
+        self.assertNotIn('⚡', output)
+        print("✓ statistics: non-forced video does not produce ⚡ line")
+
+
+# ---------------------------------------------------------------------------
+# _short_path() helper
+# ---------------------------------------------------------------------------
+
+class TestShortPath(unittest.TestCase):
+
+    def test_depth_3_returns_last_3_segments(self):
+        from video_manager import _short_path
+        result = _short_path('/mnt/data/series/s01/episode01.mkv', depth=3)
+        self.assertEqual(result, 'series/s01/episode01.mkv')
+        print("✓ _short_path depth=3 returns last 3 segments")
+
+    def test_short_path_shorter_than_depth(self):
+        from video_manager import _short_path
+        result = _short_path('s01/ep.mkv', depth=3)
+        # Fewer segments than depth → return full path unchanged
+        self.assertEqual(result, 's01/ep.mkv')
+        print("✓ _short_path returns full path when shorter than depth")
+
+
+# ---------------------------------------------------------------------------
+# print_video_list() includes path
+# ---------------------------------------------------------------------------
+
+class TestPrintVideoListShowsPath(unittest.TestCase):
+
+    def _capture_list(self, video):
+        with tempfile.NamedTemporaryFile(suffix='.json', delete=False, mode='w') as f:
+            json.dump(_make_config([video]), f)
+            path = f.name
+        mgr = VideoManager(path)
+        mgr.load()
+        import io
+        buf = io.StringIO()
+        with patch('sys.stdout', buf):
+            mgr.print_video_list(mgr.list_videos())
+        return buf.getvalue()
+
+    def test_depth2_segment_shown(self):
+        output = self._capture_list(
+            {'name': 'Ep1', 'path': '/mnt/data/MySeries/S01/ep01.mkv',
+             'categories': ['master']}
+        )
+        # At depth=3 we expect "MySeries/S01/ep01.mkv" (or a prefix of it)
+        self.assertIn('MySeries', output)
+        print("✓ print_video_list shows depth-3 path segment in output")
+
+
+# ---------------------------------------------------------------------------
+# _edit_category() – change patch target of existing category
+# ---------------------------------------------------------------------------
+
+class TestEditCategory(unittest.TestCase):
+
+    def _manager(self):
+        cfg = {
+            'videos': [],
+            'category_patches': {'master': 25000, 'space': 10000},
+            'output_patches': {},
+            'source_dirs': [],
+        }
+        with tempfile.NamedTemporaryFile(suffix='.json', delete=False, mode='w') as f:
+            json.dump(cfg, f)
+            path = f.name
+        mgr = VideoManager(path)
+        mgr.load()
+        return mgr
+
+    def test_edit_updates_target(self):
+        """_edit_category updates the patch target for an existing category."""
+        mgr = self._manager()
+        inputs = iter(['master', '99000'])
+        with patch('builtins.input', side_effect=inputs):
+            mgr._edit_category()
+
+        self.assertEqual(mgr.config['category_patches']['master'], 99000)
+        self.assertTrue(mgr.modified)
+        print("✓ _edit_category updates target correctly")
+
+    def test_edit_unknown_category_prints_error(self):
+        """Entering an unknown category name must not raise."""
+        mgr = self._manager()
+        inputs = iter(['nonexistent'])
+        with patch('builtins.input', side_effect=inputs):
+            mgr._edit_category()
+
+        # original values unchanged
+        self.assertEqual(mgr.config['category_patches']['master'], 25000)
+        print("✓ _edit_category with unknown name does not raise")
+
+    def test_edit_blank_value_keeps_current(self):
+        """Pressing Enter (blank value) must leave the target unchanged."""
+        mgr = self._manager()
+        inputs = iter(['space', ''])
+        with patch('builtins.input', side_effect=inputs):
+            mgr._edit_category()
+
+        self.assertEqual(mgr.config['category_patches']['space'], 10000)
+        print("✓ _edit_category blank input keeps current target")
+
+    def test_edit_invalid_number_prints_error(self):
+        """Non-numeric input must not raise and must not change the target."""
+        mgr = self._manager()
+        inputs = iter(['master', 'abc'])
+        with patch('builtins.input', side_effect=inputs):
+            mgr._edit_category()
+
+        self.assertEqual(mgr.config['category_patches']['master'], 25000)
+        print("✓ _edit_category invalid number does not crash and keeps target")
+
+    def test_edit_zero_rejected(self):
+        """Zero or negative values must be rejected."""
+        mgr = self._manager()
+        inputs = iter(['master', '0'])
+        with patch('builtins.input', side_effect=inputs):
+            mgr._edit_category()
+
+        self.assertEqual(mgr.config['category_patches']['master'], 25000)
+        print("✓ _edit_category zero target rejected")
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
+
+
