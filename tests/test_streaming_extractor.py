@@ -534,21 +534,29 @@ class TestFilterConstants(unittest.TestCase):
         )
         print("✓ _TONEMAP_FILTER_CUDA ends with bgr24")
 
-    def test_tonemap_cuda_uses_hwdownload_format_nv12(self):
+    def test_tonemap_cuda_uses_scale_to_break_hwdownload_negotiation(self):
         import streaming_extractor as _se
-        # Must use hwdownload=format=nv12 (not bare hwdownload) so FFmpeg pins
-        # the DMA copy to nv12 instead of negotiating yuv420p from the CUDA
-        # surface — which would crash with "Invalid output format yuv420p".
-        self.assertIn("hwdownload=format=nv12", _se._TONEMAP_FILTER_CUDA)
-        print("✓ _TONEMAP_FILTER_CUDA uses hwdownload=format=nv12")
+        # hwdownload=format=nv12 is NOT used because older FFmpeg builds do not
+        # support the 'format' option on hwdownload and crash with:
+        #   Error applying option 'format' to filter 'hwdownload': Option not found
+        # Instead, bare hwdownload is followed by scale=iw:ih which:
+        #   1. accepts NV12 input (libswscale), breaking the backward negotiation
+        #      that would otherwise ask hwdownload to produce yuv420p directly
+        #      (causing "Invalid output format yuv420p for hwframe download")
+        #   2. converts NV12→YUV420P in software when downstream requests it
+        self.assertNotIn("hwdownload=format=", _se._TONEMAP_FILTER_CUDA)
+        self.assertIn("hwdownload,", _se._TONEMAP_FILTER_CUDA)
+        self.assertIn("scale=iw:ih,", _se._TONEMAP_FILTER_CUDA)
+        print("✓ _TONEMAP_FILTER_CUDA uses bare hwdownload + scale=iw:ih (all-FFmpeg-version fix)")
 
     def test_scale_cuda_filter_contains_hwdownload(self):
         import streaming_extractor as _se
-        # Must use hwdownload=format=nv12 (not bare hwdownload) so FFmpeg pins
-        # the DMA copy to nv12 instead of negotiating yuv420p from the CUDA
-        # surface — which would crash with "Invalid output format yuv420p".
-        self.assertIn("hwdownload=format=nv12", _se._TONEMAP_FILTER_SCALE_CUDA)
-        print("✓ _TONEMAP_FILTER_SCALE_CUDA uses hwdownload=format=nv12")
+        # bare hwdownload + scale=iw:ih breaks the backward format negotiation;
+        # see test_tonemap_cuda_uses_scale_to_break_hwdownload_negotiation.
+        self.assertNotIn("hwdownload=format=", _se._TONEMAP_FILTER_SCALE_CUDA)
+        self.assertIn("hwdownload,", _se._TONEMAP_FILTER_SCALE_CUDA)
+        self.assertIn("scale=iw:ih,", _se._TONEMAP_FILTER_SCALE_CUDA)
+        print("✓ _TONEMAP_FILTER_SCALE_CUDA uses bare hwdownload + scale=iw:ih (all-FFmpeg-version fix)")
 
     def test_scale_cuda_filter_ends_with_bgr24(self):
         import streaming_extractor as _se
