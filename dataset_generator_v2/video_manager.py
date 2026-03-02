@@ -410,16 +410,13 @@ class VideoManager:
             video_list = [v for _, v in sorted_vids]
 
             def get_video_label(video):
+                # Single-column: depth-2 parent dirs + filename (e.g. series/s01/ep01.mkv)
                 return _short_path(video.get('path', ''), depth=3)
 
             def get_video_details(video):
-                video_id = next((i for i, v in sorted_vids if v == video), None)
+                # Right side: categories only — keep it short so the label isn't squeezed
                 cats = video.get('categories', [])
-                cat_str = format_categories_display(cats)
-                name = video.get('name', '?')
-                if video_id is not None:
-                    return f"[{video_id}] {name}  {cat_str}"
-                return f"{name}  {cat_str}"
+                return format_categories_display(cats)
 
             selected_indices = select_items(
                 items=video_list,
@@ -1058,7 +1055,7 @@ def main():
                             items=[v for _, v in sorted_vids],
                             title="Select videos (Space to toggle, Enter to confirm)",
                             get_label=lambda v: _short_path(v.get('path', ''), depth=3),
-                            get_details=lambda v: v['name'] + '  ' + format_categories_display(v.get('categories', []))
+                            get_details=lambda v: format_categories_display(v.get('categories', []))
                         )
                         
                         if selected is None:
@@ -1255,8 +1252,7 @@ def main():
                         ),
                         get_label=lambda v: _short_path(v.get('path', ''), depth=3),
                         get_details=lambda v: (
-                            v['name']
-                            + '  [' + ', '.join(get_video_categories(v)) + ']'
+                            '[' + ', '.join(get_video_categories(v)) + ']'
                             + ('  ⚡' if v.get('forced_frames') else '')
                         ),
                     )
