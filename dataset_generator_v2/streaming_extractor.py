@@ -34,6 +34,7 @@ import os
 import random
 import subprocess
 import threading
+import time
 from collections import deque
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
@@ -737,12 +738,19 @@ def extract_and_save_streaming_distributed(
 
     try:
         current_frame: int = 0
+        _t_start: Optional[float] = None   # set on first frame (excludes startup)
+        _log_interval: int = 100           # log throughput every N raw frames
 
         while pending_idx < len(pending_centers):
             raw = process.stdout.read(frame_bytes)
             if len(raw) < frame_bytes:
                 _log("⚠️  Video stream ended before all assignments were processed")
                 break
+
+            # Start the clock on the very first frame so FFmpeg startup time
+            # (device init, demux, codec open) is excluded from the FPS figure.
+            if _t_start is None:
+                _t_start = time.monotonic()
 
             frame = np.frombuffer(raw, dtype=np.uint8).reshape(
                 (STREAM_HEIGHT, STREAM_WIDTH, 3)
@@ -821,6 +829,21 @@ def extract_and_save_streaming_distributed(
 
             current_frame += 1
 
+            # Periodic throughput log.
+            # FPS = raw decoded frames per second (pipeline throughput).
+            # SPS = scene-sets completed per second (= assignments processed / s).
+            if _t_start is not None and current_frame % _log_interval == 0:
+                _elapsed = time.monotonic() - _t_start
+                if _elapsed > 0:
+                    _fps_actual = current_frame / _elapsed
+                    _sps_actual = frames_examined / _elapsed
+                    _log(
+                        f"  📊 frame {current_frame:>6}  "
+                        f"FPS {_fps_actual:>6.1f}  "
+                        f"SPS {_sps_actual:>5.2f}  "
+                        f"(scenes completed: {frames_examined})"
+                    )
+
             # Early exit once the last required frame has been read
             if current_frame > last_needed:
                 break
@@ -867,8 +890,21 @@ def extract_and_save_streaming_distributed(
         )
 
     total = sum(patches_created.values())
-    _log(
-        f"✓ Streaming extraction done: {total} patches saved, "
-        f"{frames_examined} assignments examined"
+    _elapsed_total = (
+        (time.monotonic() - _t_start) if _t_start is not None else 0.0
     )
+    if _elapsed_total > 0:
+        _fps_final = current_frame / _elapsed_total
+        _sps_final = frames_examined / _elapsed_total
+        _log(
+            f"✓ Streaming extraction done: {total} patches saved, "
+            f"{frames_examined} assignments examined, "
+            f"{current_frame} frames decoded — "
+            f"FPS {_fps_final:.1f}  SPS {_sps_final:.2f}"
+        )
+    else:
+        _log(
+            f"✓ Streaming extraction done: {total} patches saved, "
+            f"{frames_examined} assignments examined"
+        )
     return patches_created
