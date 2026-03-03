@@ -2201,7 +2201,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             if (files.length === 0) {
                 el.textContent = '–';
             } else {
-                el.textContent = files.join('\n');
+                el.textContent = files.join('\\n');
             }
         }
         
