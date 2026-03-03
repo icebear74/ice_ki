@@ -192,20 +192,6 @@ def main():
                     "val_lr":   "patches/{size_key}/LR_7frames"
                 }
             },
-            "model": {
-                "n_frames": 7,
-                "n_feats": config.get('N_FEATS', 72),
-                "n_blocks": config.get('N_BLOCKS', 26),
-                "precision": "float16" if config.get('USE_AMP', False) else "float32"
-            },
-            "training": {
-                "effective_batch_size": config.get('BATCH_SIZE', 1) * config.get('ACCUMULATION_STEPS', 6),
-                "adaptive_batch": {
-                    "540":     {"batch": config.get('BATCH_SIZE', 1), "accum": config.get('ACCUMULATION_STEPS', 6)},
-                    "720_169": {"batch": config.get('BATCH_SIZE', 1), "accum": config.get('ACCUMULATION_STEPS', 6)},
-                    "720":     {"batch": config.get('BATCH_SIZE', 1), "accum": config.get('ACCUMULATION_STEPS', 6)}
-                }
-            },
             "validation": {
                 "sizes": ["540", "720_169", "720"]
             }
@@ -437,11 +423,12 @@ def main():
             with open(runtime_config_path, 'r') as f:
                 rt_config = json.load(f)
             
-            # New runtime_config.json structure (no longer uses size_distribution):
+            # New runtime_config.json structure:
             # {
             #   "data": {"root": "...", "dataset_name": "master"},
-            #   "training": {"adaptive_batch": {"540": {"batch": 1, "accum": 6}, ...}}
+            #   "validation": {"sizes": ["540", "720_169", "720"]}
             # }
+            # model/training params come from config.py (no duplication)
             
             # Auto-detect which sizes are available by checking for directories
             data_config = rt_config.get('data', {})
@@ -540,7 +527,7 @@ def main():
                 sizes_config[size_key] = {
                     'enabled': True,  # All detected sizes are enabled
                     'distribution': 1.0 / len(available),  # Equal distribution (not used for weighting)
-                    'batch_size': batch_info.get('batch', 1)
+                    'batch_size': batch_info.get('batch', config.get('BATCH_SIZE', 1))
                 }
             
             # ── STARTUP DIAGNOSTIC ──────────────────────────────────────────
