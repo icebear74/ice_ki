@@ -634,8 +634,120 @@ class TestFilterConstants(unittest.TestCase):
         )
         print("✓ _TONEMAP_FILTER ends with bgr24")
 
+    def test_sdr_filter_no_zscale_or_tonemap(self):
+        """_SDR_FILTER must NOT contain zscale or tonemap.
 
-# ─── cuda_available ───────────────────────────────────────────────────────────
+        Applying the linearisation/tonemap chain to SDR content would
+        re-gamma-encode values that are already in BT.709, brightening the
+        image.  The SDR chain must be a plain scale + format conversion.
+        """
+        import streaming_extractor as _se
+        self.assertNotIn("zscale", _se._SDR_FILTER)
+        self.assertNotIn("tonemap", _se._SDR_FILTER)
+        print("✓ _SDR_FILTER contains no zscale/tonemap (correct for SDR content)")
+
+    def test_sdr_filter_scale_cuda_no_zscale_or_tonemap(self):
+        import streaming_extractor as _se
+        self.assertNotIn("zscale", _se._SDR_FILTER_SCALE_CUDA)
+        self.assertNotIn("tonemap", _se._SDR_FILTER_SCALE_CUDA)
+        print("✓ _SDR_FILTER_SCALE_CUDA contains no zscale/tonemap")
+
+
+# ─── is_hdr_transfer ──────────────────────────────────────────────────────────
+
+class TestIsHdrTransfer(unittest.TestCase):
+    """Unit tests for is_hdr_transfer()."""
+
+    def test_smpte2084_is_hdr(self):
+        from streaming_extractor import is_hdr_transfer
+        self.assertTrue(is_hdr_transfer("smpte2084"))
+        print("✓ smpte2084 recognised as HDR")
+
+    def test_hlg_is_hdr(self):
+        from streaming_extractor import is_hdr_transfer
+        self.assertTrue(is_hdr_transfer("hlg"))
+        self.assertTrue(is_hdr_transfer("arib-std-b67"))
+        print("✓ hlg / arib-std-b67 recognised as HDR")
+
+    def test_bt709_is_sdr(self):
+        from streaming_extractor import is_hdr_transfer
+        self.assertFalse(is_hdr_transfer("bt709"))
+        print("✓ bt709 recognised as SDR")
+
+    def test_none_is_sdr(self):
+        from streaming_extractor import is_hdr_transfer
+        self.assertFalse(is_hdr_transfer(None))
+        self.assertFalse(is_hdr_transfer(""))
+        print("✓ None/empty string defaults to SDR (safe)")
+
+    def test_case_insensitive(self):
+        from streaming_extractor import is_hdr_transfer
+        self.assertTrue(is_hdr_transfer("SMPTE2084"))
+        self.assertTrue(is_hdr_transfer("HLG"))
+        print("✓ is_hdr_transfer is case-insensitive")
+
+    def test_unknown_transfer_is_sdr(self):
+        from streaming_extractor import is_hdr_transfer
+        self.assertFalse(is_hdr_transfer("bt601"))
+        self.assertFalse(is_hdr_transfer("bt2020_10"))
+        print("✓ bt601/bt2020_10 not treated as HDR (BT.2020 primaries ≠ HDR transfer)")
+
+
+# ─── build_vf_filter ──────────────────────────────────────────────────────────
+
+class TestBuildVfFilter(unittest.TestCase):
+    """Unit tests for build_vf_filter()."""
+
+    def test_hdr_cpu_returns_tonemap_filter(self):
+        """HDR + no CUDA → must include zscale + tonemap."""
+        from streaming_extractor import build_vf_filter
+        f = build_vf_filter(is_hdr=True, use_cuda=False)
+        self.assertIn("zscale=t=linear", f)
+        self.assertIn("tonemap=tonemap=mobius", f)
+        self.assertTrue(f.endswith("bgr24"))
+        print("✓ build_vf_filter(HDR, no CUDA) returns tonemap chain")
+
+    def test_sdr_cpu_returns_plain_scale(self):
+        """SDR + no CUDA → must NOT include zscale or tonemap."""
+        from streaming_extractor import build_vf_filter
+        f = build_vf_filter(is_hdr=False, use_cuda=False)
+        self.assertNotIn("zscale", f)
+        self.assertNotIn("tonemap", f)
+        self.assertIn("scale=", f)
+        self.assertTrue(f.endswith("bgr24"))
+        print("✓ build_vf_filter(SDR, no CUDA) returns plain scale chain")
+
+    def test_hdr_always_ends_bgr24(self):
+        from streaming_extractor import build_vf_filter
+        self.assertTrue(build_vf_filter(is_hdr=True, use_cuda=False).endswith("bgr24"))
+        print("✓ HDR filter chain ends with bgr24")
+
+    def test_sdr_always_ends_bgr24(self):
+        from streaming_extractor import build_vf_filter
+        self.assertTrue(build_vf_filter(is_hdr=False, use_cuda=False).endswith("bgr24"))
+        print("✓ SDR filter chain ends with bgr24")
+
+    def test_png_output_replace_no_duplicate_scale(self):
+        """Replacing format=bgr24 with format=yuv420p must not produce a duplicate scale.
+
+        extract_frames_uhd replaces format=bgr24 → format=yuv420p so FFmpeg
+        can write PNG files instead of piping raw BGR24.  Because both
+        _TONEMAP_FILTER and _SDR_FILTER already contain a resize scale= step,
+        the replacement must be *format-only* (no extra scale= injected).
+        """
+        from streaming_extractor import build_vf_filter, STREAM_WIDTH, STREAM_HEIGHT
+        resize_token = f"scale={STREAM_WIDTH}:{STREAM_HEIGHT}"
+        for is_hdr in (True, False):
+            f = build_vf_filter(is_hdr=is_hdr, use_cuda=False)
+            f_png = f.replace("format=bgr24", "format=yuv420p")
+            # Exactly one resize scale= step (zscale= is a different filter)
+            self.assertEqual(
+                f_png.count(resize_token), 1,
+                f"is_hdr={is_hdr}: expected 1 resize step after bgr24→yuv420p: {f_png!r}",
+            )
+            self.assertIn("format=yuv420p", f_png)
+            self.assertNotIn("format=bgr24", f_png)
+        print("✓ bgr24→yuv420p replacement does not produce duplicate resize step")
 
 class TestCudaAvailable(unittest.TestCase):
 

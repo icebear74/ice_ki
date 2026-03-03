@@ -38,6 +38,8 @@ from streaming_extractor import (
     build_assignments_per_category,
     extract_and_save_streaming_distributed,
     is_black_frame as _streaming_is_black_frame,
+    is_hdr_transfer,
+    build_vf_filter,
 )
 from utils.progress_tracker import ProgressTracker
 from utils.dataset_display import draw_dataset_ui
@@ -445,11 +447,13 @@ class DatasetGeneratorV2UHD:
                             duration = metadata['duration']
                             durations[video_path] = duration
                             total_duration += duration
-                            
+
+                            hdr_label = "HDR" if metadata.get('is_hdr', True) else "SDR"
+                            ct = metadata.get('color_transfer') or 'unknown'
                             progress.update(task, description=f"Scanned: {video_name[:40]}...", advance=1)
                             # Log with newline for clean output
-                            print(f"Scanned: {video_name}: {duration:.1f}s")
-                            self.logger.debug(f"Scanned {video_name}: {duration:.1f}s")
+                            print(f"Scanned: {video_name}: {duration:.1f}s [{hdr_label}, {ct}]")
+                            self.logger.debug(f"Scanned {video_name}: {duration:.1f}s [{hdr_label}, {ct}]")
                         else:
                             self.logger.warning(f"Could not get duration for: {video_name}")
                             errors += 1
@@ -648,10 +652,16 @@ class DatasetGeneratorV2UHD:
         
         return temp_subdir
     
-    def extract_frames_uhd(self, video_path: str, start_time: float, n_frames: int = 7) -> Optional[Dict]:
+    def extract_frames_uhd(self, video_path: str, start_time: float, n_frames: int = 7,
+                           is_hdr: Optional[bool] = None) -> Optional[Dict]:
         """
-        Extract frames with HDR→SDR tonemap to DISK (memory-efficient).
-        
+        Extract frames to DISK (memory-efficient).
+
+        Applies the HDR→SDR tonemap chain when the source is HDR, or a
+        lightweight scale-only chain when it is SDR.  When *is_hdr* is
+        ``None`` (default) the color format is determined automatically by
+        calling ``_get_video_metadata``.
+
         MEMORY OPTIMIZATION: Returns PATHS to frames (NOT loaded into memory).
         Caller must load frames when needed and clean up temp_dir when done.
         
@@ -659,6 +669,9 @@ class DatasetGeneratorV2UHD:
             video_path: Path to video
             start_time: Start timestamp
             n_frames: Number of frames (7 or 5)
+            is_hdr: Override for HDR detection.  Pass ``True``/``False`` to
+                    skip the metadata look-up (useful when the caller already
+                    has the value from ``_get_video_metadata``).
         
         Returns:
             Dict with 'frame_paths' (list of paths) and 'temp_dir' (must be cleaned up)
@@ -666,20 +679,23 @@ class DatasetGeneratorV2UHD:
         """
         temp_dir = None
         try:
+            # Determine HDR/SDR if not supplied by caller
+            if is_hdr is None:
+                meta = self._get_video_metadata(video_path)
+                is_hdr = meta.get('is_hdr', True) if meta else True
+
             # Use configured temp directory
             temp_dir = self._create_temp_dir("extract_single")
             output_pattern = os.path.join(temp_dir, "frame_%04d.png")
-            
-            # UHD tonemap filter with 1080p scaling
-            vf_filter = (
-                "zscale=t=linear:npl=100,"
-                "format=gbrpf32le,"
-                "zscale=p=bt709,"
-                "tonemap=tonemap=mobius:desat=0,"
-                "zscale=t=bt709:m=bt709:range=full,"
-                "scale=1920:1080:flags=lanczos,"
-                "format=yuv420p"
-            )
+
+            # Build the correct filter chain for this video's color format.
+            # extract_frames_uhd uses CPU-only (no CUDA) for stability and
+            # because it processes only a few frames at a time.
+            # Replace bgr24 with yuv420p so ffmpeg can write PNG files.
+            # (Both _TONEMAP_FILTER and _SDR_FILTER already contain the scale
+            # step, so only the final pixel-format needs to change.)
+            vf_filter = build_vf_filter(is_hdr=is_hdr, use_cuda=False)
+            vf_filter = vf_filter.replace("format=bgr24", "format=yuv420p")
             
             # CPU-only mode (no CUDA) - more stable and reliable
             # FIXED: Added nice priority for lower system impact
@@ -1089,13 +1105,21 @@ class DatasetGeneratorV2UHD:
         lr_versions = self.settings.get('lr_versions', ['7frames'])
         n_frames = 7 if '7frames' in lr_versions else 5
         
-        # Get video FPS for batch extraction
+        # Get video FPS and color metadata for batch extraction
+        # (metadata was already fetched above; re-use it via cache — no extra ffprobe call)
         metadata = self._get_video_metadata(video_path)
         fps = metadata.get('fps', 25.0) if metadata else 25.0
-        
+        is_hdr = metadata.get('is_hdr', True) if metadata else True
+
+        self.logger.info(
+            f"  Color format: {metadata.get('color_transfer', 'unknown')!r} "
+            f"→ {'HDR tonemap' if is_hdr else 'SDR pass-through'}"
+        )
+
         # Extract patches using OPTIMIZED batch mode
         patches_created = self._extract_patches_multi_format_batch(
-            video_path, duration, format_distribution, n_frames, video_name, fps, video_idx
+            video_path, duration, format_distribution, n_frames, video_name, fps, video_idx,
+            is_hdr=is_hdr,
         )
         
         return patches_created
@@ -1163,7 +1187,7 @@ class DatasetGeneratorV2UHD:
     def _extract_patches_multi_format_batch(self, video_path: str, duration: float,
                                            format_distribution: Dict[str, Dict[str, int]], 
                                            n_frames: int, video_name: str, fps: float = 25.0,
-                                           video_idx: int = 0) -> Dict[str, int]:
+                                           video_idx: int = 0, is_hdr: bool = True) -> Dict[str, int]:
         """
         OPTIMIZED: Extract patches using BATCH frame extraction (10-50x faster).
         
@@ -1178,6 +1202,9 @@ class DatasetGeneratorV2UHD:
             n_frames: Number of frames to extract (5 or 7)
             video_name: Video name for logging
             fps: Video frame rate (default 25.0)
+            is_hdr: Whether the source video uses HDR transfer (PQ/HLG).
+                    When False a lightweight scale-only chain is used instead
+                    of the full HDR→SDR tonemap pipeline.
         
         Returns:
             Dict of {category: patches_created_count}
@@ -1285,6 +1312,7 @@ class DatasetGeneratorV2UHD:
             progress_fn=_on_progress,
             use_cuda=self.use_cuda,
             nice_level=self.settings.get('ffmpeg_nice', 10),
+            is_hdr=is_hdr,
         )
 
         # Merge final result into patches_created.
@@ -1645,6 +1673,11 @@ class DatasetGeneratorV2UHD:
         """
         Get video metadata using ffprobe with caching.
         Cache is based on file size and modification time.
+
+        In addition to duration / fps / resolution the method also extracts
+        the ``color_transfer`` tag from the first video stream and derives an
+        ``is_hdr`` boolean so callers can choose the appropriate FFmpeg filter
+        chain without running a separate ffprobe pass.
         """
         try:
             # Get file stats for cache validation
@@ -1665,7 +1698,9 @@ class DatasetGeneratorV2UHD:
                     return {
                         'duration': cached['duration'],
                         'fps': cached.get('fps'),
-                        'resolution': cached.get('resolution')
+                        'resolution': cached.get('resolution'),
+                        'color_transfer': cached.get('color_transfer'),
+                        'is_hdr': cached.get('is_hdr', True),
                     }
             
             # Cache miss or invalid - query ffprobe
@@ -1700,6 +1735,7 @@ class DatasetGeneratorV2UHD:
             
             fps = None
             resolution = None
+            color_transfer = None
             if video_stream:
                 # Parse FPS
                 fps_str = video_stream.get('avg_frame_rate', '0/1')
@@ -1713,12 +1749,22 @@ class DatasetGeneratorV2UHD:
                 height = video_stream.get('height')
                 if width and height:
                     resolution = [width, height]
-            
+
+                # Color transfer (determines HDR vs SDR)
+                color_transfer = video_stream.get('color_transfer') or video_stream.get('color_trc')
+
+            is_hdr = is_hdr_transfer(color_transfer)
+            self.logger.debug(
+                f"{os.path.basename(video_path)}: color_transfer={color_transfer!r} → is_hdr={is_hdr}"
+            )
+
             # Cache the metadata
             self.metadata_cache[cache_key] = {
                 'duration': duration,
                 'fps': fps,
                 'resolution': resolution,
+                'color_transfer': color_transfer,
+                'is_hdr': is_hdr,
                 'file_size': file_size,
                 'file_mtime': file_mtime
             }
@@ -1730,7 +1776,9 @@ class DatasetGeneratorV2UHD:
             return {
                 'duration': duration,
                 'fps': fps,
-                'resolution': resolution
+                'resolution': resolution,
+                'color_transfer': color_transfer,
+                'is_hdr': is_hdr,
             }
         
         except Exception as e:

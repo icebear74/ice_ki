@@ -58,23 +58,21 @@ STREAM_WIDTH: int = 1920
 STREAM_HEIGHT: int = 1080
 
 # ---------------------------------------------------------------------------
-# HDR→SDR tonemap filter chains
+# Filter chains — two families: HDR→SDR tonemap and plain SDR pass-through.
 #
-# All three chains handle HDR10 (SMPTE 2084 / BT.2020) and Dolby Vision
-# Profile 5 / 8 correctly.  Both DV P5 and DV P8 encode the base layer with
-# BT.2020 primaries and SMPTE 2084 (PQ) transfer — zscale reads those from
-# the stream metadata and converts to linear light automatically.
-# DV Profile 4 (rare; only on a handful of Apple TV+ / older Disney+ titles)
-# requires Dolby's proprietary decoder for the enhancement layer; FFmpeg
-# decodes only the SDR base layer for that profile.
+# HDR chains handle HDR10 (SMPTE 2084 / BT.2020) and Dolby Vision P5/P8.
+# SDR chains are used when the video is already standard-dynamic-range
+# (BT.709 transfer) and no tone-mapping is needed.  Applying the HDR
+# tonemap chain to an SDR source causes overexposure because zscale would
+# linearise the already-gamma-encoded values a second time.
+#
+# The correct chain is selected per-video by build_vf_filter() based on the
+# is_hdr flag returned by _get_video_metadata() / is_hdr_transfer().
 # ---------------------------------------------------------------------------
 
-# Software HDR→SDR tonemap filter chain (CPU-only fallback).
-# Used when the local FFmpeg has no CUDA filter support at all.
-# zscale reads the transfer function from stream metadata, so this chain
-# handles both HDR (smpte2084/HLG) and SDR (bt709) content correctly.
-# range=full ensures the BGR24 pipe output is unambiguously full-range
-# (0–255) for OpenCV compatibility; range=limited would output 16–235.
+# HDR→SDR: Software (CPU-only) fallback.
+# zscale reads tin from stream metadata → works for smpte2084, hlg, bt709.
+# range=full: unambiguous 0-255 output for OpenCV.
 _TONEMAP_FILTER: str = (
     "zscale=t=linear:npl=100,"
     "format=gbrpf32le,"
@@ -85,26 +83,18 @@ _TONEMAP_FILTER: str = (
     "format=bgr24"
 )
 
-# Hybrid GPU/CPU filter chain.
-# Requires only scale_cuda (no tonemap_cuda needed).
-# scale_cuda downscales 4K→1080p on the GPU while preserving the 10-bit CUDA
-# surface.  hwdownload transfers the frame to CPU memory as p010le.  The
-# subsequent steps are IDENTICAL to _TONEMAP_FILTER: zscale reads the transfer
-# function from stream metadata (not hardcoded), so both SDR (bt709) and HDR
-# (smpte2084 / HLG) content are handled correctly.
+# SDR pass-through: Software (CPU-only).
+# No linearisation or tonemap needed — just scale + convert to BGR24.
+_SDR_FILTER: str = (
+    f"scale={STREAM_WIDTH}:{STREAM_HEIGHT}:flags=lanczos,"
+    "format=bgr24"
+)
+
+# HDR→SDR: Hybrid GPU/CPU — scale_cuda downscales on GPU, tonemap on CPU.
+# hwdownload + format=p010 preserves 10-bit precision; the multi-step
+# zscale+tonemap chain is identical to _TONEMAP_FILTER.
 # Use together with -init_hw_device cuda=hw -hwaccel cuda
 #                  -hwaccel_output_format cuda.
-# Notes:
-#   - scale_cuda without :format=nv12 keeps the CUDA surface in the decoder's
-#     native format (usually p010le for 10-bit HEVC).
-#   - hwdownload + format=p010 transfers the 10-bit surface to CPU memory,
-#     preserving full precision for the colour-space conversion.
-#   - zscale=t=linear reads the input transfer (tin) from stream metadata —
-#     bt709 for SDR, smpte2084/arib-std-b67 for HDR — and converts to linear
-#     light.  DO NOT hardcode tin= here; doing so forces all content through
-#     the same (wrong) EOTF and causes overexposure on SDR material.
-#   - tonemap=mobius handles HDR highlights gracefully (no hard clipping).
-#   - range=full: unambiguous 0–255 output for OpenCV.
 _TONEMAP_FILTER_SCALE_CUDA: str = (
     f"scale_cuda={STREAM_WIDTH}:{STREAM_HEIGHT},"
     "hwdownload,"
@@ -114,6 +104,13 @@ _TONEMAP_FILTER_SCALE_CUDA: str = (
     "zscale=p=bt709,"
     "tonemap=tonemap=mobius:desat=0,"
     "zscale=t=bt709:m=bt709:range=full,"
+    "format=bgr24"
+)
+
+# SDR pass-through: Hybrid GPU/CPU — scale on GPU, convert on CPU.
+_SDR_FILTER_SCALE_CUDA: str = (
+    f"scale_cuda={STREAM_WIDTH}:{STREAM_HEIGHT},"
+    "hwdownload,"
     "format=bgr24"
 )
 
@@ -215,6 +212,74 @@ def tonemap_cuda_available() -> bool:
         out = _get_ffmpeg_filters()
         _tonemap_cuda_available = "tonemap_cuda" in out and "scale_cuda" in out
     return _tonemap_cuda_available
+
+# ---------------------------------------------------------------------------
+# HDR detection and per-video filter-chain selection
+# ---------------------------------------------------------------------------
+
+# Transfer function values that indicate HDR content.
+_HDR_TRANSFERS = frozenset({
+    "smpte2084",       # HDR10 / PQ
+    "arib-std-b67",    # HLG (broadcast HDR)
+    "hlg",             # alternate string used by some encoders
+})
+
+
+def is_hdr_transfer(color_transfer: Optional[str]) -> bool:
+    """Return True when *color_transfer* indicates HDR (PQ or HLG) content.
+
+    BT.2020 primaries alone do NOT imply HDR — SDR content encoded in the
+    BT.2020 colour space is still SDR.  Only the transfer function reliably
+    identifies HDR.
+
+    Args:
+        color_transfer: The ``color_transfer`` tag from ffprobe (may be ``None``
+                        or an empty string when the stream carries no metadata).
+
+    Returns:
+        ``True`` for PQ (smpte2084) and HLG (arib-std-b67 / hlg) streams,
+        ``False`` for everything else (bt709, bt601, unknown, …).
+    """
+    if not color_transfer:
+        return False
+    return color_transfer.strip().lower() in _HDR_TRANSFERS
+
+
+def build_vf_filter(is_hdr: bool, use_cuda: bool = True) -> str:
+    """Return the FFmpeg ``-vf`` filter string for the given video type.
+
+    Selects the best available pipeline tier at call time:
+
+    * HDR + full-GPU  → ``_TONEMAP_FILTER_CUDA``
+    * HDR + scale-GPU → ``_TONEMAP_FILTER_SCALE_CUDA``
+    * HDR + CPU-only  → ``_TONEMAP_FILTER``
+    * SDR + scale-GPU → ``_SDR_FILTER_SCALE_CUDA``
+    * SDR + CPU-only  → ``_SDR_FILTER``
+
+    Args:
+        is_hdr:    Whether the source video is HDR (PQ or HLG transfer).
+        use_cuda:  Whether CUDA acceleration is requested.  Still falls back
+                   to CPU-only when the local FFmpeg has no CUDA support.
+
+    Returns:
+        FFmpeg filter string ready for ``-vf``.
+    """
+    _use_cuda = use_cuda and cuda_available()
+    _full_gpu  = _use_cuda and tonemap_cuda_available()
+    _scale_gpu = _use_cuda and (not _full_gpu) and scale_cuda_available()
+
+    if is_hdr:
+        if _full_gpu:
+            return _TONEMAP_FILTER_CUDA
+        if _scale_gpu:
+            return _TONEMAP_FILTER_SCALE_CUDA
+        return _TONEMAP_FILTER
+    else:
+        # SDR: no tone-mapping needed; applying it would re-linearise the
+        # already-correct gamma and make images too bright.
+        if _scale_gpu:
+            return _SDR_FILTER_SCALE_CUDA
+        return _SDR_FILTER
 
 # ---------------------------------------------------------------------------
 # Public functions
@@ -569,6 +634,7 @@ def extract_and_save_streaming_distributed(
     progress_fn: Optional[Callable[[int, Dict[str, int], int], None]] = None,
     use_cuda: bool = True,
     nice_level: int = 10,
+    is_hdr: bool = True,
 ) -> Dict[str, int]:
     """
     Stream the video once and save patches as frames pass through the buffer.
@@ -613,6 +679,12 @@ def extract_and_save_streaming_distributed(
         nice_level:        CPU-priority adjustment passed to ``os.nice()`` for the
                            FFmpeg subprocess (default 10 = lower priority).  Has no
                            effect on non-Unix platforms.
+        is_hdr:            Whether the source video uses an HDR transfer function
+                           (PQ / HLG).  When ``True`` (default) the full HDR→SDR
+                           tonemap chain is applied.  When ``False`` a lightweight
+                           scale-only chain is used, avoiding incorrect
+                           re-linearisation of SDR gamma that would cause
+                           overexposure.
 
     Returns:
         ``{category: patches_saved_count}``
@@ -643,30 +715,19 @@ def extract_and_save_streaming_distributed(
 
     # Build FFmpeg command.
     #
-    # Four pipeline tiers, chosen automatically at runtime:
+    # Pipeline tier is chosen by build_vf_filter() based on is_hdr and
+    # available CUDA capabilities:
     #
-    #  1. Full-GPU (best):  -hwaccel cuda -hwaccel_output_format cuda
-    #                       + tonemap_cuda + scale_cuda + hwdownload
-    #     Frames stay in GPU VRAM from decode through HDR→SDR tonemapping
-    #     and 1920×1080 scaling.  Only the final BGR24 result is copied to
-    #     CPU.  Requires FFmpeg with --enable-cuda-nvcc/libnpp.
-    #
-    #  2. Scale-GPU + CPU tonemap:  -init_hw_device cuda=hw
-    #                               -hwaccel cuda -hwaccel_output_format cuda
-    #                               + scale_cuda + hwdownload (p010) + zscale
-    #     scale_cuda downscales 4K→1080p on the GPU preserving 10-bit depth.
-    #     hwdownload transfers the p010 surface to CPU; a single zscale step
-    #     with explicit HDR colour-space params converts to BT.709 SDR.
-    #     ~12 fps on a mid-range GPU; requires only scale_cuda.
-    #
-    #  3. Decode-GPU + CPU tonemap:  -hwaccel cuda + full software chain
-    #     GPU decoding only; the full 4K zscale/tonemap/scale chain runs on
-    #     CPU.  Falls back here when CUDA is available but scale_cuda is not.
-    #
-    #  4. Pure CPU:  no hwaccel, full software chain.
+    #  HDR source  + full-GPU   → tonemap_cuda + scale_cuda + hwdownload
+    #  HDR source  + scale-GPU  → scale_cuda + hwdownload (p010) + zscale+tonemap
+    #  HDR source  + CPU-only   → zscale + tonemap + scale (software)
+    #  SDR source  + scale-GPU  → scale_cuda + hwdownload (plain scale)
+    #  SDR source  + CPU-only   → scale (software, no linearisation)
     _use_cuda = use_cuda and cuda_available()
-    _full_gpu  = _use_cuda and tonemap_cuda_available()
+    _full_gpu  = _use_cuda and is_hdr and tonemap_cuda_available()
     _scale_gpu = _use_cuda and (not _full_gpu) and scale_cuda_available()
+
+    vf_filter = build_vf_filter(is_hdr=is_hdr, use_cuda=use_cuda)
 
     # -init_hw_device cuda=hw explicitly initialises the CUDA device context
     # before demuxing begins.  Without this flag some FFmpeg builds silently
@@ -674,22 +735,19 @@ def extract_and_save_streaming_distributed(
     # causing the GPU filter chain to receive CPU frames and crash.
     _CUDA_HW_INIT = ["-init_hw_device", "cuda=hw"]
 
+    hdr_label = "HDR" if is_hdr else "SDR"
     if _full_gpu:
         hw_args        = [*_CUDA_HW_INIT, "-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
-        vf_filter      = _TONEMAP_FILTER_CUDA
-        pipeline_label = "full-GPU (tonemap_cuda+scale_cuda)"
+        pipeline_label = f"full-GPU tonemap_cuda+scale_cuda [{hdr_label}]"
     elif _scale_gpu:
         hw_args        = [*_CUDA_HW_INIT, "-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
-        vf_filter      = _TONEMAP_FILTER_SCALE_CUDA
-        pipeline_label = "scale-GPU + CPU zscale (scale_cuda, p010, ~12 fps)"
+        pipeline_label = f"scale-GPU + CPU {'zscale/tonemap' if is_hdr else 'passthrough'} [{hdr_label}]"
     elif _use_cuda:
         hw_args        = [*_CUDA_HW_INIT, "-hwaccel", "cuda"]
-        vf_filter      = _TONEMAP_FILTER
-        pipeline_label = "decode-GPU + CPU tonemap"
+        pipeline_label = f"decode-GPU + CPU {'tonemap' if is_hdr else 'scale'} [{hdr_label}]"
     else:
         hw_args        = []
-        vf_filter      = _TONEMAP_FILTER
-        pipeline_label = "CPU-only"
+        pipeline_label = f"CPU-only {'tonemap' if is_hdr else 'scale'} [{hdr_label}]"
 
     _log(
         f"🎬 Streaming extractor: {len(sorted_asgn)} assignments, "
@@ -899,6 +957,7 @@ def extract_and_save_streaming_distributed(
             progress_fn=progress_fn,
             use_cuda=False,
             nice_level=nice_level,
+            is_hdr=is_hdr,
         )
 
     total = sum(patches_created.values())
