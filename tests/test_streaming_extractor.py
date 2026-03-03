@@ -515,27 +515,64 @@ class TestBuildAssignmentsPerCategory(unittest.TestCase):
 class TestFilterConstants(unittest.TestCase):
     """Sanity checks on the FFmpeg filter chain string constants."""
 
-    def test_scale_cuda_uses_bilinear_zscale(self):
+    def test_scale_cuda_no_hardcoded_tin_smpte2084(self):
+        """_TONEMAP_FILTER_SCALE_CUDA must NOT hardcode tin=smpte2084.
+
+        Hardcoding tin=smpte2084 forces ALL content to be treated as HDR/PQ.
+        When processing SDR (BT.709) content this causes severe overexposure:
+        BT.709 mid-gray (signal 0.5) decoded as 0.5 PQ ≈ 110 nits, which at
+        npl=100 clips to white.  zscale must read the transfer function from
+        stream metadata instead.
+        """
         import streaming_extractor as _se
-        # The p010 pipeline uses zscale with filter=bilinear for the resize
-        # (fast, good quality for downscaling 4K→1080p).
-        self.assertIn("filter=bilinear", _se._TONEMAP_FILTER_SCALE_CUDA)
-        print("✓ _TONEMAP_FILTER_SCALE_CUDA uses zscale filter=bilinear")
+        self.assertNotIn("tin=smpte2084", _se._TONEMAP_FILTER_SCALE_CUDA,
+                         "tin=smpte2084 hardcoded — this causes overexposure on SDR content")
+        print("✓ _TONEMAP_FILTER_SCALE_CUDA does NOT hardcode tin=smpte2084 (overexposure fix)")
+
+    def test_scale_cuda_uses_tonemap_for_hdr_highlights(self):
+        """_TONEMAP_FILTER_SCALE_CUDA must include a tonemap filter.
+
+        Without a tonemap filter, HDR highlights above npl=100 nits simply
+        clip to white (overexposed).  The mobius tonemap smoothly compresses
+        them instead.
+        """
+        import streaming_extractor as _se
+        self.assertIn("tonemap=tonemap=mobius", _se._TONEMAP_FILTER_SCALE_CUDA,
+                      "Missing tonemap step — HDR highlights will clip to white")
+        print("✓ _TONEMAP_FILTER_SCALE_CUDA has tonemap=mobius for smooth HDR highlight handling")
+
+    def test_scale_cuda_reads_transfer_from_metadata(self):
+        """_TONEMAP_FILTER_SCALE_CUDA must use zscale=t=linear (reads tin from metadata)."""
+        import streaming_extractor as _se
+        self.assertIn("zscale=t=linear", _se._TONEMAP_FILTER_SCALE_CUDA,
+                      "zscale=t=linear missing — transfer function must be read from stream metadata")
+        print("✓ _TONEMAP_FILTER_SCALE_CUDA uses zscale=t=linear (reads tin from stream metadata)")
 
     def test_scale_cuda_specifies_p010_after_hwdownload(self):
         import streaming_extractor as _se
         # format=p010 after hwdownload preserves the 10-bit HDR data on the
-        # CPU side so the single-step zscale can do a precise HDR→SDR conversion.
+        # CPU side so zscale can do a precise HDR→SDR conversion.
         self.assertIn("format=p010", _se._TONEMAP_FILTER_SCALE_CUDA)
         print("✓ _TONEMAP_FILTER_SCALE_CUDA uses format=p010 to preserve 10-bit HDR data")
 
-    def test_scale_cuda_has_explicit_hdr_zscale_params(self):
+    def test_no_range_limited_in_any_filter_chain(self):
+        """None of the filter chains should output range=limited.
+
+        range=limited produces 8-bit values in [16, 235] instead of [0, 255].
+        The BGR24 pipe and PNG files are interpreted as full-range by OpenCV,
+        so range=limited causes subtle colour distortion.  range=full is the
+        correct setting for OpenCV-destined output.
+        """
         import streaming_extractor as _se
-        # Explicit HDR input params (tin/pin/min) make the conversion robust
-        # even when stream metadata is missing or incorrect.
-        self.assertIn("tin=smpte2084", _se._TONEMAP_FILTER_SCALE_CUDA)
-        self.assertIn("pin=bt2020", _se._TONEMAP_FILTER_SCALE_CUDA)
-        print("✓ _TONEMAP_FILTER_SCALE_CUDA has explicit HDR colour-space params")
+        for name, chain in [
+            ("_TONEMAP_FILTER", _se._TONEMAP_FILTER),
+            ("_TONEMAP_FILTER_SCALE_CUDA", _se._TONEMAP_FILTER_SCALE_CUDA),
+        ]:
+            self.assertNotIn(
+                "range=limited", chain,
+                f"{name} contains range=limited — use range=full for OpenCV compatibility",
+            )
+        print("✓ No filter chain uses range=limited (all use range=full)")
 
     def test_tonemap_cuda_uses_bicubic_not_lanczos(self):
         import streaming_extractor as _se

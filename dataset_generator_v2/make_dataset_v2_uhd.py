@@ -676,7 +676,7 @@ class DatasetGeneratorV2UHD:
                 "format=gbrpf32le,"
                 "zscale=p=bt709,"
                 "tonemap=tonemap=mobius:desat=0,"
-                "zscale=t=bt709:m=bt709:range=limited,"
+                "zscale=t=bt709:m=bt709:range=full,"
                 "scale=1920:1080:flags=lanczos,"
                 "format=yuv420p"
             )

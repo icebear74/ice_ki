@@ -71,12 +71,16 @@ STREAM_HEIGHT: int = 1080
 
 # Software HDR→SDR tonemap filter chain (CPU-only fallback).
 # Used when the local FFmpeg has no CUDA filter support at all.
+# zscale reads the transfer function from stream metadata, so this chain
+# handles both HDR (smpte2084/HLG) and SDR (bt709) content correctly.
+# range=full ensures the BGR24 pipe output is unambiguously full-range
+# (0–255) for OpenCV compatibility; range=limited would output 16–235.
 _TONEMAP_FILTER: str = (
     "zscale=t=linear:npl=100,"
     "format=gbrpf32le,"
     "zscale=p=bt709,"
     "tonemap=tonemap=mobius:desat=0,"
-    "zscale=t=bt709:m=bt709:range=limited,"
+    "zscale=t=bt709:m=bt709:range=full,"
     f"scale={STREAM_WIDTH}:{STREAM_HEIGHT}:flags=lanczos,"
     "format=bgr24"
 )
@@ -84,32 +88,32 @@ _TONEMAP_FILTER: str = (
 # Hybrid GPU/CPU filter chain.
 # Requires only scale_cuda (no tonemap_cuda needed).
 # scale_cuda downscales 4K→1080p on the GPU while preserving the 10-bit CUDA
-# surface (no :format=nv12 override).  hwdownload transfers the 10-bit frame
-# to CPU memory as p010 (semi-planar 10-bit YUV).  A single zscale step with
-# fully-explicit colour-space parameters then converts HDR→SDR.  This avoids
-# the old multi-step zscale+tonemap chain and does NOT require the tonemap
-# filter, making it compatible with stock FFmpeg builds.
+# surface.  hwdownload transfers the frame to CPU memory as p010le.  The
+# subsequent steps are IDENTICAL to _TONEMAP_FILTER: zscale reads the transfer
+# function from stream metadata (not hardcoded), so both SDR (bt709) and HDR
+# (smpte2084 / HLG) content are handled correctly.
 # Use together with -init_hw_device cuda=hw -hwaccel cuda
 #                  -hwaccel_output_format cuda.
 # Notes:
 #   - scale_cuda without :format=nv12 keeps the CUDA surface in the decoder's
 #     native format (usually p010le for 10-bit HEVC).
-#   - hwdownload transfers that surface to CPU memory.  Downstream format=p010
-#     explicitly selects the 10-bit semi-planar output, preserving full HDR
-#     precision for the colour-space conversion.
-#   - zscale with tin=smpte2084:pin=bt2020:min=bt2020nc explicitly declares
-#     the HDR input colour space so the conversion is correct even when the
-#     stream does not carry colour-metadata side-data.
-#   - npl=100 sets the nominal peak luminance (nits) used for the PQ→BT.709
-#     mapping (100 cd/m² = standard SDR display).
-#   - filter=bilinear: the bilinear resize kernel in zscale is fast and
-#     sufficient for downscaling 4K→1080p.
-#   - format=bgr24: libswscale converts p010→bgr24 for OpenCV compatibility.
+#   - hwdownload + format=p010 transfers the 10-bit surface to CPU memory,
+#     preserving full precision for the colour-space conversion.
+#   - zscale=t=linear reads the input transfer (tin) from stream metadata —
+#     bt709 for SDR, smpte2084/arib-std-b67 for HDR — and converts to linear
+#     light.  DO NOT hardcode tin= here; doing so forces all content through
+#     the same (wrong) EOTF and causes overexposure on SDR material.
+#   - tonemap=mobius handles HDR highlights gracefully (no hard clipping).
+#   - range=full: unambiguous 0–255 output for OpenCV.
 _TONEMAP_FILTER_SCALE_CUDA: str = (
     f"scale_cuda={STREAM_WIDTH}:{STREAM_HEIGHT},"
     "hwdownload,"
     "format=p010,"
-    "zscale=p=bt709:t=bt709:m=bt709:tin=smpte2084:pin=bt2020:min=bt2020nc:npl=100:filter=bilinear,"
+    "zscale=t=linear:npl=100,"
+    "format=gbrpf32le,"
+    "zscale=p=bt709,"
+    "tonemap=tonemap=mobius:desat=0,"
+    "zscale=t=bt709:m=bt709:range=full,"
     "format=bgr24"
 )
 
