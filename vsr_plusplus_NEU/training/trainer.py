@@ -87,6 +87,9 @@ class VSRTrainer:
         # Pending JSON save tracking (save after validation + N steps)
         self.pending_json_save_step = None
         
+        # Adaptive mode change tracking for TensorBoard phase transition logging
+        self._last_adaptive_mode = 'Stable'
+        
         # Keyboard handler
         self.keyboard = KeyboardHandler()
         
@@ -383,6 +386,19 @@ class VSRTrainer:
                     self.tb_logger.log_system(self.global_step, avg_time, vram)
                     self.tb_logger.log_gradients(self.global_step, grad_norm, self.last_activities)
                     self.tb_logger.log_lr_phase(self.global_step, lr_phase)
+                    
+                    # Log adaptive mode/phase transitions
+                    current_adaptive_mode = adaptive_status.get('mode', 'Stable').lower()
+                    phase_changed = current_adaptive_mode != self._last_adaptive_mode.lower()
+                    self.tb_logger.log_training_phase(self.global_step, {
+                        'phase': current_adaptive_mode,
+                        'phase_changed': phase_changed,
+                    })
+                    if phase_changed:
+                        self.train_logger.log_event(
+                            f"Adaptive mode changed: {self._last_adaptive_mode} → {adaptive_status.get('mode', 'Stable')} at step {self.global_step}"
+                        )
+                        self._last_adaptive_mode = adaptive_status.get('mode', 'Stable')
                     
                     # Log plateau state details
                     if hasattr(self.adaptive_system, 'get_plateau_info'):

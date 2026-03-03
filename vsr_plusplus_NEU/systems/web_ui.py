@@ -1562,11 +1562,11 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             const plateauEl = document.getElementById('plateauCounter');
             const plateauWarning = document.getElementById('plateauWarning');
             plateauEl.textContent = plateauCounter;
-            if (plateauCounter > 300) {
+            if (plateauCounter > 150) {
                 plateauEl.style.color = 'var(--accent-red)';
                 plateauWarning.textContent = '🚨 WARNUNG';
                 plateauWarning.style.color = 'var(--accent-red)';
-            } else if (plateauCounter > 150) {
+            } else if (plateauCounter > 75) {
                 plateauEl.style.color = 'var(--accent-orange)';
                 plateauWarning.textContent = '🟡 Erhöht';
                 plateauWarning.style.color = 'var(--accent-orange)';
@@ -1743,11 +1743,11 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             let lossTrendText = '';
             let lossTrendColor = '';
             
-            if (plateauCounter < 150) {
+            if (plateauCounter < 75) {
                 lossTrendScore = 30.0;
                 lossTrendText = 'Converging';
                 lossTrendColor = 'var(--accent-green)';
-            } else if (plateauCounter < 300) {
+            } else if (plateauCounter < 150) {
                 lossTrendScore = 20.0;
                 lossTrendText = 'Plateau';
                 lossTrendColor = 'var(--accent-blue)';
@@ -1778,11 +1778,11 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             let stabilityText = '';
             let stabilityColor = '';
             
-            if (adaptiveMode === 'Stable' || plateauCounter < 150) {
+            if (adaptiveMode === 'Stable' || plateauCounter < 75) {
                 stabilityScore = 30.0;
                 stabilityText = 'Stable';
                 stabilityColor = 'var(--accent-green)';
-            } else if (plateauCounter < 300) {
+            } else if (plateauCounter < 150) {
                 stabilityScore = 20.0;
                 stabilityText = 'Moderate';
                 stabilityColor = 'var(--accent-blue)';

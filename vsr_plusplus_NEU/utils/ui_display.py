@@ -346,10 +346,10 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
         plateau = adaptive_status.get('plateau_counter', 0)
         adaptive_mode_val = adaptive_status.get('mode', 'Stable')
         
-        if plateau < 150:
+        if plateau < 75:
             stability_score = 30.0
             stability_status = f"{C_GREEN}Stable{C_RESET}"
-        elif plateau < 300:
+        elif plateau < 150:
             stability_score = 20.0
             stability_status = f"{C_YELLOW}Moderate{C_RESET}"
         else:
@@ -515,11 +515,11 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
         
         # Plateau counter
         plateau = adaptive_status.get('plateau_counter', 0)
-        if plateau > 300:
+        if plateau > 150:
             plateau_color = C_RED
             plateau_icon = '🚨'
             plateau_text = f"{plateau} steps (WARNING)"
-        elif plateau > 150:
+        elif plateau > 75:
             plateau_color = C_YELLOW
             plateau_icon = '🟡'
             plateau_text = f"{plateau} steps"
@@ -543,6 +543,11 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
         print_two_columns(
             f"Grad Clip: {C_CYAN}{grad_clip:.3f}{C_RESET}",
             f"Aggressive: {C_RED if aggressive else C_GRAY}{'YES' if aggressive else 'NO'}{C_RESET}",
+            ui_w
+        )
+        print_two_columns(
+            f"Perceptual W: {C_CYAN}{perceptual_weight:.3f}{C_RESET}",
+            f"Plateau Patience: {C_CYAN}{adaptive_status.get('plateau_patience', 100)}{C_RESET}",
             ui_w
         )
         

@@ -279,10 +279,17 @@ def main():
     # Create model - USING 7-FRAME MODEL (as intended by dataset_generator_v2)
     print("Creating 7-frame model...")
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    use_checkpointing = config.get('USE_CHECKPOINTING', True)
     model = VSRBidirectional_7frames_3x(
         n_feats=n_feats, 
-        n_blocks=n_blocks
+        n_blocks=n_blocks,
+        use_checkpointing=use_checkpointing
     ).to(device)
+    
+    if use_checkpointing:
+        print(f"✅ Gradient checkpointing ENABLED - saves ~40% activation memory")
+    else:
+        print(f"⚠️  Gradient checkpointing disabled")
     
     # Count parameters
     total_params = sum(p.numel() for p in model.parameters())
@@ -298,7 +305,7 @@ def main():
     
     
     # Create optimizer with layer-wise learning rates
-    # Give Final Fusion layer 10x higher learning rate to activate it
+    # Give Final Fusion layer 20x higher learning rate to strongly activate it
     lr = 10 ** config['LR_EXPONENT']
     
     # Separate Final Fusion parameters from other parameters
@@ -321,8 +328,8 @@ def main():
         },
         {
             'params': final_fusion_params,
-            'lr': lr * 10,  # 10x higher for Final Fusion
-            'weight_decay': config['WEIGHT_DECAY'] * 0.5  # Less weight decay for aggressive learning
+            'lr': lr * 20,  # 20x higher for Final Fusion (increased from 10x)
+            'weight_decay': 0.0  # No weight decay for final fusion to maximize learning
         }
     ]
     

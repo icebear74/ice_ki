@@ -60,7 +60,8 @@ WARMUP_STEPS = 1000
 MAX_LR = 1.5e-4
 
 # Minimum learning rate at end of training
-MIN_LR = 1e-7
+# Increased from 1e-7 to 1e-5 so LR stays usable longer
+MIN_LR = 1e-5
 
 
 # ============================================================================
@@ -87,7 +88,8 @@ PERCEPTUAL_WEIGHT = 0.05
 # ============================================================================
 
 # Maximum training steps
-MAX_STEPS = 100000
+# Increased from 100000 to 150000 to prevent LR from dropping too fast
+MAX_STEPS = 150000
 
 # Validation frequency (run validation every N steps)
 VAL_STEP_EVERY = 500
@@ -150,8 +152,10 @@ INITIAL_GRAD_CLIP = 1.5
 # ============================================================================
 
 # Enable Automatic Mixed Precision for faster training on Tesla P4
-# Tesla P4 supports FP16, which can significantly speed up training
-USE_AMP = True
+# NOTE: Tesla P4 has NO hardware FP16 support (only emulated).
+# AMP adds ~3GB overhead without providing any speedup on this GPU.
+# Disabled to save VRAM and improve training speed.
+USE_AMP = False
 
 
 # ============================================================================
@@ -206,9 +210,8 @@ def get_config():
         'INITIAL_GRAD_CLIP': INITIAL_GRAD_CLIP,
     }
     
-    # Add AMP if enabled
-    if USE_AMP:
-        config['USE_AMP'] = USE_AMP
+    # Add AMP setting (always include so training code can rely on its presence)
+    config['USE_AMP'] = USE_AMP
     
     return config
 
@@ -227,7 +230,7 @@ def print_config():
     print(f"  Batch Size:             {BATCH_SIZE}")
     print(f"  Accumulation Steps:     {ACCUMULATION_STEPS}")
     print(f"  Effective Batch Size:   {BATCH_SIZE * ACCUMULATION_STEPS}")
-    print(f"  Estimated VRAM:         ~3.77 GB @ batch=1")
+    print(f"  Estimated VRAM:         ~2.2 GB @ batch=1 (with gradient checkpointing)")
     
     print("\nLEARNING RATE:")
     print(f"  Initial LR:             {10**LR_EXPONENT:.2e} (10^{LR_EXPONENT})")

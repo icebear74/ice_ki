@@ -50,7 +50,7 @@ class AdaptiveSystem:
         
         # Cooldown mechanism
         self.cooldown_steps = 0
-        self.cooldown_duration = 80  # Wait 100 steps after adjustment
+        self.cooldown_duration = 30  # Reduced from 80 to 30 for faster recovery
         self.is_in_cooldown = False
         
         # Gradient clipping
@@ -64,7 +64,7 @@ class AdaptiveSystem:
         # Aggressive mode
         self.aggressive_mode = False
         self.aggressive_counter = 0
-        self.aggressive_max_steps = 5000
+        self.aggressive_max_steps = 20000  # Increased from 5000 for longer adaptation
         
         # Thresholds
         self.extreme_grad_threshold = 0.025
@@ -84,7 +84,7 @@ class AdaptiveSystem:
         # Plateau detection
         self.best_loss = float('inf')
         self.plateau_counter = 0
-        self.plateau_patience = 250
+        self.plateau_patience = 100  # Reduced from 250 for faster plateau response
         self.plateau_safety_threshold = 800  # Force reset if plateau counter exceeds this
         
         # Enhanced plateau detection
@@ -590,6 +590,7 @@ class AdaptiveSystem:
             'cooldown_remaining': self.cooldown_steps if self.is_in_cooldown else 0,
             'mode': 'Aggressive' if self.aggressive_mode else 'Stable',
             'plateau_counter': self.plateau_counter,
+            'plateau_patience': self.plateau_patience,
             'best_loss': self.best_loss,
             'ema_l1_loss': self.ema_l1_loss if self.ema_l1_loss is not None else 0.0
         }
