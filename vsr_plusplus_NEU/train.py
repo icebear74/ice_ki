@@ -194,16 +194,16 @@ def main():
             },
             "model": {
                 "n_frames": 7,
-                "n_feats": 72,
-                "n_blocks": 26,
-                "precision": "float32"
+                "n_feats": config.get('N_FEATS', 72),
+                "n_blocks": config.get('N_BLOCKS', 26),
+                "precision": "float16" if config.get('USE_AMP', False) else "float32"
             },
             "training": {
-                "effective_batch_size": 6,
+                "effective_batch_size": config.get('BATCH_SIZE', 1) * config.get('ACCUMULATION_STEPS', 6),
                 "adaptive_batch": {
-                    "540":     {"batch": 1, "accum": 6},
-                    "720_169": {"batch": 1, "accum": 6},
-                    "720":     {"batch": 1, "accum": 6}
+                    "540":     {"batch": config.get('BATCH_SIZE', 1), "accum": config.get('ACCUMULATION_STEPS', 6)},
+                    "720_169": {"batch": config.get('BATCH_SIZE', 1), "accum": config.get('ACCUMULATION_STEPS', 6)},
+                    "720":     {"batch": config.get('BATCH_SIZE', 1), "accum": config.get('ACCUMULATION_STEPS', 6)}
                 }
             },
             "validation": {
