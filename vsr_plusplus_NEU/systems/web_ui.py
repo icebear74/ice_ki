@@ -11,6 +11,32 @@ import socket
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from queue import Queue
 
+try:
+    import numpy as _np
+except ImportError:
+    _np = None
+
+try:
+    import torch as _torch
+except ImportError:
+    _torch = None
+
+
+class _NumPySafeEncoder(json.JSONEncoder):
+    """JSON encoder that converts numpy/torch scalar types to plain Python types."""
+    def default(self, obj):
+        if _np is not None:
+            if isinstance(obj, _np.integer):
+                return int(obj)
+            if isinstance(obj, _np.floating):
+                return float(obj)
+            if isinstance(obj, _np.ndarray):
+                return obj.tolist()
+        if _torch is not None:
+            if isinstance(obj, _torch.Tensor):
+                return obj.item() if obj.numel() == 1 else obj.tolist()
+        return super().default(obj)
+
 # Import runtime_config module at module level to avoid repeated imports
 from ..systems.runtime_config import RUNTIME_SAFE_PARAMS, RUNTIME_CAREFUL_PARAMS, STARTUP_ONLY_PARAMS
 
@@ -189,12 +215,17 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         """Liefert kompletten Datensnapshot als JSON"""
         full_data = self.data_repository.get_complete_snapshot()
         
+        try:
+            json_output = json.dumps(full_data, indent=2, cls=_NumPySafeEncoder)
+        except Exception as e:
+            self.send_error(500, f'JSON serialization error: {e}')
+            return
+        
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Cache-Control', 'no-cache')
         self.end_headers()
         
-        json_output = json.dumps(full_data, indent=2)
         self.wfile.write(json_output.encode('utf-8'))
     
     def _deliver_config_json(self):
