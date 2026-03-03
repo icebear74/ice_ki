@@ -227,7 +227,9 @@ def create_train_loader(config):
                 paths_config=paths_config  # NEW: Pass paths config
             )
         except Exception as e:
+            import traceback as _tb
             print(f"⚠️  Warning: Could not load training dataset for size '{size_key}': {e}")
+            _tb.print_exc()
             print(f"   Skipping size '{size_key}' — check GT/LR directories and file extensions.")
             continue
         

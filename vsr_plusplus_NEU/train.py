@@ -503,6 +503,49 @@ def main():
                     'batch_size': batch_info.get('batch', 1)
                 }
             
+            # ── STARTUP DIAGNOSTIC ──────────────────────────────────────────
+            # Count GT and LR files on disk per size BEFORE any loading logic,
+            # so mismatches / missing LR files are visible right away.
+            import time as _time
+            train_lr_pattern = paths_config.get('train_lr', 'patches/{size_key}/LR_7frames')
+            print(f"\n{C_CYAN}{'━'*56}")
+            print(f"  📋  DATASET FILE COUNTS (pre-load diagnostic)")
+            print(f"{'━'*56}{C_RESET}")
+            for sk, _ in available:
+                gt_dir  = os.path.join(data_root, dataset_name,
+                                       train_gt_pattern.replace('{size_key}', sk))
+                lr_dir  = os.path.join(data_root, dataset_name,
+                                       train_lr_pattern.replace('{size_key}', sk))
+                gt_files = sorted([f for f in os.listdir(gt_dir)
+                                   if f.lower().endswith('.png')]) if os.path.isdir(gt_dir) else []
+                lr_files = sorted([f for f in os.listdir(lr_dir)
+                                   if f.lower().endswith('.png')]) if os.path.isdir(lr_dir) else []
+                gt_count = len(gt_files)
+                lr_count = len(lr_files)
+                match_count = len(set(gt_files) & set(lr_files))
+                ok = gt_count > 0 and lr_count > 0 and match_count > 0
+                status = f"{C_GREEN}✓" if ok else f"{C_RED}✗"
+                print(f"  {status}  {sk:8s}{C_RESET}  GT={gt_count:6,}  LR={lr_count:6,}  "
+                      f"matched={match_count:6,}  "
+                      f"GT dir: {gt_dir}")
+                if not os.path.isdir(lr_dir):
+                    print(f"           {C_RED}⚠  LR directory NOT FOUND: {lr_dir}{C_RESET}")
+                elif lr_count == 0:
+                    print(f"           {C_YELLOW}⚠  LR directory is empty (no .png files){C_RESET}")
+                elif match_count == 0:
+                    print(f"           {C_RED}⚠  No GT/LR filename matches — check naming!{C_RESET}")
+                    if gt_files and lr_files:
+                        print(f"           GT sample : {gt_files[0]}")
+                        print(f"           LR sample : {lr_files[0]}")
+            print(f"{C_CYAN}{'━'*56}{C_RESET}")
+            print(f"{C_YELLOW}  ⏳  Starting in 10 seconds — press Ctrl+C to abort …{C_RESET}")
+            for _i in range(10, 0, -1):
+                print(f"      {_i} …", end='\r', flush=True)
+                _time.sleep(1)
+            print(f"  {C_GREEN}▶  Continuing …{C_RESET}                    ")
+            print(f"{C_CYAN}{'━'*56}{C_RESET}\n")
+            # ── END DIAGNOSTIC ──────────────────────────────────────────────
+            
             # Prepare config for multi-size loader
             loader_config = {
                 'data_root': data_root,
