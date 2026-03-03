@@ -178,6 +178,46 @@ def main():
     rt_config = None
     dataset_name = 'master'  # Default
     
+    if not os.path.exists(runtime_config_path):
+        # No config found — create one from hardcoded defaults so multi-size
+        # training is enabled on the very first run.
+        _default_rt = {
+            "data": {
+                "root": DATASET_ROOT,
+                "dataset_name": dataset_name,
+                "paths": {
+                    "train_gt": "patches/{size_key}/GT",
+                    "train_lr": "patches/{size_key}/LR_7frames",
+                    "val_gt":   "val/{size_key}/GT",
+                    "val_lr":   "patches/{size_key}/LR_7frames"
+                }
+            },
+            "model": {
+                "n_frames": 7,
+                "n_feats": 72,
+                "n_blocks": 26,
+                "precision": "float32"
+            },
+            "training": {
+                "effective_batch_size": 6,
+                "adaptive_batch": {
+                    "540":     {"batch": 1, "accum": 6},
+                    "720_169": {"batch": 1, "accum": 6},
+                    "720":     {"batch": 1, "accum": 6}
+                }
+            },
+            "validation": {
+                "sizes": ["540", "720_169", "720"]
+            }
+        }
+        try:
+            with open(runtime_config_path, 'w') as _f:
+                json.dump(_default_rt, _f, indent=2)
+            print(f"{C_GREEN}✅ Created default runtime_config.json: {runtime_config_path}{C_RESET}")
+            print(f"{C_YELLOW}   Edit this file to customise paths, batch sizes, and validation sizes.{C_RESET}")
+        except Exception as _e:
+            print(f"{C_YELLOW}⚠ Could not write default runtime_config.json: {_e}{C_RESET}")
+
     if os.path.exists(runtime_config_path):
         try:
             with open(runtime_config_path, 'r') as f:
