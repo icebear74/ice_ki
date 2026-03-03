@@ -583,10 +583,17 @@ def main():
         # Get validation sizes from config
         val_sizes = rt_config.get('validation', {}).get('sizes', [])
         if not val_sizes:
-            # Fallback to auto-detected training sizes
-            train_gt_pattern = paths_config.get('train_gt', 'patches/{size_key}/GT') if paths_config else 'patches/{size_key}/GT'
-            available = detect_available_sizes(data_root, dataset_name, train_gt_pattern)
-            val_sizes = [size_key for size_key, _ in available] if available else ['540']
+            # Auto-detect from validation GT directories (NOT training dirs)
+            val_gt_pattern = (paths_config.get('val_gt', 'val/{size_key}/GT') if paths_config else 'val/{size_key}/GT')
+            val_sizes = []
+            for sk in ['540', '720', '720_169']:
+                val_dir = os.path.join(data_root, dataset_name, val_gt_pattern.replace('{size_key}', sk))
+                if os.path.isdir(val_dir):
+                    files = [f for f in os.listdir(val_dir) if f.lower().endswith('.png')]
+                    if files:
+                        val_sizes.append(sk)
+            if not val_sizes:
+                val_sizes = ['540']
     else:
         # Fallback to defaults
         data_root = DATASET_ROOT
