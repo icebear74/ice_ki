@@ -19,6 +19,7 @@ class ResidualBlock(nn.Module):
         self.use_checkpointing = use_checkpointing
         
     def _forward_impl(self, x):
+        """Internal forward computation, separated for gradient checkpointing support."""
         residual = x
         out = self.conv1(x)
         out = self.relu(out)

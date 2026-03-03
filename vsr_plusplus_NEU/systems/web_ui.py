@@ -63,6 +63,7 @@ class CompleteTrainingDataStore:
             'adaptive_is_cooldown': False,
             'adaptive_cooldown_remaining': 0,
             'adaptive_plateau_counter': 0,
+            'adaptive_plateau_patience': 100,  # Dynamic patience value from AdaptiveSystem
             'adaptive_lr_boost_available': False,
             'adaptive_perceptual_trend': 0,  # Change since last update
             
@@ -1557,16 +1558,17 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 cooldownRemaining.textContent = '';
             }
             
-            // Plateau counter with color coding
+            // Plateau counter with color coding (thresholds derived from plateau_patience)
             const plateauCounter = data.adaptive_plateau_counter || 0;
+            const plateauPatience = data.adaptive_plateau_patience || 100;
             const plateauEl = document.getElementById('plateauCounter');
             const plateauWarning = document.getElementById('plateauWarning');
             plateauEl.textContent = plateauCounter;
-            if (plateauCounter > 150) {
+            if (plateauCounter > plateauPatience * 1.5) {
                 plateauEl.style.color = 'var(--accent-red)';
                 plateauWarning.textContent = '🚨 WARNUNG';
                 plateauWarning.style.color = 'var(--accent-red)';
-            } else if (plateauCounter > 75) {
+            } else if (plateauCounter > plateauPatience * 0.75) {
                 plateauEl.style.color = 'var(--accent-orange)';
                 plateauWarning.textContent = '🟡 Erhöht';
                 plateauWarning.style.color = 'var(--accent-orange)';
@@ -1739,15 +1741,16 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             
             // 1. Loss trend (up to 30 points) - based on plateau counter
             const plateauCounter = data.adaptive_plateau_counter || 0;
+            const plateauPatience = data.adaptive_plateau_patience || 100;
             let lossTrendScore = 0;
             let lossTrendText = '';
             let lossTrendColor = '';
             
-            if (plateauCounter < 75) {
+            if (plateauCounter < plateauPatience * 0.75) {
                 lossTrendScore = 30.0;
                 lossTrendText = 'Converging';
                 lossTrendColor = 'var(--accent-green)';
-            } else if (plateauCounter < 150) {
+            } else if (plateauCounter < plateauPatience * 1.5) {
                 lossTrendScore = 20.0;
                 lossTrendText = 'Plateau';
                 lossTrendColor = 'var(--accent-blue)';
@@ -1778,11 +1781,11 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             let stabilityText = '';
             let stabilityColor = '';
             
-            if (adaptiveMode === 'Stable' || plateauCounter < 75) {
+            if (adaptiveMode === 'Stable' || plateauCounter < plateauPatience * 0.75) {
                 stabilityScore = 30.0;
                 stabilityText = 'Stable';
                 stabilityColor = 'var(--accent-green)';
-            } else if (plateauCounter < 150) {
+            } else if (plateauCounter < plateauPatience * 1.5) {
                 stabilityScore = 20.0;
                 stabilityText = 'Moderate';
                 stabilityColor = 'var(--accent-blue)';

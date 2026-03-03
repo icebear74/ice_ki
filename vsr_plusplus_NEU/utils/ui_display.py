@@ -344,12 +344,13 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
     # 3. Learning stability (up to 30 points) - based on plateau counter and adaptive mode
     if adaptive_status:
         plateau = adaptive_status.get('plateau_counter', 0)
+        patience = adaptive_status.get('plateau_patience', 100)
         adaptive_mode_val = adaptive_status.get('mode', 'Stable')
         
-        if plateau < 75:
+        if plateau < patience * 0.75:
             stability_score = 30.0
             stability_status = f"{C_GREEN}Stable{C_RESET}"
-        elif plateau < 150:
+        elif plateau < patience * 1.5:
             stability_score = 20.0
             stability_status = f"{C_YELLOW}Moderate{C_RESET}"
         else:
@@ -513,13 +514,14 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
             cooldown_display = f"✅ {C_GREEN}Inactive{C_RESET}"
         print_line(f"Cooldown: {cooldown_display}", ui_w)
         
-        # Plateau counter
+        # Plateau counter (thresholds derived from plateau_patience)
         plateau = adaptive_status.get('plateau_counter', 0)
-        if plateau > 150:
+        patience = adaptive_status.get('plateau_patience', 100)
+        if plateau > patience * 1.5:
             plateau_color = C_RED
             plateau_icon = '🚨'
             plateau_text = f"{plateau} steps (WARNING)"
-        elif plateau > 75:
+        elif plateau > patience * 0.75:
             plateau_color = C_YELLOW
             plateau_icon = '🟡'
             plateau_text = f"{plateau} steps"

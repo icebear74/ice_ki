@@ -287,9 +287,9 @@ def main():
     ).to(device)
     
     if use_checkpointing:
-        print(f"✅ Gradient checkpointing ENABLED - saves ~40% activation memory")
+        print("✅ Gradient checkpointing ENABLED - saves ~40% activation memory")
     else:
-        print(f"⚠️  Gradient checkpointing disabled")
+        print("⚠️  Gradient checkpointing disabled")
     
     # Count parameters
     total_params = sum(p.numel() for p in model.parameters())

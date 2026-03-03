@@ -388,17 +388,17 @@ class VSRTrainer:
                     self.tb_logger.log_lr_phase(self.global_step, lr_phase)
                     
                     # Log adaptive mode/phase transitions
-                    current_adaptive_mode = adaptive_status.get('mode', 'Stable').lower()
-                    phase_changed = current_adaptive_mode != self._last_adaptive_mode.lower()
+                    current_adaptive_mode = adaptive_status.get('mode', 'Stable')
+                    phase_changed = current_adaptive_mode.lower() != self._last_adaptive_mode.lower()
                     self.tb_logger.log_training_phase(self.global_step, {
-                        'phase': current_adaptive_mode,
+                        'phase': current_adaptive_mode.lower(),
                         'phase_changed': phase_changed,
                     })
                     if phase_changed:
                         self.train_logger.log_event(
-                            f"Adaptive mode changed: {self._last_adaptive_mode} → {adaptive_status.get('mode', 'Stable')} at step {self.global_step}"
+                            f"Adaptive mode changed: {self._last_adaptive_mode} → {current_adaptive_mode} at step {self.global_step}"
                         )
-                        self._last_adaptive_mode = adaptive_status.get('mode', 'Stable')
+                        self._last_adaptive_mode = current_adaptive_mode
                     
                     # Log plateau state details
                     if hasattr(self.adaptive_system, 'get_plateau_info'):
@@ -752,6 +752,7 @@ class VSRTrainer:
                 adaptive_is_cooldown=adaptive_status.get('is_cooldown', False),
                 adaptive_cooldown_remaining=adaptive_status.get('cooldown_remaining', 0),
                 adaptive_plateau_counter=adaptive_status.get('plateau_counter', 0),
+                adaptive_plateau_patience=adaptive_status.get('plateau_patience', 100),
                 adaptive_lr_boost_available=adaptive_status.get('lr_boost_available', False),
                 adaptive_perceptual_trend=0,  # TODO: calculate trend
                 
