@@ -564,7 +564,12 @@ class VSRDataset(Dataset):
                         lr_frames = [np.flip(f, axis=0).copy() for f in lr_frames]
                     
                     # Random rotation (0, 90, 180, 270)
-                    k = random.randint(0, 3)
+                    # For non-square patches (e.g. 720_169), 90°/270° would swap H and W,
+                    # making tensors in the same batch unstackable. Limit to 0°/180°.
+                    if gt.shape[0] == gt.shape[1]:
+                        k = random.randint(0, 3)
+                    else:
+                        k = random.choice([0, 2])
                     if k > 0:
                         gt = np.rot90(gt, k).copy()
                         lr_frames = [np.rot90(f, k).copy() for f in lr_frames]
