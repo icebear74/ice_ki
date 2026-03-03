@@ -31,7 +31,7 @@ class VSRDataset(Dataset):
         paths_config: Optional dict with path patterns:
             - train_gt: Pattern for training GT (default: 'patches/{size_key}/GT')
             - train_lr: Pattern for training LR (default: 'patches/{size_key}/LR_7frames')
-            - val_gt: Pattern for validation GT (default: 'val/GT/{size_key}')
+            - val_gt: Pattern for validation GT (default: 'val/{size_key}/GT')
             - val_lr: Pattern for validation LR (default: 'patches/{size_key}/LR_7frames')
     """
     
@@ -51,7 +51,7 @@ class VSRDataset(Dataset):
             paths_config = {}
         self.train_gt_pattern = paths_config.get('train_gt', 'patches/{size_key}/GT')
         self.train_lr_pattern = paths_config.get('train_lr', 'patches/{size_key}/LR_7frames')
-        self.val_gt_pattern = paths_config.get('val_gt', 'val/GT/{size_key}')
+        self.val_gt_pattern = paths_config.get('val_gt', 'val/{size_key}/GT')
         self.val_lr_pattern = paths_config.get('val_lr', 'patches/{size_key}/LR_7frames')
         
         # Build paths based on mode
