@@ -110,7 +110,9 @@ def _draw_current_video_section(state, width):
         percent = cat_data.get('percent', 0.0)
         
         label = f"  {cat_name:10s}"
-        numbers = f"{created:5d} / {target:5d} ({percent:5.1f}%)"
+        # "created" and "target" are GT-Bilder (= Szenen); each GT-Bild has one
+        # stacked LR counterpart containing n_frames frames.
+        numbers = f"{created:5d} GT / {target:5d} GT ({percent:5.1f}%)"
         bar = make_bar(percent, bar_width, color)
         
         print(f"{label}  {numbers}  {bar}")
@@ -123,7 +125,7 @@ def _draw_overall_progress_section(state, width):
     overall_progress = state.get('overall_progress', {})
     categories = state.get('categories') or list(overall_progress.keys())
     
-    bar_width = min(50, width - 45)
+    bar_width = min(50, width - 50)  # 5 chars wider margin to fit the added ' GT' suffixes
     
     for idx, cat_key in enumerate(categories):
         color = _category_color(cat_key, idx)
@@ -134,7 +136,8 @@ def _draw_overall_progress_section(state, width):
         percent = cat_data.get('percent', 0.0)
         
         label = f"  {cat_name:10s}"
-        numbers = f"{format_number(created):>8s} / {format_number(target):>8s} ({percent:5.1f}%)"
+        # target = category_targets[category] = the user-configured GT-Bilder goal
+        numbers = f"{format_number(created):>8s} GT / {format_number(target):>8s} GT ({percent:5.1f}%)"
         bar = make_bar(percent, bar_width, color)
         
         print(f"{label}  {numbers}  {bar}")
@@ -197,17 +200,39 @@ def _draw_patch_distribution_table(state, width):
 def _draw_statistics_and_eta(state, width):
     """Draw statistics and ETA section"""
     print_section_header("STATISTIKEN & GESCHÄTZTE RESTZEIT")
-    
-    # Statistics
-    scenes_processed = state.get('scenes_processed', 0)
-    patches_total = state.get('patches_created_total', 0)
-    avg_time = state.get('avg_time_per_scene', 0.0)
-    
-    stats_line = f"  Szenen: {C_GREEN}{scenes_processed:>6d}{C_RESET}  |  "
-    stats_line += f"Patches: {C_GREEN}{format_number(patches_total):>8s}{C_RESET}  |  "
-    stats_line += f"Ø Zeit/Szene: {C_GREEN}{avg_time:>5.1f}s{C_RESET}"
-    print(stats_line)
-    
+
+    frames_read   = state.get('frames_read_total', 0)       # raw frames decoded by FFmpeg
+    frames_total  = state.get('frames_processed_total', 0)  # center-frame assignments evaluated
+    gt_total      = state.get('patches_created_total', 0)   # GT-Bilder saved (= Szenen, cross-category sum)
+    skipped       = max(0, frames_total - gt_total)
+    avg_time      = state.get('avg_time_per_scene', 0.0)
+    live_fps      = state.get('live_fps', 0.0)
+    live_sps      = state.get('live_sps', 0.0)
+
+    # Gelesen     = raw FFmpeg frames decoded
+    # Szenen      = center-frame assignments evaluated (= unique scene positions across categories)
+    # GT-Bilder   = GT files saved; each GT-Bild corresponds to exactly 1 scene and 1 stacked LR
+    #               file containing n_frames LR frames (e.g. 7 × 30 000 = 210 000 LR frames)
+    # Übersprungen = assignments that produced no GT file (black frame or crop failure)
+    line1 = (
+        f"  Gelesen: {C_GREEN}{format_number(frames_read):>8s}{C_RESET}  |  "
+        f"Szenen: {C_GREEN}{format_number(frames_total):>8s}{C_RESET}  |  "
+        f"GT-Bilder: {C_GREEN}{format_number(gt_total):>8s}{C_RESET}  |  "
+        f"Übersprungen: {C_GREEN}{format_number(skipped):>6s}{C_RESET}"
+    )
+    if avg_time > 0:
+        line1 += f"  |  Ø Zeit/Szene: {C_GREEN}{avg_time:>5.1f}s{C_RESET}"
+    print(line1)
+
+    # FPS / SPS throughput line (only shown once the pipeline has started)
+    if live_fps > 0 or live_sps > 0:
+        fps_str = f"{live_fps:>7.1f}" if live_fps > 0 else "    N/A"
+        sps_str = f"{live_sps:>7.2f}" if live_sps > 0 else "    N/A"
+        print(
+            f"  FPS (decoded): {C_CYAN}{fps_str}{C_RESET}  |  "
+            f"SPS (scenes/s): {C_CYAN}{sps_str}{C_RESET}"
+        )
+
     print()
     
     # ETA – only configured categories + total

@@ -5,6 +5,7 @@ Based on vsr_plusplus/utils/ui_terminal.py
 Professional box-drawing and ANSI control
 """
 
+import atexit
 import re
 import sys
 import shutil
@@ -98,12 +99,15 @@ def clear_and_home():
 
 
 def hide_cursor():
-    """Hide terminal cursor"""
+    """Hide terminal cursor and register an atexit handler to restore it."""
     print(ANSI_HIDE_CURSOR, end='', flush=True)
+    if not getattr(hide_cursor, '_atexit_registered', False):
+        atexit.register(show_cursor)
+        hide_cursor._atexit_registered = True
 
 
 def show_cursor():
-    """Show terminal cursor"""
+    """Show terminal cursor."""
     print(ANSI_SHOW_CURSOR, end='', flush=True)
 
 

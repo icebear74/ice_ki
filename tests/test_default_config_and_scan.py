@@ -838,22 +838,31 @@ class TestDynamicCategoryDisplay(unittest.TestCase):
         self.assertIn('Anime', output)
         print("✓ dynamic display: custom category 'anime' rendered")
 
-    def test_format_sizes_columns_dynamic(self):
-        """Only the configured format sizes appear as columns in the table."""
-        state = self._make_state(['master'], format_sizes=['540'])
+    def test_fps_sps_shown_when_available(self):
+        """FPS and SPS lines must appear in the statistics section when > 0."""
+        state = self._make_state(['master'])
+        state['live_fps'] = 47.3
+        state['live_sps'] = 12.5
         output = self._capture_draw(state)
-        # '540' column header must appear
-        self.assertIn('540', output)
-        # '720' must not appear as a column (only '540' is configured)
-        # Strip ANSI colour codes before checking to avoid false negatives
         import re
         plain = re.sub(r'\x1b\[[0-9;]*m', '', output)
-        # The patch-distribution table header line should contain '540' but not '720'
-        table_header = [l for l in plain.splitlines() if 'Kategorie' in l]
-        self.assertTrue(table_header, "No table header line found")
-        self.assertIn('540', table_header[0])
-        self.assertNotIn('720', table_header[0])
-        print("✓ dynamic display: format size columns match config")
+        self.assertIn('FPS', plain)
+        self.assertIn('SPS', plain)
+        self.assertIn('47.3', plain)
+        self.assertIn('12.50', plain)
+        print("✓ dynamic display: FPS/SPS line rendered when live values > 0")
+
+    def test_fps_sps_hidden_when_zero(self):
+        """FPS/SPS line must NOT appear when both values are zero (not started)."""
+        state = self._make_state(['master'])
+        # live_fps and live_sps default to 0 (or absent)
+        output = self._capture_draw(state)
+        import re
+        plain = re.sub(r'\x1b\[[0-9;]*m', '', output)
+        # The throughput line should not appear before the pipeline starts
+        fps_lines = [l for l in plain.splitlines() if 'FPS (decoded)' in l]
+        self.assertEqual(fps_lines, [], "FPS line should not appear when both values are zero")
+        print("✓ dynamic display: FPS/SPS line hidden when values are zero")
 
 
 if __name__ == '__main__':

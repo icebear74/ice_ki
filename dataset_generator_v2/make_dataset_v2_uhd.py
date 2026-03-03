@@ -34,6 +34,13 @@ from utils.format_definitions import (
     FORMATS, CATEGORY_FORMAT_DISTRIBUTION, CATEGORY_PATHS,
     select_random_format, get_output_dirs_for_format
 )
+from streaming_extractor import (
+    build_assignments_per_category,
+    extract_and_save_streaming_distributed,
+    is_black_frame as _streaming_is_black_frame,
+    is_hdr_transfer,
+    build_vf_filter,
+)
 from utils.progress_tracker import ProgressTracker
 from utils.dataset_display import draw_dataset_ui
 from utils.terminal_ui import hide_cursor, show_cursor, clear_screen
@@ -95,10 +102,13 @@ class DatasetGeneratorV2UHD:
         self.logger = self._setup_logger()
         sys.logger = self.logger
         
-        # CUDA/GPU disabled - using CPU-only mode for better stability
-        # CPU extraction is reliable and seeking is the bottleneck anyway
-        self.use_cuda = False
-        self.logger.info("🖥️  CPU-only mode enabled (CUDA/GPU disabled for stability)")
+        # Use CUDA when the local FFmpeg build supports it; fall back to CPU.
+        from streaming_extractor import cuda_available
+        self.use_cuda = cuda_available()
+        if self.use_cuda:
+            self.logger.info("🚀 CUDA/GPU mode enabled (hardware-accelerated decoding & scaling)")
+        else:
+            self.logger.info("🖥️  CPU-only mode enabled (CUDA not available in this FFmpeg build)")
         
         # Videos are already sorted in JSON by multi-category priority
         # Process them in exact JSON order (no additional sorting)
@@ -142,8 +152,12 @@ class DatasetGeneratorV2UHD:
             'patch_distribution': {},
             'scenes_processed': 0,
             'patches_created_total': 0,
+            'frames_processed_total': 0,
+            'frames_read_total': 0,
             'avg_time_per_scene': 0.0,
             'eta': {},
+            'live_fps': 0.0,   # decoded frames per second (FFmpeg pipeline throughput)
+            'live_sps': 0.0,   # scene-assignments processed per second
             # Only categories that actually exist in the config
             'categories': list(self.category_targets.keys()),
             # Only format-size columns that actually exist in the config
@@ -243,9 +257,8 @@ class DatasetGeneratorV2UHD:
         """Handle shutdown signals gracefully - fast exit on Ctrl+C"""
         print("\n\n⚠️  Ctrl+C detected! Aborting immediately...")
         self.running = False
-        # Show cursor before exit
-        if self.use_terminal_ui:
-            show_cursor()
+        # Always restore cursor/terminal regardless of use_terminal_ui flag
+        show_cursor()
         # Save progress before exit
         if hasattr(self, 'tracker'):
             try:
@@ -257,93 +270,76 @@ class DatasetGeneratorV2UHD:
         sys.exit(0)
     
     def _update_terminal_ui(self):
-        """Update and redraw the terminal UI"""
+        """Update and redraw the terminal UI (throttled to update_interval)."""
         if not self.use_terminal_ui:
             return
-        
-        # Update every call for real-time progress during extraction
+
+        now = time.time()
+        if now - self.last_update_time < self.update_interval:
+            return
+        self.last_update_time = now
         self.ui_update_counter += 1
-        # Log update to verify it's being called (visible on screen for debugging)
-        print(f"[GUI UPDATE #{self.ui_update_counter}] Patches: {self.ui_state.get('patches_created_total', 0)}", flush=True)
-        self.logger.info(f"GUI update #{self.ui_update_counter} - patches: {self.ui_state.get('patches_created_total', 0)}")
-        
+
         try:
             # Update overall progress from tracker
             category_stats = self.tracker.status.get('category_stats', {})
             for category in self.category_targets.keys():
                 if category in category_stats:
                     stats = category_stats[category]
-                    # Use actual distribution totals instead of raw category targets
-                    target = self.distribution_totals.get(category, 0)
-                    current = stats.get('images_created', 0)  # ProgressTracker uses 'images_created'
+                    # Use the user-configured target (category_targets), not the
+                    # rounded distribution sum (distribution_totals), so the progress
+                    # bar reflects exactly what the user asked for (30 000 GT images
+                    # means 30 000 GT images, not 29 850 due to per-video rounding).
+                    target = self.category_targets.get(category, 0)
+                    current = stats.get('images_created', 0)
                     percent = (current / target * 100) if target > 0 else 0.0
                     self.ui_state['overall_progress'][category] = {
-                        'created': current,  # Fixed: was 'current', display expects 'created'
+                        'created': current,
                         'target': target,
-                        'percent': percent  # Added: display expects this
+                        'percent': percent,
                     }
-            
-            # Calculate patch distribution by category and size
-            # Use ACTUAL format names from configuration (e.g., small_540, medium_720_169, large_720)
+
+            # Patch distribution by category and format
             patch_dist = {}
             for category in self.format_config.keys():
                 patch_dist[category] = {}
-                # Get actual format names from configuration for this category
                 if category in self.format_config:
                     for format_name in self.format_config[category].keys():
-                        # Get from tracker if available
                         if category in category_stats:
-                            # Get distribution based on actual format probabilities
-                            total = category_stats[category].get('images_created', 0)  # ProgressTracker uses 'images_created'
+                            total = category_stats[category].get('images_created', 0)
                             prob = self.format_probabilities.get(category, {}).get(format_name, 0.0)
                             current = int(total * prob)
-                            # Use actual distribution totals
-                            target_total = self.distribution_totals.get(category, 0)
+                            target_total = self.category_targets.get(category, 0)
                             target = int(target_total * prob)
-                            
                             patch_dist[category][format_name] = {
                                 'count': current,
-                                'target': target
+                                'target': target,
                             }
                         else:
                             patch_dist[category][format_name] = {'count': 0, 'target': 0}
-            
             self.ui_state['patch_distribution'] = patch_dist
-            
-            # Calculate ETAs
+
+            # ETA calculation: use global rate (total saved / elapsed)
             elapsed = time.time() - self.start_time
-            if self.ui_state['patches_created_total'] > 0 and elapsed > 0:
-                rate = self.ui_state['patches_created_total'] / elapsed
-                
+            patches_done = self.ui_state.get('patches_created_total', 0)
+            if patches_done > 0 and elapsed > 0:
+                rate = patches_done / elapsed
                 eta_by_category = {}
                 max_eta = 0
-                for category in self.ui_state['overall_progress'].keys():
-                    if category in self.ui_state['overall_progress']:
-                        current = self.ui_state['overall_progress'][category]['created']  # Fixed: was 'current'
-                        target = self.ui_state['overall_progress'][category]['target']
-                        remaining = target - current
-                        if rate > 0 and remaining > 0:
-                            eta_seconds = remaining / rate
-                            eta_by_category[category] = eta_seconds
-                            max_eta = max(max_eta, eta_seconds)
-                
+                for category in self.ui_state['overall_progress']:
+                    cat_data = self.ui_state['overall_progress'][category]
+                    remaining = cat_data['target'] - cat_data['created']
+                    if remaining > 0 and rate > 0:
+                        eta_s = remaining / rate
+                        eta_by_category[category] = eta_s
+                        max_eta = max(max_eta, eta_s)
                 self.ui_state['eta'] = eta_by_category
                 self.ui_state['eta']['total'] = max_eta
-            
-            # Draw the UI
-            print(f"[DRAWING GUI...]", flush=True)
+
             clear_screen()
             draw_dataset_ui(self.ui_state)
-            # Force flush to ensure display updates immediately
-            sys.stdout.flush()
-            # Extra newline to ensure terminal processes the output
-            print("", end='', flush=True)
-            print(f"[GUI DRAWN]", flush=True)
-            
+
         except Exception as e:
-            # Don't let UI errors crash the program, but DO show them on screen!
-            print(f"\n⚠️  GUI UPDATE ERROR: {e}")
-            print(f"   (Check log for stack trace)")
             self.logger.error(f"UI update error: {e}", exc_info=True)
     
     def _log_system_resources(self, operation: str = ""):
@@ -451,11 +447,13 @@ class DatasetGeneratorV2UHD:
                             duration = metadata['duration']
                             durations[video_path] = duration
                             total_duration += duration
-                            
+
+                            hdr_label = "HDR" if metadata.get('is_hdr', True) else "SDR"
+                            ct = metadata.get('color_transfer') or 'unknown'
                             progress.update(task, description=f"Scanned: {video_name[:40]}...", advance=1)
                             # Log with newline for clean output
-                            print(f"Scanned: {video_name}: {duration:.1f}s")
-                            self.logger.debug(f"Scanned {video_name}: {duration:.1f}s")
+                            print(f"Scanned: {video_name}: {duration:.1f}s [{hdr_label}, {ct}]")
+                            self.logger.debug(f"Scanned {video_name}: {duration:.1f}s [{hdr_label}, {ct}]")
                         else:
                             self.logger.warning(f"Could not get duration for: {video_name}")
                             errors += 1
@@ -522,33 +520,73 @@ class DatasetGeneratorV2UHD:
             # For EACH category separately
             for category, category_target in self.category_targets.items():
                 self.logger.info(f"\n  Processing category: {category} (target: {category_target:,})")
-                
-                # Find videos that have THIS category
-                category_videos = []
-                category_total_duration = 0.0
-                
+
+                # Separate videos into forced-frames and proportional buckets.
+                # Videos whose 'forced_frames' dict contains a positive value for
+                # this category get that exact count; the remainder of the category
+                # budget is distributed proportionally among the other videos.
+                forced_videos: Dict[str, int] = {}   # path → forced_count
+                normal_videos = []                   # (path, name, duration)
+                normal_total_duration = 0.0
+                forced_total = 0
+
                 for v in self.videos:
                     video_cats = get_video_categories(v)
-                    if category in video_cats:
-                        video_path = v['path']
-                        if video_path in durations:
-                            duration = durations[video_path]
-                            category_videos.append((video_path, v['name'], duration))
-                            category_total_duration += duration
-                
-                self.logger.info(f"    {category}: {len(category_videos)} videos, {category_total_duration/3600:.1f} hours total")
-                
-                if category_total_duration == 0 or len(category_videos) == 0:
+                    if category not in video_cats:
+                        continue
+                    video_path = v['path']
+                    if video_path not in durations:
+                        continue
+                    forced = v.get('forced_frames', {}).get(category, 0)
+                    if forced > 0:
+                        forced_videos[video_path] = forced
+                        forced_total += forced
+                        self.logger.info(
+                            f"    ⚡ {v.get('name','?')}: forced {forced:,} frames "
+                            f"for category '{category}'"
+                        )
+                    else:
+                        dur = durations[video_path]
+                        normal_videos.append((video_path, v['name'], dur))
+                        normal_total_duration += dur
+
+                # Budget remaining after honouring forced frames
+                remaining_budget = max(0, category_target - forced_total)
+                if forced_total > 0:
+                    self.logger.info(
+                        f"    Category '{category}': target {category_target:,}, "
+                        f"forced {forced_total:,}, remaining for proportional "
+                        f"distribution: {remaining_budget:,}"
+                    )
+
+                self.logger.info(
+                    f"    {category}: {len(forced_videos)} forced + "
+                    f"{len(normal_videos)} proportional videos, "
+                    f"{normal_total_duration/3600:.1f} hours proportional"
+                )
+
+                if len(normal_videos) == 0 and not forced_videos:
                     self.logger.warning(f"    No videos or zero duration for {category}, skipping")
                     continue
-                
-                # Distribute category target among these videos proportionally
-                for video_path, video_name, duration in category_videos:
-                    proportion = duration / category_total_duration
-                    patches = int(category_target * proportion)
+
+                # Apply forced-frame targets
+                for video_path, forced_count in forced_videos.items():
+                    video_targets[video_path][category] = forced_count
+
+                # Distribute remaining_budget proportionally among normal videos
+                for video_path, video_name, duration in normal_videos:
+                    if normal_total_duration > 0:
+                        patches = int(remaining_budget * duration / normal_total_duration)
+                    else:
+                        patches = 0
                     video_targets[video_path][category] = patches
-                    
-                    self.logger.debug(f"      {video_name}: {duration:.0f}s ({proportion*100:.1f}%) → {patches} patches")
+                    self.logger.debug(
+                        f"      {video_name}: {duration:.0f}s "
+                        f"({duration / normal_total_duration * 100:.1f}% of proportional pool) "
+                        f"→ {patches} patches"
+                        if normal_total_duration > 0 else
+                        f"      {video_name}: {duration:.0f}s → {patches} patches (zero-duration pool)"
+                    )
             
             # Show summary
             self.logger.info("\n  Per-video summary (top 10 by total patches):")
@@ -614,10 +652,16 @@ class DatasetGeneratorV2UHD:
         
         return temp_subdir
     
-    def extract_frames_uhd(self, video_path: str, start_time: float, n_frames: int = 7) -> Optional[Dict]:
+    def extract_frames_uhd(self, video_path: str, start_time: float, n_frames: int = 7,
+                           is_hdr: Optional[bool] = None) -> Optional[Dict]:
         """
-        Extract frames with HDR→SDR tonemap to DISK (memory-efficient).
-        
+        Extract frames to DISK (memory-efficient).
+
+        Applies the HDR→SDR tonemap chain when the source is HDR, or a
+        lightweight scale-only chain when it is SDR.  When *is_hdr* is
+        ``None`` (default) the color format is determined automatically by
+        calling ``_get_video_metadata``.
+
         MEMORY OPTIMIZATION: Returns PATHS to frames (NOT loaded into memory).
         Caller must load frames when needed and clean up temp_dir when done.
         
@@ -625,6 +669,9 @@ class DatasetGeneratorV2UHD:
             video_path: Path to video
             start_time: Start timestamp
             n_frames: Number of frames (7 or 5)
+            is_hdr: Override for HDR detection.  Pass ``True``/``False`` to
+                    skip the metadata look-up (useful when the caller already
+                    has the value from ``_get_video_metadata``).
         
         Returns:
             Dict with 'frame_paths' (list of paths) and 'temp_dir' (must be cleaned up)
@@ -632,20 +679,23 @@ class DatasetGeneratorV2UHD:
         """
         temp_dir = None
         try:
+            # Determine HDR/SDR if not supplied by caller
+            if is_hdr is None:
+                meta = self._get_video_metadata(video_path)
+                is_hdr = meta.get('is_hdr', True) if meta else True
+
             # Use configured temp directory
             temp_dir = self._create_temp_dir("extract_single")
             output_pattern = os.path.join(temp_dir, "frame_%04d.png")
-            
-            # UHD tonemap filter with 1080p scaling
-            vf_filter = (
-                "zscale=t=linear:npl=100,"
-                "format=gbrpf32le,"
-                "zscale=p=bt709,"
-                "tonemap=tonemap=mobius:desat=0,"
-                "zscale=t=bt709:m=bt709:range=limited,"
-                "scale=1920:1080:flags=lanczos,"
-                "format=yuv420p"
-            )
+
+            # Build the correct filter chain for this video's color format.
+            # extract_frames_uhd uses CPU-only (no CUDA) for stability and
+            # because it processes only a few frames at a time.
+            # Replace bgr24 with yuv420p so ffmpeg can write PNG files.
+            # (Both _TONEMAP_FILTER and _SDR_FILTER already contain the scale
+            # step, so only the final pixel-format needs to change.)
+            vf_filter = build_vf_filter(is_hdr=is_hdr, use_cuda=False)
+            vf_filter = vf_filter.replace("format=bgr24", "format=yuv420p")
             
             # CPU-only mode (no CUDA) - more stable and reliable
             # FIXED: Added nice priority for lower system impact
@@ -1055,13 +1105,21 @@ class DatasetGeneratorV2UHD:
         lr_versions = self.settings.get('lr_versions', ['7frames'])
         n_frames = 7 if '7frames' in lr_versions else 5
         
-        # Get video FPS for batch extraction
+        # Get video FPS and color metadata for batch extraction
+        # (metadata was already fetched above; re-use it via cache — no extra ffprobe call)
         metadata = self._get_video_metadata(video_path)
         fps = metadata.get('fps', 25.0) if metadata else 25.0
-        
+        is_hdr = metadata.get('is_hdr', True) if metadata else True
+
+        self.logger.info(
+            f"  Color format: {metadata.get('color_transfer', 'unknown')!r} "
+            f"→ {'HDR tonemap' if is_hdr else 'SDR pass-through'}"
+        )
+
         # Extract patches using OPTIMIZED batch mode
         patches_created = self._extract_patches_multi_format_batch(
-            video_path, duration, format_distribution, n_frames, video_name, fps, video_idx
+            video_path, duration, format_distribution, n_frames, video_name, fps, video_idx,
+            is_hdr=is_hdr,
         )
         
         return patches_created
@@ -1129,7 +1187,7 @@ class DatasetGeneratorV2UHD:
     def _extract_patches_multi_format_batch(self, video_path: str, duration: float,
                                            format_distribution: Dict[str, Dict[str, int]], 
                                            n_frames: int, video_name: str, fps: float = 25.0,
-                                           video_idx: int = 0) -> Dict[str, int]:
+                                           video_idx: int = 0, is_hdr: bool = True) -> Dict[str, int]:
         """
         OPTIMIZED: Extract patches using BATCH frame extraction (10-50x faster).
         
@@ -1144,6 +1202,9 @@ class DatasetGeneratorV2UHD:
             n_frames: Number of frames to extract (5 or 7)
             video_name: Video name for logging
             fps: Video frame rate (default 25.0)
+            is_hdr: Whether the source video uses HDR transfer (PQ/HLG).
+                    When False a lightweight scale-only chain is used instead
+                    of the full HDR→SDR tonemap pipeline.
         
         Returns:
             Dict of {category: patches_created_count}
@@ -1172,332 +1233,112 @@ class DatasetGeneratorV2UHD:
         self.logger.info(f"📹 Video: {video_name}")
         self.logger.info(f"🎯 Target: {total_target} patches across {len(format_distribution)} categories")
         
-        # Phase 1: Calculate all extraction timestamps
-        self.logger.info(f"\n📋 Phase 1: Calculating extraction plan...")
-        
-        # Each scene is assigned to EXACTLY ONE (category, format) slot → no duplicates.
-        # Total scenes needed = total patches across all slots.
-        scenes_needed = total_target
-        
-        self.logger.info(f"✓ Format distribution analysis:")
-        self.logger.info(f"  Total target patches: {total_target}")
-        self.logger.info(f"  Scenes needed: {scenes_needed} (each scene used exactly once)")
-        
-        # Calculate stride to EVENLY DISTRIBUTE across ENTIRE video duration
-        # This ensures frames from beginning, middle, AND END of video
-        usable_duration = duration - 1.0  # Leave 1 second at end
-        
-        if scenes_needed > 0 and usable_duration > 0:
-            # Calculate stride: divide total duration by number of SCENES needed
-            stride_seconds = usable_duration / scenes_needed
-            # Minimum stride to avoid extracting too frequently
-            stride_seconds = max(stride_seconds, 0.5)
-        else:
-            stride_seconds = 3.0  # Fallback
-        
-        self.logger.info(f"\n  Video duration: {duration:.1f}s")
-        self.logger.info(f"  Video FPS: {fps:.2f}")
-        self.logger.info(f"  Total frames in video: {int(duration * fps)}")
-        self.logger.info(f"  Calculated stride: {stride_seconds:.2f}s = {int(stride_seconds * fps)} frames")
-        
-        # Generate timestamps evenly across entire video
-        timestamps = []
-        for i in range(scenes_needed):
-            timestamp = i * stride_seconds
-            if timestamp < usable_duration:
-                timestamps.append(timestamp)
-            else:
-                break
-        
-        self.logger.info(f"\n✓ Planned {len(timestamps)} extraction points (scenes)")
-        self.logger.info(f"  Extraction pattern: One scene every {int(stride_seconds * fps)} frames")
-        self.logger.info(f"  Each scene: 7 consecutive frames")
-        if timestamps:
-            self.logger.info(f"  First timestamp: {timestamps[0]:.2f}s (0.0% of video)")
-            self.logger.info(f"  Last timestamp: {timestamps[-1]:.2f}s ({100*timestamps[-1]/duration:.1f}% of video)")
-            self.logger.info(f"  Coverage: Entire video from start to end")
-        self.logger.info(f"  Total frames to extract: {len(timestamps) * n_frames}")
-        self.logger.info(f"  All {len(timestamps)} scenes will be used (0% waste)")
-        
-        # Phase 2: INCREMENTAL extraction and processing
-        # User request: "extrahier 7 frames .. verteile die .. extrahiere die nächsten 7 usw usw"
-        # Translation: "extract 7 frames .. distribute them .. extract the next 7, etc."
-        self.logger.info(f"\n🎬 Phase 2: INCREMENTAL extraction and processing...")
-        self.logger.info(f"  Extract 7 frames → Process → Clean up → Repeat")
-        self.logger.info(f"  Memory-efficient: Only 7 frames in RAM at a time")
-        self.logger.info(f"  Target directories (master/, space/, etc.) will be created as patches are saved")
-        
-        black_frame_threshold_kb = 15
-        black_frame_detection_limit_seconds = 10.0
-        black_frames_detected = 0
-        black_frames_skipped = 0
-        total_created = 0
-        
-        # Build a scene→slot partition: each scene goes to EXACTLY ONE (category, format).
-        # This prevents any scene from being saved to more than one output directory.
-        total_scenes = len(timestamps)
-
-        # Flatten all (category, format_name, count) slots
-        all_slots: List[Tuple[str, str, int]] = []
-        for category, formats in format_distribution.items():
-            for format_name, count in formats.items():
-                all_slots.append((category, format_name, count))
-
-        # If the video is too short, scale down slot counts proportionally
-        slots_total = sum(c for _, _, c in all_slots)
-        if slots_total > total_scenes:
-            scale = total_scenes / slots_total
-            all_slots = [(cat, fmt, max(1, int(cnt * scale))) for cat, fmt, cnt in all_slots]
-            # Trim any excess caused by rounding
-            excess = sum(c for _, _, c in all_slots) - total_scenes
-            if excess > 0:
-                all_slots.sort(key=lambda x: -x[2])
-                all_slots[0] = (all_slots[0][0], all_slots[0][1],
-                                max(0, all_slots[0][2] - excess))
-
-        # Assign scenes to slots with INTERLEAVED distribution so every format
-        # gets patches from the very first scenes processed.  Without this,
-        # a consecutive-block layout causes the second/third format directories
-        # to be created only after thousands of scenes, making them appear
-        # "missing" during a normal-length run.
+        # Phase 1: Build per-category assignments independently.
         #
-        # Algorithm: for each slot, assign each of its count scenes a fractional
-        # position j/count in [0,1).  Sorting all (frac_pos, cat, fmt) entries
-        # by frac_pos distributes formats evenly across the whole scene range
-        # while preserving the exact per-format counts.
-        annotated: List[Tuple[float, str, str]] = []
-        for category, format_name, count in all_slots:
-            for j in range(count):
-                annotated.append((j / count, category, format_name))
-        annotated.sort(key=lambda x: x[0])   # stable sort → ties keep insertion order
+        # Rule: within each category every scene appears at most ONCE (assigned
+        # to exactly one format).  Across categories the same video position
+        # CAN appear in multiple categories – e.g. 5 000 scenes for master and
+        # 2 000 for universal gives 7 000 assignments fed into one streaming pass.
+        usable_duration = duration - 1.0
+        assignments = build_assignments_per_category(
+            format_distribution=format_distribution,
+            duration=duration,
+            fps=fps,
+            n_frames=n_frames,
+        )
 
-        scene_to_slot: Dict[int, Tuple[str, str]] = {
-            i: (a[1], a[2]) for i, a in enumerate(annotated)
-        }
+        from collections import Counter as _Counter
+        cat_counts = _Counter(cat for _, cat, _ in assignments)
+        self.logger.info(f"\n📊 Assignments per category (independent sets):")
+        for cat, cnt in sorted(cat_counts.items()):
+            self.logger.info(f"  {cat}: {cnt} unique scenes")
+        self.logger.info(f"  Total: {len(assignments)} assignments → one streaming pass")
 
-        self.logger.info(f"\n📊 Scene partition per format (no duplicates):")
-        for category, format_name, count in all_slots:
-            self.logger.info(f"  {category}/{format_name}: {count} unique scenes")
-        
-        # INCREMENTAL PROCESSING: Extract → Process → Clean → Repeat
-        self.logger.info(f"\n🔄 Starting incremental extraction and processing...")
-        self.logger.info(f"  Processing {len(timestamps)} timestamps one at a time")
-        
-        processed_count = 0
-        extraction_failures = 0
-        
-        for scene_idx, ts in enumerate(timestamps):
-            self.logger.info(f"\n📍 Scene {scene_idx+1}/{len(timestamps)}: timestamp {ts:.2f}s")
-            scene_start_time = time.time()  # Track scene processing time
-            
-            # Each scene is assigned to exactly one (category, format) slot
-            if scene_idx not in scene_to_slot:
-                self.logger.debug(f"  ⏭️  Skipping (no slot assigned)")
-                continue
-            
-            # Check if we should abort
-            if not self.running:
-                self.logger.info("⚠️  Aborting extraction (Ctrl+C detected)")
-                break
-            
-            # EXTRACT 7 frames for this timestamp
-            self.logger.info(f"  🎬 Extracting {n_frames} frames...")
-            result = self.extract_frames_uhd(video_path, ts, n_frames)
-            
-            if not result or not result.get('frame_paths'):
-                self.logger.error(f"  ❌ Extraction failed for timestamp {ts:.2f}s")
-                extraction_failures += 1
-                continue
-            
-            frame_file_paths = result['frame_paths']
-            temp_dir = result['temp_dir']
-            self.logger.info(f"  ✓ Extracted {len(frame_file_paths)} frames to temp directory")
-            
-            # Load frames into memory (only 7 frames - minimal RAM usage)
-            frames = []
-            for frame_path in frame_file_paths:
-                frame = cv2.imread(frame_path)
-                if frame is None:
-                    self.logger.warning(f"  ⚠️  Could not read frame {frame_path}")
-                    break
-                frames.append(frame)
-            
-            if len(frames) != n_frames:
-                self.logger.warning(f"  ⚠️  Incomplete frames ({len(frames)}/{n_frames}), skipping")
-                # Clean up
-                for frame_path in frame_file_paths:
-                    if os.path.exists(frame_path):
-                        os.remove(frame_path)
-                if temp_dir and os.path.exists(temp_dir):
-                    import shutil
-                    shutil.rmtree(temp_dir, ignore_errors=True)
-                continue
-            
-            self.logger.info(f"  ✓ Loaded {len(frames)} frames into memory")
-            
-            # Update GUI to show extraction progress
-            self.ui_state['scenes_processed'] = processed_count + 1
+        # Phase 2: Stream the video once, saving patches via progress callback.
+        self.logger.info(f"\n🚀 SINGLE-PASS streaming extraction "
+                         f"({n_frames}-frame rolling buffer, no seeking)…")
+
+        # Snapshot of patches already counted before this video so the callback
+        # can report a cumulative total in ui_state['patches_created_total'].
+        prior_total: int = self.ui_state.get('patches_created_total', 0)
+        # raw frames already accumulated by previous videos (so the cumulative
+        # frames_read_total is correct across all videos)
+        self._prior_raw_frames: int = self.ui_state.get('frames_read_total', 0)
+        # Per-category counts already tracked (for delta-based tracker updates).
+        last_tracker: Dict[str, int] = {cat: 0 for cat in patches_created}
+        # Wall-clock start for per-video FPS / SPS measurement
+        video_t0: float = time.monotonic()
+
+        def _on_progress(frames_examined: int, patches_so_far: Dict[str, int], raw_frames_read: int) -> None:
+            # Live UI counters
+            self.ui_state['frames_processed_total'] = frames_examined
+            self.ui_state['frames_read_total'] = self._prior_raw_frames + raw_frames_read
+            # Cumulative patch total across all videos
+            self.ui_state['patches_created_total'] = (
+                prior_total + sum(patches_so_far.values())
+            )
+            # Live throughput metrics
+            elapsed_time = time.monotonic() - video_t0
+            if elapsed_time > 0:
+                self.ui_state['live_fps'] = raw_frames_read / elapsed_time
+                self.ui_state['live_sps'] = frames_examined / elapsed_time
+            # Update per-video progress bars with live per-category patch counts
+            current_progress = self.ui_state.get('current_video_progress', {})
+            for cat, new_total in patches_so_far.items():
+                if cat in current_progress:
+                    target = current_progress[cat].get('target', 0)
+                    pct = (new_total / target * 100) if target > 0 else 0.0
+                    current_progress[cat]['created'] = new_total
+                    current_progress[cat]['percent'] = pct
+            # Increment tracker by delta to avoid double-counting on final merge
+            for cat, new_total in patches_so_far.items():
+                delta = new_total - last_tracker.get(cat, 0)
+                if delta > 0:
+                    self.tracker.increment_category_images(cat, delta)
+                    last_tracker[cat] = new_total
+            # Throttled redraw (respects self.update_interval)
             self._update_terminal_ui()
-            
-            # PROCESS frames: this scene goes to exactly ONE (category, format) slot
-            patches_created_this_scene = 0
-            category, format_name = scene_to_slot[scene_idx]
-            format_config = self.format_config[category][format_name]
 
-            # Try up to 5 times to find an interesting patch with random crops
-            MAX_RANDOM_ATTEMPTS = 5
-            gt, lr = None, None
+        streaming_result = extract_and_save_streaming_distributed(
+            video_path=video_path,
+            assignments=assignments,
+            n_frames=n_frames,
+            format_config=self.format_config,
+            base_dir=self.base_dir,
+            fps=fps,
+            logger=self.logger,
+            is_interesting_fn=self.is_interesting_patch,
+            is_black_frame_fn=_streaming_is_black_frame,
+            progress_fn=_on_progress,
+            use_cuda=self.use_cuda,
+            nice_level=self.settings.get('ffmpeg_nice', 10),
+            is_hdr=is_hdr,
+        )
 
-            for attempt in range(MAX_RANDOM_ATTEMPTS + 1):
-                if attempt < MAX_RANDOM_ATTEMPTS:
-                    gt, lr = self.create_patch_pair(frames, format_name, format_config, force_center=False)
-                else:
-                    gt, lr = self.create_patch_pair(frames, format_name, format_config, force_center=True)
+        # Merge final result into patches_created.
+        # Tracker already updated incrementally in _on_progress – do NOT call
+        # tracker.increment_category_images again here to avoid double-counting.
+        for category, count in streaming_result.items():
+            patches_created[category] = patches_created.get(category, 0) + count
 
-                if gt is None or lr is None:
-                    continue
+        total_created = sum(patches_created.values())
+        self.ui_state['patches_created_total'] = prior_total + total_created
+        self.ui_state['current_video_name'] = video_name
+        self.ui_state['current_video_index'] = video_idx
+        # Force a final UI redraw regardless of throttle
+        self.last_update_time = 0.0
+        self._update_terminal_ui()
 
-                if self.is_interesting_patch(gt) or attempt >= MAX_RANDOM_ATTEMPTS:
-                    break
-
-            if gt is not None and lr is not None:
-                saved, gt_path, lr_path = self._save_patch_pair(
-                    gt, lr, video_path, ts,
-                    category, format_name, n_frames
-                )
-
-                if saved:
-                    # Check for black frames only in first 10 seconds
-                    if ts <= black_frame_detection_limit_seconds and \
-                       self._is_black_frame(gt_path, black_frame_threshold_kb):
-                        black_frames_detected += 1
-                        self.logger.debug(f"    Black frame detected, deleting")
-                        try:
-                            if os.path.exists(gt_path):
-                                os.remove(gt_path)
-                            if os.path.exists(lr_path):
-                                os.remove(lr_path)
-                        except Exception as e:
-                            self.logger.error(f"    Error deleting black frame files: {e}")
-                    else:
-                        if ts > black_frame_detection_limit_seconds:
-                            black_frames_skipped += 1
-
-                        patches_targets[category][format_name]['created'] += 1
-                        patches_created[category] += 1
-                        total_created += 1
-                        patches_created_this_scene += 1
-
-                        # Update UI state with new patch count
-                        self.ui_state['patches_created_total'] = total_created
-
-                        self.logger.info(f"    ✓ Saved patch: {category}/{format_name} → {os.path.basename(gt_path)}")
-            
-            # CLEAN UP: Delete frame files immediately to free disk space
-            for frame_path in frame_file_paths:
-                try:
-                    if os.path.exists(frame_path):
-                        os.remove(frame_path)
-                except Exception as e:
-                    self.logger.warning(f"  ⚠️  Could not delete frame file: {e}")
-            
-            # Clean up temp directory
-            if temp_dir and os.path.exists(temp_dir):
-                import shutil
-                try:
-                    shutil.rmtree(temp_dir, ignore_errors=True)
-                except Exception as e:
-                    self.logger.warning(f"  ⚠️  Could not delete temp directory: {e}")
-            
-            # Free memory
-            del frames
-            
-            processed_count += 1
-            
-            # Update UI state immediately after scene completion
-            self.ui_state['current_video_name'] = video_name
-            self.ui_state['current_video_index'] = video_idx
-            self.ui_state['scenes_processed'] = processed_count
-            self.ui_state['patches_created_total'] = total_created
-            
-            # Update current video progress
-            for category in patches_created.keys():
-                category_created = patches_created[category]
-                category_target = sum(patches_targets[category][fmt]['target'] for fmt in patches_targets[category])
-                category_percent = (category_created / category_target * 100) if category_target > 0 else 0.0
-                self.ui_state['current_video_progress'][category] = {
-                    'created': category_created,  # Fixed: was 'current', display expects 'created'
-                    'target': category_target,
-                    'percent': category_percent  # Added: display expects this
-                }
-            
-            # Calculate average time per scene
-            elapsed = time.time() - scene_start_time if 'scene_start_time' in locals() else 0
-            if processed_count > 0:
-                self.ui_state['avg_time_per_scene'] = elapsed / processed_count
-            
-            # Update tracker with patches created in this scene (for overall progress in GUI)
-            for category, count in patches_created.items():
-                # Get the number of new patches created for this category in this iteration
-                # patches_created is cumulative, so we need to calculate the delta
-                previous_count = self.ui_state.get('previous_patches_per_category', {}).get(category, 0)
-                new_patches = count - previous_count
-                if new_patches > 0:
-                    self.tracker.increment_category_images(category, new_patches)
-            
-            # Store current counts for next iteration
-            if 'previous_patches_per_category' not in self.ui_state:
-                self.ui_state['previous_patches_per_category'] = {}
-            for category, count in patches_created.items():
-                self.ui_state['previous_patches_per_category'][category] = count
-            
-            # Update terminal UI
-            self._update_terminal_ui()
-            
-            # Progress update
-            self.logger.info(f"  ✓ Created {patches_created_this_scene} patches from this scene")
-            self.logger.info(f"  📊 Progress: {processed_count}/{len(timestamps)} scenes processed, {total_created} total patches created")
-            
-            if processed_count % 10 == 0:
-                # Show category progress every 10 scenes
-                self.logger.info(f"\n  📊 Category progress after {processed_count} scenes:")
-                for category in sorted(patches_created.keys()):
-                    category_created = patches_created[category]
-                    category_target = sum(patches_targets[category][fmt]['target'] for fmt in patches_targets[category])
-                    pct = 100 * category_created / category_target if category_target > 0 else 0
-                    self.logger.info(f"    {category:12s}: {category_created:5d}/{category_target:5d} patches ({pct:5.1f}%)")
-        
-        # Final summary
-        self.logger.info(f"\n{'═'*60}")
-        self.logger.info(f"✓ Incremental extraction and processing complete!")
-        self.logger.info(f"  Scenes processed: {processed_count}/{len(timestamps)}")
-        if extraction_failures > 0:
-            self.logger.warning(f"  Extraction failures: {extraction_failures}")
-        self.logger.info(f"  Total patches created: {total_created}")
-        self.logger.info(f"{'═'*60}")
-        
-        # Final statistics
         total_time = time.time() - start_time
-        
+
         self.logger.info(f"\n╔══════════════════════════════════════════════════════════╗")
-        self.logger.info(f"║  EXTRACTION COMPLETE                                     ║")
+        self.logger.info(f"║  EXTRACTION COMPLETE (streaming)                         ║")
         self.logger.info(f"╚══════════════════════════════════════════════════════════╝")
-        self.logger.info(f"✓ Processed {processed_count}/{len(timestamps)} scenes in {total_time:.1f}s")
-        self.logger.info(f"✓ Created {total_created} patches total")
-        
-        if black_frames_detected > 0:
-            self.logger.info(f"  🚫 Black frames detected and removed: {black_frames_detected}")
-        if black_frames_skipped > 0:
-            self.logger.info(f"  ⏭️  Frames saved without check (after 10s): {black_frames_skipped}")
-        
+        self.logger.info(f"✓ Created {total_created} patches in {total_time:.1f}s")
         self.logger.info(f"\n📊 Per-category breakdown:")
-        for category, formats in patches_targets.items():
-            cat_total = sum(stats['created'] for stats in formats.values())
-            cat_target = sum(stats['target'] for stats in formats.values())
-            self.logger.info(f"  {category}: {cat_total}/{cat_target} patches")
-            for format_name, stats in formats.items():
-                self.logger.info(f"    └─ {format_name}: {stats['created']}/{stats['target']}")
-        
+        for category, count in sorted(patches_created.items()):
+            self.logger.info(f"  {category}: {count} patches")
+
         return patches_created
     
     def _extract_patches_multi_format_legacy(self, video_path: str, duration: float,
@@ -1832,6 +1673,11 @@ class DatasetGeneratorV2UHD:
         """
         Get video metadata using ffprobe with caching.
         Cache is based on file size and modification time.
+
+        In addition to duration / fps / resolution the method also extracts
+        the ``color_transfer`` tag from the first video stream and derives an
+        ``is_hdr`` boolean so callers can choose the appropriate FFmpeg filter
+        chain without running a separate ffprobe pass.
         """
         try:
             # Get file stats for cache validation
@@ -1852,7 +1698,9 @@ class DatasetGeneratorV2UHD:
                     return {
                         'duration': cached['duration'],
                         'fps': cached.get('fps'),
-                        'resolution': cached.get('resolution')
+                        'resolution': cached.get('resolution'),
+                        'color_transfer': cached.get('color_transfer'),
+                        'is_hdr': cached.get('is_hdr', True),
                     }
             
             # Cache miss or invalid - query ffprobe
@@ -1887,6 +1735,7 @@ class DatasetGeneratorV2UHD:
             
             fps = None
             resolution = None
+            color_transfer = None
             if video_stream:
                 # Parse FPS
                 fps_str = video_stream.get('avg_frame_rate', '0/1')
@@ -1900,12 +1749,22 @@ class DatasetGeneratorV2UHD:
                 height = video_stream.get('height')
                 if width and height:
                     resolution = [width, height]
-            
+
+                # Color transfer (determines HDR vs SDR)
+                color_transfer = video_stream.get('color_transfer') or video_stream.get('color_trc')
+
+            is_hdr = is_hdr_transfer(color_transfer)
+            self.logger.debug(
+                f"{os.path.basename(video_path)}: color_transfer={color_transfer!r} → is_hdr={is_hdr}"
+            )
+
             # Cache the metadata
             self.metadata_cache[cache_key] = {
                 'duration': duration,
                 'fps': fps,
                 'resolution': resolution,
+                'color_transfer': color_transfer,
+                'is_hdr': is_hdr,
                 'file_size': file_size,
                 'file_mtime': file_mtime
             }
@@ -1917,7 +1776,9 @@ class DatasetGeneratorV2UHD:
             return {
                 'duration': duration,
                 'fps': fps,
-                'resolution': resolution
+                'resolution': resolution,
+                'color_transfer': color_transfer,
+                'is_hdr': is_hdr,
             }
         
         except Exception as e:
@@ -2048,11 +1909,11 @@ class DatasetGeneratorV2UHD:
     
     def run(self):
         """Main generation loop with proportional distribution"""
-        # Hide cursor for clean terminal UI
-        if self.use_terminal_ui:
-            hide_cursor()
-        
         try:
+            # Hide cursor for clean terminal UI — inside try so finally always restores it
+            if self.use_terminal_ui:
+                hide_cursor()
+
             if RICH_AVAILABLE:
                 console.print(Panel.fit(
                     "[bold cyan]Dataset Generator V2 - UHD Quality[/bold cyan]\n"
@@ -2102,7 +1963,16 @@ class DatasetGeneratorV2UHD:
             
             # Console output removed - all info shown in terminal GUI
             # No need to print here, user sees progress in the GUI
-            
+
+            # Sort videos so that any video with forced_frames is processed first.
+            # Stable sort preserves the relative order within each group.
+            forced_count = sum(1 for v in self.videos if v.get('forced_frames'))
+            self.videos.sort(key=lambda v: 0 if v.get('forced_frames') else 1)
+            if forced_count:
+                self.logger.info(
+                    f"⚡ Forced-frame videos promoted to front of queue: {forced_count} / {len(self.videos)}"
+                )
+
             # Get resume point
             start_idx = self.tracker.status['progress']['current_video_index']
             
@@ -2171,6 +2041,14 @@ class DatasetGeneratorV2UHD:
                     print(f"{'='*80}\n")
                     self._update_terminal_ui()
                 
+                # Mark this video as "in progress" BEFORE we start work so
+                # that a crash or pipeline failure causes a retry on the next
+                # run rather than silently skipping it (the old code wrote
+                # idx+1 AFTER completion, meaning a video that produced 0
+                # patches was treated as done and never retried).
+                self.tracker.update_progress(current_video_index=idx)
+                self.tracker.save()
+
                 try:
                     # Process this video completely (extraction + processing)
                     stats = self.process_video(idx, video_cat_targets)
@@ -2178,18 +2056,26 @@ class DatasetGeneratorV2UHD:
                     # Check if video was skipped
                     if stats.get('skipped'):
                         self.logger.info(f"⏭️  Skipped: {video_name} - {stats.get('reason', 'unknown')}")
-                        # Update tracker with skip
+                        # Advance past this video only after a deliberate skip
                         self.tracker.update_progress(
                             current_video_index=idx + 1,
                             patches_created=0
                         )
                     else:
-                        # Update tracker with actual patches
+                        # Update patches count; advance index only when patches
+                        # were actually created so a failed extraction is retried.
                         patches_created = stats.get('patches_created', 0)
-                        self.tracker.update_progress(
-                            current_video_index=idx + 1,
-                            patches_created=patches_created
-                        )
+                        if patches_created > 0:
+                            self.tracker.update_progress(
+                                current_video_index=idx + 1,
+                                patches_created=patches_created
+                            )
+                        else:
+                            self.tracker.update_progress(patches_created=0)
+                            self.logger.warning(
+                                f"⚠️  {video_name}: 0 patches created — "
+                                f"video will be retried on next run"
+                            )
                         self.logger.info(f"✅ Complete: {video_name} - {patches_created} patches created")
                     
                     # Log category progress after each video
@@ -2252,10 +2138,12 @@ def main():
         generator = DatasetGeneratorV2UHD(config_path)
         generator.run()
     except KeyboardInterrupt:
+        show_cursor()
         print("\n⚠️  Interrupted by user")
         print("Progress saved. Run again to resume.")
         sys.exit(0)
     except Exception as e:
+        show_cursor()
         print(f"Fatal error: {e}")
         import traceback
         traceback.print_exc()

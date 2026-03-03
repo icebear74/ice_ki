@@ -5,6 +5,8 @@ ANSI color codes and helper functions for terminal display.
 Similar to vsr_plusplus_NEU/utils/ui_terminal.py
 """
 
+import atexit
+import os
 import re
 import sys
 
@@ -29,17 +31,33 @@ ANSI_SHOW_CURSOR = "\033[?25h"
 # ANSI Escape Sequence Pattern (for stripping colors from text)
 ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 
+# Track whether we have hidden the cursor so we register atexit only once
+# and so show_cursor() is always safe to call even if called multiple times.
+_cursor_hidden = False
+
 
 def hide_cursor():
-    """Hide terminal cursor"""
+    """Hide terminal cursor and register an atexit handler to restore it."""
+    global _cursor_hidden
     sys.stdout.write(ANSI_HIDE_CURSOR)
     sys.stdout.flush()
+    if not _cursor_hidden:
+        _cursor_hidden = True
+        atexit.register(show_cursor)  # guaranteed restore on any normal exit
 
 
 def show_cursor():
-    """Show terminal cursor"""
+    """Show terminal cursor and restore echo."""
+    global _cursor_hidden
     sys.stdout.write(ANSI_SHOW_CURSOR)
     sys.stdout.flush()
+    _cursor_hidden = False
+    # Restore echo in case it was silenced (e.g. by tty.setcbreak / setraw or
+    # any other code that disabled it).  The redirect keeps stderr clean when
+    # the call runs outside a real tty (e.g. in tests or pipes).
+    # stty is Unix-only; skip on Windows where it is not available.
+    if sys.platform != 'win32':
+        os.system('stty echo 2>/dev/null')
 
 
 def clear_screen():

@@ -121,7 +121,7 @@ class DatasetGeneratorV2:
                     "format=gbrpf32le,"
                     "zscale=p=bt709,"
                     "tonemap=tonemap=mobius:desat=0,"
-                    "zscale=t=bt709:m=bt709:range=limited,"
+                    "zscale=t=bt709:m=bt709:range=full,"
                     "format=yuv420p"
                 )
                 
