@@ -338,15 +338,15 @@ class TensorBoardLogger:
         # Format configuration as markdown table
         config_text = "# Training Configuration\n\n"
         config_text += "## Model Architecture\n"
-        config_text += f"- **Features (n_feats)**: {config.get('n_feats', 'N/A')}\n"
-        config_text += f"- **Blocks (n_blocks)**: {config.get('n_blocks', 'N/A')}\n"
-        config_text += f"- **Batch Size**: {config.get('batch_size', 'N/A')}\n"
+        config_text += f"- **Features (n_feats)**: {config.get('N_FEATS', 'N/A')}\n"
+        config_text += f"- **Blocks (n_blocks)**: {config.get('N_BLOCKS', 'N/A')}\n"
+        config_text += f"- **Batch Size**: {config.get('BATCH_SIZE', 'N/A')}\n"
         config_text += f"- **Accumulation Steps**: {config.get('ACCUMULATION_STEPS', 'N/A')}\n\n"
         
         config_text += "## Training Parameters\n"
         config_text += f"- **Max Steps**: {config.get('MAX_STEPS', 'N/A')}\n"
-        config_text += f"- **Max LR**: {config.get('max_lr', 'N/A')}\n"
-        config_text += f"- **Min LR**: {config.get('min_lr', 'N/A')}\n"
+        config_text += f"- **Max LR**: {config.get('MAX_LR', 'N/A')}\n"
+        config_text += f"- **Min LR**: {config.get('MIN_LR', 'N/A')}\n"
         config_text += f"- **Warmup Steps**: {config.get('WARMUP_STEPS', 'N/A')}\n"
         config_text += f"- **Validation Every**: {config.get('VAL_STEP_EVERY', 'N/A')} steps\n"
         config_text += f"- **Save Every**: {config.get('SAVE_STEP_EVERY', 'N/A')} steps\n\n"
@@ -355,17 +355,17 @@ class TensorBoardLogger:
         config_text += f"- **Plateau Patience**: {config.get('plateau_patience', 'N/A')}\n"
         config_text += f"- **Plateau Safety Threshold**: {config.get('plateau_safety_threshold', 'N/A')}\n"
         config_text += f"- **Cooldown Duration**: {config.get('cooldown_duration', 'N/A')}\n"
-        config_text += f"- **Initial Grad Clip**: {config.get('initial_grad_clip', 'N/A')}\n\n"
+        config_text += f"- **Initial Grad Clip**: {config.get('INITIAL_GRAD_CLIP', 'N/A')}\n\n"
         
         config_text += "## Loss Weights (Target)\n"
-        config_text += f"- **L1 Weight**: {config.get('l1_weight_target', 'N/A')}\n"
-        config_text += f"- **MS Weight**: {config.get('ms_weight_target', 'N/A')}\n"
-        config_text += f"- **Gradient Weight**: {config.get('grad_weight_target', 'N/A')}\n"
-        config_text += f"- **Perceptual Weight**: {config.get('perceptual_weight_target', 'N/A')}\n\n"
+        config_text += f"- **L1 Weight**: {config.get('L1_WEIGHT', 'N/A')}\n"
+        config_text += f"- **MS Weight**: {config.get('MS_WEIGHT', 'N/A')}\n"
+        config_text += f"- **Gradient Weight**: {config.get('GRAD_WEIGHT', 'N/A')}\n"
+        config_text += f"- **Perceptual Weight**: {config.get('PERCEPTUAL_WEIGHT', 'N/A')}\n\n"
         
         config_text += "## Data\n"
         config_text += f"- **Data Root**: {config.get('DATA_ROOT', 'N/A')}\n"
-        config_text += f"- **Num Workers**: {config.get('num_workers', 'N/A')}\n"
+        config_text += f"- **Num Workers**: {config.get('NUM_WORKERS', 'N/A')}\n"
         
         self.writer.add_text('Config/Initial_Configuration', config_text, 0)
         
@@ -374,10 +374,10 @@ class TensorBoardLogger:
             self.writer.add_scalar('Config/Parameters/plateau_patience', config['plateau_patience'], 0)
         if 'plateau_safety_threshold' in config:
             self.writer.add_scalar('Config/Parameters/plateau_safety_threshold', config['plateau_safety_threshold'], 0)
-        if 'max_lr' in config:
-            self.writer.add_scalar('Config/Parameters/max_lr', config['max_lr'], 0)
-        if 'min_lr' in config:
-            self.writer.add_scalar('Config/Parameters/min_lr', config['min_lr'], 0)
+        if 'MAX_LR' in config:
+            self.writer.add_scalar('Config/Parameters/max_lr', config['MAX_LR'], 0)
+        if 'MIN_LR' in config:
+            self.writer.add_scalar('Config/Parameters/min_lr', config['MIN_LR'], 0)
     
     def log_plateau_state(self, step, plateau_info):
         """

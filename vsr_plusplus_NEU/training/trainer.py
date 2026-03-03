@@ -1488,18 +1488,24 @@ class VSRTrainer:
         """
         self.train_logger.log_event("🚀 TRAINING STARTED")
         
-        # Log initial configuration snapshot to TensorBoard
-        self.tb_logger.log_config_snapshot(self.config)
+        # Log initial configuration snapshot to TensorBoard — merge in
+        # adaptive system params which are not stored in self.config
+        snapshot_config = dict(self.config)
+        if self.adaptive_system:
+            snapshot_config['plateau_patience'] = self.adaptive_system.plateau_patience
+            snapshot_config['plateau_safety_threshold'] = self.adaptive_system.plateau_safety_threshold
+            snapshot_config['cooldown_duration'] = self.adaptive_system.cooldown_duration
+        self.tb_logger.log_config_snapshot(snapshot_config)
         
         # Log initial hyperparameters if at step 0
         if self.global_step == 0:
             hparams = {
-                'n_feats': self.config.get('n_feats', 128),
-                'n_blocks': self.config.get('n_blocks', 32),
-                'batch_size': self.config.get('batch_size', 4),
-                'max_lr': self.config.get('max_lr', 1.5e-4),
-                'min_lr': self.config.get('min_lr', 1e-6),
-                'plateau_patience': self.config.get('plateau_patience', 250),
+                'n_feats': self.config.get('N_FEATS', 128),
+                'n_blocks': self.config.get('N_BLOCKS', 32),
+                'batch_size': self.config.get('BATCH_SIZE', 4),
+                'max_lr': self.config.get('MAX_LR', 1.5e-4),
+                'min_lr': self.config.get('MIN_LR', 1e-6),
+                'plateau_patience': snapshot_config.get('plateau_patience', 250),
             }
             # Will update metrics as training progresses
             initial_metrics = {'initial_step': 0}

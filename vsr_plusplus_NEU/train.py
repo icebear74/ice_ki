@@ -57,6 +57,9 @@ C_YELLOW = "\033[93m"
 C_BOLD = "\033[1m"
 C_RESET = "\033[0m"
 
+# Canonical list of all supported training/validation size keys
+KNOWN_SIZE_KEYS = ['540', '720', '720_169']
+
 
 def is_tensorboard_running(port=6006):
     """Check if TensorBoard is already running on the specified port"""
@@ -414,7 +417,7 @@ def main():
             
             # Check which size directories exist and have files
             available_sizes = []
-            for size_key in ['540', '720', '720_169']:
+            for size_key in KNOWN_SIZE_KEYS:
                 # Build path using pattern
                 train_path = train_gt_pattern.replace('{size_key}', size_key)
                 train_dir = os.path.join(data_root, dataset_name, train_path)
@@ -455,7 +458,7 @@ def main():
         print(f"{C_CYAN}Detecting available sizes in: {os.path.join(data_root, dataset_name)}{C_RESET}")
         print(f"{C_CYAN}  Using path pattern: {train_gt_pattern}{C_RESET}")
         
-        for size_key in ['540', '720', '720_169']:
+        for size_key in KNOWN_SIZE_KEYS:
             # Build path using pattern
             train_path = train_gt_pattern.replace('{size_key}', size_key)
             train_dir = os.path.join(data_root, dataset_name, train_path)
@@ -584,9 +587,9 @@ def main():
         val_sizes = rt_config.get('validation', {}).get('sizes', [])
         if not val_sizes:
             # Auto-detect from validation GT directories (NOT training dirs)
-            val_gt_pattern = (paths_config.get('val_gt', 'val/{size_key}/GT') if paths_config else 'val/{size_key}/GT')
+            val_gt_pattern = paths_config.get('val_gt', 'val/{size_key}/GT') if paths_config else 'val/{size_key}/GT'
             val_sizes = []
-            for sk in ['540', '720', '720_169']:
+            for sk in KNOWN_SIZE_KEYS:
                 val_dir = os.path.join(data_root, dataset_name, val_gt_pattern.replace('{size_key}', sk))
                 if os.path.isdir(val_dir):
                     files = [f for f in os.listdir(val_dir) if f.lower().endswith('.png')]
@@ -605,7 +608,7 @@ def main():
     print(f"{C_CYAN}Creating validation datasets for sizes: {', '.join(val_sizes)}{C_RESET}")
     
     # Ensure validation GT subdirs exist so the user can copy images into them
-    for size_key in ['540', '720', '720_169']:
+    for size_key in KNOWN_SIZE_KEYS:
         val_gt_dir = os.path.join(data_root, dataset_name, 'val', size_key, 'GT')
         os.makedirs(val_gt_dir, exist_ok=True)
     print(f"{C_GREEN}✅ Validation GT directories ready: {os.path.join(data_root, dataset_name, 'val', '{size_key}', 'GT')}{C_RESET}")
