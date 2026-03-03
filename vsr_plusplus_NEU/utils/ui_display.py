@@ -674,7 +674,7 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
     print_line(f"{C_BOLD}⚡ FUSION LAYER ACTIVITY{C_RESET}", ui_w)
     print_separator(ui_w, 'single')
     
-    _draw_activity_display(activities, bar_width_single, bar_width_double, peak_layer_name if activities else None)
+    _draw_activity_display(activities, display_mode, term_size.lines, ui_w, bar_width_single, bar_width_double, peak_layer_name if activities else None)
     
     # === FOOTER ===
     print_separator(ui_w, 'double')
