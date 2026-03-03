@@ -370,12 +370,12 @@ def main():
     
     # Create GradScaler for mixed precision training if enabled
     use_amp = config.get('USE_AMP', False)
-    scaler = GradScaler(enabled=use_amp)
+    scaler = GradScaler() if use_amp else None
     
     if use_amp:
         print(f"{C_GREEN}✅ Mixed Precision (AMP) enabled - reduced VRAM usage{C_RESET}\n")
     else:
-        print(f"{C_YELLOW}⚠️  Mixed Precision (AMP) disabled - higher VRAM usage{C_RESET}\n")
+        print(f"{C_GREEN}✅ Mixed Precision (AMP) disabled - no AMP overhead (recommended for Tesla P4){C_RESET}\n")
     
     # Create datasets
     print("Loading datasets...")
@@ -596,6 +596,13 @@ def main():
     
     # Create validation dataset and loader for EACH size
     print(f"{C_CYAN}Creating validation datasets for sizes: {', '.join(val_sizes)}{C_RESET}")
+    
+    # Ensure validation GT subdirs exist so the user can copy images into them
+    for size_key in ['540', '720', '720_169']:
+        val_gt_dir = os.path.join(data_root, dataset_name, 'val', size_key, 'GT')
+        os.makedirs(val_gt_dir, exist_ok=True)
+    print(f"{C_GREEN}✅ Validation GT directories ready: {os.path.join(data_root, dataset_name, 'val', '{size_key}', 'GT')}{C_RESET}")
+    
     total_val_samples = 0
     
     for size_key in val_sizes:

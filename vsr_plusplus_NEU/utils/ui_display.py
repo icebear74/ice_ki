@@ -670,21 +670,11 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
         
         print_separator(ui_w, 'double')
     
-    # === LAYER ACTIVITY ===
-    available_lines = term_size.lines - 30  # Lines available for layer display
-    
-    # Calculate layer counts for display
-    n_blocks = config.get('N_BLOCKS', 32)
-    total_layers = len(activities) if activities else 0
-    fusion_layers = total_layers - n_blocks if total_layers > n_blocks else 0
-    
-    print_line(f"{C_BOLD}⚡ LAYER ACTIVITY{C_RESET} - Mode: {DISPLAY_MODE_NAMES[display_mode]}", ui_w)
-    print_line(f"ResidualBlocks: {C_CYAN}{n_blocks}{C_RESET} | Total Layers: {C_CYAN}{total_layers}{C_RESET} (incl. {fusion_layers} fusion)", ui_w)
+    # === LAYER ACTIVITY (Fusion layers only) ===
+    print_line(f"{C_BOLD}⚡ FUSION LAYER ACTIVITY{C_RESET}", ui_w)
     print_separator(ui_w, 'single')
     
-    # Display based on mode, passing peak layer name for marking
-    _draw_activity_display(activities, display_mode, available_lines, ui_w, 
-                          bar_width_single, bar_width_double, peak_layer_name if activities else None)
+    _draw_activity_display(activities, bar_width_single, bar_width_double, peak_layer_name if activities else None)
     
     # === FOOTER ===
     print_separator(ui_w, 'double')
@@ -703,12 +693,11 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
     print_separator(ui_w, 'thin')
     print_two_columns(
         f"{C_CYAN}P{C_RESET} Pause/Resume  │  {C_CYAN}V{C_RESET} Validation",
-        f"{C_CYAN}S{C_RESET} Change View  │  {C_CYAN}ENTER{C_RESET} Config",
+        f"{C_CYAN}ENTER{C_RESET} Config  │  {C_CYAN}Q{C_RESET} Quit",
         ui_w
     )
-    print_two_columns(
-        f"{C_CYAN}C{C_RESET} Save Checkpoint  │  {C_CYAN}Q{C_RESET} Quit",
-        f"{C_CYAN}ESC{C_RESET} Emergency Stop",
+    print_line(
+        f"{C_CYAN}C{C_RESET} Save Checkpoint  │  {C_CYAN}ESC{C_RESET} Emergency Stop",
         ui_w
     )
     sys.stdout.write("\n")
