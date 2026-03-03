@@ -87,6 +87,9 @@ class VSRTrainer:
         # Pending JSON save tracking (save after validation + N steps)
         self.pending_json_save_step = None
         
+        # Adaptive mode change tracking for TensorBoard phase transition logging
+        self._last_adaptive_mode = 'Stable'
+        
         # Keyboard handler
         self.keyboard = KeyboardHandler()
         
@@ -206,48 +209,54 @@ class VSRTrainer:
                 size_key = batch.get('size_key', 'unknown')
                 batch_filenames = batch.get('filenames', [])
             else:
-                # Traditional single-size batch (tuple)
-                lr_stack, gt = batch
+                # Traditional single-size batch (tuple: lr, gt, filenames)
+                lr_stack, gt, batch_filenames = batch
                 lr_stack = lr_stack.to(self.device)
                 gt = gt.to(self.device)
-                size_key = 'default'
-                batch_filenames = []
+                # Get the actual resolution key from the dataset if possible
+                if hasattr(self.train_loader, 'dataset') and hasattr(self.train_loader.dataset, 'size_key'):
+                    size_key = self.train_loader.dataset.size_key
+                else:
+                    size_key = 'default'
             
-            # Track batch files for WebUI display
-            if batch_filenames and hasattr(self, 'web_monitor') and self.web_monitor:
-                # Format filenames as "size_key/filename.png"
-                formatted_files = [f"{size_key}/{fn}" for fn in batch_filenames]
+            # Track batch files for WebUI display — always update counters, filenames when available
+            if hasattr(self, 'web_monitor') and self.web_monitor:
+                batch_size_val = lr_stack.size(0)
+                files_used_in_epoch = (batch_idx + 1) * batch_size_val
                 
-                # Add to accumulation buffer
-                accumulation_buffer.append({
-                    'files': formatted_files,
-                    'size_key': size_key
-                })
+                # Get total files in epoch
+                if hasattr(self.train_loader, 'sampler'):
+                    total_files_in_epoch = len(self.train_loader.sampler) * batch_size_val
+                elif hasattr(self.train_loader, '__len__'):
+                    total_files_in_epoch = len(self.train_loader) * batch_size_val
+                else:
+                    total_files_in_epoch = steps_per_epoch * batch_size_val
                 
-                # Keep only last accumulation_steps batches
-                if len(accumulation_buffer) > accumulation_steps:
-                    accumulation_buffer.pop(0)
+                # Only accumulate filenames when the dataloader provides them
+                if batch_filenames:
+                    formatted_files = [f"{size_key}/{fn}" for fn in batch_filenames]
+                    accumulation_buffer.append({
+                        'files': formatted_files,
+                        'size_key': size_key
+                    })
+                    # Keep only last accumulation_steps batches
+                    if len(accumulation_buffer) > accumulation_steps:
+                        accumulation_buffer.pop(0)
                 
-                # Collect all files in accumulation window
+                # Collect all files and per-size counts from accumulation window
                 all_accumulated_files = []
                 files_per_size = {'720': 0, '540': 0, '720_169': 0}
                 for buffer_item in accumulation_buffer:
                     all_accumulated_files.extend(buffer_item['files'])
-                    # Count files per size
-                    files_per_size[buffer_item['size_key']] += len(buffer_item['files'])
-                
-                # Calculate total files used in epoch (based on batch_idx and batch size)
-                batch_size = lr_stack.size(0)
-                files_used_in_epoch = (batch_idx + 1) * batch_size
-                
-                # Get total files in epoch
-                total_files_in_epoch = len(self.train_loader.sampler) if hasattr(self.train_loader, 'sampler') else steps_per_epoch
+                    sk = buffer_item['size_key']
+                    files_per_size[sk] = files_per_size.get(sk, 0) + len(buffer_item['files'])
                 
                 # Update web_monitor with current batch info
                 self.web_monitor.data_store.update_all_metrics(
                     current_batch={
                         'files': all_accumulated_files,
                         'size_key': size_key,
+                        'batch_size': batch_size_val,
                         'files_used_in_epoch': files_used_in_epoch,
                         'total_files_in_epoch': total_files_in_epoch,
                         'files_per_size': files_per_size,
@@ -383,6 +392,19 @@ class VSRTrainer:
                     self.tb_logger.log_system(self.global_step, avg_time, vram)
                     self.tb_logger.log_gradients(self.global_step, grad_norm, self.last_activities)
                     self.tb_logger.log_lr_phase(self.global_step, lr_phase)
+                    
+                    # Log adaptive mode/phase transitions
+                    current_adaptive_mode = adaptive_status.get('mode', 'Stable')
+                    phase_changed = current_adaptive_mode.lower() != self._last_adaptive_mode.lower()
+                    self.tb_logger.log_training_phase(self.global_step, {
+                        'phase': current_adaptive_mode.lower(),
+                        'phase_changed': phase_changed,
+                    })
+                    if phase_changed:
+                        self.train_logger.log_event(
+                            f"Adaptive mode changed: {self._last_adaptive_mode} → {current_adaptive_mode} at step {self.global_step}"
+                        )
+                        self._last_adaptive_mode = current_adaptive_mode
                     
                     # Log plateau state details
                     if hasattr(self.adaptive_system, 'get_plateau_info'):
@@ -736,6 +758,7 @@ class VSRTrainer:
                 adaptive_is_cooldown=adaptive_status.get('is_cooldown', False),
                 adaptive_cooldown_remaining=adaptive_status.get('cooldown_remaining', 0),
                 adaptive_plateau_counter=adaptive_status.get('plateau_counter', 0),
+                adaptive_plateau_patience=adaptive_status.get('plateau_patience', 100),
                 adaptive_lr_boost_available=adaptive_status.get('lr_boost_available', False),
                 adaptive_perceptual_trend=0,  # TODO: calculate trend
                 
@@ -1469,18 +1492,24 @@ class VSRTrainer:
         """
         self.train_logger.log_event("🚀 TRAINING STARTED")
         
-        # Log initial configuration snapshot to TensorBoard
-        self.tb_logger.log_config_snapshot(self.config)
+        # Log initial configuration snapshot to TensorBoard — merge in
+        # adaptive system params which are not stored in self.config
+        snapshot_config = dict(self.config)
+        if self.adaptive_system:
+            snapshot_config['plateau_patience'] = self.adaptive_system.plateau_patience
+            snapshot_config['plateau_safety_threshold'] = self.adaptive_system.plateau_safety_threshold
+            snapshot_config['cooldown_duration'] = self.adaptive_system.cooldown_duration
+        self.tb_logger.log_config_snapshot(snapshot_config)
         
         # Log initial hyperparameters if at step 0
         if self.global_step == 0:
             hparams = {
-                'n_feats': self.config.get('n_feats', 128),
-                'n_blocks': self.config.get('n_blocks', 32),
-                'batch_size': self.config.get('batch_size', 4),
-                'max_lr': self.config.get('max_lr', 1.5e-4),
-                'min_lr': self.config.get('min_lr', 1e-6),
-                'plateau_patience': self.config.get('plateau_patience', 250),
+                'n_feats': self.config.get('N_FEATS', 128),
+                'n_blocks': self.config.get('N_BLOCKS', 32),
+                'batch_size': self.config.get('BATCH_SIZE', 4),
+                'max_lr': self.config.get('MAX_LR', 1.5e-4),
+                'min_lr': self.config.get('MIN_LR', 1e-6),
+                'plateau_patience': snapshot_config.get('plateau_patience', 250),
             }
             # Will update metrics as training progresses
             initial_metrics = {'initial_step': 0}

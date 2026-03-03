@@ -144,10 +144,10 @@ class MultiSizeDataLoader:
             filename_list = []
             
             for idx in batch_indices:
-                lr, gt = dataset[idx]
+                lr, gt, filename = dataset[idx]
                 lr_list.append(lr)
                 gt_list.append(gt)
-                filename_list.append(dataset.gt_files[idx])
+                filename_list.append(filename)
             
             # Stack into batch tensors
             lr_batch = torch.stack(lr_list, dim=0)  # [B, 7, 3, H, W]
@@ -216,22 +216,29 @@ def create_train_loader(config):
         if distribution <= 0.0:
             continue
         
-        # Create dataset
-        dataset = VSRDataset(
-            root=data_root,
-            dataset_name=dataset_name,
-            size_key=size_key,
-            mode='train',
-            augment=augment,
-            paths_config=paths_config  # NEW: Pass paths config
-        )
+        # Create dataset — skip this size gracefully if it fails
+        try:
+            dataset = VSRDataset(
+                root=data_root,
+                dataset_name=dataset_name,
+                size_key=size_key,
+                mode='train',
+                augment=augment,
+                paths_config=paths_config  # NEW: Pass paths config
+            )
+        except Exception as e:
+            import traceback as _tb
+            print(f"⚠️  Warning: Could not load training dataset for size '{size_key}': {e}")
+            _tb.print_exc()
+            print(f"   Skipping size '{size_key}' — check GT/LR directories and file extensions.")
+            continue
         
         datasets_dict[size_key] = dataset
         size_distribution[size_key] = distribution
         batch_sizes[size_key] = size_cfg.get('batch_size', 1)
     
     if not datasets_dict:
-        raise ValueError("No enabled datasets with distribution > 0")
+        raise ValueError("No training datasets could be loaded for any size. Check GT/LR directories and file extensions.")
     
     # Create sampler
     sampler = SizeGroupedSampler(

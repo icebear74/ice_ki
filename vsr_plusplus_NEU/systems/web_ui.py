@@ -11,6 +11,32 @@ import socket
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from queue import Queue
 
+try:
+    import numpy as _np
+except ImportError:
+    _np = None
+
+try:
+    import torch as _torch
+except ImportError:
+    _torch = None
+
+
+class _NumPySafeEncoder(json.JSONEncoder):
+    """JSON encoder that converts numpy/torch scalar types to plain Python types."""
+    def default(self, obj):
+        if _np is not None:
+            if isinstance(obj, _np.integer):
+                return int(obj)
+            if isinstance(obj, _np.floating):
+                return float(obj)
+            if isinstance(obj, _np.ndarray):
+                return obj.tolist()
+        if _torch is not None:
+            if isinstance(obj, _torch.Tensor):
+                return obj.item() if obj.numel() == 1 else obj.tolist()
+        return super().default(obj)
+
 # Import runtime_config module at module level to avoid repeated imports
 from ..systems.runtime_config import RUNTIME_SAFE_PARAMS, RUNTIME_CAREFUL_PARAMS, STARTUP_ONLY_PARAMS
 
@@ -63,6 +89,7 @@ class CompleteTrainingDataStore:
             'adaptive_is_cooldown': False,
             'adaptive_cooldown_remaining': 0,
             'adaptive_plateau_counter': 0,
+            'adaptive_plateau_patience': 100,  # Dynamic patience value from AdaptiveSystem
             'adaptive_lr_boost_available': False,
             'adaptive_perceptual_trend': 0,  # Change since last update
             
@@ -114,7 +141,8 @@ class CompleteTrainingDataStore:
             # Current Batch Information (NEW)
             'current_batch': {
                 'files': [],  # List of "size_key/filename.png" strings
-                'size_key': '',  # Current batch size key
+                'size_key': '',  # Current batch resolution key (e.g. '540', '720')
+                'batch_size': 0,  # Number of images per batch step
                 'files_used_in_epoch': 0,  # How many files have been processed in current epoch
                 'total_files_in_epoch': 0  # Total files in this epoch
             },
@@ -188,12 +216,17 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         """Liefert kompletten Datensnapshot als JSON"""
         full_data = self.data_repository.get_complete_snapshot()
         
+        try:
+            json_output = json.dumps(full_data, indent=2, cls=_NumPySafeEncoder)
+        except Exception as e:
+            self.send_error(500, f'JSON serialization error: {e}')
+            return
+        
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Cache-Control', 'no-cache')
         self.end_headers()
         
-        json_output = json.dumps(full_data, indent=2)
         self.wfile.write(json_output.encode('utf-8'))
     
     def _deliver_config_json(self):
@@ -1459,20 +1492,22 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             <!-- Batch files list -->
             <div style="margin-top: 8px;">
                 <h3 style="color: var(--accent-orange); margin-bottom: 8px; font-size: 1.05em;">Files in Accumulation Window:</h3>
-                <textarea id="batchFilesList" readonly style="
+                <div id="batchFilesList" style="
                     width: 100%;
-                    height: 120px;
                     background: rgba(15, 23, 42, 0.6);
                     border: 1px solid var(--border-color);
                     border-radius: 6px;
                     color: var(--text-primary);
-                    padding: 10px;
+                    padding: 8px 10px;
                     font-size: 0.8em;
                     font-family: 'Courier New', monospace;
-                    resize: vertical;
-                    line-height: 1.5;
+                    line-height: 1.6;
                     box-sizing: border-box;
-                "></textarea>
+                    min-height: 28px;
+                    white-space: pre;
+                    overflow-x: auto;
+                    overflow-y: hidden;
+                ">–</div>
             </div>
         </div>
         
@@ -1557,16 +1592,17 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 cooldownRemaining.textContent = '';
             }
             
-            // Plateau counter with color coding
+            // Plateau counter with color coding (thresholds derived from plateau_patience)
             const plateauCounter = data.adaptive_plateau_counter || 0;
+            const plateauPatience = data.adaptive_plateau_patience || 100;
             const plateauEl = document.getElementById('plateauCounter');
             const plateauWarning = document.getElementById('plateauWarning');
             plateauEl.textContent = plateauCounter;
-            if (plateauCounter > 300) {
+            if (plateauCounter > plateauPatience * 1.5) {
                 plateauEl.style.color = 'var(--accent-red)';
                 plateauWarning.textContent = '🚨 WARNUNG';
                 plateauWarning.style.color = 'var(--accent-red)';
-            } else if (plateauCounter > 150) {
+            } else if (plateauCounter > plateauPatience * 0.75) {
                 plateauEl.style.color = 'var(--accent-orange)';
                 plateauWarning.textContent = '🟡 Erhöht';
                 plateauWarning.style.color = 'var(--accent-orange)';
@@ -1739,15 +1775,16 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             
             // 1. Loss trend (up to 30 points) - based on plateau counter
             const plateauCounter = data.adaptive_plateau_counter || 0;
+            const plateauPatience = data.adaptive_plateau_patience || 100;
             let lossTrendScore = 0;
             let lossTrendText = '';
             let lossTrendColor = '';
             
-            if (plateauCounter < 150) {
+            if (plateauCounter < plateauPatience * 0.75) {
                 lossTrendScore = 30.0;
                 lossTrendText = 'Converging';
                 lossTrendColor = 'var(--accent-green)';
-            } else if (plateauCounter < 300) {
+            } else if (plateauCounter < plateauPatience * 1.5) {
                 lossTrendScore = 20.0;
                 lossTrendText = 'Plateau';
                 lossTrendColor = 'var(--accent-blue)';
@@ -1778,11 +1815,11 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             let stabilityText = '';
             let stabilityColor = '';
             
-            if (adaptiveMode === 'Stable' || plateauCounter < 150) {
+            if (adaptiveMode === 'Stable' || plateauCounter < plateauPatience * 0.75) {
                 stabilityScore = 30.0;
                 stabilityText = 'Stable';
                 stabilityColor = 'var(--accent-green)';
-            } else if (plateauCounter < 300) {
+            } else if (plateauCounter < plateauPatience * 1.5) {
                 stabilityScore = 20.0;
                 stabilityText = 'Moderate';
                 stabilityColor = 'var(--accent-blue)';
@@ -2155,14 +2192,19 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             const accumulationSteps = batch.accumulation_steps || 1;
             document.getElementById('batchAccumulationSteps').textContent = accumulationSteps;
             
-            // Update batch size key
+            // Update batch size (images per step) and resolution key
+            const batchSize = batch.batch_size || '-';
             const sizeKey = batch.size_key || '-';
-            document.getElementById('batchSizeKey').textContent = sizeKey;
+            document.getElementById('batchSizeKey').textContent = batchSize + (sizeKey && sizeKey !== '-' ? ' (' + sizeKey + ')' : '');
             
-            // Update batch files list
+            // Update batch files list — one file per line, height grows with content
             const files = batch.files || [];
-            const filesList = files.join('\\\\n');
-            document.getElementById('batchFilesList').value = filesList;
+            const el = document.getElementById('batchFilesList');
+            if (files.length === 0) {
+                el.textContent = '–';
+            } else {
+                el.textContent = files.join('\\n');
+            }
         }
         
         function downloadDataAsJSON() {

@@ -57,6 +57,9 @@ C_YELLOW = "\033[93m"
 C_BOLD = "\033[1m"
 C_RESET = "\033[0m"
 
+# Canonical list of all supported training/validation size keys
+KNOWN_SIZE_KEYS = ['540', '720', '720_169']
+
 
 def is_tensorboard_running(port=6006):
     """Check if TensorBoard is already running on the specified port"""
@@ -175,6 +178,32 @@ def main():
     rt_config = None
     dataset_name = 'master'  # Default
     
+    if not os.path.exists(runtime_config_path):
+        # No config found — create one from hardcoded defaults so multi-size
+        # training is enabled on the very first run.
+        _default_rt = {
+            "data": {
+                "root": DATASET_ROOT,
+                "dataset_name": dataset_name,
+                "paths": {
+                    "train_gt": "patches/{size_key}/GT",
+                    "train_lr": "patches/{size_key}/LR_7frames",
+                    "val_gt":   "val/{size_key}/GT",
+                    "val_lr":   "patches/{size_key}/LR_7frames"
+                }
+            },
+            "validation": {
+                "sizes": ["540", "720_169", "720"]
+            }
+        }
+        try:
+            with open(runtime_config_path, 'w') as _f:
+                json.dump(_default_rt, _f, indent=2)
+            print(f"{C_GREEN}✅ Created default runtime_config.json: {runtime_config_path}{C_RESET}")
+            print(f"{C_YELLOW}   Edit this file to customise paths, batch sizes, and validation sizes.{C_RESET}")
+        except Exception as _e:
+            print(f"{C_YELLOW}⚠ Could not write default runtime_config.json: {_e}{C_RESET}")
+
     if os.path.exists(runtime_config_path):
         try:
             with open(runtime_config_path, 'r') as f:
@@ -279,10 +308,17 @@ def main():
     # Create model - USING 7-FRAME MODEL (as intended by dataset_generator_v2)
     print("Creating 7-frame model...")
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    use_checkpointing = config.get('USE_CHECKPOINTING', True)
     model = VSRBidirectional_7frames_3x(
         n_feats=n_feats, 
-        n_blocks=n_blocks
+        n_blocks=n_blocks,
+        use_checkpointing=use_checkpointing
     ).to(device)
+    
+    if use_checkpointing:
+        print("✅ Gradient checkpointing ENABLED - saves ~40% activation memory")
+    else:
+        print("⚠️  Gradient checkpointing disabled")
     
     # Count parameters
     total_params = sum(p.numel() for p in model.parameters())
@@ -298,7 +334,7 @@ def main():
     
     
     # Create optimizer with layer-wise learning rates
-    # Give Final Fusion layer 10x higher learning rate to activate it
+    # Give Final Fusion layer 20x higher learning rate to strongly activate it
     lr = 10 ** config['LR_EXPONENT']
     
     # Separate Final Fusion parameters from other parameters
@@ -321,8 +357,8 @@ def main():
         },
         {
             'params': final_fusion_params,
-            'lr': lr * 10,  # 10x higher for Final Fusion
-            'weight_decay': config['WEIGHT_DECAY'] * 0.5  # Less weight decay for aggressive learning
+            'lr': lr * 20,  # 20x higher for Final Fusion (increased from 10x)
+            'weight_decay': 0.0  # No weight decay for final fusion to maximize learning
         }
     ]
     
@@ -363,12 +399,12 @@ def main():
     
     # Create GradScaler for mixed precision training if enabled
     use_amp = config.get('USE_AMP', False)
-    scaler = GradScaler(enabled=use_amp)
+    scaler = GradScaler() if use_amp else None
     
     if use_amp:
         print(f"{C_GREEN}✅ Mixed Precision (AMP) enabled - reduced VRAM usage{C_RESET}\n")
     else:
-        print(f"{C_YELLOW}⚠️  Mixed Precision (AMP) disabled - higher VRAM usage{C_RESET}\n")
+        print(f"{C_GREEN}✅ Mixed Precision (AMP) disabled - no AMP overhead (recommended for Tesla P4){C_RESET}\n")
     
     # Create datasets
     print("Loading datasets...")
@@ -387,11 +423,12 @@ def main():
             with open(runtime_config_path, 'r') as f:
                 rt_config = json.load(f)
             
-            # New runtime_config.json structure (no longer uses size_distribution):
+            # New runtime_config.json structure:
             # {
             #   "data": {"root": "...", "dataset_name": "master"},
-            #   "training": {"adaptive_batch": {"540": {"batch": 1, "accum": 6}, ...}}
+            #   "validation": {"sizes": ["540", "720_169", "720"]}
             # }
+            # model/training params come from config.py (no duplication)
             
             # Auto-detect which sizes are available by checking for directories
             data_config = rt_config.get('data', {})
@@ -407,7 +444,7 @@ def main():
             
             # Check which size directories exist and have files
             available_sizes = []
-            for size_key in ['540', '720', '720_169']:
+            for size_key in KNOWN_SIZE_KEYS:
                 # Build path using pattern
                 train_path = train_gt_pattern.replace('{size_key}', size_key)
                 train_dir = os.path.join(data_root, dataset_name, train_path)
@@ -424,11 +461,12 @@ def main():
                 else:
                     print(f"{C_YELLOW}    ⚠ Directory does not exist{C_RESET}")
             
-            if len(available_sizes) > 1:
+            if available_sizes:
                 use_multi_size = True
-                print(f"{C_CYAN}✓ Multi-size training enabled: {', '.join(available_sizes)}{C_RESET}")
-            elif len(available_sizes) == 1:
-                print(f"{C_CYAN}✓ Single-size training: {available_sizes[0]}{C_RESET}")
+                if len(available_sizes) == 1:
+                    print(f"{C_CYAN}✓ Single-size detected ({available_sizes[0]}), using multi-size loader for consistency{C_RESET}")
+                else:
+                    print(f"{C_CYAN}✓ Multi-size training enabled: {', '.join(available_sizes)}{C_RESET}")
             else:
                 print(f"{C_YELLOW}⚠ No training data found, falling back to defaults{C_RESET}")
         except Exception as e:
@@ -448,7 +486,7 @@ def main():
         print(f"{C_CYAN}Detecting available sizes in: {os.path.join(data_root, dataset_name)}{C_RESET}")
         print(f"{C_CYAN}  Using path pattern: {train_gt_pattern}{C_RESET}")
         
-        for size_key in ['540', '720', '720_169']:
+        for size_key in KNOWN_SIZE_KEYS:
             # Build path using pattern
             train_path = train_gt_pattern.replace('{size_key}', size_key)
             train_dir = os.path.join(data_root, dataset_name, train_path)
@@ -489,8 +527,51 @@ def main():
                 sizes_config[size_key] = {
                     'enabled': True,  # All detected sizes are enabled
                     'distribution': 1.0 / len(available),  # Equal distribution (not used for weighting)
-                    'batch_size': batch_info.get('batch', 1)
+                    'batch_size': batch_info.get('batch', config.get('BATCH_SIZE', 1))
                 }
+            
+            # ── STARTUP DIAGNOSTIC ──────────────────────────────────────────
+            # Count GT and LR files on disk per size BEFORE any loading logic,
+            # so mismatches / missing LR files are visible right away.
+            import time as _time
+            train_lr_pattern = paths_config.get('train_lr', 'patches/{size_key}/LR_7frames')
+            print(f"\n{C_CYAN}{'━'*56}")
+            print(f"  📋  DATASET FILE COUNTS (pre-load diagnostic)")
+            print(f"{'━'*56}{C_RESET}")
+            for sk, _ in available:
+                gt_dir  = os.path.join(data_root, dataset_name,
+                                       train_gt_pattern.replace('{size_key}', sk))
+                lr_dir  = os.path.join(data_root, dataset_name,
+                                       train_lr_pattern.replace('{size_key}', sk))
+                gt_files = sorted([f for f in os.listdir(gt_dir)
+                                   if f.lower().endswith('.png')]) if os.path.isdir(gt_dir) else []
+                lr_files = sorted([f for f in os.listdir(lr_dir)
+                                   if f.lower().endswith('.png')]) if os.path.isdir(lr_dir) else []
+                gt_count = len(gt_files)
+                lr_count = len(lr_files)
+                match_count = len(set(gt_files) & set(lr_files))
+                ok = gt_count > 0 and lr_count > 0 and match_count > 0
+                status = f"{C_GREEN}✓" if ok else f"{C_RED}✗"
+                print(f"  {status}  {sk:8s}{C_RESET}  GT={gt_count:6,}  LR={lr_count:6,}  "
+                      f"matched={match_count:6,}  "
+                      f"GT dir: {gt_dir}")
+                if not os.path.isdir(lr_dir):
+                    print(f"           {C_RED}⚠  LR directory NOT FOUND: {lr_dir}{C_RESET}")
+                elif lr_count == 0:
+                    print(f"           {C_YELLOW}⚠  LR directory is empty (no .png files){C_RESET}")
+                elif match_count == 0:
+                    print(f"           {C_RED}⚠  No GT/LR filename matches — check naming!{C_RESET}")
+                    if gt_files and lr_files:
+                        print(f"           GT sample : {gt_files[0]}")
+                        print(f"           LR sample : {lr_files[0]}")
+            print(f"{C_CYAN}{'━'*56}{C_RESET}")
+            print(f"{C_YELLOW}  ⏳  Starting in 10 seconds — press Ctrl+C to abort …{C_RESET}")
+            for _i in range(10, 0, -1):
+                print(f"      {_i} …", end='\r', flush=True)
+                _time.sleep(1)
+            print(f"  {C_GREEN}▶  Continuing …{C_RESET}                    ")
+            print(f"{C_CYAN}{'━'*56}{C_RESET}\n")
+            # ── END DIAGNOSTIC ──────────────────────────────────────────────
             
             # Prepare config for multi-size loader
             loader_config = {
@@ -576,10 +657,17 @@ def main():
         # Get validation sizes from config
         val_sizes = rt_config.get('validation', {}).get('sizes', [])
         if not val_sizes:
-            # Fallback to auto-detected training sizes
-            train_gt_pattern = paths_config.get('train_gt', 'patches/{size_key}/GT') if paths_config else 'patches/{size_key}/GT'
-            available = detect_available_sizes(data_root, dataset_name, train_gt_pattern)
-            val_sizes = [size_key for size_key, _ in available] if available else ['540']
+            # Auto-detect from validation GT directories (NOT training dirs)
+            val_gt_pattern = paths_config.get('val_gt', 'val/{size_key}/GT') if paths_config else 'val/{size_key}/GT'
+            val_sizes = []
+            for sk in KNOWN_SIZE_KEYS:
+                val_dir = os.path.join(data_root, dataset_name, val_gt_pattern.replace('{size_key}', sk))
+                if os.path.isdir(val_dir):
+                    files = [f for f in os.listdir(val_dir) if f.lower().endswith('.png')]
+                    if files:
+                        val_sizes.append(sk)
+            if not val_sizes:
+                val_sizes = ['540']
     else:
         # Fallback to defaults
         data_root = DATASET_ROOT
@@ -589,6 +677,13 @@ def main():
     
     # Create validation dataset and loader for EACH size
     print(f"{C_CYAN}Creating validation datasets for sizes: {', '.join(val_sizes)}{C_RESET}")
+    
+    # Ensure validation GT subdirs exist so the user can copy images into them
+    for size_key in KNOWN_SIZE_KEYS:
+        val_gt_dir = os.path.join(data_root, dataset_name, 'val', size_key, 'GT')
+        os.makedirs(val_gt_dir, exist_ok=True)
+    print(f"{C_GREEN}✅ Validation GT directories ready: {os.path.join(data_root, dataset_name, 'val', '{size_key}', 'GT')}{C_RESET}")
+    
     total_val_samples = 0
     
     for size_key in val_sizes:

@@ -6,22 +6,32 @@ MATCHES original VSRBidirectional_3x architecture exactly for realistic memory t
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 class ResidualBlock(nn.Module):
     """Residual block matching original architecture."""
-    def __init__(self, n_feats):
+    def __init__(self, n_feats, use_checkpointing=False):
         super().__init__()
         self.conv1 = nn.Conv2d(n_feats, n_feats, 3, 1, 1)
         self.relu = nn.LeakyReLU(0.1, inplace=False)  # LeakyReLU like original
         self.conv2 = nn.Conv2d(n_feats, n_feats, 3, 1, 1)
         self.last_activity = 0.0
+        self.use_checkpointing = use_checkpointing
         
-    def forward(self, x):
+    def _forward_impl(self, x):
+        """Internal forward computation, separated for gradient checkpointing support."""
         residual = x
         out = self.conv1(x)
         out = self.relu(out)
         out = self.conv2(out)
         out = residual + out
+        return out
+        
+    def forward(self, x):
+        if self.use_checkpointing and self.training:
+            out = checkpoint(self._forward_impl, x, use_reentrant=False)
+        else:
+            out = self._forward_impl(x)
         
         # Track activity
         self.last_activity = out.detach().abs().mean().item()
@@ -63,7 +73,7 @@ class VSRBidirectional_7frames_3x(nn.Module):
     
     Architecture matches VSRBidirectional_3x for realistic memory measurements.
     """
-    def __init__(self, n_feats=72, n_blocks=26):
+    def __init__(self, n_feats=72, n_blocks=26, use_checkpointing=False):
         super().__init__()
         self.n_feats = n_feats
         self.n_blocks = n_blocks
@@ -79,10 +89,10 @@ class VSRBidirectional_7frames_3x(nn.Module):
         
         # 3. Propagation Trunks
         self.backward_trunk = nn.ModuleList([
-            ResidualBlock(n_feats) for _ in range(half_blocks)
+            ResidualBlock(n_feats, use_checkpointing=use_checkpointing) for _ in range(half_blocks)
         ])
         self.forward_trunk = nn.ModuleList([
-            ResidualBlock(n_feats) for _ in range(half_blocks)
+            ResidualBlock(n_feats, use_checkpointing=use_checkpointing) for _ in range(half_blocks)
         ])
         
         # 4. Final Fusion

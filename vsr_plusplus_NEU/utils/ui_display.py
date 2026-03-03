@@ -344,12 +344,13 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
     # 3. Learning stability (up to 30 points) - based on plateau counter and adaptive mode
     if adaptive_status:
         plateau = adaptive_status.get('plateau_counter', 0)
+        patience = adaptive_status.get('plateau_patience', 100)
         adaptive_mode_val = adaptive_status.get('mode', 'Stable')
         
-        if plateau < 150:
+        if plateau < patience * 0.75:
             stability_score = 30.0
             stability_status = f"{C_GREEN}Stable{C_RESET}"
-        elif plateau < 300:
+        elif plateau < patience * 1.5:
             stability_score = 20.0
             stability_status = f"{C_YELLOW}Moderate{C_RESET}"
         else:
@@ -513,13 +514,14 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
             cooldown_display = f"✅ {C_GREEN}Inactive{C_RESET}"
         print_line(f"Cooldown: {cooldown_display}", ui_w)
         
-        # Plateau counter
+        # Plateau counter (thresholds derived from plateau_patience)
         plateau = adaptive_status.get('plateau_counter', 0)
-        if plateau > 300:
+        patience = adaptive_status.get('plateau_patience', 100)
+        if plateau > patience * 1.5:
             plateau_color = C_RED
             plateau_icon = '🚨'
             plateau_text = f"{plateau} steps (WARNING)"
-        elif plateau > 150:
+        elif plateau > patience * 0.75:
             plateau_color = C_YELLOW
             plateau_icon = '🟡'
             plateau_text = f"{plateau} steps"
@@ -543,6 +545,11 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
         print_two_columns(
             f"Grad Clip: {C_CYAN}{grad_clip:.3f}{C_RESET}",
             f"Aggressive: {C_RED if aggressive else C_GRAY}{'YES' if aggressive else 'NO'}{C_RESET}",
+            ui_w
+        )
+        print_two_columns(
+            f"Perceptual W: {C_CYAN}{perceptual_weight:.3f}{C_RESET}",
+            f"Plateau Patience: {C_CYAN}{adaptive_status.get('plateau_patience', 100)}{C_RESET}",
             ui_w
         )
         
@@ -663,21 +670,11 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
         
         print_separator(ui_w, 'double')
     
-    # === LAYER ACTIVITY ===
-    available_lines = term_size.lines - 30  # Lines available for layer display
-    
-    # Calculate layer counts for display
-    n_blocks = config.get('N_BLOCKS', 32)
-    total_layers = len(activities) if activities else 0
-    fusion_layers = total_layers - n_blocks if total_layers > n_blocks else 0
-    
-    print_line(f"{C_BOLD}⚡ LAYER ACTIVITY{C_RESET} - Mode: {DISPLAY_MODE_NAMES[display_mode]}", ui_w)
-    print_line(f"ResidualBlocks: {C_CYAN}{n_blocks}{C_RESET} | Total Layers: {C_CYAN}{total_layers}{C_RESET} (incl. {fusion_layers} fusion)", ui_w)
+    # === LAYER ACTIVITY (Fusion layers only) ===
+    print_line(f"{C_BOLD}⚡ FUSION LAYER ACTIVITY{C_RESET}", ui_w)
     print_separator(ui_w, 'single')
     
-    # Display based on mode, passing peak layer name for marking
-    _draw_activity_display(activities, display_mode, available_lines, ui_w, 
-                          bar_width_single, bar_width_double, peak_layer_name if activities else None)
+    _draw_activity_display(activities, display_mode, term_size.lines, ui_w, bar_width_single, bar_width_double, peak_layer_name if activities else None)
     
     # === FOOTER ===
     print_separator(ui_w, 'double')
@@ -696,12 +693,11 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
     print_separator(ui_w, 'thin')
     print_two_columns(
         f"{C_CYAN}P{C_RESET} Pause/Resume  │  {C_CYAN}V{C_RESET} Validation",
-        f"{C_CYAN}S{C_RESET} Change View  │  {C_CYAN}ENTER{C_RESET} Config",
+        f"{C_CYAN}ENTER{C_RESET} Config  │  {C_CYAN}Q{C_RESET} Quit",
         ui_w
     )
-    print_two_columns(
-        f"{C_CYAN}C{C_RESET} Save Checkpoint  │  {C_CYAN}Q{C_RESET} Quit",
-        f"{C_CYAN}ESC{C_RESET} Emergency Stop",
+    print_line(
+        f"{C_CYAN}C{C_RESET} Save Checkpoint  │  {C_CYAN}ESC{C_RESET} Emergency Stop",
         ui_w
     )
     sys.stdout.write("\n")

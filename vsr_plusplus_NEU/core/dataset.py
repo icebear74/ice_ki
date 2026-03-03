@@ -31,7 +31,7 @@ class VSRDataset(Dataset):
         paths_config: Optional dict with path patterns:
             - train_gt: Pattern for training GT (default: 'patches/{size_key}/GT')
             - train_lr: Pattern for training LR (default: 'patches/{size_key}/LR_7frames')
-            - val_gt: Pattern for validation GT (default: 'val/GT/{size_key}')
+            - val_gt: Pattern for validation GT (default: 'val/{size_key}/GT')
             - val_lr: Pattern for validation LR (default: 'patches/{size_key}/LR_7frames')
     """
     
@@ -51,7 +51,7 @@ class VSRDataset(Dataset):
             paths_config = {}
         self.train_gt_pattern = paths_config.get('train_gt', 'patches/{size_key}/GT')
         self.train_lr_pattern = paths_config.get('train_lr', 'patches/{size_key}/LR_7frames')
-        self.val_gt_pattern = paths_config.get('val_gt', 'val/GT/{size_key}')
+        self.val_gt_pattern = paths_config.get('val_gt', 'val/{size_key}/GT')
         self.val_lr_pattern = paths_config.get('val_lr', 'patches/{size_key}/LR_7frames')
         
         # Build paths based on mode
@@ -80,7 +80,7 @@ class VSRDataset(Dataset):
         if not os.path.exists(self.gt_dir):
             raise ValueError(f"GT directory not found: {self.gt_dir}")
         
-        all_gt_files = sorted([f for f in os.listdir(self.gt_dir) if f.endswith('.png')])
+        all_gt_files = sorted([f for f in os.listdir(self.gt_dir) if f.lower().endswith('.png')])
         
         if not all_gt_files:
             raise ValueError(f"No PNG files found in {self.gt_dir}")
@@ -202,10 +202,8 @@ class VSRDataset(Dataset):
                 if self.patch_lr_dir:
                     print(f"  OR {self.patch_lr_dir}")
                 print()
-        elif skipped_files or invalid_dimension_files:
-            # For training mode, just show count
-            if skipped_files:
-                print(f"\n⚠️  Skipped {len(skipped_files)} GT files without matching LR files in {mode}")
+        elif invalid_dimension_files:
+            # For training mode, only warn about dimension issues (GT-LR filename mismatches are silently skipped)
             if invalid_dimension_files and self.validate_upfront:
                 print(f"⚠️  Skipped {len(invalid_dimension_files)} files with invalid dimensions in {mode} (size_key={size_key})")
             print()
@@ -382,7 +380,7 @@ class VSRDataset(Dataset):
             }
         
         # Count all GT files in directory
-        all_gt_files = sorted([f for f in os.listdir(self.gt_dir) if f.endswith('.png')])
+        all_gt_files = sorted([f for f in os.listdir(self.gt_dir) if f.lower().endswith('.png')])
         new_gt_count = len(all_gt_files)
         current_loaded = len(self.gt_files)
         new_files = new_gt_count - current_loaded
@@ -422,7 +420,7 @@ class VSRDataset(Dataset):
                     }
                 
                 # Get all GT files
-                all_gt_files = sorted([f for f in os.listdir(self.gt_dir) if f.endswith('.png')])
+                all_gt_files = sorted([f for f in os.listdir(self.gt_dir) if f.lower().endswith('.png')])
                 
                 if not all_gt_files:
                     return {
@@ -468,9 +466,7 @@ class VSRDataset(Dataset):
                     else:
                         missing_lr_count += 1
                 
-                # Report skipped files (only if any were skipped)
-                if missing_lr_count > 0:
-                    print(f"\n⚠️  Reload: Skipped {missing_lr_count} GT files without matching LR files ({self.mode}, size_key={self.size_key})")
+                # GT files without a matching LR file are silently skipped
                 
                 # Update the dataset atomically
                 self.gt_files = new_gt_files
@@ -568,7 +564,12 @@ class VSRDataset(Dataset):
                         lr_frames = [np.flip(f, axis=0).copy() for f in lr_frames]
                     
                     # Random rotation (0, 90, 180, 270)
-                    k = random.randint(0, 3)
+                    # For non-square patches (e.g. 720_169), 90°/270° would swap H and W,
+                    # making tensors in the same batch unstackable. Limit to 0°/180°.
+                    if gt.shape[0] == gt.shape[1]:
+                        k = random.randint(0, 3)
+                    else:
+                        k = random.choice([0, 2])
                     if k > 0:
                         gt = np.rot90(gt, k).copy()
                         lr_frames = [np.rot90(f, k).copy() for f in lr_frames]
@@ -580,7 +581,7 @@ class VSRDataset(Dataset):
                     for f in lr_frames
                 ])
                 
-                return lr_stack, gt
+                return lr_stack, gt, gt_file
                 
             except Exception as e:
                 # Log the error but try to recover
