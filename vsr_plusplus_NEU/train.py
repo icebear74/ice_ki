@@ -434,11 +434,12 @@ def main():
                 else:
                     print(f"{C_YELLOW}    ⚠ Directory does not exist{C_RESET}")
             
-            if len(available_sizes) > 1:
+            if available_sizes:
                 use_multi_size = True
-                print(f"{C_CYAN}✓ Multi-size training enabled: {', '.join(available_sizes)}{C_RESET}")
-            elif len(available_sizes) == 1:
-                print(f"{C_CYAN}✓ Single-size training: {available_sizes[0]}{C_RESET}")
+                if len(available_sizes) == 1:
+                    print(f"{C_CYAN}✓ Single-size detected ({available_sizes[0]}), using multi-size loader for consistency{C_RESET}")
+                else:
+                    print(f"{C_CYAN}✓ Multi-size training enabled: {', '.join(available_sizes)}{C_RESET}")
             else:
                 print(f"{C_YELLOW}⚠ No training data found, falling back to defaults{C_RESET}")
         except Exception as e:

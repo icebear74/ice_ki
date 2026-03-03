@@ -209,12 +209,15 @@ class VSRTrainer:
                 size_key = batch.get('size_key', 'unknown')
                 batch_filenames = batch.get('filenames', [])
             else:
-                # Traditional single-size batch (tuple)
-                lr_stack, gt = batch
+                # Traditional single-size batch (tuple: lr, gt, filenames)
+                lr_stack, gt, batch_filenames = batch
                 lr_stack = lr_stack.to(self.device)
                 gt = gt.to(self.device)
-                size_key = 'default'
-                batch_filenames = []
+                # Get the actual resolution key from the dataset if possible
+                if hasattr(self.train_loader, 'dataset') and hasattr(self.train_loader.dataset, 'size_key'):
+                    size_key = self.train_loader.dataset.size_key
+                else:
+                    size_key = 'default'
             
             # Track batch files for WebUI display — always update counters, filenames when available
             if hasattr(self, 'web_monitor') and self.web_monitor:
@@ -253,6 +256,7 @@ class VSRTrainer:
                     current_batch={
                         'files': all_accumulated_files,
                         'size_key': size_key,
+                        'batch_size': batch_size_val,
                         'files_used_in_epoch': files_used_in_epoch,
                         'total_files_in_epoch': total_files_in_epoch,
                         'files_per_size': files_per_size,

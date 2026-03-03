@@ -80,7 +80,7 @@ class VSRDataset(Dataset):
         if not os.path.exists(self.gt_dir):
             raise ValueError(f"GT directory not found: {self.gt_dir}")
         
-        all_gt_files = sorted([f for f in os.listdir(self.gt_dir) if f.endswith('.png')])
+        all_gt_files = sorted([f for f in os.listdir(self.gt_dir) if f.lower().endswith('.png')])
         
         if not all_gt_files:
             raise ValueError(f"No PNG files found in {self.gt_dir}")
@@ -202,10 +202,8 @@ class VSRDataset(Dataset):
                 if self.patch_lr_dir:
                     print(f"  OR {self.patch_lr_dir}")
                 print()
-        elif skipped_files or invalid_dimension_files:
-            # For training mode, just show count
-            if skipped_files:
-                print(f"\n⚠️  Skipped {len(skipped_files)} GT files without matching LR files in {mode}")
+        elif invalid_dimension_files:
+            # For training mode, only warn about dimension issues (GT-LR filename mismatches are silently skipped)
             if invalid_dimension_files and self.validate_upfront:
                 print(f"⚠️  Skipped {len(invalid_dimension_files)} files with invalid dimensions in {mode} (size_key={size_key})")
             print()
@@ -382,7 +380,7 @@ class VSRDataset(Dataset):
             }
         
         # Count all GT files in directory
-        all_gt_files = sorted([f for f in os.listdir(self.gt_dir) if f.endswith('.png')])
+        all_gt_files = sorted([f for f in os.listdir(self.gt_dir) if f.lower().endswith('.png')])
         new_gt_count = len(all_gt_files)
         current_loaded = len(self.gt_files)
         new_files = new_gt_count - current_loaded
@@ -422,7 +420,7 @@ class VSRDataset(Dataset):
                     }
                 
                 # Get all GT files
-                all_gt_files = sorted([f for f in os.listdir(self.gt_dir) if f.endswith('.png')])
+                all_gt_files = sorted([f for f in os.listdir(self.gt_dir) if f.lower().endswith('.png')])
                 
                 if not all_gt_files:
                     return {
@@ -468,9 +466,7 @@ class VSRDataset(Dataset):
                     else:
                         missing_lr_count += 1
                 
-                # Report skipped files (only if any were skipped)
-                if missing_lr_count > 0:
-                    print(f"\n⚠️  Reload: Skipped {missing_lr_count} GT files without matching LR files ({self.mode}, size_key={self.size_key})")
+                # GT files without a matching LR file are silently skipped
                 
                 # Update the dataset atomically
                 self.gt_files = new_gt_files
@@ -580,7 +576,7 @@ class VSRDataset(Dataset):
                     for f in lr_frames
                 ])
                 
-                return lr_stack, gt
+                return lr_stack, gt, gt_file
                 
             except Exception as e:
                 # Log the error but try to recover

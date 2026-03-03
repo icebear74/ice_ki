@@ -72,7 +72,8 @@ class VSRValidator:
         val_start = time.time()
         
         with torch.no_grad():
-            for batch_idx, (lr_stack, gt) in enumerate(self.val_loader):
+            for batch_idx, batch in enumerate(self.val_loader):
+                lr_stack, gt, _ = batch
                 # Update sample count BEFORE displaying
                 num_samples += lr_stack.size(0)
                 

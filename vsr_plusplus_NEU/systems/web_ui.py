@@ -141,7 +141,8 @@ class CompleteTrainingDataStore:
             # Current Batch Information (NEW)
             'current_batch': {
                 'files': [],  # List of "size_key/filename.png" strings
-                'size_key': '',  # Current batch size key
+                'size_key': '',  # Current batch resolution key (e.g. '540', '720')
+                'batch_size': 0,  # Number of images per batch step
                 'files_used_in_epoch': 0,  # How many files have been processed in current epoch
                 'total_files_in_epoch': 0  # Total files in this epoch
             },
@@ -2191,9 +2192,10 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             const accumulationSteps = batch.accumulation_steps || 1;
             document.getElementById('batchAccumulationSteps').textContent = accumulationSteps;
             
-            // Update batch size key
+            // Update batch size (images per step) and resolution key
+            const batchSize = batch.batch_size || '-';
             const sizeKey = batch.size_key || '-';
-            document.getElementById('batchSizeKey').textContent = sizeKey;
+            document.getElementById('batchSizeKey').textContent = batchSize + (sizeKey && sizeKey !== '-' ? ' (' + sizeKey + ')' : '');
             
             // Update batch files list — one file per line, height grows with content
             const files = batch.files || [];
