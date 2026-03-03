@@ -1460,20 +1460,22 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             <!-- Batch files list -->
             <div style="margin-top: 8px;">
                 <h3 style="color: var(--accent-orange); margin-bottom: 8px; font-size: 1.05em;">Files in Accumulation Window:</h3>
-                <textarea id="batchFilesList" readonly style="
+                <div id="batchFilesList" style="
                     width: 100%;
-                    height: 120px;
                     background: rgba(15, 23, 42, 0.6);
                     border: 1px solid var(--border-color);
                     border-radius: 6px;
                     color: var(--text-primary);
-                    padding: 10px;
+                    padding: 8px 10px;
                     font-size: 0.8em;
                     font-family: 'Courier New', monospace;
-                    resize: vertical;
-                    line-height: 1.5;
+                    line-height: 1.6;
                     box-sizing: border-box;
-                "></textarea>
+                    min-height: 28px;
+                    white-space: pre;
+                    overflow-x: auto;
+                    overflow-y: hidden;
+                ">–</div>
             </div>
         </div>
         
@@ -2162,10 +2164,14 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             const sizeKey = batch.size_key || '-';
             document.getElementById('batchSizeKey').textContent = sizeKey;
             
-            // Update batch files list
+            // Update batch files list — one file per line, height grows with content
             const files = batch.files || [];
-            const filesList = files.join('\\\\n');
-            document.getElementById('batchFilesList').value = filesList;
+            const el = document.getElementById('batchFilesList');
+            if (files.length === 0) {
+                el.textContent = '–';
+            } else {
+                el.textContent = files.join('\n');
+            }
         }
         
         function downloadDataAsJSON() {
