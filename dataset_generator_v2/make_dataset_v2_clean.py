@@ -207,6 +207,8 @@ class DatasetGeneratorV2:
             # INTER_LANCZOS4 = highest quality (Lanczos over 8×8 pixel neighbourhood)
             center_frame = frames[3]
             gt = cv2.resize(center_frame, (gt_w, gt_h), interpolation=cv2.INTER_LANCZOS4)
+            if self.is_low_variety(gt):
+                return None, None
             
             # LR: All 7 frames, full-frame resize to LR size
             # INTER_AREA = DVD-realistic quality (same as crop-based sizes)
@@ -232,6 +234,8 @@ class DatasetGeneratorV2:
             # GT: Center frame (index 3) crop from FULL UHD quality
             center_frame = frames[3]
             gt = center_frame[crop_y:crop_y+gt_h, crop_x:crop_x+gt_w]
+            if self.is_low_variety(gt):
+                return None, None
             
             # LR: All 7 frames, same crop, DVD-realistic downscale
             lr_frames = []
@@ -281,6 +285,17 @@ class DatasetGeneratorV2:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
         return laplacian_var < threshold
+    
+    def is_low_variety(self, frame: np.ndarray) -> bool:
+        """
+        Detect low-variety GT patches (plain black, white, or near-uniform images).
+        Uses the standard deviation of grayscale pixel values.
+        A low std means most pixels are the same color → useless for training.
+        Threshold is read from config['quality']['min_variety_std'] (default: 15.0).
+        """
+        threshold = self.config['quality'].get('min_variety_std', 15.0)
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        return float(gray.std()) < threshold
     
     def process_video(self, video_path: str, video_info: dict, target_patches: int):
         """
