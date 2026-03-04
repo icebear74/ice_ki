@@ -199,9 +199,10 @@ class VSRTrainer:
             )
         # ── End graduated data strategy ──────────────────────────────────────
         
-        accumulation_steps = self.config.get('ACCUMULATION_STEPS', 1)
-        steps_per_epoch = len(self.train_loader) // accumulation_steps
+        default_accum_steps = self.config.get('ACCUMULATION_STEPS', 6)
+        steps_per_epoch = len(self.train_loader) // default_accum_steps
         current_epoch_step = 0
+        accum_counter = 0  # Running counter for dynamic accumulation
         
         # Buffer for accumulation window files
         accumulation_buffer = []
@@ -245,6 +246,13 @@ class VSRTrainer:
                 else:
                     size_key = 'default'
             
+            # Dynamic accumulation: large 720 patches use fewer steps for speed;
+            # 540 and 720_169 (similar total pixels) use the standard count.
+            if size_key == '720':
+                current_accum_steps = 4
+            else:
+                current_accum_steps = default_accum_steps
+            
             # Track batch files for WebUI display — always update counters, filenames when available
             if hasattr(self, 'web_monitor') and self.web_monitor:
                 batch_size_val = lr_stack.size(0)
@@ -265,8 +273,8 @@ class VSRTrainer:
                         'files': formatted_files,
                         'size_key': size_key
                     })
-                    # Keep only last accumulation_steps batches
-                    if len(accumulation_buffer) > accumulation_steps:
+                    # Keep only last current_accum_steps batches
+                    if len(accumulation_buffer) > current_accum_steps:
                         accumulation_buffer.pop(0)
                 
                 # Collect all files and per-size counts from accumulation window
@@ -286,7 +294,7 @@ class VSRTrainer:
                         'files_used_in_epoch': files_used_in_epoch,
                         'total_files_in_epoch': total_files_in_epoch,
                         'files_per_size': files_per_size,
-                        'accumulation_steps': accumulation_steps
+                        'accumulation_steps': current_accum_steps
                     }
                 )
             
@@ -305,14 +313,17 @@ class VSRTrainer:
                 )
                 
                 # ── Graduated perceptual loss scheduling ────────────────────
-                # Override the adaptive system's perceptual weight with the
-                # scheduled value so it starts at 0.0 and ramps up slowly.
+                # Phase 1/2: override adaptive weight with the scheduled ramp.
+                # Phase 3: get_perceptual_weight returns None, so the
+                # AdaptiveSystem's dynamic weight is used unchanged.
                 if self.data_strategy_scheduler is not None:
-                    perceptual_w = self.data_strategy_scheduler.get_perceptual_weight(
+                    scheduled_perceptual_w = self.data_strategy_scheduler.get_perceptual_weight(
                         self.global_step
                     )
-                    # Keep adaptive_status in sync for logging
-                    adaptive_status['perceptual_weight'] = perceptual_w
+                    if scheduled_perceptual_w is not None:
+                        perceptual_w = scheduled_perceptual_w
+                        # Keep adaptive_status in sync for logging
+                        adaptive_status['perceptual_weight'] = perceptual_w
                 # ── End graduated perceptual loss scheduling ─────────────────
                 
                 # Compute loss
@@ -320,7 +331,7 @@ class VSRTrainer:
                 loss = loss_dict['total']
                 
                 # Scale loss for accumulation
-                loss = loss / accumulation_steps
+                loss = loss / current_accum_steps
             
             # Backward pass with gradient scaling
             if self.scaler is not None:
@@ -328,8 +339,9 @@ class VSRTrainer:
             else:
                 loss.backward()
             
-            # Update optimizer (every accumulation_steps)
-            if (batch_idx + 1) % accumulation_steps == 0:
+            # Update optimizer (every current_accum_steps using running counter)
+            accum_counter += 1
+            if accum_counter >= current_accum_steps:
                 # Unscale gradients before clipping
                 if self.scaler is not None:
                     self.scaler.unscale_(self.optimizer)
@@ -348,6 +360,7 @@ class VSRTrainer:
                 adam_momentum = self._get_adam_momentum()
                 
                 self.optimizer.zero_grad()
+                accum_counter = 0  # Reset after successful optimizer step
                 
                 # Update LR scheduler (every LR_UPDATE_EVERY steps)
                 lr_update_every = self.config.get('LR_UPDATE_EVERY', 10)
@@ -447,19 +460,23 @@ class VSRTrainer:
                     if self.data_strategy_scheduler is not None:
                         sched = self.data_strategy_scheduler
                         sched_perc_w = sched.get_perceptual_weight(self.global_step)
-                        self.tb_logger.writer.add_scalar(
-                            'DataStrategy/PerceptualWeight', sched_perc_w, self.global_step
-                        )
+                        # Only log the scheduled weight during Phase 1/2 (not None)
+                        if sched_perc_w is not None:
+                            self.tb_logger.writer.add_scalar(
+                                'DataStrategy/PerceptualWeight', sched_perc_w, self.global_step
+                            )
                         sampler = getattr(self.train_loader, 'sampler', None)
                         if sampler is not None:
                             dist = sched.get_distribution(
                                 self.global_step,
                                 available_sizes=getattr(sampler, 'active_sizes', None)
                             )
-                            for sk, w in dist.items():
-                                self.tb_logger.writer.add_scalar(
-                                    f'DataStrategy/Weight_{sk}', w, self.global_step
-                                )
+                            # dist is None in Phase 3 (natural file-count sampling)
+                            if dist is not None:
+                                for sk, w in dist.items():
+                                    self.tb_logger.writer.add_scalar(
+                                        f'DataStrategy/Weight_{sk}', w, self.global_step
+                                    )
                     
                     # Log plateau state details
                     if hasattr(self.adaptive_system, 'get_plateau_info'):

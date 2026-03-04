@@ -51,7 +51,7 @@ ACCUMULATION_STEPS = 6
 LR_EXPONENT = -5
 
 # Weight decay for AdamW optimizer (regularization)
-WEIGHT_DECAY = 0.001
+WEIGHT_DECAY = 5e-4
 
 # Warmup steps (linear increase from 0 to max LR)
 WARMUP_STEPS = 2000

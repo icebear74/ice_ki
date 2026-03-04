@@ -47,7 +47,7 @@ class FusionBlock(nn.Module):
     def __init__(self, in_feats, out_feats):
         super().__init__()
         self.conv3x3 = nn.Conv2d(in_feats, out_feats, 3, 1, 1)
-        self.relu = nn.LeakyReLU(0.1, inplace=True)
+        self.relu = nn.LeakyReLU(0.1, inplace=False)
         self.conv1x1 = nn.Conv2d(out_feats, out_feats, 1)
         self.last_activity_3x3 = 0.0
         self.last_activity_1x1 = 0.0

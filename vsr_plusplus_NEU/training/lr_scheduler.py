@@ -44,6 +44,11 @@ class AdaptiveLRScheduler:
         self.plateau_boost_available = True
         self.last_boost_step = 0
         self.boost_cooldown = 1000  # Wait 1000 steps between boosts
+        
+        # Hold the boosted LR for a fixed number of steps before returning
+        # to cosine annealing, to prevent an immediate spike-then-drop.
+        self.boost_hold_lr = None
+        self.boost_hold_until = 0
     
     def step(self, global_step, plateau_detected=False):
         """
@@ -59,8 +64,8 @@ class AdaptiveLRScheduler:
         # FIX 4: PLATEAU RECOVERY - If stuck for 300+ steps, boost LR
         if plateau_detected and self.plateau_boost_available:
             old_lr = self.optimizer.param_groups[0]['lr']
-            # Triple LR (but cap at MAX_LR)
-            new_lr = min(old_lr * 3.0, self.max_lr)
+            # Boost LR by ×1.5 (capped at MAX_LR) and hold for 200 steps
+            new_lr = min(old_lr * 1.5, self.max_lr)
             
             # Apply to optimizer
             for param_group in self.optimizer.param_groups:
@@ -68,19 +73,33 @@ class AdaptiveLRScheduler:
             
             current_lr = new_lr
             
+            # Hold the boosted LR for 200 steps before returning to cosine
+            self.boost_hold_lr = new_lr
+            self.boost_hold_until = global_step + 200
+            
             # Disable boost for next 1000 steps (prevent spam)
             self.plateau_boost_available = False
             self.last_boost_step = global_step
             
             # Log event
             print(f"\n⚡ LR BOOST TRIGGERED at step {global_step}")
-            print(f"   {old_lr:.2e} -> {new_lr:.2e} (×{new_lr/old_lr:.1f})")
+            print(f"   {old_lr:.2e} -> {new_lr:.2e} (×{new_lr/old_lr:.1f}), held for 200 steps")
             
             return current_lr, 'plateau_boost'
         
         # Re-enable boost after cooldown
         if global_step - self.last_boost_step > self.boost_cooldown:
             self.plateau_boost_available = True
+        
+        # Hold the boosted LR until the hold period expires
+        if self.boost_hold_lr is not None:
+            if global_step < self.boost_hold_until:
+                for param_group in self.optimizer.param_groups:
+                    param_group['lr'] = self.boost_hold_lr
+                return self.boost_hold_lr, 'plateau_boost'
+            else:
+                # Hold period expired, resume normal schedule
+                self.boost_hold_lr = None
         
         # Phase 1: Warmup
         if global_step < self.warmup_steps:
