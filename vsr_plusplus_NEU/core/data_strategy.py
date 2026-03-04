@@ -10,25 +10,38 @@ class DataStrategyScheduler:
     Graduated data and loss strategy scheduler for progressive training.
 
     Implements a three-phase training schedule to avoid gradient conflicts
-    and premature perceptual loss introduction:
+    and premature perceptual loss introduction.
+
+    Key design principle
+    -------------------
+    The training dataset files on disk are **already pre-weighted** in the
+    correct long-run ratio (≈ 50 % 540, 25 % 720, 25 % 720_169).  Therefore
+    Phase 3 does NOT apply any distribution override – the sampler simply
+    draws proportionally to file counts, which naturally yields the desired
+    mix.
 
     Phase 1 – Warmup (steps 0–1000):
-        Data : 100 % 720_169 (full-frames only)
+        Data : 100 % 720_169 (full-frames only, via explicit override)
+               → model learns global structure without crop conflicts
         Loss : perceptual weight = 0.0
 
     Phase 2 – Crop Introduction (steps 1000–10000):
-        Data : linear interpolation from 100 % full-frames → target distribution
+        Data : linear interpolation from 100 % 720_169 → approximate natural
+               distribution (CROP_INTRO_END_DISTRIBUTION), so that by step
+               10000 the override values closely match what is already on disk.
                step 1000  → {720_169: 1.00, 540: 0.00, 720: 0.00}
-               step 10000 → {720_169: 0.25, 540: 0.50, 720: 0.25}
+               step ~10000 → approaching {720_169: 0.25, 540: 0.50, 720: 0.25}
         Loss : perceptual weight 0.0 → 0.05 (linear)
 
     Phase 3 – Stable Training (steps 10000+):
-        Data : target distribution (25 % 720_169, 50 % 540, 25 % 720)
+        Data : natural file-count proportional sampling (no override).
+               get_distribution() returns None so the sampler uses the actual
+               file ratio on disk (which is already the desired distribution).
         Loss : perceptual weight = 0.05
 
     Args:
         all_size_keys: list of size keys present in the dataset
-                       (sizes absent from TARGET_DISTRIBUTION get weight 0.0)
+                       (used only during Phase 2 interpolation)
     """
 
     PHASE_WARMUP = 'warmup'
@@ -39,8 +52,12 @@ class DataStrategyScheduler:
     WARMUP_END = 1000
     CROP_INTRO_END = 10000
 
-    # Target (final) distribution for Phase 3
-    TARGET_DISTRIBUTION = {
+    # End-point of the Phase 2 interpolation.
+    # This approximates the natural file ratio on disk (50 % 540, 25 % 720,
+    # 25 % 720_169).  It is used ONLY during Phase 2; Phase 3 uses None
+    # (natural file-count sampling) so the actual on-disk distribution takes
+    # over seamlessly.
+    CROP_INTRO_END_DISTRIBUTION = {
         '720_169': 0.25,
         '540': 0.50,
         '720': 0.25,
@@ -57,7 +74,7 @@ class DataStrategyScheduler:
     TARGET_PERCEPTUAL_WEIGHT = 0.05
 
     def __init__(self, all_size_keys=None):
-        self._all_size_keys = all_size_keys or list(self.TARGET_DISTRIBUTION.keys())
+        self._all_size_keys = all_size_keys or list(self.CROP_INTRO_END_DISTRIBUTION.keys())
         self._last_phase = None
 
     # ------------------------------------------------------------------
@@ -81,16 +98,19 @@ class DataStrategyScheduler:
         """
         Return per-size sampling weights for the given training step.
 
-        Weights are normalized so they sum to 1.0.  Sizes not in
-        TARGET_DISTRIBUTION receive weight 0.0.
+        Phase 1 and 2 return a dict mapping size_key → float weight.
+        Phase 3 returns **None**, signalling the sampler to use its default
+        file-count proportional mode (no override), because the files on disk
+        are already in the desired distribution.
 
         Args:
             step:            Current global training step.
             available_sizes: Iterable of size keys that are actually loaded.
-                             Defaults to all_size_keys passed at construction.
+                             Only used during Phase 1/2.  Defaults to
+                             all_size_keys passed at construction.
 
         Returns:
-            dict mapping size_key → float weight (0.0–1.0, sum == 1.0)
+            dict (Phase 1/2) or None (Phase 3)
         """
         if available_sizes is None:
             available_sizes = self._all_size_keys
@@ -106,12 +126,14 @@ class DataStrategyScheduler:
             dist = {}
             for s in available_sizes:
                 start_w = self.WARMUP_DISTRIBUTION.get(s, 0.0)
-                end_w = self.TARGET_DISTRIBUTION.get(s, 0.0)
+                end_w = self.CROP_INTRO_END_DISTRIBUTION.get(s, 0.0)
                 dist[s] = start_w + t * (end_w - start_w)
             return dist
 
-        # PHASE_STABLE
-        return {s: self.TARGET_DISTRIBUTION.get(s, 0.0) for s in available_sizes}
+        # PHASE_STABLE – return None so the sampler uses natural file counts.
+        # The files on disk are already in the desired distribution, so no
+        # explicit override is needed.
+        return None
 
     # ------------------------------------------------------------------
     # Perceptual loss weight

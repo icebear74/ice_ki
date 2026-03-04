@@ -613,7 +613,7 @@ def main():
                   f"{DataStrategyScheduler.CROP_INTRO_END}): "
                   f"linear mix-in, perceptual 0.0→{DataStrategyScheduler.TARGET_PERCEPTUAL_WEIGHT}")
             print(f"  • Phase 3 (steps {DataStrategyScheduler.CROP_INTRO_END}+): "
-                  f"target distribution, perceptual={DataStrategyScheduler.TARGET_PERCEPTUAL_WEIGHT}")
+                  f"natural file-count sampling (no override), perceptual={DataStrategyScheduler.TARGET_PERCEPTUAL_WEIGHT}")
             print()
         except Exception as e:
             import traceback

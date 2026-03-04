@@ -91,39 +91,38 @@ class TestDataStrategySchedulerDistribution(unittest.TestCase):
         self.assertAlmostEqual(dist['540'], 0.0, places=6)
         self.assertAlmostEqual(dist['720'], 0.0, places=6)
 
-    def test_crop_intro_end_equals_target(self):
-        """At step 10000 (t=1) the distribution should equal the target distribution."""
-        dist = self.sched.get_distribution(10000, self.ALL_SIZES)
-        target = DataStrategyScheduler.TARGET_DISTRIBUTION
+    def test_crop_intro_near_end_approaches_target(self):
+        """At step 9999 (t≈1) the distribution should be very close to CROP_INTRO_END_DISTRIBUTION."""
+        dist = self.sched.get_distribution(9999, self.ALL_SIZES)
+        target = DataStrategyScheduler.CROP_INTRO_END_DISTRIBUTION
         for sk in self.ALL_SIZES:
-            self.assertAlmostEqual(dist[sk], target.get(sk, 0.0), places=6,
+            self.assertAlmostEqual(dist[sk], target.get(sk, 0.0), places=2,
                                    msg=f"Mismatch for size {sk}")
 
     def test_crop_intro_midpoint_monotonic(self):
         """720_169 weight decreases and crop weights increase during Phase 2."""
         dist_start = self.sched.get_distribution(1000, self.ALL_SIZES)
         dist_mid = self.sched.get_distribution(5500, self.ALL_SIZES)
-        dist_end = self.sched.get_distribution(10000, self.ALL_SIZES)
+        dist_near_end = self.sched.get_distribution(9999, self.ALL_SIZES)
 
         # 720_169 strictly decreasing
         self.assertGreater(dist_start['720_169'], dist_mid['720_169'])
-        self.assertGreater(dist_mid['720_169'], dist_end['720_169'])
+        self.assertGreater(dist_mid['720_169'], dist_near_end['720_169'])
 
         # Crop sizes strictly increasing
         for sk in ('540', '720'):
             self.assertLess(dist_start[sk], dist_mid[sk])
-            self.assertLess(dist_mid[sk], dist_end[sk])
+            self.assertLess(dist_mid[sk], dist_near_end[sk])
 
-    def test_stable_equals_target(self):
-        dist = self.sched.get_distribution(50000, self.ALL_SIZES)
-        target = DataStrategyScheduler.TARGET_DISTRIBUTION
-        for sk in self.ALL_SIZES:
-            self.assertAlmostEqual(dist[sk], target.get(sk, 0.0), places=6)
+    def test_stable_returns_none(self):
+        """Phase 3 returns None so the sampler uses natural file-count proportional mode."""
+        self.assertIsNone(self.sched.get_distribution(10000, self.ALL_SIZES))
+        self.assertIsNone(self.sched.get_distribution(50000, self.ALL_SIZES))
 
-    def test_missing_size_gets_zero(self):
-        """A size key not in TARGET_DISTRIBUTION receives weight 0.0."""
-        dist = self.sched.get_distribution(50000, ['720_169', '540', '720', 'unknown_size'])
-        self.assertAlmostEqual(dist.get('unknown_size', 0.0), 0.0, places=6)
+    def test_stable_returns_none_ignores_available_sizes(self):
+        """None is returned regardless of what available_sizes is passed in Phase 3."""
+        self.assertIsNone(self.sched.get_distribution(10000, ['720_169']))
+        self.assertIsNone(self.sched.get_distribution(10000, None))
 
 
 class TestDataStrategySchedulerPerceptualWeight(unittest.TestCase):
@@ -369,9 +368,11 @@ class TestSizeGroupedSamplerDistribution(unittest.TestCase):
         self.assertTrue(all(sk == '720_169' for sk in size_keys_p1),
                         f"Phase 1 should yield only 720_169, got: {set(size_keys_p1)}")
 
-        # Phase 3: all sizes present
-        dist = sched.get_distribution(50000, sampler.active_sizes)
-        sampler.set_distribution(dist)
+        # Phase 3: get_distribution returns None → set_distribution(None) restores
+        # natural file-count proportional sampling, so all sizes should appear.
+        dist_p3 = sched.get_distribution(50000, sampler.active_sizes)
+        self.assertIsNone(dist_p3, "Phase 3 must return None so sampler uses file counts")
+        sampler.set_distribution(dist_p3)  # None → natural file-count mode
         size_keys_p3 = set(sk for sk, _ in sampler)
         self.assertEqual(size_keys_p3, {'720_169', '540', '720'})
 
