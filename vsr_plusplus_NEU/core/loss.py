@@ -145,7 +145,11 @@ class HybridLoss(nn.Module):
                     F.l1_loss(pred_grad_y, target_grad_y)) / 2
         
         # 4. Perceptual Loss (if enabled)
-        if self.perceptual_loss is not None and perceptual_w > 0:
+        # Lazily initialize PerceptualLoss so that a scheduled weight > 0 works
+        # even when the initial perceptual_weight was set to 0.0 at construction.
+        if perceptual_w > 0:
+            if self.perceptual_loss is None:
+                self.perceptual_loss = PerceptualLoss().to(pred.device)
             perceptual_loss = self.perceptual_loss(pred, target)
         else:
             perceptual_loss = torch.tensor(0.0, device=pred.device)

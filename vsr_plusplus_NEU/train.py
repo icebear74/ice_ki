@@ -505,6 +505,9 @@ def main():
         
         return available
     
+    # Graduated data/loss strategy scheduler (set to None unless multi-size)
+    data_strategy_scheduler = None
+    
     if use_multi_size:
         # Use multi-size dataloader
         try:
@@ -596,6 +599,21 @@ def main():
                 print(f"  • {size_key}: {len(dataset):,} samples ({dist*100:.1f}%)")
             print(f"{C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{C_RESET}")
             print(f"{C_YELLOW}⚠️  To change dataset sizes, modify runtime_config.json and RESTART training{C_RESET}")
+            print()
+            
+            # Create graduated data/loss strategy scheduler for multi-size training
+            from vsr_plusplus_NEU.core.dataloader import DataStrategyScheduler
+            data_strategy_scheduler = DataStrategyScheduler(
+                all_size_keys=list(train_loader.datasets_dict.keys())
+            )
+            print(f"{C_CYAN}📅 DataStrategyScheduler enabled:{C_RESET}")
+            print(f"  • Phase 1 (steps 0–{DataStrategyScheduler.WARMUP_END}): "
+                  f"100% 720_169 only, perceptual=0.0")
+            print(f"  • Phase 2 (steps {DataStrategyScheduler.WARMUP_END}–"
+                  f"{DataStrategyScheduler.CROP_INTRO_END}): "
+                  f"linear mix-in, perceptual 0.0→{DataStrategyScheduler.TARGET_PERCEPTUAL_WEIGHT}")
+            print(f"  • Phase 3 (steps {DataStrategyScheduler.CROP_INTRO_END}+): "
+                  f"target distribution, perceptual={DataStrategyScheduler.TARGET_PERCEPTUAL_WEIGHT}")
             print()
         except Exception as e:
             import traceback
@@ -789,6 +807,10 @@ def main():
     
     # Pass all validation loaders to trainer for multi-size validation
     trainer.val_loaders = val_loaders
+    
+    # Attach graduated data/loss strategy scheduler when multi-size training
+    if data_strategy_scheduler is not None:
+        trainer.data_strategy_scheduler = data_strategy_scheduler
     
     # Set start step
     trainer.set_start_step(start_step)

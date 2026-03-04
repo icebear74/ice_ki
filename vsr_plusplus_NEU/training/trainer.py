@@ -90,6 +90,10 @@ class VSRTrainer:
         # Adaptive mode change tracking for TensorBoard phase transition logging
         self._last_adaptive_mode = 'Stable'
         
+        # Graduated data/loss strategy scheduler (optional)
+        # Set via trainer.data_strategy_scheduler = DataStrategyScheduler(...)
+        self.data_strategy_scheduler = None
+        
         # Keyboard handler
         self.keyboard = KeyboardHandler()
         
@@ -168,11 +172,32 @@ class VSRTrainer:
     def train_epoch(self, epoch):
         """
         Train one epoch
-        
+
         Args:
             epoch: Current epoch number
         """
         self.model.train()
+
+        # ── Graduated data strategy ──────────────────────────────────────────
+        # Update the sampler's distribution at the start of each epoch so that
+        # Phase 1/2/3 transitions take effect without restarting training.
+        if self.data_strategy_scheduler is not None:
+            scheduler = self.data_strategy_scheduler
+            sampler = getattr(self.train_loader, 'sampler', None)
+
+            if sampler is not None and hasattr(sampler, 'set_distribution'):
+                dist = scheduler.get_distribution(
+                    self.global_step,
+                    available_sizes=sampler.active_sizes
+                )
+                sampler.set_distribution(dist)
+
+            # Log phase transitions
+            scheduler.check_phase_transition(
+                self.global_step,
+                log_fn=self.train_logger.log_event
+            )
+        # ── End graduated data strategy ──────────────────────────────────────
         
         accumulation_steps = self.config.get('ACCUMULATION_STEPS', 1)
         steps_per_epoch = len(self.train_loader) // accumulation_steps
@@ -193,6 +218,7 @@ class VSRTrainer:
             
             # Check keyboard input
             self._check_keyboard_input(epoch, steps_per_epoch, current_epoch_step)
+
             
             # Manual validation trigger
             if self.do_manual_val:
@@ -277,6 +303,17 @@ class VSRTrainer:
                     output, gt, self.global_step, 
                     current_l1_loss=current_l1
                 )
+                
+                # ── Graduated perceptual loss scheduling ────────────────────
+                # Override the adaptive system's perceptual weight with the
+                # scheduled value so it starts at 0.0 and ramps up slowly.
+                if self.data_strategy_scheduler is not None:
+                    perceptual_w = self.data_strategy_scheduler.get_perceptual_weight(
+                        self.global_step
+                    )
+                    # Keep adaptive_status in sync for logging
+                    adaptive_status['perceptual_weight'] = perceptual_w
+                # ── End graduated perceptual loss scheduling ─────────────────
                 
                 # Compute loss
                 loss_dict = self.loss_fn(output, gt, l1_w, ms_w, grad_w, perceptual_w)
@@ -405,6 +442,24 @@ class VSRTrainer:
                             f"Adaptive mode changed: {self._last_adaptive_mode} → {current_adaptive_mode} at step {self.global_step}"
                         )
                         self._last_adaptive_mode = current_adaptive_mode
+                    
+                    # Log data strategy scheduler info to TensorBoard
+                    if self.data_strategy_scheduler is not None:
+                        sched = self.data_strategy_scheduler
+                        sched_perc_w = sched.get_perceptual_weight(self.global_step)
+                        self.tb_logger.writer.add_scalar(
+                            'DataStrategy/PerceptualWeight', sched_perc_w, self.global_step
+                        )
+                        sampler = getattr(self.train_loader, 'sampler', None)
+                        if sampler is not None:
+                            dist = sched.get_distribution(
+                                self.global_step,
+                                available_sizes=getattr(sampler, 'active_sizes', None)
+                            )
+                            for sk, w in dist.items():
+                                self.tb_logger.writer.add_scalar(
+                                    f'DataStrategy/Weight_{sk}', w, self.global_step
+                                )
                     
                     # Log plateau state details
                     if hasattr(self.adaptive_system, 'get_plateau_info'):
