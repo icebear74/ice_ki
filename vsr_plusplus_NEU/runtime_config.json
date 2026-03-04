@@ -1,0 +1,19 @@
+{
+  "data": {
+    "root": "/mnt/data/training/datasetNeu",
+    "dataset_name": "master",
+    "paths": {
+      "train_gt": "patches/{size_key}/GT",
+      "train_lr": "patches/{size_key}/LR_7frames",
+      "val_gt": "val/{size_key}/GT",
+      "val_lr": "patches/{size_key}/LR_7frames"
+    }
+  },
+  "validation": {
+    "sizes": [
+      "540",
+      "720_169",
+      "720"
+    ]
+  }
+}
