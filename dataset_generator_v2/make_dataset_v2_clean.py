@@ -171,7 +171,10 @@ class DatasetGeneratorV2:
     
     def create_patch_pair(self, frames: List[np.ndarray], size_key: str) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         """
-        Create GT + LR pair with random crop from UHD frames
+        Create GT + LR pair from UHD frames.
+        
+        For '720_169': resizes the full frame to 720×405 (no random crop).
+        For all other sizes: random crop from UHD frame.
         
         Args:
             frames: 7 UHD frames (e.g., 3840×2160 each)
@@ -189,34 +192,53 @@ class DatasetGeneratorV2:
         lr_w = gt_w // scale
         lr_h = gt_h // scale
         
-        # Get frame dimensions (full UHD!)
-        frame_h, frame_w = frames[0].shape[:2]
-        
-        # Check if frame is large enough
-        if frame_h < gt_h or frame_w < gt_w:
-            logger.warning(f"Frame too small: {frame_w}×{frame_h}, need {gt_w}×{gt_h}")
-            return None, None
-        
-        # RANDOM crop position (can be edges, corners, anywhere!)
-        max_x = frame_w - gt_w
-        max_y = frame_h - gt_h
-        crop_x = random.randint(0, max_x)
-        crop_y = random.randint(0, max_y)
-        
-        # GT: Center frame (index 3) crop from FULL UHD quality
-        center_frame = frames[3]
-        gt = center_frame[crop_y:crop_y+gt_h, crop_x:crop_x+gt_w]
-        
-        # LR: All 7 frames, same crop, DVD-realistic downscale
-        lr_frames = []
-        for frame in frames:
-            # Crop same region
-            crop = frame[crop_y:crop_y+gt_h, crop_x:crop_x+gt_w]
+        if size_key == '720_169':
+            # Full-frame resize: scale entire 1920×1080 source frame to 720×405
+            # Aspect ratio is preserved because both source (16:9) and target (16:9) match.
+            # Minimum size guard: source must be at least as large as the target.
+            frame_h, frame_w = frames[0].shape[:2]
+            if frame_h < gt_h or frame_w < gt_w:
+                logger.warning(f"Frame too small for 720_169: {frame_w}×{frame_h}, need {gt_w}×{gt_h}")
+                return None, None
+            # INTER_LANCZOS4 = highest quality (Lanczos over 8×8 pixel neighbourhood)
+            center_frame = frames[3]
+            gt = cv2.resize(center_frame, (gt_w, gt_h), interpolation=cv2.INTER_LANCZOS4)
             
-            # INTER_AREA = DVD-realistic quality (sweet spot)
-            # Not too good (LANCZOS/CUBIC), not too bad (LINEAR/NEAREST)
-            lr = cv2.resize(crop, (lr_w, lr_h), interpolation=cv2.INTER_AREA)
-            lr_frames.append(lr)
+            # LR: All 7 frames, full-frame resize to LR size
+            # INTER_LANCZOS4 = highest quality downscale
+            lr_frames = []
+            for frame in frames:
+                lr = cv2.resize(frame, (lr_w, lr_h), interpolation=cv2.INTER_LANCZOS4)
+                lr_frames.append(lr)
+        else:
+            # Get frame dimensions (full UHD!)
+            frame_h, frame_w = frames[0].shape[:2]
+            
+            # Check if frame is large enough
+            if frame_h < gt_h or frame_w < gt_w:
+                logger.warning(f"Frame too small: {frame_w}×{frame_h}, need {gt_w}×{gt_h}")
+                return None, None
+            
+            # RANDOM crop position (can be edges, corners, anywhere!)
+            max_x = frame_w - gt_w
+            max_y = frame_h - gt_h
+            crop_x = random.randint(0, max_x)
+            crop_y = random.randint(0, max_y)
+            
+            # GT: Center frame (index 3) crop from FULL UHD quality
+            center_frame = frames[3]
+            gt = center_frame[crop_y:crop_y+gt_h, crop_x:crop_x+gt_w]
+            
+            # LR: All 7 frames, same crop, DVD-realistic downscale
+            lr_frames = []
+            for frame in frames:
+                # Crop same region
+                crop = frame[crop_y:crop_y+gt_h, crop_x:crop_x+gt_w]
+                
+                # INTER_AREA = DVD-realistic quality (sweet spot)
+                # Not too good (LANCZOS/CUBIC), not too bad (LINEAR/NEAREST)
+                lr = cv2.resize(crop, (lr_w, lr_h), interpolation=cv2.INTER_AREA)
+                lr_frames.append(lr)
         
         # Stack vertically (übereinander): frames underneath each other
         # For 7 frames of 240×240, this creates 1680×240
