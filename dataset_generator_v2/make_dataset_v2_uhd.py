@@ -899,30 +899,50 @@ class DatasetGeneratorV2UHD:
         if frame_h < gt_h or frame_w < gt_w:
             return None, None
         
-        # Calculate crop position
-        max_x = frame_w - gt_w
-        max_y = frame_h - gt_h
-        
-        if force_center:
-            # Center crop: exact center of frame
-            crop_x = max_x // 2
-            crop_y = max_y // 2
+        if format_name in ('medium_169', '720_169'):
+            # Full-frame resize: scale entire source frame to target size (no crop).
+            # GT: INTER_LANCZOS4 = highest quality (Lanczos 8×8 pixel neighbourhood)
+            center_idx = n_frames // 2
+            gt = cv2.resize(frames[center_idx], (gt_w, gt_h), interpolation=cv2.INTER_LANCZOS4)
+            
+            # Variety check: silently discard plain black/white/uniform GT
+            if self.is_low_variety(gt):
+                return None, None
+            
+            # LR: INTER_AREA = DVD-realistic quality
+            lr_frames = []
+            for frame in frames:
+                lr = cv2.resize(frame, (lr_w, lr_h), interpolation=cv2.INTER_AREA)
+                lr_frames.append(lr)
         else:
-            # Random crop
-            crop_x = random.randint(0, max_x)
-            crop_y = random.randint(0, max_y)
-        
-        # GT: Center frame
-        center_idx = n_frames // 2
-        center_frame = frames[center_idx]
-        gt = center_frame[crop_y:crop_y+gt_h, crop_x:crop_x+gt_w]
-        
-        # LR: All frames with DVD-realistic downscale
-        lr_frames = []
-        for frame in frames:
-            crop = frame[crop_y:crop_y+gt_h, crop_x:crop_x+gt_w]
-            lr = cv2.resize(crop, (lr_w, lr_h), interpolation=cv2.INTER_AREA)
-            lr_frames.append(lr)
+            # Calculate crop position
+            max_x = frame_w - gt_w
+            max_y = frame_h - gt_h
+            
+            if force_center:
+                # Center crop: exact center of frame
+                crop_x = max_x // 2
+                crop_y = max_y // 2
+            else:
+                # Random crop
+                crop_x = random.randint(0, max_x)
+                crop_y = random.randint(0, max_y)
+            
+            # GT: Center frame
+            center_idx = n_frames // 2
+            center_frame = frames[center_idx]
+            gt = center_frame[crop_y:crop_y+gt_h, crop_x:crop_x+gt_w]
+            
+            # Variety check: silently discard plain black/white/uniform GT
+            if self.is_low_variety(gt):
+                return None, None
+            
+            # LR: All frames with DVD-realistic downscale
+            lr_frames = []
+            for frame in frames:
+                crop = frame[crop_y:crop_y+gt_h, crop_x:crop_x+gt_w]
+                lr = cv2.resize(crop, (lr_w, lr_h), interpolation=cv2.INTER_AREA)
+                lr_frames.append(lr)
         
         # Stack vertically (übereinander) - axis=0 stacks frames underneath each other
         lr_stacked = np.concatenate(lr_frames, axis=0)
@@ -1822,6 +1842,17 @@ class DatasetGeneratorV2UHD:
         except Exception as e:
             self.logger.error(f"Error checking file size: {e}")
             return False
+    
+    def is_low_variety(self, frame: np.ndarray) -> bool:
+        """
+        Check if a GT patch has too little pixel variety to be useful for training.
+        Rejects plain black, plain white, and near-uniform frames.
+        Uses the standard deviation of grayscale pixel values.
+        Threshold read from settings['min_variety_std'] (default: 15.0).
+        """
+        threshold = self.settings.get('min_variety_std', 15.0)
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame  # 3=color, 2=grayscale
+        return float(gray.std()) < threshold
     
     def is_interesting_patch(self, patch: np.ndarray) -> bool:
         """
