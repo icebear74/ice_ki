@@ -173,8 +173,12 @@ class DatasetGeneratorV2:
         """
         Create GT + LR pair from UHD frames.
         
-        For '720_169': resizes the full frame to 720×405 (no random crop).
-        For all other sizes: random crop from UHD frame.
+        GT always uses the highest quality interpolation (INTER_LANCZOS4).
+        LR uses DVD-realistic downscaling (INTER_AREA) to simulate source material
+        the model is trained to upscale.
+        
+        For '720_169': full-frame resize to 720×405 (no random crop).
+        For all other sizes ('540', '720'): random crop from UHD frame.
         
         Args:
             frames: 7 UHD frames (e.g., 3840×2160 each)
@@ -205,10 +209,10 @@ class DatasetGeneratorV2:
             gt = cv2.resize(center_frame, (gt_w, gt_h), interpolation=cv2.INTER_LANCZOS4)
             
             # LR: All 7 frames, full-frame resize to LR size
-            # INTER_LANCZOS4 = highest quality downscale
+            # INTER_AREA = DVD-realistic quality (same as crop-based sizes)
             lr_frames = []
             for frame in frames:
-                lr = cv2.resize(frame, (lr_w, lr_h), interpolation=cv2.INTER_LANCZOS4)
+                lr = cv2.resize(frame, (lr_w, lr_h), interpolation=cv2.INTER_AREA)
                 lr_frames.append(lr)
         else:
             # Get frame dimensions (full UHD!)
