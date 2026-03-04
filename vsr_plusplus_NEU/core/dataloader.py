@@ -12,102 +12,174 @@ from torch.utils.data import Sampler
 import random
 import numpy as np
 
+from .data_strategy import DataStrategyScheduler  # noqa: F401 – re-exported for callers
+
 
 class SizeGroupedSampler(Sampler):
     """
     Sampler that yields batches grouped by size key.
-    
-    Samples from different size groups proportionally to their file counts.
-    
-    IMPORTANT: Dataset extraction is pre-weighted, so files on disk already reflect
-    the desired distribution. This sampler simply samples proportionally to the
-    number of files in each size category (no additional weighting needed).
-    
+
+    Samples from different size groups proportionally to their file counts
+    by default.  When a distribution override is set via
+    ``set_distribution()``, sampling proportions follow those weights
+    instead of raw file counts.
+
+    IMPORTANT: Dataset extraction is pre-weighted, so files on disk already
+    reflect the desired long-run distribution.  The distribution override is
+    used only during the graduated warmup strategy.
+
     Args:
-        datasets_dict: Dict mapping size_key to dataset
-                      Example: {'720': dataset1, '540': dataset2, '720_169': dataset3}
+        datasets_dict:     Dict mapping size_key to dataset
+                           Example: {'720': ds1, '540': ds2, '720_169': ds3}
         size_distribution: Dict mapping size_key to probability weight
-                          (ONLY used to determine which sizes to load, NOT for sampling)
-                          Example: {'720': 0.4, '540': 0.4, '720_169': 0.2}
-        batch_sizes: Dict mapping size_key to batch size
-                    Example: {'720': 1, '540': 1, '720_169': 1}
-        shuffle: Whether to shuffle indices within each size group
-    
-    Note: size_distribution is now only used to filter active sizes.
-          Actual sampling is proportional to file counts (files are pre-weighted during extraction).
+                           (legacy param – no longer used for sampling weights;
+                           kept for backwards compatibility)
+        batch_sizes:       Dict mapping size_key to batch size
+        shuffle:           Whether to shuffle indices within each size group
     """
-    
+
     def __init__(self, datasets_dict, size_distribution, batch_sizes, shuffle=True):
         self.datasets_dict = datasets_dict
         self.size_distribution = size_distribution
         self.batch_sizes = batch_sizes
         self.shuffle = shuffle
-        
-        # Use all sizes from datasets_dict (size_distribution no longer filters)
-        # All datasets in datasets_dict are already enabled/detected
+
+        # All loaded datasets are active
         self.active_sizes = list(datasets_dict.keys())
-        
+
         if not self.active_sizes:
             raise ValueError("No datasets provided")
-        
-        # NOTE: We NO LONGER normalize/weight by distribution!
-        # Files are already pre-weighted during dataset generation.
-        # We simply sample proportionally to actual file counts.
-        
-        # Pre-compute total batches per size (based on actual file counts, not distribution)
-        self.num_batches_per_size = {
-            size_key: len(datasets_dict[size_key]) // batch_sizes[size_key]
-            for size_key in self.active_sizes
+
+        # Distribution override set by DataStrategyScheduler (None = file-count mode)
+        self._distribution_override = None
+
+        # Compute initial batch counts (file-count proportional)
+        self._compute_batch_counts()
+
+    # ------------------------------------------------------------------
+    # Distribution override
+    # ------------------------------------------------------------------
+
+    def set_distribution(self, distribution_dict):
+        """
+        Override sampling proportions with explicit weights.
+
+        Called by ``DataStrategyScheduler`` at the start of each epoch to
+        implement the graduated training schedule.
+
+        Args:
+            distribution_dict: Dict mapping size_key → weight (need not sum
+                                to 1; will be normalized internally).
+                                Sizes with weight 0.0 are excluded from
+                                the current epoch's batch schedule.
+                                Pass ``None`` to restore file-count mode.
+        """
+        self._distribution_override = distribution_dict
+        self._compute_batch_counts()
+
+    def _compute_batch_counts(self):
+        """
+        (Re-)compute ``num_batches_per_size`` and ``total_batches``.
+
+        When no distribution override is active, batches are proportional
+        to file counts (original behaviour).  When an override is active,
+        batches are allocated according to the normalized weights, capped
+        at the number of available batches per size to avoid cycling.
+        """
+        if self._distribution_override is None:
+            # Original: proportional to file counts
+            self.num_batches_per_size = {
+                sk: len(self.datasets_dict[sk]) // self.batch_sizes[sk]
+                for sk in self.active_sizes
+            }
+            self.total_batches = sum(self.num_batches_per_size.values())
+            return
+
+        # Distribution-weighted mode
+        # Active sizes: those with a positive weight that are loaded
+        active = {
+            sk: w
+            for sk, w in self._distribution_override.items()
+            if sk in self.active_sizes and w > 0
         }
-        
-        # Total number of batches across all sizes
+        total_w = sum(active.values())
+
+        if total_w == 0:
+            # Fallback: use file-count proportional
+            self.num_batches_per_size = {
+                sk: len(self.datasets_dict[sk]) // self.batch_sizes[sk]
+                for sk in self.active_sizes
+            }
+            self.total_batches = sum(self.num_batches_per_size.values())
+            return
+
+        normalized = {sk: w / total_w for sk, w in active.items()}
+
+        # Base epoch length: total available batches across all sizes
+        base_total = sum(
+            len(self.datasets_dict[sk]) // self.batch_sizes[sk]
+            for sk in self.active_sizes
+        )
+
+        self.num_batches_per_size = {}
+        for sk in self.active_sizes:
+            w = normalized.get(sk, 0.0)
+            if w > 0:
+                available = len(self.datasets_dict[sk]) // self.batch_sizes[sk]
+                target = max(1, round(base_total * w))
+                # Cap at available to avoid cycling identical samples
+                self.num_batches_per_size[sk] = min(target, available)
+            else:
+                self.num_batches_per_size[sk] = 0
+
         self.total_batches = sum(self.num_batches_per_size.values())
-    
+
+    # ------------------------------------------------------------------
+    # Iterator
+    # ------------------------------------------------------------------
+
     def __iter__(self):
         """
         Yields (size_key, batch_indices) tuples.
-        
+
         Each iteration:
         1. Shuffles indices for each size group (if shuffle=True)
-        2. Creates batch schedule proportional to file counts (NOT distribution weights)
+        2. Creates batch schedule according to current batch counts
+           (file-count proportional by default; distribution-weighted when
+           ``set_distribution()`` has been called)
         3. Yields batches in random order
-        
-        Note: Sampling is now purely based on actual file counts, not distribution config.
         """
-        # Create shuffled indices for each size group
+        # Create shuffled indices for each active size group
         indices_per_size = {}
         for size_key in self.active_sizes:
+            if self.num_batches_per_size.get(size_key, 0) == 0:
+                continue
             dataset_size = len(self.datasets_dict[size_key])
             indices = list(range(dataset_size))
-            
             if self.shuffle:
                 random.shuffle(indices)
-            
             indices_per_size[size_key] = indices
-        
-        # Create batch schedule: list of (size_key, batch_idx) based on file counts
-        # (NO distribution weighting - files are already pre-weighted!)
+
+        # Build batch schedule
         batch_schedule = []
         for size_key in self.active_sizes:
-            num_batches = self.num_batches_per_size[size_key]
-            batch_schedule.extend([(size_key, i) for i in range(num_batches)])
-        
-        # Shuffle the batch schedule to mix sizes
+            num_batches = self.num_batches_per_size.get(size_key, 0)
+            if num_batches > 0:
+                batch_schedule.extend([(size_key, i) for i in range(num_batches)])
+
+        # Shuffle to interleave sizes
         if self.shuffle:
             random.shuffle(batch_schedule)
-        
-        # Yield batches according to schedule
+
+        # Yield batches
         for size_key, batch_idx in batch_schedule:
             batch_size = self.batch_sizes[size_key]
             start_idx = batch_idx * batch_size
             end_idx = start_idx + batch_size
-            
-            batch_indices = indices_per_size[size_key][start_idx:end_idx]
-            
-            yield (size_key, batch_indices)
-    
+            yield (size_key, indices_per_size[size_key][start_idx:end_idx])
+
     def __len__(self):
-        """Total number of batches across all size groups"""
+        """Total number of batches across all active size groups."""
         return self.total_batches
 
 
