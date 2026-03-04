@@ -500,22 +500,33 @@ def create_patch_pair(
     format_name: str,
     format_cfg: dict,
     force_center: bool = False,
+    logger=None,
 ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
     """
     Create a ``(GT, LR)`` patch pair from a sequence of frames.
 
-    * **GT** – centre frame, cropped to ``gt_size``.
-    * **LR** – all frames cropped and downscaled to ``lr_size``, stacked
-      vertically (axis 0).
+    **16:9 formats** (``medium_169`` / ``720_169``):
+      * GT – full-frame resize to ``gt_size`` with ``INTER_LANCZOS4``
+        (best quality, no crop).
+      * LR – full-frame resize to ``lr_size`` with ``INTER_AREA``
+        (DVD-realistic quality).
+
+    **Square formats** (``small_540``, ``large_720``, …):
+      * GT – centre frame, cropped to ``gt_size``.
+      * LR – all frames cropped and downscaled to ``lr_size`` with
+        ``INTER_AREA``, stacked vertically (axis 0).
+
+    In both cases a near-uniform GT (plain black, white, or flat colour) is
+    silently discarded (``(None, None)``).  If the source frame is too small
+    for the requested resize target a warning is logged.
 
     Args:
         frames:       BGR numpy arrays, length 5 or 7.
-        format_name:  Format key (e.g. ``"small_540"``).  Currently unused
-                      inside the function but kept for future dispatch.
-        format_cfg:   Dict with ``'gt_size': [W, H]`` and
-                      ``'lr_size': [W, H]``.
-        force_center: Use the geometric centre of the frame instead of a
-                      random crop location.
+        format_name:  Format key (e.g. ``"medium_169"``, ``"small_540"``).
+        format_cfg:   Dict with ``'gt_size': [W, H]`` and ``'lr_size': [W, H]``.
+        force_center: Square formats only – use the geometric centre of the
+                      frame instead of a random crop location.
+        logger:       Optional logger instance for warning messages.
 
     Returns:
         ``(gt, lr_stacked)`` or ``(None, None)`` on failure.
@@ -528,25 +539,56 @@ def create_patch_pair(
     lr_w, lr_h = format_cfg["lr_size"]
 
     frame_h, frame_w = frames[0].shape[:2]
-    if frame_h < gt_h or frame_w < gt_w:
-        return None, None
 
-    max_x = frame_w - gt_w
-    max_y = frame_h - gt_h
+    if format_name in ("medium_169", "720_169"):
+        # Full-frame resize – the whole source frame is scaled to the target
+        # size.  No crop is applied so the full 16:9 content is preserved.
+        if frame_h < gt_h or frame_w < gt_w:
+            if logger:
+                logger.warning(
+                    f"[{format_name}] Frame too small for resize: "
+                    f"{frame_w}×{frame_h} < {gt_w}×{gt_h} – skipped"
+                )
+            return None, None
 
-    if force_center:
-        crop_x, crop_y = max_x // 2, max_y // 2
+        center_idx = n // 2
+        # GT: INTER_LANCZOS4 = highest quality (Lanczos 8×8 neighbourhood)
+        gt = cv2.resize(frames[center_idx], (gt_w, gt_h), interpolation=cv2.INTER_LANCZOS4)
+
+        # Variety check: silently discard near-uniform GT (black/white/flat)
+        gray = cv2.cvtColor(gt, cv2.COLOR_BGR2GRAY)
+        if float(gray.std()) < 15.0:
+            return None, None
+
+        # LR: INTER_AREA = DVD-realistic quality
+        lr_frames = []
+        for frame in frames:
+            lr_frames.append(cv2.resize(frame, (lr_w, lr_h), interpolation=cv2.INTER_AREA))
     else:
-        crop_x = random.randint(0, max_x)
-        crop_y = random.randint(0, max_y)
+        if frame_h < gt_h or frame_w < gt_w:
+            return None, None
 
-    center_idx = n // 2
-    gt = frames[center_idx][crop_y : crop_y + gt_h, crop_x : crop_x + gt_w]
+        max_x = frame_w - gt_w
+        max_y = frame_h - gt_h
 
-    lr_frames = []
-    for frame in frames:
-        crop = frame[crop_y : crop_y + gt_h, crop_x : crop_x + gt_w]
-        lr_frames.append(cv2.resize(crop, (lr_w, lr_h), interpolation=cv2.INTER_AREA))
+        if force_center:
+            crop_x, crop_y = max_x // 2, max_y // 2
+        else:
+            crop_x = random.randint(0, max_x)
+            crop_y = random.randint(0, max_y)
+
+        center_idx = n // 2
+        gt = frames[center_idx][crop_y : crop_y + gt_h, crop_x : crop_x + gt_w]
+
+        # Variety check: silently discard near-uniform GT (black/white/flat)
+        gray = cv2.cvtColor(gt, cv2.COLOR_BGR2GRAY)
+        if float(gray.std()) < 15.0:
+            return None, None
+
+        lr_frames = []
+        for frame in frames:
+            crop = frame[crop_y : crop_y + gt_h, crop_x : crop_x + gt_w]
+            lr_frames.append(cv2.resize(crop, (lr_w, lr_h), interpolation=cv2.INTER_AREA))
 
     lr_stacked = np.concatenate(lr_frames, axis=0)
     return gt, lr_stacked
@@ -864,12 +906,16 @@ def extract_and_save_streaming_distributed(
                             if not cfg:
                                 continue
 
-                            # Up to 5 random crops; 6th attempt is forced centre crop
+                            # Resize formats (medium_169/720_169) always use the full
+                            # frame – retrying never changes the result.
+                            is_resize_fmt = fmt_name in ("medium_169", "720_169")
+                            max_attempts = 1 if is_resize_fmt else 6
                             gt, lr = None, None
-                            for attempt in range(6):
+                            for attempt in range(max_attempts):
                                 force = attempt >= 5
                                 gt, lr = create_patch_pair(
-                                    window, fmt_name, cfg, force_center=force
+                                    window, fmt_name, cfg,
+                                    force_center=force, logger=logger
                                 )
                                 if gt is None:
                                     continue
