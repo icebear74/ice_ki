@@ -37,6 +37,7 @@ from utils.format_definitions import (
 from streaming_extractor import (
     build_assignments_per_category,
     extract_and_save_streaming_distributed,
+    create_patch_pair,
     is_black_frame as _streaming_is_black_frame,
     is_hdr_transfer,
     build_vf_filter,
@@ -872,83 +873,6 @@ class DatasetGeneratorV2UHD:
         }
     
     
-    def create_patch_pair(self, frames: List[np.ndarray], format_name: str, 
-                         format_config: dict, force_center: bool = False) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
-        """
-        Create GT + LR pair with random crop from UHD
-        
-        Args:
-            frames: UHD frames
-            format_name: Format key (small_540, medium_169, large_720)
-            format_config: Format configuration
-            force_center: If True, use center crop instead of random crop
-        
-        Returns:
-            (gt, lr_stacked) or (None, None)
-        """
-        n_frames = len(frames)
-        if n_frames not in [5, 7]:
-            return None, None
-        
-        gt_w, gt_h = format_config['gt_size']  # JSON stores W×H
-        lr_w, lr_h = format_config['lr_size']  # JSON stores W×H
-        
-        # Get frame dimensions (UHD!)
-        frame_h, frame_w = frames[0].shape[:2]
-        
-        if frame_h < gt_h or frame_w < gt_w:
-            return None, None
-        
-        if format_name in ('medium_169', '720_169'):
-            # Full-frame resize: scale entire source frame to target size (no crop).
-            # GT: INTER_LANCZOS4 = highest quality (Lanczos 8×8 pixel neighbourhood)
-            center_idx = n_frames // 2
-            gt = cv2.resize(frames[center_idx], (gt_w, gt_h), interpolation=cv2.INTER_LANCZOS4)
-            
-            # Variety check: silently discard plain black/white/uniform GT
-            if self.is_low_variety(gt):
-                return None, None
-            
-            # LR: INTER_AREA = DVD-realistic quality
-            lr_frames = []
-            for frame in frames:
-                lr = cv2.resize(frame, (lr_w, lr_h), interpolation=cv2.INTER_AREA)
-                lr_frames.append(lr)
-        else:
-            # Calculate crop position
-            max_x = frame_w - gt_w
-            max_y = frame_h - gt_h
-            
-            if force_center:
-                # Center crop: exact center of frame
-                crop_x = max_x // 2
-                crop_y = max_y // 2
-            else:
-                # Random crop
-                crop_x = random.randint(0, max_x)
-                crop_y = random.randint(0, max_y)
-            
-            # GT: Center frame
-            center_idx = n_frames // 2
-            center_frame = frames[center_idx]
-            gt = center_frame[crop_y:crop_y+gt_h, crop_x:crop_x+gt_w]
-            
-            # Variety check: silently discard plain black/white/uniform GT
-            if self.is_low_variety(gt):
-                return None, None
-            
-            # LR: All frames with DVD-realistic downscale
-            lr_frames = []
-            for frame in frames:
-                crop = frame[crop_y:crop_y+gt_h, crop_x:crop_x+gt_w]
-                lr = cv2.resize(crop, (lr_w, lr_h), interpolation=cv2.INTER_AREA)
-                lr_frames.append(lr)
-        
-        # Stack vertically (übereinander) - axis=0 stacks frames underneath each other
-        lr_stacked = np.concatenate(lr_frames, axis=0)
-        
-        return gt, lr_stacked
-    
     def calculate_format_distribution_for_video(self, video: dict, target_patches: int) -> Dict[str, Dict[str, int]]:
         """
         Calculate exact format distribution for a video.
@@ -1182,7 +1106,7 @@ class DatasetGeneratorV2UHD:
                 format_config = config['format_config']
                 
                 # Create patch pair for this category/format
-                gt, lr = self.create_patch_pair(frames, format_name, format_config)
+                gt, lr = create_patch_pair(frames, format_name, format_config, logger=self.logger)
                 
                 if gt is None or lr is None:
                     continue
@@ -1441,7 +1365,7 @@ class DatasetGeneratorV2UHD:
                             continue
                         
                         # Create patch pair for this category/format
-                        gt, lr = self.create_patch_pair(frames, format_name, format_config)
+                        gt, lr = create_patch_pair(frames, format_name, format_config, logger=self.logger)
                         
                         if gt is None or lr is None:
                             retry_count += 1
@@ -1592,7 +1516,7 @@ class DatasetGeneratorV2UHD:
                             continue
                         
                         # Create patch pair for this category/format
-                        gt, lr = self.create_patch_pair(frames, format_name, format_config)
+                        gt, lr = create_patch_pair(frames, format_name, format_config, logger=self.logger)
                         
                         if gt is None or lr is None:
                             retry_count += 1
@@ -1842,17 +1766,6 @@ class DatasetGeneratorV2UHD:
         except Exception as e:
             self.logger.error(f"Error checking file size: {e}")
             return False
-    
-    def is_low_variety(self, frame: np.ndarray) -> bool:
-        """
-        Check if a GT patch has too little pixel variety to be useful for training.
-        Rejects plain black, plain white, and near-uniform frames.
-        Uses the standard deviation of grayscale pixel values.
-        Threshold read from settings['min_variety_std'] (default: 15.0).
-        """
-        threshold = self.settings.get('min_variety_std', 15.0)
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame  # 3=color, 2=grayscale
-        return float(gray.std()) < threshold
     
     def is_interesting_patch(self, patch: np.ndarray) -> bool:
         """
