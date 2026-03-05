@@ -136,9 +136,9 @@ class VSRTrainer:
             
             # Collect labeled images with size prefix
             if 'labeled_images' in metrics and metrics['labeled_images'] is not None:
-                # Add size prefix to image tags
-                for img in metrics['labeled_images']:
-                    all_labeled_images.append((size_key, img))
+                # Build tag as val_{size_key}/{filename_stem}
+                for name, img in metrics['labeled_images']:
+                    all_labeled_images.append((f"val_{size_key}/{name}", img))
             
             # Store metrics
             all_metrics.append((size_key, metrics))
@@ -158,9 +158,9 @@ class VSRTrainer:
             'lr_to_gt': sum(m.get('lr_to_gt', 0) for _, m in all_metrics) / len(all_metrics),
         }
         
-        # Include all labeled images from all sizes
+        # Include all labeled images from all sizes (list of (tag, tensor) tuples)
         if all_labeled_images:
-            combined_metrics['labeled_images'] = [img for _, img in all_labeled_images]
+            combined_metrics['labeled_images'] = all_labeled_images
         
         # Store per-size metrics for detailed logging
         combined_metrics['per_size_metrics'] = {size_key: m for size_key, m in all_metrics}
@@ -583,7 +583,7 @@ class VSRTrainer:
                         logged_count = 0
                         failed_count = 0
                         
-                        for idx, img_tensor in enumerate(labeled_images):
+                        for tag, img_tensor in labeled_images:
                             try:
                                 # Ensure tensor is in correct format for TensorBoard
                                 if img_tensor.device.type != 'cpu':
@@ -592,16 +592,16 @@ class VSRTrainer:
                                     img_tensor = img_tensor.contiguous()
                                 
                                 self.tb_logger.writer.add_image(
-                                    f"Val/sample_{idx:04d}", 
+                                    tag, 
                                     img_tensor, 
                                     self.global_step
                                 )
                                 logged_count += 1
                             except Exception as e:
                                 failed_count += 1
-                                print(f"⚠️  Failed to log validation image {idx}: {e}")
+                                print(f"⚠️  Failed to log validation image {tag}: {e}")
                                 self.train_logger.log_event(
-                                    f"Warning: Failed to log validation image {idx}: {e}"
+                                    f"Warning: Failed to log validation image {tag}: {e}"
                                 )
                                 # Continue with other images even if one fails
                                 continue
@@ -1040,9 +1040,9 @@ class VSRTrainer:
         # Log ALL images (like in original)
         labeled_images = metrics.get('labeled_images')
         if labeled_images is not None:
-            for idx, img_tensor in enumerate(labeled_images):
+            for tag, img_tensor in labeled_images:
                 self.tb_logger.writer.add_image(
-                    f"Val/sample_{idx:04d}", 
+                    tag, 
                     img_tensor, 
                     self.global_step
                 )

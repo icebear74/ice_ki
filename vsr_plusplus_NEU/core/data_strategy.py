@@ -20,20 +20,20 @@ class DataStrategyScheduler:
     draws proportionally to file counts, which naturally yields the desired
     mix.
 
-    Phase 1 – Warmup (steps 0–2000):
+    Phase 1 – Warmup (steps 0–15000):
         Data : 100 % 720_169 (full-frames only, via explicit override)
                → model learns global structure without crop conflicts
         Loss : perceptual weight = 0.0
 
-    Phase 2 – Crop Introduction (steps 2000–10000):
+    Phase 2 – Crop Introduction (steps 15000–25000):
         Data : linear interpolation from 100 % 720_169 → approximate natural
                distribution (CROP_INTRO_END_DISTRIBUTION), so that by step
-               10000 the override values closely match what is already on disk.
-               step 2000  → {720_169: 1.00, 540: 0.00, 720: 0.00}
-               step ~10000 → approaching {720_169: 0.25, 540: 0.50, 720: 0.25}
+               25000 the override values closely match what is already on disk.
+               step 15000 → {720_169: 1.00, 540: 0.00, 720: 0.00}
+               step ~25000 → approaching {720_169: 0.25, 540: 0.50, 720: 0.25}
         Loss : perceptual weight 0.0 → 0.05 (linear)
 
-    Phase 3 – Stable Training (steps 10000+):
+    Phase 3 – Stable Training (steps 25000+):
         Data : natural file-count proportional sampling (no override).
                get_distribution() returns None so the sampler uses the actual
                file ratio on disk (which is already the desired distribution).
@@ -50,8 +50,8 @@ class DataStrategyScheduler:
     PHASE_STABLE = 'stable'
 
     # Phase boundaries (in global training steps)
-    WARMUP_END = 2000
-    CROP_INTRO_END = 10000
+    WARMUP_END = 15000
+    CROP_INTRO_END = 25000
 
     # End-point of the Phase 2 interpolation.
     # This approximates the natural file ratio on disk (50 % 540, 25 % 720,

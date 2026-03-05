@@ -84,8 +84,8 @@ class AdaptiveSystem:
         # Plateau detection
         self.best_loss = float('inf')
         self.plateau_counter = 0
-        self.plateau_patience = 100  # Reduced from 250 for faster plateau response
-        self.plateau_safety_threshold = 800  # Force reset if plateau counter exceeds this
+        self.plateau_patience = 500  # Increased to avoid false plateau detection on crop introduction
+        self.plateau_safety_threshold = 2000  # Force reset if plateau counter exceeds this
         
         # Enhanced plateau detection
         self.best_quality = 0.0
@@ -195,7 +195,9 @@ class AdaptiveSystem:
         
         if not self._warmup_complete:
             self._warmup_steps += 1
-            if self._warmup_steps >= 100:
+            # Wait until step 16000: 15000 full-frame warmup steps + 1000 crop intro steps
+            # to ensure aggressive mode doesn't fire on the natural loss increase from crop introduction
+            if self._warmup_steps >= 16000:
                 self._warmup_complete = True
             # During warmup, don't trigger aggressive mode
             return sharpness_ratio
