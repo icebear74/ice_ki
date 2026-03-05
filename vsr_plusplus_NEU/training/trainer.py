@@ -419,8 +419,11 @@ class VSRTrainer:
                     current_lr = self.lr_scheduler.get_current_lr()
                     lr_phase = self.lr_scheduler.get_current_phase()
                 
-                # Update plateau tracker
-                self.adaptive_system.update_plateau_tracker(loss_dict['total'].item() if torch.is_tensor(loss_dict['total']) else loss_dict['total'])
+                # Update plateau tracker (only meaningful after LR warmup)
+                self.adaptive_system.update_plateau_tracker(
+                    loss_dict['total'].item() if torch.is_tensor(loss_dict['total']) else loss_dict['total'],
+                    step=self.global_step
+                )
                 
                 # Get activity
                 self.last_activities = self.model.get_layer_activity()
