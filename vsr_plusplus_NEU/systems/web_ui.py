@@ -1479,8 +1479,8 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             
             <!-- Accumulation steps info -->
             <div style="display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid var(--border-color); margin-bottom: 12px;">
-                <span style="color: var(--text-secondary); font-size: 1.05em;">Accumulation Steps</span>
-                <span style="color: var(--accent-orange); font-weight: bold; font-size: 1.05em;" id="batchAccumulationSteps">1</span>
+                <span style="color: var(--text-secondary); font-size: 1.05em;">Accumulation Step</span>
+                <span style="color: var(--accent-orange); font-weight: bold; font-size: 1.05em;" id="batchAccumulationSteps">1 / 1</span>
             </div>
             
             <!-- Current batch size -->
@@ -2190,7 +2190,8 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             
             // Update accumulation steps
             const accumulationSteps = batch.accumulation_steps || 1;
-            document.getElementById('batchAccumulationSteps').textContent = accumulationSteps;
+            const accumStep = batch.accum_step || 1;
+            document.getElementById('batchAccumulationSteps').textContent = accumStep + ' / ' + accumulationSteps;
             
             // Update batch size (images per step) and resolution key
             const batchSize = batch.batch_size || '-';

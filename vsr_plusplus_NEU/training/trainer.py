@@ -318,7 +318,8 @@ class VSRTrainer:
                         'files_used_in_epoch': files_used_in_epoch,
                         'total_files_in_epoch': total_files_in_epoch,
                         'files_per_size': files_per_size,
-                        'accumulation_steps': current_accum_steps
+                        'accumulation_steps': current_accum_steps,
+                        'accum_step': accum_counter + 1,
                     }
                 )
             
