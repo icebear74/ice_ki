@@ -28,6 +28,10 @@ class SizeGroupedSampler(Sampler):
     reflect the desired long-run distribution.  The distribution override is
     used only during the graduated warmup strategy.
 
+    Accumulation grouping ensures that exactly ``accum_steps[size_key]``
+    consecutive batches of the same resolution are always yielded together,
+    so that ``optimizer.step()`` fires only at resolution-block boundaries.
+
     Args:
         datasets_dict:     Dict mapping size_key to dataset
                            Example: {'720': ds1, '540': ds2, '720_169': ds3}
@@ -36,9 +40,12 @@ class SizeGroupedSampler(Sampler):
                            kept for backwards compatibility)
         batch_sizes:       Dict mapping size_key to batch size
         shuffle:           Whether to shuffle indices within each size group
+        accum_steps:       Dict mapping size_key to gradient accumulation steps
+                           (default: 4 for '720', 6 for all other sizes)
     """
 
-    def __init__(self, datasets_dict, size_distribution, batch_sizes, shuffle=True):
+    def __init__(self, datasets_dict, size_distribution, batch_sizes, shuffle=True,
+                 accum_steps=None):
         self.datasets_dict = datasets_dict
         self.size_distribution = size_distribution
         self.batch_sizes = batch_sizes
@@ -49,6 +56,14 @@ class SizeGroupedSampler(Sampler):
 
         if not self.active_sizes:
             raise ValueError("No datasets provided")
+
+        # Per-size accumulation steps (default: 4 for '720', 6 for others)
+        if accum_steps is None:
+            accum_steps = {}
+        self.accum_steps = {
+            sk: accum_steps.get(sk, 4 if sk == '720' else 6)
+            for sk in self.active_sizes
+        }
 
         # Distribution override set by DataStrategyScheduler (None = file-count mode)
         self._distribution_override = None
@@ -85,11 +100,17 @@ class SizeGroupedSampler(Sampler):
         to file counts (original behaviour).  When an override is active,
         batches are allocated according to the normalized weights, capped
         at the number of available batches per size to avoid cycling.
+
+        In both cases the final batch count per size is rounded *down* to
+        the nearest multiple of ``accum_steps[size_key]`` so that full
+        accumulation blocks are always emitted.
         """
         if self._distribution_override is None:
             # Original: proportional to file counts
             self.num_batches_per_size = {
-                sk: len(self.datasets_dict[sk]) // self.batch_sizes[sk]
+                sk: self._round_to_accum(
+                    len(self.datasets_dict[sk]) // self.batch_sizes[sk], sk
+                )
                 for sk in self.active_sizes
             }
             self.total_batches = sum(self.num_batches_per_size.values())
@@ -107,7 +128,9 @@ class SizeGroupedSampler(Sampler):
         if total_w == 0:
             # Fallback: use file-count proportional
             self.num_batches_per_size = {
-                sk: len(self.datasets_dict[sk]) // self.batch_sizes[sk]
+                sk: self._round_to_accum(
+                    len(self.datasets_dict[sk]) // self.batch_sizes[sk], sk
+                )
                 for sk in self.active_sizes
             }
             self.total_batches = sum(self.num_batches_per_size.values())
@@ -127,12 +150,22 @@ class SizeGroupedSampler(Sampler):
             if w > 0:
                 available = len(self.datasets_dict[sk]) // self.batch_sizes[sk]
                 target = max(1, round(base_total * w))
-                # Cap at available to avoid cycling identical samples
-                self.num_batches_per_size[sk] = min(target, available)
+                # Cap at available to avoid cycling identical samples, then
+                # round down to a full accumulation block
+                self.num_batches_per_size[sk] = self._round_to_accum(
+                    min(target, available), sk
+                )
             else:
                 self.num_batches_per_size[sk] = 0
 
         self.total_batches = sum(self.num_batches_per_size.values())
+
+    def _round_to_accum(self, n_batches, size_key):
+        """Round *n_batches* down to the nearest multiple of accum_steps."""
+        steps = self.accum_steps.get(size_key, 1)
+        if steps <= 1:
+            return n_batches
+        return (n_batches // steps) * steps
 
     # ------------------------------------------------------------------
     # Iterator
@@ -147,7 +180,11 @@ class SizeGroupedSampler(Sampler):
         2. Creates batch schedule according to current batch counts
            (file-count proportional by default; distribution-weighted when
            ``set_distribution()`` has been called)
-        3. Yields batches in random order
+        3. Groups per-size batches into accumulation blocks of
+           ``accum_steps[size_key]`` so that the optimizer step always fires
+           at a resolution-block boundary.
+        4. Shuffles the accumulation blocks (not individual batches) to
+           interleave sizes without breaking accumulation alignment.
         """
         # Create shuffled indices for each active size group
         indices_per_size = {}
@@ -160,23 +197,32 @@ class SizeGroupedSampler(Sampler):
                 random.shuffle(indices)
             indices_per_size[size_key] = indices
 
-        # Build batch schedule
-        batch_schedule = []
+        # Build accumulation blocks: each block is a list of
+        # accum_steps consecutive batch indices for the same size.
+        accum_blocks = []
         for size_key in self.active_sizes:
             num_batches = self.num_batches_per_size.get(size_key, 0)
-            if num_batches > 0:
-                batch_schedule.extend([(size_key, i) for i in range(num_batches)])
+            if num_batches == 0:
+                continue
+            steps = self.accum_steps.get(size_key, 1)
+            # Slice the flat batch index list into blocks of `steps`
+            batch_indices = list(range(num_batches))
+            for block_start in range(0, num_batches, steps):
+                block = [(size_key, i) for i in batch_indices[block_start:block_start + steps]]
+                if len(block) == steps:  # only emit complete blocks
+                    accum_blocks.append(block)
 
-        # Shuffle to interleave sizes
+        # Shuffle at block level to interleave sizes
         if self.shuffle:
-            random.shuffle(batch_schedule)
+            random.shuffle(accum_blocks)
 
-        # Yield batches
-        for size_key, batch_idx in batch_schedule:
-            batch_size = self.batch_sizes[size_key]
-            start_idx = batch_idx * batch_size
-            end_idx = start_idx + batch_size
-            yield (size_key, indices_per_size[size_key][start_idx:end_idx])
+        # Yield batches in block order
+        for block in accum_blocks:
+            for size_key, batch_idx in block:
+                batch_size = self.batch_sizes[size_key]
+                start_idx = batch_idx * batch_size
+                end_idx = start_idx + batch_size
+                yield (size_key, indices_per_size[size_key][start_idx:end_idx])
 
     def __len__(self):
         """Total number of batches across all active size groups."""
@@ -251,12 +297,14 @@ def create_train_loader(config):
             - 'dataset_name': Name of dataset (default: 'master')
             - 'sizes': Dict with size configs, e.g.:
                 {
-                    '720': {'enabled': True, 'distribution': 0.4, 'batch_size': 1},
-                    '540': {'enabled': True, 'distribution': 0.4, 'batch_size': 1},
-                    '720_169': {'enabled': True, 'distribution': 0.2, 'batch_size': 1}
+                    '720': {'enabled': True, 'distribution': 0.4, 'batch_size': 1, 'accum': 4},
+                    '540': {'enabled': True, 'distribution': 0.4, 'batch_size': 1, 'accum': 6},
+                    '720_169': {'enabled': True, 'distribution': 0.2, 'batch_size': 1, 'accum': 6}
                 }
                 Note: 'distribution' > 0 means "load this size", the value itself
-                      is only informational (files on disk determine actual ratio)
+                      is only informational (files on disk determine actual ratio).
+                      'accum' sets gradient accumulation steps for this size
+                      (defaults: 4 for '720', 6 for all other sizes).
             - 'augment': Whether to use augmentations (default: True)
             - 'shuffle': Whether to shuffle batches (default: True)
     
@@ -279,6 +327,7 @@ def create_train_loader(config):
     datasets_dict = {}
     size_distribution = {}
     batch_sizes = {}
+    accum_steps = {}
     
     for size_key, size_cfg in sizes_config.items():
         if not size_cfg.get('enabled', False):
@@ -308,6 +357,10 @@ def create_train_loader(config):
         datasets_dict[size_key] = dataset
         size_distribution[size_key] = distribution
         batch_sizes[size_key] = size_cfg.get('batch_size', 1)
+        # Extract accumulation steps for this size; fall back to legacy defaults
+        # (4 for '720', 6 for all other sizes)
+        default_accum = 4 if size_key == '720' else 6
+        accum_steps[size_key] = size_cfg.get('accum', default_accum)
     
     if not datasets_dict:
         raise ValueError("No training datasets could be loaded for any size. Check GT/LR directories and file extensions.")
@@ -317,7 +370,8 @@ def create_train_loader(config):
         datasets_dict=datasets_dict,
         size_distribution=size_distribution,
         batch_sizes=batch_sizes,
-        shuffle=shuffle
+        shuffle=shuffle,
+        accum_steps=accum_steps
     )
     
     # Create dataloader
