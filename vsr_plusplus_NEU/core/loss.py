@@ -22,6 +22,8 @@ class PerceptualLoss(nn.Module):
     - Pretrained on ImageNet for robust feature extraction
     - Frozen weights (no training) for stable gradients
     - Provides real perceptual feedback for sharpness
+    - Single forward pass: layers evaluated once, outputs extracted at
+      relu1_2 (idx 3), relu2_2 (idx 8), relu3_3 (idx 15), relu4_3 (idx 22)
     """
     
     def __init__(self):
@@ -29,18 +31,16 @@ class PerceptualLoss(nn.Module):
         # Load VGG16 with ImageNet weights
         vgg = vgg16(weights=VGG16_Weights.IMAGENET1K_V1)
         
-        # Extract feature layers (relu1_2, relu2_2, relu3_3, relu4_3)
-        self.features = nn.ModuleList([
-            vgg.features[:4],   # relu1_2
-            vgg.features[:9],   # relu2_2
-            vgg.features[:16],  # relu3_3
-            vgg.features[:23],  # relu4_3
-        ])
+        # Store all layers up to relu4_3 as a single sequence for one forward pass
+        self.features = vgg.features[:23]  # layers 0–22 (relu4_3 inclusive)
+        
+        # Indices at which to extract intermediate feature maps:
+        # relu1_2=3, relu2_2=8, relu3_3=15, relu4_3=22
+        self._extract_indices = {3, 8, 15, 22}
         
         # Freeze all VGG parameters
-        for feature_layer in self.features:
-            for param in feature_layer.parameters():
-                param.requires_grad = False
+        for param in self.features.parameters():
+            param.requires_grad = False
         
         # Set to eval mode
         self.eval()
@@ -55,7 +55,7 @@ class PerceptualLoss(nn.Module):
     
     def forward(self, pred, target):
         """
-        Compute perceptual loss
+        Compute perceptual loss using a single forward pass through VGG.
         
         Args:
             pred: Predicted image [B, 3, H, W] in range [0, 1]
@@ -68,15 +68,20 @@ class PerceptualLoss(nn.Module):
         pred = self.normalize(pred)
         target = self.normalize(target)
         
-        # Compute L1 loss at each feature layer
+        # Single pass: accumulate L1 loss at each target layer index
         loss = 0.0
-        for feature_layer in self.features:
-            pred_feat = feature_layer(pred)
-            target_feat = feature_layer(target)
-            loss += F.l1_loss(pred_feat, target_feat)
+        num_extracted = 0
+        x_pred = pred
+        x_target = target
+        for i, layer in enumerate(self.features):
+            x_pred = layer(x_pred)
+            x_target = layer(x_target)
+            if i in self._extract_indices:
+                loss += F.l1_loss(x_pred, x_target)
+                num_extracted += 1
         
-        # Average over layers
-        return loss / len(self.features)
+        # Average over extracted layers (num_extracted is always 4 but guard defensively)
+        return loss / max(num_extracted, 1)
 
 
 class HybridLoss(nn.Module):
@@ -127,10 +132,13 @@ class HybridLoss(nn.Module):
         # 1. L1 Loss
         l1_loss = F.l1_loss(pred, target)
         
-        # 2. Multi-Scale Loss (downsample 2x and compare)
-        pred_down = F.avg_pool2d(pred, kernel_size=2, stride=2)
-        target_down = F.avg_pool2d(target, kernel_size=2, stride=2)
-        ms_loss = F.l1_loss(pred_down, target_down)
+        # 2. Multi-Scale Loss (2x and 4x downsampling, averaged)
+        pred_down2 = F.avg_pool2d(pred, kernel_size=2, stride=2)
+        target_down2 = F.avg_pool2d(target, kernel_size=2, stride=2)
+        pred_down4 = F.avg_pool2d(pred_down2, kernel_size=2, stride=2)
+        target_down4 = F.avg_pool2d(target_down2, kernel_size=2, stride=2)
+        ms_loss = (F.l1_loss(pred_down2, target_down2) +
+                   F.l1_loss(pred_down4, target_down4)) / 2
         
         # 3. Gradient Loss (spatial gradients)
         # Horizontal gradients
@@ -154,11 +162,14 @@ class HybridLoss(nn.Module):
         else:
             perceptual_loss = torch.tensor(0.0, device=pred.device)
         
-        # 5. Weighted combination
+        # 5. Weighted combination, normalized by total weight so gradient
+        #    magnitude stays constant as perceptual weight ramps up.
+        total_w = l1_w + ms_w + grad_w + perceptual_w
+        total_w = max(total_w, 1e-8)  # guard against all-zero weights
         total_loss = (l1_w * l1_loss + 
                      ms_w * ms_loss + 
                      grad_w * grad_loss + 
-                     perceptual_w * perceptual_loss)
+                     perceptual_w * perceptual_loss) / total_w
         
         return {
             'l1': l1_loss.item(),

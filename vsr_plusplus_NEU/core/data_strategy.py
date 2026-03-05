@@ -20,16 +20,16 @@ class DataStrategyScheduler:
     draws proportionally to file counts, which naturally yields the desired
     mix.
 
-    Phase 1 – Warmup (steps 0–1000):
+    Phase 1 – Warmup (steps 0–2000):
         Data : 100 % 720_169 (full-frames only, via explicit override)
                → model learns global structure without crop conflicts
         Loss : perceptual weight = 0.0
 
-    Phase 2 – Crop Introduction (steps 1000–10000):
+    Phase 2 – Crop Introduction (steps 2000–10000):
         Data : linear interpolation from 100 % 720_169 → approximate natural
                distribution (CROP_INTRO_END_DISTRIBUTION), so that by step
                10000 the override values closely match what is already on disk.
-               step 1000  → {720_169: 1.00, 540: 0.00, 720: 0.00}
+               step 2000  → {720_169: 1.00, 540: 0.00, 720: 0.00}
                step ~10000 → approaching {720_169: 0.25, 540: 0.50, 720: 0.25}
         Loss : perceptual weight 0.0 → 0.05 (linear)
 
@@ -37,7 +37,8 @@ class DataStrategyScheduler:
         Data : natural file-count proportional sampling (no override).
                get_distribution() returns None so the sampler uses the actual
                file ratio on disk (which is already the desired distribution).
-        Loss : perceptual weight = 0.05
+        Loss : returns None so the AdaptiveSystem controls the weight
+               dynamically (no static override).
 
     Args:
         all_size_keys: list of size keys present in the dataset
@@ -49,7 +50,7 @@ class DataStrategyScheduler:
     PHASE_STABLE = 'stable'
 
     # Phase boundaries (in global training steps)
-    WARMUP_END = 1000
+    WARMUP_END = 2000
     CROP_INTRO_END = 10000
 
     # End-point of the Phase 2 interpolation.
@@ -143,8 +144,13 @@ class DataStrategyScheduler:
         """
         Return the scheduled perceptual loss weight for the given step.
 
+        Phase 1 (warmup): returns 0.0 to suppress perceptual loss entirely.
+        Phase 2 (crop intro): linearly ramps from 0.0 to TARGET_PERCEPTUAL_WEIGHT.
+        Phase 3 (stable): returns None so the caller (trainer) keeps the
+            AdaptiveSystem's dynamically computed weight instead of overriding it.
+
         Returns:
-            float in [0.0, TARGET_PERCEPTUAL_WEIGHT]
+            float in [0.0, TARGET_PERCEPTUAL_WEIGHT] for Phase 1/2, or None for Phase 3
         """
         phase = self.get_phase(step)
 
@@ -156,7 +162,8 @@ class DataStrategyScheduler:
             t = max(0.0, min(1.0, t))
             return t * self.TARGET_PERCEPTUAL_WEIGHT
 
-        return self.TARGET_PERCEPTUAL_WEIGHT
+        # PHASE_STABLE – return None so the AdaptiveSystem controls the weight.
+        return None
 
     # ------------------------------------------------------------------
     # Phase-transition logging
