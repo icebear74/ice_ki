@@ -205,8 +205,15 @@ class VSRTrainer:
         accum_counter = 0  # Running counter for dynamic accumulation
         prev_size_key = None  # Track size-key changes for clean boundary enforcement
 
-        # Buffer for accumulation window files
-        accumulation_buffer = []
+        # Per-optimizer-step file tracking: collects batches for the CURRENT
+        # accumulation window (reset at each optimizer step and on size-key change).
+        current_window_batches = []  # list[dict]: each entry has 'size_key' and 'files'
+
+        # Snapshot of the last complete accumulation window for WebUI display.
+        # Updated only when current_window_batches reaches current_accum_steps,
+        # so the display always shows a full set of same-resolution files.
+        display_files = []   # list[str]: file paths from the last complete window
+        display_fps = {'720': 0, '540': 0, '720_169': 0}
         
         # Initialize loop timing
         loop_start_time = time.time()
@@ -273,7 +280,9 @@ class VSRTrainer:
                     # Discard partial gradients — never mix resolutions
                     self.optimizer.zero_grad()
                     accum_counter = 0
-                accumulation_buffer = []
+                current_window_batches = []
+                display_files = []
+                display_fps = {'720': 0, '540': 0, '720_169': 0}
             prev_size_key = size_key
             # ── End size-key transition ───────────────────────────────────────
             
@@ -290,34 +299,37 @@ class VSRTrainer:
                 else:
                     total_files_in_epoch = steps_per_epoch * batch_size_val
                 
-                # Only accumulate filenames when the dataloader provides them
+                # Accumulate filenames for the current optimizer-step window
                 if batch_filenames:
                     formatted_files = [f"{size_key}/{fn}" for fn in batch_filenames]
-                    accumulation_buffer.append({
+                    current_window_batches.append({
+                        'size_key': size_key,
                         'files': formatted_files,
-                        'size_key': size_key
                     })
-                    # Keep only last current_accum_steps batches
-                    while len(accumulation_buffer) > current_accum_steps:
-                        accumulation_buffer.pop(0)
+                    # When the window is complete, snapshot it for display and
+                    # reset so the next window starts fresh.
+                    if len(current_window_batches) >= current_accum_steps:
+                        display_files = [
+                            f for item in current_window_batches for f in item['files']
+                        ]
+                        display_fps = {'720': 0, '540': 0, '720_169': 0}
+                        for item in current_window_batches:
+                            sk = item['size_key']
+                            display_fps[sk] = display_fps.get(sk, 0) + len(item['files'])
+                        current_window_batches = []  # ready for next window
                 
-                # Collect all files and per-size counts from accumulation window
-                all_accumulated_files = []
-                files_per_size = {'720': 0, '540': 0, '720_169': 0}
-                for buffer_item in accumulation_buffer:
-                    all_accumulated_files.extend(buffer_item['files'])
-                    sk = buffer_item['size_key']
-                    files_per_size[sk] = files_per_size.get(sk, 0) + len(buffer_item['files'])
-                
-                # Update web_monitor with current batch info
+                # Update web_monitor with current batch info.
+                # display_files/display_fps hold the last complete window so the
+                # list is always either empty (epoch start, before first complete
+                # window) or exactly current_accum_steps files of the same size.
                 self.web_monitor.data_store.update_all_metrics(
                     current_batch={
-                        'files': all_accumulated_files,
+                        'files': display_files,
                         'size_key': size_key,
                         'batch_size': batch_size_val,
                         'files_used_in_epoch': files_used_in_epoch,
                         'total_files_in_epoch': total_files_in_epoch,
-                        'files_per_size': files_per_size,
+                        'files_per_size': display_fps,
                         'accumulation_steps': current_accum_steps,
                         'accum_step': accum_counter + 1,
                     }
