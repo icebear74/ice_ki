@@ -527,10 +527,13 @@ def main():
             
             for size_key, file_count in available:
                 batch_info = adaptive_batch.get(size_key, {})
+                # Fall back to the same defaults used by SizeGroupedSampler
+                default_accum = 4 if size_key == '720' else 6
                 sizes_config[size_key] = {
                     'enabled': True,  # All detected sizes are enabled
                     'distribution': 1.0 / len(available),  # Equal distribution (not used for weighting)
-                    'batch_size': batch_info.get('batch', config.get('BATCH_SIZE', 1))
+                    'batch_size': batch_info.get('batch', config.get('BATCH_SIZE', 1)),
+                    'accum': batch_info.get('accum', default_accum),
                 }
             
             # ── STARTUP DIAGNOSTIC ──────────────────────────────────────────

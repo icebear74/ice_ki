@@ -109,6 +109,10 @@ class AdaptiveSystem:
         self.history_settling_steps = 100
         self.history_steps_collected = 0
         self.history_settling_complete = False
+
+        # Cached mode — updated by update_loss_weights so get_status() always
+        # returns the true current mode (Warmup / Settling / Stable / Aggressive)
+        self._cached_mode = 'Warmup'
     
     def _update_ema_loss(self, l1_loss_value):
         """Update EMA of L1 loss for smooth tracking"""
@@ -259,6 +263,7 @@ class AdaptiveSystem:
             self.grad_weight = self.initial_grad
             self.perceptual_weight = self.initial_perceptual
             
+            self._cached_mode = 'Warmup'
             status = {
                 'is_cooldown': False,
                 'cooldown_remaining': 0,
@@ -281,6 +286,7 @@ class AdaptiveSystem:
             self.grad_weight = self.initial_grad
             self.perceptual_weight = self.initial_perceptual
             
+            self._cached_mode = 'Settling'
             # Return initial weights during settling
             status = {
                 'is_cooldown': False,
@@ -345,10 +351,11 @@ class AdaptiveSystem:
         
         # Check if we should update (skip if in cooldown or not update time)
         if self.is_in_cooldown or step % update_freq != 0:
+            self._cached_mode = 'Aggressive' if self.aggressive_mode else 'Stable'
             status = {
                 'is_cooldown': self.is_in_cooldown,
                 'cooldown_remaining': self.cooldown_steps if self.is_in_cooldown else 0,
-                'mode': 'Aggressive' if self.aggressive_mode else 'Stable'
+                'mode': self._cached_mode
             }
             return self.l1_weight, self.ms_weight, self.grad_weight, self.perceptual_weight, status
         
@@ -359,10 +366,11 @@ class AdaptiveSystem:
         
         # Warmup
         if len(self.sharpness_history) < min_measurements:
+            self._cached_mode = 'Aggressive' if self.aggressive_mode else 'Stable'
             status = {
                 'is_cooldown': False,
                 'cooldown_remaining': 0,
-                'mode': 'Aggressive' if self.aggressive_mode else 'Stable'
+                'mode': self._cached_mode
             }
             return self.l1_weight, self.ms_weight, self.grad_weight, self.perceptual_weight, status
         
@@ -433,10 +441,11 @@ class AdaptiveSystem:
         
         self.adjustment_step += 1
         
+        self._cached_mode = 'Aggressive' if self.aggressive_mode else 'Stable'
         status = {
             'is_cooldown': self.is_in_cooldown,
             'cooldown_remaining': self.cooldown_steps if self.is_in_cooldown else 0,
-            'mode': 'Aggressive' if self.aggressive_mode else 'Stable'
+            'mode': self._cached_mode
         }
         
         return self.l1_weight, self.ms_weight, self.grad_weight, self.perceptual_weight, status
@@ -476,7 +485,7 @@ class AdaptiveSystem:
         
         return total_norm, self.clip_value
     
-    def update_plateau_tracker(self, loss, quality=None):
+    def update_plateau_tracker(self, loss, quality=None, step=0, warmup_steps=1000):
         """
         ADVANCED plateau detection with multiple signals:
         - Loss improvement (adaptive threshold based on loss level)
@@ -485,9 +494,22 @@ class AdaptiveSystem:
         - Grace period for noisy improvements
         
         Args:
-            loss: Current total loss value
-            quality: Optional quality metric (KI quality %)
+            loss:         Current total loss value
+            quality:      Optional quality metric (KI quality %)
+            step:         Current global training step
+            warmup_steps: Number of LR warmup steps (from LR scheduler config).
+                          Plateau tracking is frozen below this value so the
+                          counter only starts once the model is in a stable
+                          learning regime after the LR ramp-up is complete.
         """
+        # During LR warmup the loss is dominated by the ramp-up schedule, not
+        # by genuine convergence.  Keep the tracker reset so it starts fresh
+        # with a clean slate once warmup ends.
+        if step < warmup_steps:
+            self.plateau_counter = 0
+            self.ema_loss = None
+            self.best_loss = float('inf')
+            return
         # Initialize EMA on first call
         if self.ema_loss is None:
             self.ema_loss = loss
@@ -588,7 +610,7 @@ class AdaptiveSystem:
             'aggressive_mode': self.aggressive_mode,
             'is_cooldown': self.is_in_cooldown,
             'cooldown_remaining': self.cooldown_steps if self.is_in_cooldown else 0,
-            'mode': 'Aggressive' if self.aggressive_mode else 'Stable',
+            'mode': self._cached_mode,
             'plateau_counter': self.plateau_counter,
             'plateau_patience': self.plateau_patience,
             'best_loss': self.best_loss,

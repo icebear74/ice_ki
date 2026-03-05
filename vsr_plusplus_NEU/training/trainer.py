@@ -203,9 +203,17 @@ class VSRTrainer:
         steps_per_epoch = len(self.train_loader) // default_accum_steps
         current_epoch_step = 0
         accum_counter = 0  # Running counter for dynamic accumulation
-        
-        # Buffer for accumulation window files
-        accumulation_buffer = []
+        prev_size_key = None  # Track size-key changes for clean boundary enforcement
+
+        # Per-optimizer-step file tracking: collects batches for the CURRENT
+        # accumulation window (reset at each optimizer step and on size-key change).
+        current_window_batches = []  # list[dict]: each entry has 'size_key' and 'files'
+
+        # Snapshot of the last complete accumulation window for WebUI display.
+        # Updated only when current_window_batches reaches current_accum_steps,
+        # so the display always shows a full set of same-resolution files.
+        display_files = []   # list[str]: file paths from the last complete window
+        display_fps = {'720': 0, '540': 0, '720_169': 0}
         
         # Initialize loop timing
         loop_start_time = time.time()
@@ -246,12 +254,37 @@ class VSRTrainer:
                 else:
                     size_key = 'default'
             
-            # Dynamic accumulation: large 720 patches use fewer steps for speed;
-            # 540 and 720_169 (similar total pixels) use the standard count.
-            if size_key == '720':
+            # Dynamic accumulation steps: priority order —
+            # 1. ADAPTIVE_BATCH_CONFIG from runtime_config (training.adaptive_batch)
+            # 2. ADAPTIVE_BATCH_CONFIG from main config
+            # 3. Hardcoded defaults (4 for '720', 6 for others)
+            adaptive_batch_cfg = None
+            if self.runtime_config is not None:
+                adaptive_batch_cfg = self.runtime_config.get('training.adaptive_batch')
+            if adaptive_batch_cfg is None:
+                adaptive_batch_cfg = self.config.get('ADAPTIVE_BATCH_CONFIG')
+            if adaptive_batch_cfg and size_key in adaptive_batch_cfg:
+                current_accum_steps = adaptive_batch_cfg[size_key].get('accum', default_accum_steps)
+            elif size_key == '720':
                 current_accum_steps = 4
             else:
                 current_accum_steps = default_accum_steps
+
+            # ── Size-key transition: enforce clean accumulation boundaries ────
+            # If the resolution block changes mid-accumulation (e.g. due to a
+            # crash-resume or an imperfect sampler block), discard any partially
+            # accumulated gradients and reset the display buffer so the WebUI
+            # never shows files from different resolutions in the same window.
+            if size_key != prev_size_key:
+                if accum_counter > 0:
+                    # Discard partial gradients — never mix resolutions
+                    self.optimizer.zero_grad()
+                    accum_counter = 0
+                current_window_batches = []
+                display_files = []
+                display_fps = {'720': 0, '540': 0, '720_169': 0}
+            prev_size_key = size_key
+            # ── End size-key transition ───────────────────────────────────────
             
             # Track batch files for WebUI display — always update counters, filenames when available
             if hasattr(self, 'web_monitor') and self.web_monitor:
@@ -266,35 +299,39 @@ class VSRTrainer:
                 else:
                     total_files_in_epoch = steps_per_epoch * batch_size_val
                 
-                # Only accumulate filenames when the dataloader provides them
+                # Accumulate filenames for the current optimizer-step window
                 if batch_filenames:
                     formatted_files = [f"{size_key}/{fn}" for fn in batch_filenames]
-                    accumulation_buffer.append({
+                    current_window_batches.append({
+                        'size_key': size_key,
                         'files': formatted_files,
-                        'size_key': size_key
                     })
-                    # Keep only last current_accum_steps batches
-                    if len(accumulation_buffer) > current_accum_steps:
-                        accumulation_buffer.pop(0)
+                    # When the window is complete, snapshot it for display and
+                    # reset so the next window starts fresh.
+                    if len(current_window_batches) >= current_accum_steps:
+                        display_files = [
+                            f for item in current_window_batches for f in item['files']
+                        ]
+                        display_fps = {'720': 0, '540': 0, '720_169': 0}
+                        for item in current_window_batches:
+                            sk = item['size_key']
+                            display_fps[sk] = display_fps.get(sk, 0) + len(item['files'])
+                        current_window_batches = []  # ready for next window
                 
-                # Collect all files and per-size counts from accumulation window
-                all_accumulated_files = []
-                files_per_size = {'720': 0, '540': 0, '720_169': 0}
-                for buffer_item in accumulation_buffer:
-                    all_accumulated_files.extend(buffer_item['files'])
-                    sk = buffer_item['size_key']
-                    files_per_size[sk] = files_per_size.get(sk, 0) + len(buffer_item['files'])
-                
-                # Update web_monitor with current batch info
+                # Update web_monitor with current batch info.
+                # display_files/display_fps hold the last complete window so the
+                # list is always either empty (epoch start, before first complete
+                # window) or exactly current_accum_steps files of the same size.
                 self.web_monitor.data_store.update_all_metrics(
                     current_batch={
-                        'files': all_accumulated_files,
+                        'files': display_files,
                         'size_key': size_key,
                         'batch_size': batch_size_val,
                         'files_used_in_epoch': files_used_in_epoch,
                         'total_files_in_epoch': total_files_in_epoch,
-                        'files_per_size': files_per_size,
-                        'accumulation_steps': current_accum_steps
+                        'files_per_size': display_fps,
+                        'accumulation_steps': current_accum_steps,
+                        'accum_step': accum_counter + 1,
                     }
                 )
             
@@ -382,8 +419,12 @@ class VSRTrainer:
                     current_lr = self.lr_scheduler.get_current_lr()
                     lr_phase = self.lr_scheduler.get_current_phase()
                 
-                # Update plateau tracker
-                self.adaptive_system.update_plateau_tracker(loss_dict['total'].item() if torch.is_tensor(loss_dict['total']) else loss_dict['total'])
+                # Update plateau tracker (only meaningful after LR warmup)
+                self.adaptive_system.update_plateau_tracker(
+                    loss_dict['total'].item() if torch.is_tensor(loss_dict['total']) else loss_dict['total'],
+                    step=self.global_step,
+                    warmup_steps=getattr(self.lr_scheduler, 'warmup_steps', 1000)
+                )
                 
                 # Get activity
                 self.last_activities = self.model.get_layer_activity()

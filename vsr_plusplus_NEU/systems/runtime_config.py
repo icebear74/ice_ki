@@ -73,7 +73,7 @@ DEFAULT_CONFIG = {
         "adaptive_batch": {
             "540": {"batch": 1, "accum": 6},
             "720_169": {"batch": 1, "accum": 6},
-            "720": {"batch": 1, "accum": 6}
+            "720": {"batch": 1, "accum": 4}
         }
     },
     "validation": {
