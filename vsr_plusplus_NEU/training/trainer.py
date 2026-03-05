@@ -422,7 +422,8 @@ class VSRTrainer:
                 # Update plateau tracker (only meaningful after LR warmup)
                 self.adaptive_system.update_plateau_tracker(
                     loss_dict['total'].item() if torch.is_tensor(loss_dict['total']) else loss_dict['total'],
-                    step=self.global_step
+                    step=self.global_step,
+                    warmup_steps=getattr(self.lr_scheduler, 'warmup_steps', 1000)
                 )
                 
                 # Get activity

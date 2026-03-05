@@ -1044,39 +1044,39 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 <span id="statusBadge" class="status-indicator status-training">Training</span>
             </div>
             <div class="control-buttons">
-                <button class="btn btn-primary" onclick="downloadDataAsJSON()">
-                    📥 Download Data (JSON)
+                <button class="btn btn-primary" onclick="downloadDataAsJSON()" title="Alle aktuellen Trainingsdaten als JSON-Datei herunterladen">
+                    📥 Daten herunterladen (JSON)
                 </button>
-                <button class="btn btn-success" onclick="requestValidation()">
-                    🔍 Run Validation
+                <button class="btn btn-success" onclick="requestValidation()" title="Validierungsdurchlauf manuell starten">
+                    🔍 Validierung starten
                 </button>
-                <button class="btn btn-primary" onclick="openConfigPage()">
-                    ⚙️ Configuration
+                <button class="btn btn-primary" onclick="openConfigPage()" title="Trainingsparameter live anpassen">
+                    ⚙️ Konfiguration
                 </button>
-                <button class="btn btn-success" id="checkpointBtn" onclick="triggerCheckpoint()">
-                    💾 Save Checkpoint
+                <button class="btn btn-success" id="checkpointBtn" onclick="triggerCheckpoint()" title="Aktuellen Modellzustand sofort speichern">
+                    💾 Checkpoint speichern
                 </button>
-                <button class="btn btn-primary" id="pauseBtn" onclick="togglePause()">
-                    ⏸️ Pause Training
+                <button class="btn btn-primary" id="pauseBtn" onclick="togglePause()" title="Training pausieren oder fortsetzen">
+                    ⏸️ Training pausieren
                 </button>
-                <button class="btn btn-success" onclick="triggerVideoInference()">
-                    🎬 Video Testlauf
+                <button class="btn btn-success" onclick="triggerVideoInference()" title="Test-Video mit aktuellem Modell verarbeiten">
+                    🎬 Video-Testlauf
                 </button>
-                <button class="btn btn-primary" onclick="exportLogs()">
-                    📊 Export Logs
+                <button class="btn btn-primary" onclick="exportLogs()" title="Trainingsmetriken als JSON exportieren">
+                    📊 Logs exportieren
                 </button>
             </div>
         </div>
         
         <!-- TRAINING SCORE - Prominent Performance Indicator -->
-        <div id="trainingScoreCard" class="training-score-card excellent">
-            <div class="score-title">⭐ TRAINING SCORE</div>
+        <div id="trainingScoreCard" class="training-score-card excellent" title="Gesamtbewertung des Trainingsfortschritts basierend auf Verlust-Trend, Qualität und Stabilität">
+            <div class="score-title">⭐ TRAININGS-BEWERTUNG</div>
             <div class="score-value" id="scoreValue">85.0%</div>
-            <div class="score-label" id="scoreLabel">EXCELLENT</div>
+            <div class="score-label" id="scoreLabel">AUSGEZEICHNET</div>
             <div class="score-components">
-                <div class="score-component" id="scoreTrend">Trend: Converging</div>
-                <div class="score-component" id="scoreQuality">Quality: 70%</div>
-                <div class="score-component" id="scoreStability">Stability: Stable</div>
+                <div class="score-component" id="scoreTrend">Trend: Konvergierend</div>
+                <div class="score-component" id="scoreQuality">Qualität: 70%</div>
+                <div class="score-component" id="scoreStability">Stabilität: Stabil</div>
             </div>
         </div>
         
@@ -1099,16 +1099,16 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             </div>
         </div>
         
-        <div class="section-header">📉 Loss-Werte & Gewichte</div>
+        <div class="section-header">📉 Verluste &amp; Gewichte</div>
         
         <!-- NEW: Stacked Bar Chart Visualization -->
         <div class="layer-activity-container">
-            <div class="card-title" style="font-size: 1.2em; margin-bottom: 20px;">📊 Loss & Weight Distribution</div>
+            <div class="card-title" style="font-size: 1.2em; margin-bottom: 20px;">📊 Verluste &amp; Gewichtsverteilung</div>
             
             <div class="stacked-bars-container">
                 <!-- Weight Distribution -->
                 <div class="bar-section">
-                    <div class="bar-label">Weight Distribution (%)</div>
+                    <div class="bar-label">Gewichtsverteilung (%)</div>
                     <div class="stacked-bar" id="weightBar">
                         <div class="bar-segment segment-l1" id="weightL1">
                             <span>L1: 0%</span>
@@ -1127,7 +1127,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 
                 <!-- Loss Value Distribution -->
                 <div class="bar-section">
-                    <div class="bar-label">Loss Value Distribution (relative)</div>
+                    <div class="bar-label">Verlustwerte (relativ)</div>
                     <div class="stacked-bar" id="lossBar">
                         <div class="bar-segment segment-l1" id="lossL1">
                             <span>L1: 0.000</span>
@@ -1148,53 +1148,53 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             <div class="legend">
                 <div class="legend-item">
                     <div class="legend-color segment-l1"></div>
-                    <span>L1 Loss <span class="legend-value" id="legendL1">0.0000</span></span>
+                    <span title="Mittlerer absoluter Fehler zwischen KI-Ausgabe und Zielbild">L1-Verlust <span class="legend-value" id="legendL1">0.0000</span></span>
                 </div>
                 <div class="legend-item">
                     <div class="legend-color segment-ms"></div>
-                    <span>MS Loss <span class="legend-value" id="legendMS">0.0000</span></span>
+                    <span title="Multi-Scale Strukturverlust – prüft Bildstruktur auf mehreren Skalen">MS-Verlust <span class="legend-value" id="legendMS">0.0000</span></span>
                 </div>
                 <div class="legend-item">
                     <div class="legend-color segment-grad"></div>
-                    <span>Gradient Loss <span class="legend-value" id="legendGrad">0.0000</span></span>
+                    <span title="Kantenschärfe-Verlust – belohnt scharfe Kanten und feine Details">Gradient-Verlust <span class="legend-value" id="legendGrad">0.0000</span></span>
                 </div>
                 <div class="legend-item">
                     <div class="legend-color segment-perceptual"></div>
-                    <span>Perceptual Loss <span class="legend-value" id="legendPerc">0.0000</span></span>
+                    <span title="Wahrnehmungs-Verlust (VGG-Features) – für naturgetreue Texturen">Wahrnehmungs-Verlust <span class="legend-value" id="legendPerc">0.0000</span></span>
                 </div>
                 <div class="legend-item">
-                    <strong>Total Loss: <span class="legend-value" id="legendTotal">0.0000</span></strong>
+                    <strong>Gesamt-Verlust: <span class="legend-value" id="legendTotal">0.0000</span></strong>
                 </div>
             </div>
         </div>
         
         <div class="grid-container">
-            <div class="info-card">
-                <div class="card-title">L1 Loss</div>
+            <div class="info-card" title="Mittlerer absoluter Fehler zwischen KI-Ausgabe und Zielbild">
+                <div class="card-title">L1-Verlust</div>
                 <div class="card-value" id="l1Loss">0.0000</div>
-                <div class="card-subtitle">w: <span id="l1Weight">0.60</span></div>
+                <div class="card-subtitle">Gew.: <span id="l1Weight">0.60</span></div>
             </div>
             
-            <div class="info-card">
-                <div class="card-title">MS Loss</div>
+            <div class="info-card" title="Multi-Scale Strukturverlust – prüft Bildstruktur auf mehreren Skalen">
+                <div class="card-title">MS-Verlust</div>
                 <div class="card-value" id="msLoss">0.0000</div>
-                <div class="card-subtitle">w: <span id="msWeight">0.20</span></div>
+                <div class="card-subtitle">Gew.: <span id="msWeight">0.20</span></div>
             </div>
             
-            <div class="info-card">
-                <div class="card-title">Gradient Loss</div>
+            <div class="info-card" title="Kantenschärfe-Verlust – belohnt scharfe Kanten und feine Details">
+                <div class="card-title">Gradient-Verlust</div>
                 <div class="card-value" id="gradLoss">0.0000</div>
-                <div class="card-subtitle">w: <span id="gradWeight">0.20</span></div>
+                <div class="card-subtitle">Gew.: <span id="gradWeight">0.20</span></div>
             </div>
             
-            <div class="info-card">
-                <div class="card-title">Perceptual Loss</div>
+            <div class="info-card" title="Wahrnehmungs-Verlust (VGG-Features) – für naturgetreue Texturen; wird erst nach Schritt 10.000 aktiv">
+                <div class="card-title">Wahrnehmungs-Verlust</div>
                 <div class="card-value" id="percLoss">0.0000</div>
-                <div class="card-subtitle">w: <span id="percWeight">0.00</span></div>
+                <div class="card-subtitle">Gew.: <span id="percWeight">0.00</span></div>
             </div>
             
             <div class="info-card">
-                <div class="card-title">Total Loss</div>
+                <div class="card-title">Gesamt-Verlust</div>
                 <div class="card-value" id="totalLoss">0.0000</div>
                 <div class="card-subtitle">Summe aller Komponenten</div>
             </div>
@@ -1203,36 +1203,36 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         <div class="section-header">🎚️ Adaptive System Status</div>
         
         <div class="grid-container">
-            <div class="info-card">
+            <div class="info-card" title="Aktueller Modus des adaptiven Systems: Aufwärmen / Einpendeln / Stabil / Aggressiv">
                 <div class="card-title">Modus</div>
-                <div class="card-value" id="adaptiveMode" style="font-size: 1.5em;">Stable</div>
+                <div class="card-value" id="adaptiveMode" style="font-size: 1.5em;">Stabil</div>
             </div>
             
-            <div class="info-card">
-                <div class="card-title">Cooldown</div>
+            <div class="info-card" title="Abkühlphase nach einer Gewichtsanpassung – verhindert zu schnelle Änderungen">
+                <div class="card-title">Abkühlphase</div>
                 <div class="card-value" id="cooldownStatus">Inaktiv</div>
                 <div class="card-subtitle" id="cooldownRemaining"></div>
             </div>
             
-            <div class="info-card">
-                <div class="card-title">Plateau Counter</div>
+            <div class="info-card" title="Zählt Optimizer-Schritte ohne messbare Verbesserung. Bei Überschreiten der Geduld wird ein LR-Boost erwogen.">
+                <div class="card-title">Plateau-Zähler</div>
                 <div class="card-value" id="plateauCounter">0</div>
                 <div class="card-subtitle" id="plateauWarning"></div>
             </div>
             
-            <div class="info-card">
-                <div class="card-title">LR Boost</div>
+            <div class="info-card" title="Zeigt an, ob ein Lernraten-Boost verfügbar ist (ausgelöst wenn Plateau-Zähler die Gedulds-Schwelle überschreitet)">
+                <div class="card-title">LR-Boost</div>
                 <div class="card-value" id="lrBoostStatus">Bereit</div>
             </div>
             
-            <div class="info-card">
-                <div class="card-title">Perceptual Weight</div>
+            <div class="info-card" title="Gewichtung des Wahrnehmungs-Verlusts – wird nach Schritt 10.000 vom adaptiven System dynamisch gesteuert">
+                <div class="card-title">Wahrnehmungsgewicht</div>
                 <div class="card-value" id="perceptualWeightDisplay">5.0%</div>
                 <div class="card-subtitle" id="perceptualTrend"></div>
             </div>
             
-            <div class="info-card">
-                <div class="card-title">Gradient Clip</div>
+            <div class="info-card" title="Maximale erlaubte Gradientennorm – wird adaptiv angepasst um explodierende Gradienten zu verhindern">
+                <div class="card-title">Gradient-Begrenzung</div>
                 <div class="card-value" id="gradClip">1.00</div>
             </div>
         </div>
@@ -1240,74 +1240,74 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         <div class="section-header">📊 Basis-Metriken</div>
         
         <div class="grid-container">
-            <div class="info-card">
+            <div class="info-card" title="Globale Anzahl der bisher durchgeführten Optimizer-Schritte">
                 <div class="card-title">Iteration</div>
                 <div class="card-value" id="stepValue">0</div>
                 <div class="card-subtitle">von <span id="maxSteps">100,000</span></div>
             </div>
             
-            <div class="info-card">
-                <div class="card-title">Learning Rate</div>
+            <div class="info-card" title="Aktuelle Lernschrittgröße des AdamW-Optimierers">
+                <div class="card-title">Lernrate</div>
                 <div class="card-value" id="learnRate">0.0000</div>
-                <div class="card-subtitle">Phase: <span id="lrPhase">warmup</span></div>
+                <div class="card-subtitle">Phase: <span id="lrPhase">Aufwärmen</span></div>
             </div>
             
-            <div class="info-card">
-                <div class="card-title">ETA (Total)</div>
+            <div class="info-card" title="Geschätzte verbleibende Trainingszeit basierend auf der aktuellen Iterationsgeschwindigkeit">
+                <div class="card-title">Verbl. Zeit (gesamt)</div>
                 <div class="card-value" id="etaTotal">--:--:--</div>
-                <div class="card-subtitle">Epoch: <span id="etaEpoch">--:--:--</span></div>
+                <div class="card-subtitle">Epoche: <span id="etaEpoch">--:--:--</span></div>
             </div>
             
-            <div class="info-card">
-                <div class="card-title">Speed</div>
+            <div class="info-card" title="Anzahl der Optimizer-Schritte pro Sekunde">
+                <div class="card-title">Geschwindigkeit</div>
                 <div class="card-value" id="iterSpeed">0.00</div>
-                <div class="card-subtitle">it/s</div>
+                <div class="card-subtitle">Iter./s</div>
             </div>
             
-            <div class="info-card">
+            <div class="info-card" title="Aktuell belegter GPU-Speicher (Video RAM)">
                 <div class="card-title">VRAM</div>
                 <div class="card-value" id="vramUsage">0.0</div>
                 <div class="card-subtitle">GB</div>
             </div>
             
-            <div class="info-card">
-                <div class="card-title">👁️ AdamW Momentum</div>
+            <div class="info-card" title="Durchschnittliches erstes Moment des AdamW-Optimierers – zeigt wie aktiv die Gewichte gerade angepasst werden">
+                <div class="card-title">👁️ AdamW-Momentum</div>
                 <div class="card-value" id="adamMomentum">0.000</div>
-                <div class="card-subtitle">Optimizer</div>
+                <div class="card-subtitle">Optimierer</div>
             </div>
         </div>
         
-        <div class="section-header">🎯 Quality Metriken</div>
+        <div class="section-header">🎯 Qualitäts-Metriken</div>
         
         <div class="grid-container">
-            <div class="info-card">
-                <div class="card-title">LR Quality</div>
+            <div class="info-card" title="Qualitätsbewertung des Eingangsvideos (Low Resolution) – Referenzwert für die KI-Ausgabe">
+                <div class="card-title">LR-Qualität</div>
                 <div class="card-value" id="lrQuality">0.0%</div>
             </div>
             
-            <div class="info-card">
-                <div class="card-title">KI Quality</div>
+            <div class="info-card" title="Qualitätsbewertung der KI-Ausgabe (Super-Resolution) – höher ist besser">
+                <div class="card-title">KI-Qualität</div>
                 <div class="card-value" id="kiQuality">0.0%</div>
-                <div class="card-subtitle">Best: <span id="bestQuality">0.0%</span></div>
+                <div class="card-subtitle">Bestes: <span id="bestQuality">0.0%</span></div>
             </div>
             
-            <div class="info-card">
-                <div class="card-title">Improvement (KI vs LR)</div>
+            <div class="info-card" title="Wie viel besser die KI-Ausgabe im Vergleich zum LR-Eingangsbild ist (positiv = KI besser als LR)">
+                <div class="card-title">Verbesserung (KI vs. LR)</div>
                 <div class="card-value" id="improvement">0.0%</div>
             </div>
             
-            <div class="info-card">
-                <div class="card-title">KI to GT (PSNR/SSIM)</div>
+            <div class="info-card" title="Wie nah die KI-Ausgabe am Referenzbild (Ground Truth) ist – gemessen über PSNR und SSIM">
+                <div class="card-title">KI vs. GT (PSNR/SSIM)</div>
                 <div class="card-value" id="kiToGt">0.0%</div>
             </div>
             
-            <div class="info-card">
-                <div class="card-title">Validation Loss</div>
+            <div class="info-card" title="Verlust des letzten Validierungsdurchlaufs">
+                <div class="card-title">Validierungs-Verlust</div>
                 <div class="card-value" id="valLoss">0.0000</div>
             </div>
         </div>
         
-        <div class="section-header">🔥 Peak Layer Activity</div>
+        <div class="section-header">🔥 Maximale Layer-Aktivität</div>
         
         <div class="layer-activity-container">
             <div class="peak-bar-container">
@@ -1324,9 +1324,9 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             </div>
             
             <div class="peak-info">
-                <span>Peak Layer: <strong id="peakLayer">-</strong></span>
-                <span>Value: <strong id="peakValue">-</strong></span>
-                <span style="color: var(--text-secondary); font-size: 0.9em;">Actual: <strong id="peakActualValue">-</strong></span>
+                <span>Stärkster Layer: <strong id="peakLayer">-</strong></span>
+                <span>Wert: <strong id="peakValue">-</strong></span>
+                <span style="color: var(--text-secondary); font-size: 0.9em;">Absolut: <strong id="peakActualValue">-</strong></span>
             </div>
             <div class="peak-warning" id="peakWarning" style="display: none;"></div>
         </div>
@@ -1336,7 +1336,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             <div class="card-title" style="font-size: 1.1em; margin-bottom: 15px;">📊 Stream-Übersicht (Durchschnitt)</div>
             
             <div class="layer-row">
-                <div class="layer-name" style="color: var(--accent-blue);">⬅️ Backward Stream</div>
+                <div class="layer-name" style="color: var(--accent-blue);">⬅️ Rückwärts-Stream</div>
                 <div class="layer-bar-container">
                     <div class="layer-bar-fill" id="backwardAvgBar" style="width: 0%; background: linear-gradient(90deg, var(--accent-blue), var(--accent-purple));"></div>
                 </div>
@@ -1344,7 +1344,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             </div>
             
             <div class="layer-row">
-                <div class="layer-name" style="color: var(--accent-green);">➡️ Forward Stream</div>
+                <div class="layer-name" style="color: var(--accent-green);">➡️ Vorwärts-Stream</div>
                 <div class="layer-bar-container">
                     <div class="layer-bar-fill" id="forwardAvgBar" style="width: 0%; background: linear-gradient(90deg, var(--accent-green), #00ff88);"></div>
                 </div>
@@ -1363,14 +1363,14 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         <div class="section-header">📊 Layer-Aktivitäten (Details)</div>
         
         <div id="layerActivitiesBackward" class="layer-activity-container">
-            <h3 style="color: var(--accent-blue); margin-bottom: 15px; font-size: 1.1em;">⬅️ Backward Stream</h3>
+            <h3 style="color: var(--accent-blue); margin-bottom: 15px; font-size: 1.1em;">⬅️ Rückwärts-Stream</h3>
             <div id="backwardLayers" style="color: var(--text-secondary); text-align: center;">
                 Warte auf Daten...
             </div>
         </div>
         
         <div id="layerActivitiesForward" class="layer-activity-container">
-            <h3 style="color: var(--accent-green); margin-bottom: 15px; font-size: 1.1em;">➡️ Forward Stream</h3>
+            <h3 style="color: var(--accent-green); margin-bottom: 15px; font-size: 1.1em;">➡️ Vorwärts-Stream</h3>
             <div id="forwardLayers" style="color: var(--text-secondary); text-align: center;">
                 Warte auf Daten...
             </div>
@@ -1383,12 +1383,12 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             </div>
         </div>
         
-        <div class="section-header">📂 Dataset Files</div>
+        <div class="section-header">📂 Datensatz-Dateien</div>
         
         <div class="layer-activity-container">
             <!-- Training Datasets -->
             <div style="margin-bottom: 20px;">
-                <h3 style="color: var(--accent-blue); margin-bottom: 10px; font-size: 1.1em;">🎯 Training Datasets</h3>
+                <h3 style="color: var(--accent-blue); margin-bottom: 10px; font-size: 1.1em;">🎯 Trainings-Datensätze</h3>
                 
                 <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border-color);">
                     <span style="color: var(--text-secondary);">720×720</span>
@@ -1417,7 +1417,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             
             <!-- Validation Datasets -->
             <div>
-                <h3 style="color: var(--accent-green); margin-bottom: 10px; font-size: 1.1em;">✅ Validation Datasets</h3>
+                <h3 style="color: var(--accent-green); margin-bottom: 10px; font-size: 1.1em;">✅ Validierungs-Datensätze</h3>
                 <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border-color);">
                     <span style="color: var(--text-secondary);">720×720</span>
                     <span style="color: var(--text-primary); font-weight: bold;" id="val720Count">0</span>
@@ -1444,22 +1444,22 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             </div>
             
             <div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-color); font-size: 0.85em; color: var(--text-secondary);">
-                Last check: Step <span id="datasetLastCheck">0</span>
+                Letzte Prüfung: Schritt <span id="datasetLastCheck">0</span>
             </div>
         </div>
         
-        <div class="section-header">📦 Current Batch</div>
+        <div class="section-header">📦 Aktueller Batch</div>
         
         <div class="layer-activity-container">
             <!-- Files used counter - Total -->
-            <div style="display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid var(--border-color); margin-bottom: 8px;">
-                <span style="color: var(--text-secondary); font-size: 1.05em;">Total Files (Accumulation)</span>
+            <div style="display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid var(--border-color); margin-bottom: 8px;" title="Bisher in dieser Epoche verarbeitete Dateien / Gesamtanzahl der Dateien in dieser Epoche">
+                <span style="color: var(--text-secondary); font-size: 1.05em;">Dateien (Epoche)</span>
                 <span style="color: var(--accent-blue); font-weight: bold; font-family: 'Courier New', monospace; font-size: 1.05em;" id="batchFilesUsed">0 / 0</span>
             </div>
             
             <!-- Files per size -->
             <div style="margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--border-color);">
-                <h3 style="color: var(--text-secondary); margin-bottom: 8px; font-size: 0.95em;">Files per Size:</h3>
+                <h3 style="color: var(--text-secondary); margin-bottom: 8px; font-size: 0.95em;">Dateien pro Auflösung:</h3>
                 
                 <div style="display: flex; justify-content: space-between; padding: 4px 0;">
                     <span style="color: var(--text-secondary); font-size: 0.9em;">720×720</span>
@@ -1478,20 +1478,20 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             </div>
             
             <!-- Accumulation steps info -->
-            <div style="display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid var(--border-color); margin-bottom: 12px;">
-                <span style="color: var(--text-secondary); font-size: 1.05em;">Accumulation Step</span>
+            <div style="display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid var(--border-color); margin-bottom: 12px;" title="Aktueller Schritt im Akkumulationsfenster / Gesamtanzahl der Schritte. Erst nach dem letzten Schritt wird der Optimizer aktualisiert.">
+                <span style="color: var(--text-secondary); font-size: 1.05em;">Akkumulationsschritt</span>
                 <span style="color: var(--accent-orange); font-weight: bold; font-size: 1.05em;" id="batchAccumulationSteps">1 / 1</span>
             </div>
             
             <!-- Current batch size -->
-            <div style="display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid var(--border-color); margin-bottom: 12px;">
-                <span style="color: var(--text-secondary); font-size: 1.05em;">Current Batch Size</span>
+            <div style="display: flex; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid var(--border-color); margin-bottom: 12px;" title="Anzahl der Bilder pro Einzelschritt und verwendete Auflösung">
+                <span style="color: var(--text-secondary); font-size: 1.05em;">Batch-Größe</span>
                 <span style="color: var(--accent-green); font-weight: bold; font-size: 1.05em;" id="batchSizeKey">-</span>
             </div>
             
             <!-- Batch files list -->
             <div style="margin-top: 8px;">
-                <h3 style="color: var(--accent-orange); margin-bottom: 8px; font-size: 1.05em;">Files in Accumulation Window:</h3>
+                <h3 style="color: var(--accent-orange); margin-bottom: 8px; font-size: 1.05em;">Dateien im Akkumulationsfenster:</h3>
                 <div id="batchFilesList" style="
                     width: 100%;
                     background: rgba(15, 23, 42, 0.6);
@@ -1523,7 +1523,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             </a>
             
             <div class="refresh-control">
-                <label for="refreshInterval">Auto-Refresh:</label>
+                <label for="refreshInterval">Auto-Aktualisierung:</label>
                 <input type="number" id="refreshInterval" value="5" min="1" max="60" step="1">
                 <span style="color: var(--text-secondary); margin-left: 5px;">Sekunden</span>
                 <button class="btn btn-success" onclick="updateRefreshRate()" style="margin-left: 10px;">
@@ -1557,6 +1557,12 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             document.getElementById('totalLoss').textContent = data.total_loss_value.toFixed(4);
             document.getElementById('learnRate').textContent = data.learning_rate_value.toFixed(6);
             document.getElementById('lrPhase').textContent = data.lr_phase_name;
+            const lrPhaseTranslations = {
+                'warmup': 'Aufwärmen', 'cosine': 'Kosinus-Abkühlung',
+                'plateau_boost': 'LR-Boost', 'plateau_reduced': 'LR reduziert'
+            };
+            document.getElementById('lrPhase').textContent =
+                lrPhaseTranslations[data.lr_phase_name] || data.lr_phase_name;
             document.getElementById('etaTotal').textContent = data.eta_total_formatted;
             document.getElementById('etaEpoch').textContent = data.eta_epoch_formatted;
             
@@ -1579,13 +1585,18 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             updateStackedBars(data);
             
             // Adaptive system status
-            document.getElementById('adaptiveMode').textContent = data.adaptive_mode || 'Stable';
+            const modeTranslations = {
+                'Stable': 'Stabil', 'Warmup': 'Aufwärmen',
+                'Settling': 'Einpendeln', 'Aggressive': 'Aggressiv'
+            };
+            const rawMode = data.adaptive_mode || 'Stable';
+            document.getElementById('adaptiveMode').textContent = modeTranslations[rawMode] || rawMode;
             const cooldownStatus = document.getElementById('cooldownStatus');
             const cooldownRemaining = document.getElementById('cooldownRemaining');
             if (data.adaptive_is_cooldown) {
                 cooldownStatus.textContent = 'Aktiv';
                 cooldownStatus.style.color = 'var(--accent-orange)';
-                cooldownRemaining.textContent = data.adaptive_cooldown_remaining + ' Steps verblieben';
+                cooldownRemaining.textContent = data.adaptive_cooldown_remaining + ' Schritte verbleibend';
             } else {
                 cooldownStatus.textContent = 'Inaktiv';
                 cooldownStatus.style.color = 'var(--accent-green)';
@@ -1782,7 +1793,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             
             if (plateauCounter < plateauPatience * 0.75) {
                 lossTrendScore = 30.0;
-                lossTrendText = 'Converging';
+                lossTrendText = 'Konvergierend';
                 lossTrendColor = 'var(--accent-green)';
             } else if (plateauCounter < plateauPatience * 1.5) {
                 lossTrendScore = 20.0;
@@ -1790,7 +1801,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 lossTrendColor = 'var(--accent-blue)';
             } else {
                 lossTrendScore = 10.0;
-                lossTrendText = 'Stagnating';
+                lossTrendText = 'Stagnierend';
                 lossTrendColor = 'var(--accent-red)';
             }
             scoreTotal += lossTrendScore;
@@ -1806,7 +1817,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 
                 const qualityColor = kiQuality >= 70 ? 'var(--accent-green)' : 
                                     kiQuality >= 50 ? 'var(--accent-blue)' : 'var(--accent-orange)';
-                components.push({ name: 'Quality', text: kiQuality.toFixed(0) + '%', color: qualityColor });
+                components.push({ name: 'Qualität', text: kiQuality.toFixed(0) + '%', color: qualityColor });
             }
             
             // 3. Learning stability (up to 30 points) - based on adaptive mode
@@ -1817,20 +1828,20 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             
             if (adaptiveMode === 'Stable' || plateauCounter < plateauPatience * 0.75) {
                 stabilityScore = 30.0;
-                stabilityText = 'Stable';
+                stabilityText = 'Stabil';
                 stabilityColor = 'var(--accent-green)';
             } else if (plateauCounter < plateauPatience * 1.5) {
                 stabilityScore = 20.0;
-                stabilityText = 'Moderate';
+                stabilityText = 'Mäßig';
                 stabilityColor = 'var(--accent-blue)';
             } else {
                 stabilityScore = 10.0;
-                stabilityText = 'Unstable';
+                stabilityText = 'Instabil';
                 stabilityColor = 'var(--accent-red)';
             }
             scoreTotal += stabilityScore;
             scoreMax += 30.0;
-            components.push({ name: 'Stability', text: stabilityText, color: stabilityColor });
+            components.push({ name: 'Stabilität', text: stabilityText, color: stabilityColor });
             
             // Calculate overall percentage
             const trainingScorePct = scoreMax > 0 ? (scoreTotal / scoreMax) * 100.0 : 50.0;
@@ -1843,22 +1854,22 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             
             if (trainingScorePct >= 80) {
                 cardClass += 'excellent';
-                scoreLabel = 'EXCELLENT';
+                scoreLabel = 'AUSGEZEICHNET';
                 scoreColor = 'var(--accent-green)';
                 scoreIcon = '🟢';
             } else if (trainingScorePct >= 60) {
                 cardClass += 'good';
-                scoreLabel = 'GOOD';
+                scoreLabel = 'GUT';
                 scoreColor = 'var(--accent-blue)';
                 scoreIcon = '🔵';
             } else if (trainingScorePct >= 40) {
                 cardClass += 'moderate';
-                scoreLabel = 'MODERATE';
+                scoreLabel = 'MÄSSIG';
                 scoreColor = 'var(--accent-orange)';
                 scoreIcon = '🟡';
             } else {
                 cardClass += 'needs-attention';
-                scoreLabel = 'NEEDS ATTENTION';
+                scoreLabel = 'AUFMERKSAMKEIT NÖTIG';
                 scoreColor = 'var(--accent-red)';
                 scoreIcon = '🔴';
             }
@@ -1875,16 +1886,16 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             
             // Update components
             document.getElementById('scoreTrend').innerHTML = 
-                `<span style="color: ${components[0].color}">${components[0].name}: ${components[0].text}</span>`;
+                `<span style="color: ${components[0].color}">Trend: ${components[0].text}</span>`;
             
             if (components.length > 1) {
                 document.getElementById('scoreQuality').innerHTML = 
-                    `<span style="color: ${components[1].color}">${components[1].name}: ${components[1].text}</span>`;
+                    `<span style="color: ${components[1].color}">Qualität: ${components[1].text}</span>`;
             }
             
             if (components.length > 2) {
                 document.getElementById('scoreStability').innerHTML = 
-                    `<span style="color: ${components[2].color}">${components[2].name}: ${components[2].text}</span>`;
+                    `<span style="color: ${components[2].color}">Stabilität: ${components[2].text}</span>`;
             }
         }
         
@@ -1903,10 +1914,10 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             // Update warning
             const warningEl = document.getElementById('peakWarning');
             if (peakValue > 2.0) {
-                warningEl.textContent = '🔴 EXTREME! Check training stability!';
+                warningEl.textContent = '🔴 EXTREM! Trainings-Stabilität prüfen!';
                 warningEl.style.display = 'block';
             } else if (peakValue > 1.5) {
-                warningEl.textContent = '⚠️ Unusually high activity!';
+                warningEl.textContent = '⚠️ Ungewöhnlich hohe Aktivität!';
                 warningEl.style.display = 'block';
             } else {
                 warningEl.style.display = 'none';
@@ -2267,14 +2278,14 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             .then(response => response.json())
             .then(result => {
                 if (result.success) {
-                    alert('✅ Checkpoint saved successfully!');
+                    alert('✅ Checkpoint gespeichert!');
                 } else {
-                    alert('❌ Failed to save checkpoint: ' + (result.message || 'Unknown error'));
+                    alert('❌ Fehler beim Speichern: ' + (result.message || 'Unbekannter Fehler'));
                 }
             })
             .catch(error => {
                 console.error('Error saving checkpoint:', error);
-                alert('❌ Error saving checkpoint');
+                alert('❌ Fehler beim Speichern des Checkpoints');
             });
         }
         
@@ -2294,19 +2305,19 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 if (result.success) {
                     const pauseBtn = document.getElementById('pauseBtn');
                     if (result.paused) {
-                        pauseBtn.textContent = '▶️ Resume Training';
+                        pauseBtn.textContent = '▶️ Training fortsetzen';
                         pauseBtn.className = 'btn btn-success';
                     } else {
-                        pauseBtn.textContent = '⏸️ Pause Training';
+                        pauseBtn.textContent = '⏸️ Training pausieren';
                         pauseBtn.className = 'btn btn-primary';
                     }
                 } else {
-                    alert('❌ Failed to toggle pause: ' + (result.message || 'Unknown error'));
+                    alert('❌ Fehler beim Pausieren: ' + (result.message || 'Unbekannter Fehler'));
                 }
             })
             .catch(error => {
                 console.error('Error toggling pause:', error);
-                alert('❌ Error toggling pause');
+                alert('❌ Fehler beim Pausieren');
             });
         }
         
@@ -2329,14 +2340,14 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             .then(response => response.json())
             .then(result => {
                 if (result.success) {
-                    alert('✅ Video test run queued successfully!\\n\\nThe trainer will process the test video shortly.');
+                    alert('✅ Video-Testlauf wurde gestartet!\\n\\nDer Trainer verarbeitet das Test-Video in Kürze.');
                 } else {
-                    alert('❌ Failed to queue video test: ' + (result.message || 'Unknown error'));
+                    alert('❌ Fehler beim Starten des Video-Tests: ' + (result.message || 'Unbekannter Fehler'));
                 }
             })
             .catch(error => {
                 console.error('Error triggering video test:', error);
-                alert('❌ Error triggering video test');
+                alert('❌ Fehler beim Video-Test');
             });
         }
         
@@ -2395,7 +2406,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 })
                 .catch(error => {
                     console.error('Error exporting logs:', error);
-                    alert('❌ Error exporting logs');
+                    alert('❌ Fehler beim Exportieren der Logs');
                 });
         }
         
@@ -2412,7 +2423,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 if (result.success) {
                     currentRefreshInterval = result.interval * 1000;
                     restartAutoRefresh();
-                    alert(`✅ Auto-Refresh auf ${result.interval} Sekunden gesetzt`);
+                    alert(`✅ Auto-Aktualisierung auf ${result.interval} Sekunden gesetzt`);
                 }
             })
             .catch(error => {

@@ -485,7 +485,7 @@ class AdaptiveSystem:
         
         return total_norm, self.clip_value
     
-    def update_plateau_tracker(self, loss, quality=None, step=0):
+    def update_plateau_tracker(self, loss, quality=None, step=0, warmup_steps=1000):
         """
         ADVANCED plateau detection with multiple signals:
         - Loss improvement (adaptive threshold based on loss level)
@@ -494,16 +494,18 @@ class AdaptiveSystem:
         - Grace period for noisy improvements
         
         Args:
-            loss:    Current total loss value
-            quality: Optional quality metric (KI quality %)
-            step:    Current global training step (used to freeze tracking
-                     during LR warmup so the counter stays at 0 until the
-                     model is in a stable learning regime)
+            loss:         Current total loss value
+            quality:      Optional quality metric (KI quality %)
+            step:         Current global training step
+            warmup_steps: Number of LR warmup steps (from LR scheduler config).
+                          Plateau tracking is frozen below this value so the
+                          counter only starts once the model is in a stable
+                          learning regime after the LR ramp-up is complete.
         """
-        # During LR warmup (step < 1000) the loss is dominated by the ramp-up
-        # schedule, not by genuine convergence.  Keep the tracker reset so it
-        # starts fresh with a clean slate once warmup ends.
-        if step < 1000:
+        # During LR warmup the loss is dominated by the ramp-up schedule, not
+        # by genuine convergence.  Keep the tracker reset so it starts fresh
+        # with a clean slate once warmup ends.
+        if step < warmup_steps:
             self.plateau_counter = 0
             self.ema_loss = None
             self.best_loss = float('inf')
