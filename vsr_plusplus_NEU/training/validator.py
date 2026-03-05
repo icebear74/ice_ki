@@ -4,6 +4,7 @@ VSRValidator - Validation logic for VSR training
 Validates model on validation set and computes quality metrics
 """
 
+import os
 import sys
 import time
 import torch
@@ -73,7 +74,7 @@ class VSRValidator:
         
         with torch.no_grad():
             for batch_idx, batch in enumerate(self.val_loader):
-                lr_stack, gt, _ = batch
+                lr_stack, gt, filenames = batch
                 # Update sample count BEFORE displaying
                 num_samples += lr_stack.size(0)
                 
@@ -189,8 +190,9 @@ class VSRValidator:
                     combined_tensor = combined_tensor.float() / 255.0
                     combined_tensor = combined_tensor.contiguous()
                     
-                    # Store only the final labeled image
-                    labeled_images.append(combined_tensor)
+                    # Store only the final labeled image, keyed by filename stem
+                    name = os.path.splitext(os.path.basename(filenames[i]))[0]
+                    labeled_images.append((name, combined_tensor))
                 
                 # GPU MEMORY CRITICAL: Free GPU tensors IMMEDIATELY after batch processing
                 # This is the key to reducing VRAM usage during validation
