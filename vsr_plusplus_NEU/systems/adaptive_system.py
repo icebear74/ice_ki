@@ -195,9 +195,9 @@ class AdaptiveSystem:
         
         if not self._warmup_complete:
             self._warmup_steps += 1
-            # Wait until step 6000: 5000 full-frame warmup steps + 1000 crop intro steps
+            # Wait until step 16000: 15000 full-frame warmup steps + 1000 crop intro steps
             # to ensure aggressive mode doesn't fire on the natural loss increase from crop introduction
-            if self._warmup_steps >= 6000:
+            if self._warmup_steps >= 16000:
                 self._warmup_complete = True
             # During warmup, don't trigger aggressive mode
             return sharpness_ratio
