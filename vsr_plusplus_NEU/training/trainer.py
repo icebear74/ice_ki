@@ -203,7 +203,8 @@ class VSRTrainer:
         steps_per_epoch = len(self.train_loader) // default_accum_steps
         current_epoch_step = 0
         accum_counter = 0  # Running counter for dynamic accumulation
-        
+        prev_size_key = None  # Track size-key changes for clean boundary enforcement
+
         # Buffer for accumulation window files
         accumulation_buffer = []
         
@@ -261,6 +262,20 @@ class VSRTrainer:
                 current_accum_steps = 4
             else:
                 current_accum_steps = default_accum_steps
+
+            # ── Size-key transition: enforce clean accumulation boundaries ────
+            # If the resolution block changes mid-accumulation (e.g. due to a
+            # crash-resume or an imperfect sampler block), discard any partially
+            # accumulated gradients and reset the display buffer so the WebUI
+            # never shows files from different resolutions in the same window.
+            if size_key != prev_size_key:
+                if accum_counter > 0:
+                    # Discard partial gradients — never mix resolutions
+                    self.optimizer.zero_grad()
+                    accum_counter = 0
+                accumulation_buffer = []
+            prev_size_key = size_key
+            # ── End size-key transition ───────────────────────────────────────
             
             # Track batch files for WebUI display — always update counters, filenames when available
             if hasattr(self, 'web_monitor') and self.web_monitor:
@@ -283,7 +298,7 @@ class VSRTrainer:
                         'size_key': size_key
                     })
                     # Keep only last current_accum_steps batches
-                    if len(accumulation_buffer) > current_accum_steps:
+                    while len(accumulation_buffer) > current_accum_steps:
                         accumulation_buffer.pop(0)
                 
                 # Collect all files and per-size counts from accumulation window
