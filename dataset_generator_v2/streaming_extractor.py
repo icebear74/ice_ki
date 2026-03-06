@@ -19,6 +19,11 @@ build_frame_ranges_from_assignments()
     Merge the per-assignment frame windows into the minimal set of
     contiguous ranges needed.  Useful for logging / optimisation analysis.
 
+snap_assignments_to_centers()
+    Snap near-duplicate center frame indices (within ±tol_frames) to a
+    shared representative center, reducing redundant work when multiple
+    categories are active.
+
 extract_and_save_streaming_distributed()
     Main entry point.  Launches one FFmpeg process, streams BGR24 frames,
     saves patches on-the-fly.
@@ -31,6 +36,7 @@ save_patch_pair()
 """
 
 import os
+import queue
 import random
 import subprocess
 import threading
@@ -73,20 +79,25 @@ STREAM_HEIGHT: int = 1080
 # HDR→SDR: Software (CPU-only) fallback.
 # zscale reads tin from stream metadata → works for smpte2084, hlg, bt709.
 # range=full: unambiguous 0-255 output for OpenCV.
+# Performance notes:
+#   - tonemap=reinhard is the fastest tone-mapper (simple x/(1+x) curve).
+#   - flags=bilinear is much faster than lanczos for the resize step; the
+#     difference in quality is invisible after the patch crop.
+#   - filter=bilinear in each zscale step speeds up any incidental resampling.
 _TONEMAP_FILTER: str = (
-    "zscale=t=linear:npl=100,"
+    "zscale=t=linear:npl=100:filter=bilinear,"
     "format=gbrpf32le,"
-    "zscale=p=bt709,"
-    "tonemap=tonemap=mobius:desat=0,"
-    "zscale=t=bt709:m=bt709:range=full,"
-    f"scale={STREAM_WIDTH}:{STREAM_HEIGHT}:flags=lanczos,"
+    "zscale=p=bt709:filter=bilinear,"
+    "tonemap=tonemap=reinhard:desat=0,"
+    "zscale=t=bt709:m=bt709:range=full:filter=bilinear,"
+    f"scale={STREAM_WIDTH}:{STREAM_HEIGHT}:flags=bilinear,"
     "format=bgr24"
 )
 
 # SDR pass-through: Software (CPU-only).
 # No linearisation or tonemap needed — just scale + convert to BGR24.
 _SDR_FILTER: str = (
-    f"scale={STREAM_WIDTH}:{STREAM_HEIGHT}:flags=lanczos,"
+    f"scale={STREAM_WIDTH}:{STREAM_HEIGHT}:flags=bilinear,"
     "format=bgr24"
 )
 
@@ -99,11 +110,11 @@ _TONEMAP_FILTER_SCALE_CUDA: str = (
     f"scale_cuda={STREAM_WIDTH}:{STREAM_HEIGHT},"
     "hwdownload,"
     "format=p010,"
-    "zscale=t=linear:npl=100,"
+    "zscale=t=linear:npl=100:filter=bilinear,"
     "format=gbrpf32le,"
-    "zscale=p=bt709,"
-    "tonemap=tonemap=mobius:desat=0,"
-    "zscale=t=bt709:m=bt709:range=full,"
+    "zscale=p=bt709:filter=bilinear,"
+    "tonemap=tonemap=reinhard:desat=0,"
+    "zscale=t=bt709:m=bt709:range=full:filter=bilinear,"
     "format=bgr24"
 )
 
@@ -495,6 +506,59 @@ def build_assignments_per_category(
     return sorted(all_assignments, key=lambda x: x[0])
 
 
+def snap_assignments_to_centers(
+    assignments: List[Tuple[int, str, str]],
+    fps: float,
+    tol_seconds: float = 1.0,
+) -> List[Tuple[int, str, str]]:
+    """
+    Snap near-duplicate center frame indices across categories to shared centers.
+
+    Assignments whose ``center_frame_idx`` falls within ``±tol_frames`` of an
+    already-chosen representative center are remapped to that representative.
+    This prevents independent per-category assignments that differ by only a
+    few frames from being treated as distinct streaming positions, reducing the
+    number of unique centers and improving throughput when multiple categories
+    are active.
+
+    The algorithm is O(N log N):
+
+    1. Sort assignments by ``center_frame_idx``.
+    2. Walk in order, greedily assigning each center to the current cluster
+       representative (first element encountered in that cluster).
+    3. A new cluster starts when the current center is more than
+       ``tol_frames`` away from the current representative.
+
+    Args:
+        assignments:  List of ``(center_frame_idx, category, format_name)``.
+        fps:          Video frame rate used to convert seconds → frames.
+        tol_seconds:  Tolerance window in seconds (default 1.0).  Set to 0 to
+                      disable snapping entirely.
+
+    Returns:
+        Sorted list of ``(center_frame_idx, category, format_name)`` with
+        snapped center indices.  The ``(category, format_name)`` pairs are
+        preserved unchanged; only ``center_frame_idx`` values may be adjusted.
+    """
+    if not assignments or tol_seconds <= 0.0:
+        return sorted(assignments, key=lambda x: x[0])
+
+    tol_frames: int = max(1, int(round(fps * tol_seconds)))
+
+    sorted_asgn = sorted(assignments, key=lambda x: x[0])
+
+    result: List[Tuple[int, str, str]] = []
+    rep_center: Optional[int] = None  # current cluster representative
+
+    for frame_idx, category, fmt_name in sorted_asgn:
+        if rep_center is None or abs(frame_idx - rep_center) > tol_frames:
+            # Start a new cluster: this frame becomes the representative.
+            rep_center = frame_idx
+        result.append((rep_center, category, fmt_name))
+
+    return result
+
+
 def degrade_lr_frame(
     frame: np.ndarray,
     degrade_cfg: dict,
@@ -779,6 +843,7 @@ def extract_and_save_streaming_distributed(
     nice_level: int = 10,
     is_hdr: bool = True,
     degrade_cfg: Optional[dict] = None,
+    center_snap_seconds: float = 0.0,
 ) -> Dict[str, int]:
     """
     Stream the video once and save patches as frames pass through the buffer.
@@ -792,54 +857,64 @@ def extract_and_save_streaming_distributed(
     The stream is terminated early once the last needed frame has been read.
 
     Args:
-        video_path:        Path to input video.
-        assignments:       Output of :func:`build_assignments_per_category`.
-        n_frames:          Frames per patch window (default 7).
-        format_config:     ``{category: {format_name: {'gt_size': …, 'lr_size': …}}}``.
-        base_dir:          Root dataset output directory.
-        fps:               Video frame rate.
-        logger:            Optional logger instance.
-        is_interesting_fn: Optional callable ``(patch: np.ndarray) -> bool`` for
-                           quality gating.  When provided, random crops are re-tried
-                           up to 5 times before falling back to a centre crop.
-        is_black_frame_fn: Optional callable ``(frame: np.ndarray) -> bool``
-                           receiving the raw center frame.  When provided and
-                           returns ``True`` the entire video position (all its
-                           category/format pairs) is skipped without saving.
-                           Defaults to :func:`is_black_frame` when ``None`` is
-                           passed (i.e. black frames are always filtered unless you
-                           explicitly pass ``lambda _: False``).
-                           Note: the ``is_black_frame`` default filter (mean < 20)
-                           partially overlaps with the variety-std check inside
-                           ``create_patch_pair`` (std < 15).  Set
-                           ``is_black_frame_fn=lambda _: False`` to disable the
-                           pre-filter entirely if you rely solely on the variety
-                           check via ``min_variety_std`` in the quality config.
-        progress_fn:       Optional callable
-                           ``(frames_examined: int,
-                              patches_so_far: Dict[str, int],
-                              raw_frames_read: int)``
-                           invoked after *every* processed assignment (saved **or**
-                           skipped).  ``raw_frames_read`` is the total number of
-                           raw video frames decoded from the stream so far.
-        use_cuda:          When ``True`` (default), enable CUDA hardware-accelerated
-                           decoding if the local FFmpeg build supports it.  Falls
-                           back to software decoding automatically when CUDA is not
-                           available.
-        nice_level:        CPU-priority adjustment passed to ``os.nice()`` for the
-                           FFmpeg subprocess (default 10 = lower priority).  Has no
-                           effect on non-Unix platforms.
-        is_hdr:            Whether the source video uses an HDR transfer function
-                           (PQ / HLG).  When ``True`` (default) the full HDR→SDR
-                           tonemap chain is applied.  When ``False`` a lightweight
-                           scale-only chain is used, avoiding incorrect
-                           re-linearisation of SDR gamma that would cause
-                           overexposure.
-        degrade_cfg:       Optional degradation config dict forwarded to
-                           :func:`create_patch_pair` / :func:`degrade_lr_frame`.
-                           When ``None`` no LR degradation is applied.  Populate
-                           from the ``quality`` section of the generator config
-                           (keys: ``lr_degrade_prob``, ``lr_dark_boost``, etc.).
+        video_path:          Path to input video.
+        assignments:         Output of :func:`build_assignments_per_category`.
+        n_frames:            Frames per patch window (default 7).
+        format_config:       ``{category: {format_name: {'gt_size': …, 'lr_size': …}}}``.
+        base_dir:            Root dataset output directory.
+        fps:                 Video frame rate.
+        logger:              Optional logger instance.
+        is_interesting_fn:   Optional callable ``(patch: np.ndarray) -> bool`` for
+                             quality gating.  When provided, random crops are re-tried
+                             up to 5 times before falling back to a centre crop.
+        is_black_frame_fn:   Optional callable ``(frame: np.ndarray) -> bool``
+                             receiving the raw center frame.  When provided and
+                             returns ``True`` the entire video position (all its
+                             category/format pairs) is skipped without saving.
+                             Defaults to :func:`is_black_frame` when ``None`` is
+                             passed (i.e. black frames are always filtered unless you
+                             explicitly pass ``lambda _: False``).
+                             Note: the ``is_black_frame`` default filter (mean < 20)
+                             partially overlaps with the variety-std check inside
+                             ``create_patch_pair`` (std < 15).  Set
+                             ``is_black_frame_fn=lambda _: False`` to disable the
+                             pre-filter entirely if you rely solely on the variety
+                             check via ``min_variety_std`` in the quality config.
+        progress_fn:         Optional callable
+                             ``(frames_examined: int,
+                                patches_so_far: Dict[str, int],
+                                raw_frames_read: int)``
+                             invoked after *every* processed assignment (saved **or**
+                             skipped).  ``raw_frames_read`` is the total number of
+                             raw video frames decoded from the stream so far.
+        use_cuda:            When ``True`` (default), enable CUDA hardware-accelerated
+                             decoding if the local FFmpeg build supports it.  Falls
+                             back to software decoding automatically when CUDA is not
+                             available.
+        nice_level:          CPU-priority adjustment passed to ``os.nice()`` for the
+                             FFmpeg subprocess (default 10 = lower priority).  Has no
+                             effect on non-Unix platforms.
+        is_hdr:              Whether the source video uses an HDR transfer function
+                             (PQ / HLG).  When ``True`` (default) the full HDR→SDR
+                             tonemap chain is applied.  When ``False`` a lightweight
+                             scale-only chain is used, avoiding incorrect
+                             re-linearisation of SDR gamma that would cause
+                             overexposure.
+        degrade_cfg:         Optional degradation config dict forwarded to
+                             :func:`create_patch_pair` / :func:`degrade_lr_frame`.
+                             When ``None`` no LR degradation is applied.  Populate
+                             from the ``quality`` section of the generator config
+                             (keys: ``lr_degrade_prob``, ``lr_dark_boost``, etc.).
+        center_snap_seconds: Tolerance in seconds for cross-category center snapping
+                             (default 0.0 = disabled).  When > 0, assignments whose
+                             center frame indices lie within
+                             ``±round(fps * center_snap_seconds)`` frames of each
+                             other are unified to a shared representative center.
+                             Useful when external code generates near-duplicate centers;
+                             has no benefit (and halves the SPS metric) when
+                             ``build_assignments_per_category`` is used, because that
+                             function already places each category on its own
+                             evenly-spaced grid.
 
     Returns:
         ``{category: patches_saved_count}``
@@ -858,7 +933,25 @@ def extract_and_save_streaming_distributed(
         return {}
 
     half = n_frames // 2
-    sorted_asgn = sorted(assignments, key=lambda x: x[0])
+
+    # --- Optional cross-category center snapping --------------------------
+    if center_snap_seconds > 0.0:
+        n_before = len(assignments)
+        unique_before = len({idx for idx, _, _ in assignments})
+        snapped_asgn = snap_assignments_to_centers(
+            assignments, fps=fps, tol_seconds=center_snap_seconds
+        )
+        unique_after = len({idx for idx, _, _ in snapped_asgn})
+        _snap_tol_frames = max(1, int(round(fps * center_snap_seconds)))
+        _log(
+            f"🔗 Center snapping: {n_before} assignments, "
+            f"{unique_before} unique centers → {unique_after} unique centers "
+            f"(tol={center_snap_seconds:.2f}s / {_snap_tol_frames} frames)"
+        )
+    else:
+        snapped_asgn = assignments  # snapping disabled — use as-is
+
+    sorted_asgn = sorted(snapped_asgn, key=lambda x: x[0])
 
     # Build mapping: center_frame_idx → [(category, format_name), …]
     center_map: Dict[int, List[Tuple[str, str]]] = {}
@@ -868,6 +961,89 @@ def extract_and_save_streaming_distributed(
     pending_centers: List[int] = sorted(center_map.keys())
     last_needed: int = pending_centers[-1] + half if pending_centers else 0
 
+    # --- Build the exact set of frames that will ever be needed -----------
+    # Each assignment requires a contiguous window [center-half … center+half].
+    # We collect every frame index in any such window, sort them, and merge
+    # adjacent indices into contiguous ranges.  These ranges are then passed
+    # to FFmpeg as a `select` filter expression so that the expensive tonemap
+    # and scale stages run *only* on the frames Python will actually use.
+    #
+    # For a typical 10-minute 24fps video with 100 scene assignments and
+    # n_frames=7, this reduces filter-chain CPU work from ~14 400 frames
+    # to ~700 frames (≈5%).
+    _all_needed: List[int] = sorted({
+        fi
+        for c in pending_centers
+        for fi in range(max(0, c - half), c + half + 1)
+    })
+    # Merge into contiguous ranges for a compact select expression.
+    _select_ranges: List[Tuple[int, int]] = []
+    if _all_needed:
+        _rs, _re = _all_needed[0], _all_needed[0]
+        for _f in _all_needed[1:]:
+            if _f == _re + 1:
+                _re = _f
+            else:
+                _select_ranges.append((_rs, _re))
+                _rs = _re = _f
+        _select_ranges.append((_rs, _re))
+
+    # FFmpeg's filtergraph parser treats commas as filter separators, so the
+    # commas inside between(n,a,b) must be escaped with a backslash so they
+    # are not misread as filter boundaries.
+    _select_expr: str = "+".join(
+        f"between(n\\,{s}\\,{e})" for s, e in _select_ranges
+    )
+
+    _select_pct = (
+        100.0 * len(_all_needed) / (last_needed + 1) if last_needed >= 0 else 100.0
+    )
+
+    # --- Pre-compute per-video constants ----------------------------------
+    # video_stem and output dir paths are the same for every patch in this
+    # video — compute them once to avoid Path() and os.makedirs overhead in
+    # the hot decode loop.
+    _video_stem: str = Path(video_path).stem
+    _output_dirs_cache: Dict[Tuple[str, str], Dict[str, str]] = {}
+    for _, _cat, _fmt in sorted_asgn:
+        _key = (_cat, _fmt)
+        if _key not in _output_dirs_cache:
+            _dirs = get_output_dirs_for_format(base_dir, _cat, _fmt, n_frames)
+            for _d in _dirs.values():
+                os.makedirs(_d, exist_ok=True)
+            _output_dirs_cache[_key] = _dirs
+
+    # --- Async PNG write queue --------------------------------------------
+    # Patch writing is off-loaded to background threads so that disk I/O
+    # overlaps with FFmpeg decode.  Use 2 writer threads to fill both GT and
+    # LR paths in parallel.  A bounded queue provides back-pressure when the
+    # disk is slower than the CPU.
+    _png_params = [cv2.IMWRITE_PNG_COMPRESSION, 1]
+    _write_queue: queue.Queue = queue.Queue(maxsize=256)
+
+    def _write_worker() -> None:
+        while True:
+            item = _write_queue.get()
+            if item is None:
+                _write_queue.task_done()
+                break
+            gt_img, lr_img, gt_p, lr_p = item
+            try:
+                cv2.imwrite(gt_p, gt_img, _png_params)
+                cv2.imwrite(lr_p, lr_img, _png_params)
+            except Exception as _exc:
+                if logger:
+                    logger.warning(f"[write_worker] Failed to write patch: {_exc!r}")
+            _write_queue.task_done()
+
+    _n_write_threads = 2
+    _write_threads = [
+        threading.Thread(target=_write_worker, daemon=True)
+        for _ in range(_n_write_threads)
+    ]
+    for _t in _write_threads:
+        _t.start()
+
     # Build FFmpeg command.
     #
     # Pipeline tier is chosen by build_vf_filter() based on is_hdr and
@@ -875,14 +1051,57 @@ def extract_and_save_streaming_distributed(
     #
     #  HDR source  + full-GPU   → tonemap_cuda + scale_cuda + hwdownload
     #  HDR source  + scale-GPU  → scale_cuda + hwdownload (p010) + zscale+tonemap
-    #  HDR source  + CPU-only   → zscale + tonemap + scale (software)
+    #  HDR source  + CPU-only   → zscale + tonemap(reinhard) + scale (bilinear)
     #  SDR source  + scale-GPU  → scale_cuda + hwdownload (plain scale)
-    #  SDR source  + CPU-only   → scale (software, no linearisation)
+    #  SDR source  + CPU-only   → scale bilinear (software, no linearisation)
     _use_cuda = use_cuda and cuda_available()
     _full_gpu  = _use_cuda and is_hdr and tonemap_cuda_available()
     _scale_gpu = _use_cuda and (not _full_gpu) and scale_cuda_available()
 
     vf_filter = build_vf_filter(is_hdr=is_hdr, use_cuda=use_cuda)
+
+    # --- Inject select filter to skip unused frames in the filter chain ---
+    # The `select` filter passes only the frames in `_select_expr` to
+    # downstream filter stages.  Non-selected frames are still decoded
+    # (unavoidable for H.264/H.265 inter-frame prediction) but bypass the
+    # expensive scale/tonemap/zscale stages entirely.
+    #
+    # Placement depends on the pipeline tier:
+    #   CPU path        → select goes at the very start of the filter chain.
+    #   Hybrid GPU/CPU  → GPU scale runs first (cheap, already on GPU);
+    #                     select is inserted right after hwdownload so the
+    #                     expensive CPU tonemap only runs on needed frames.
+    #   Full-GPU        → all stages are on GPU; select is placed after the
+    #                     final hwdownload to cut pipe bandwidth.
+    if _select_expr:
+        if _full_gpu:
+            # Full-GPU: insert select right before the final format=bgr24
+            # (after hwdownload+scale=iw:ih+format=yuv420p — all GPU work
+            # is already done, select avoids the final CPU format conversion
+            # and the pipe write for unwanted frames).
+            _marker = ",format=bgr24"
+            if _marker in vf_filter:
+                vf_filter = vf_filter.replace(
+                    _marker, f",select={_select_expr},format=bgr24", 1
+                )
+            else:
+                _log("⚠️  Could not inject select into full-GPU filter chain — falling back to prepend")
+                vf_filter = f"select={_select_expr},{vf_filter}"
+        elif _scale_gpu:
+            # Hybrid scale-GPU + CPU tonemap: insert select after hwdownload
+            # so the CPU-side zscale/tonemap only processes needed frames.
+            _marker = "hwdownload,"
+            if _marker in vf_filter:
+                vf_filter = vf_filter.replace(
+                    _marker, f"hwdownload,select={_select_expr},", 1
+                )
+            else:
+                _log("⚠️  Could not inject select into hybrid GPU filter chain — falling back to prepend")
+                vf_filter = f"select={_select_expr},{vf_filter}"
+        else:
+            # CPU-only (or decode-only CUDA): prepend select so tonemap/scale
+            # runs on needed frames only.
+            vf_filter = f"select={_select_expr},{vf_filter}"
 
     # -init_hw_device cuda=hw explicitly initialises the CUDA device context
     # before demuxing begins.  Without this flag some FFmpeg builds silently
@@ -902,16 +1121,32 @@ def extract_and_save_streaming_distributed(
         pipeline_label = f"decode-GPU + CPU {'tonemap' if is_hdr else 'scale'} [{hdr_label}]"
     else:
         hw_args        = []
-        pipeline_label = f"CPU-only {'tonemap' if is_hdr else 'scale'} [{hdr_label}]"
+        pipeline_label = f"CPU-only {'tonemap/reinhard' if is_hdr else 'scale/bilinear'} [{hdr_label}]"
 
     _log(
         f"🎬 Streaming extractor: {len(sorted_asgn)} assignments, "
+        f"{len(pending_centers)} unique centers, "
         f"last frame needed: {last_needed}, "
         f"pipeline={pipeline_label}, nice={nice_level}"
     )
+    _log(
+        f"🎯 Frame selection: {len(_all_needed)} frames needed "
+        f"({_select_pct:.1f}% of {last_needed + 1} decoded) "
+        f"in {len(_select_ranges)} ranges — "
+        f"filter-chain CPU reduced proportionally"
+    )
 
+    # -threads 0  → FFmpeg auto-selects the optimal number of decode threads
+    #               (H.264 / H.265 decoders are slice-threaded: all CPU cores
+    #               are used without this flag the decoder is single-threaded).
+    # -filter_threads 0 → same for the filter graph (zscale, scale).
+    # -loglevel warning → suppress the verbose per-frame ffmpeg info lines;
+    #               errors and warnings still appear in the stderr pipe.
     cmd = [
         "ffmpeg",
+        "-threads", "0",
+        "-filter_threads", "0",
+        "-loglevel", "warning",
         *hw_args,
         "-i", video_path,
         "-vf", vf_filter,
@@ -963,14 +1198,17 @@ def extract_and_save_streaming_distributed(
     stderr_thread.start()
 
     try:
-        current_frame: int = 0
+        # `selected_idx` tracks our position in `_all_needed`.  FFmpeg (via the
+        # `select` filter) only outputs the frames in that list, in sorted order,
+        # so each pipe read maps directly to `_all_needed[selected_idx]`.
+        selected_idx: int = 0
         _t_start: Optional[float] = None   # set on first frame (excludes startup)
-        _log_interval: int = 100           # log throughput every N raw frames
+        _log_interval: int = 50            # log throughput every N selected frames
 
         while pending_idx < len(pending_centers):
             raw = process.stdout.read(frame_bytes)
             if len(raw) < frame_bytes:
-                _log("⚠️  Video stream ended before all assignments were processed")
+                _log("⚠️  Video stream ended before all selected frames were received")
                 break
 
             # Start the clock on the very first frame so FFmpeg startup time
@@ -978,10 +1216,20 @@ def extract_and_save_streaming_distributed(
             if _t_start is None:
                 _t_start = time.monotonic()
 
+            # Guard against FFmpeg producing more frames than the select
+            # expression requested (shouldn't happen, but avoids IndexError).
+            if selected_idx >= len(_all_needed):
+                _log("⚠️  FFmpeg produced more frames than selected — stopping")
+                break
+
+            # Map this pipe read to its actual video frame index.
+            actual_frame: int = _all_needed[selected_idx]
+            selected_idx += 1
+
             frame = np.frombuffer(raw, dtype=np.uint8).reshape(
                 (STREAM_HEIGHT, STREAM_WIDTH, 3)
             ).copy()
-            buffer[current_frame] = frame
+            buffer[actual_frame] = frame
 
             # Evict frames that are no longer needed by any pending assignment.
             # The earliest window we still need starts at pending_center - half.
@@ -992,7 +1240,7 @@ def extract_and_save_streaming_distributed(
             # Satisfy pending assignments whose full window is now in the buffer
             while pending_idx < len(pending_centers):
                 center = pending_centers[pending_idx]
-                if current_frame < center + half:
+                if actual_frame < center + half:
                     break  # Need more frames
 
                 # Build the n_frames window; clamp negative indices to 0
@@ -1041,42 +1289,38 @@ def extract_and_save_streaming_distributed(
                                     break
 
                             if gt is not None and lr is not None:
-                                ok, _, _ = save_patch_pair(
-                                    gt, lr, video_path, ts,
-                                    category, fmt_name, n_frames, base_dir,
+                                dirs = _output_dirs_cache[(category, fmt_name)]
+                                patch_name = f"{_video_stem}_{int(ts * 1000):08d}.png"
+                                _write_queue.put((
+                                    gt, lr,
+                                    os.path.join(dirs["gt"], patch_name),
+                                    os.path.join(dirs["lr"], patch_name),
+                                ))
+                                patches_created[category] = (
+                                    patches_created.get(category, 0) + 1
                                 )
-                                if ok:
-                                    patches_created[category] = (
-                                        patches_created.get(category, 0) + 1
-                                    )
-                                    _log(
-                                        f"  ✓ frame {center} → {category}/{fmt_name}"
-                                    )
 
                     if progress_fn is not None:
-                        progress_fn(frames_examined, dict(patches_created), current_frame)
+                        # 3rd arg = actual video frame index (same semantics as
+                        # the previous raw_frames_read / current_frame counter —
+                        # monotonically increasing video frame number).
+                        progress_fn(frames_examined, dict(patches_created), actual_frame)
 
                 pending_idx += 1
 
-            current_frame += 1
-
             # Periodic throughput log.
-            # FPS = raw decoded frames per second (pipeline throughput).
-            # SPS = scene-sets completed per second (= assignments processed / s).
-            if _t_start is not None and current_frame % _log_interval == 0:
+            # SPS = scene-sets completed per second (assignments processed / s).
+            # sel/s = selected frames per second (frames FFmpeg actually piped).
+            if _t_start is not None and selected_idx % _log_interval == 0:
                 _elapsed = time.monotonic() - _t_start
                 if _elapsed > 0:
-                    _fps_actual = current_frame / _elapsed
+                    _sel_fps = selected_idx / _elapsed
                     _sps_actual = frames_examined / _elapsed
                     _log(
-                        f"  📊 frame {current_frame:>6}  "
-                        f"FPS {_fps_actual:>6.1f}  SPS {_sps_actual:>6.2f}  "
-                        f"(scenes completed: {frames_examined})"
+                        f"  📊 sel {selected_idx:>5}/{len(_all_needed)}  "
+                        f"sel/s {_sel_fps:>6.1f}  SPS {_sps_actual:>6.2f}  "
+                        f"(scenes: {frames_examined})"
                     )
-
-            # Early exit once the last required frame has been read
-            if current_frame > last_needed:
-                break
 
     finally:
         try:
@@ -1089,10 +1333,17 @@ def extract_and_save_streaming_distributed(
         # Log FFmpeg stderr whenever no frames were produced — this is the
         # most useful diagnostic for filter chain errors (e.g. unsupported
         # interp_algo, pixel format mismatch, missing filter).
-        if current_frame == 0 and stderr_lines:
+        if selected_idx == 0 and stderr_lines:
             _log("FFmpeg stderr (last 20 lines):")
             for _line in stderr_lines[-20:]:
                 _log(f"  [ffmpeg] {_line}")
+
+        # Drain the async write queue — wait for all pending PNG writes to
+        # finish before returning so that patches_created is accurate.
+        for _ in _write_threads:
+            _write_queue.put(None)  # poison pill per worker
+        for _t in _write_threads:
+            _t.join()
 
     # GPU pipeline produced zero frames — most likely a runtime hw-accel failure
     # (e.g. CUDA driver mismatch, scale_cuda format-negotiation bug, or FFmpeg
@@ -1100,7 +1351,7 @@ def extract_and_save_streaming_distributed(
     # contains scale_cuda / hwdownload GPU filters).
     # Retry transparently with the CPU-only pipeline so extraction still
     # completes, rather than silently returning 0 patches.
-    if current_frame == 0 and (_full_gpu or _scale_gpu):
+    if selected_idx == 0 and (_full_gpu or _scale_gpu):
         _log(
             "⚠️  GPU pipeline produced no frames — retrying with CPU-only pipeline"
         )
@@ -1118,6 +1369,7 @@ def extract_and_save_streaming_distributed(
             use_cuda=False,
             nice_level=nice_level,
             is_hdr=is_hdr,
+            center_snap_seconds=center_snap_seconds,
         )
 
     total = sum(patches_created.values())
@@ -1125,13 +1377,13 @@ def extract_and_save_streaming_distributed(
         (time.monotonic() - _t_start) if _t_start is not None else 0.0
     )
     if _elapsed_total > 0:
-        _fps_final = current_frame / _elapsed_total
         _sps_final = frames_examined / _elapsed_total
+        _sel_fps_final = selected_idx / _elapsed_total
         _log(
             f"✓ Streaming extraction done: {total} patches saved, "
             f"{frames_examined} assignments examined, "
-            f"{current_frame} frames decoded — "
-            f"FPS {_fps_final:.1f}  SPS {_sps_final:.2f}"
+            f"{selected_idx}/{len(_all_needed)} selected frames received — "
+            f"sel/s {_sel_fps_final:.1f}  SPS {_sps_final:.2f}"
         )
     else:
         _log(
