@@ -19,6 +19,11 @@ build_frame_ranges_from_assignments()
     Merge the per-assignment frame windows into the minimal set of
     contiguous ranges needed.  Useful for logging / optimisation analysis.
 
+snap_assignments_to_centers()
+    Snap near-duplicate center frame indices (within ±tol_frames) to a
+    shared representative center, reducing redundant work when multiple
+    categories are active.
+
 extract_and_save_streaming_distributed()
     Main entry point.  Launches one FFmpeg process, streams BGR24 frames,
     saves patches on-the-fly.
@@ -495,6 +500,59 @@ def build_assignments_per_category(
     return sorted(all_assignments, key=lambda x: x[0])
 
 
+def snap_assignments_to_centers(
+    assignments: List[Tuple[int, str, str]],
+    fps: float,
+    tol_seconds: float = 1.0,
+) -> List[Tuple[int, str, str]]:
+    """
+    Snap near-duplicate center frame indices across categories to shared centers.
+
+    Assignments whose ``center_frame_idx`` falls within ``±tol_frames`` of an
+    already-chosen representative center are remapped to that representative.
+    This prevents independent per-category assignments that differ by only a
+    few frames from being treated as distinct streaming positions, reducing the
+    number of unique centers and improving throughput when multiple categories
+    are active.
+
+    The algorithm is O(N log N):
+
+    1. Sort assignments by ``center_frame_idx``.
+    2. Walk in order, greedily assigning each center to the current cluster
+       representative (first element encountered in that cluster).
+    3. A new cluster starts when the current center is more than
+       ``tol_frames`` away from the current representative.
+
+    Args:
+        assignments:  List of ``(center_frame_idx, category, format_name)``.
+        fps:          Video frame rate used to convert seconds → frames.
+        tol_seconds:  Tolerance window in seconds (default 1.0).  Set to 0 to
+                      disable snapping entirely.
+
+    Returns:
+        Sorted list of ``(center_frame_idx, category, format_name)`` with
+        snapped center indices.  The ``(category, format_name)`` pairs are
+        preserved unchanged; only ``center_frame_idx`` values may be adjusted.
+    """
+    if not assignments or tol_seconds <= 0.0:
+        return sorted(assignments, key=lambda x: x[0])
+
+    tol_frames: int = max(1, int(round(fps * tol_seconds)))
+
+    sorted_asgn = sorted(assignments, key=lambda x: x[0])
+
+    result: List[Tuple[int, str, str]] = []
+    rep_center: Optional[int] = None  # current cluster representative
+
+    for frame_idx, category, fmt_name in sorted_asgn:
+        if rep_center is None or abs(frame_idx - rep_center) > tol_frames:
+            # Start a new cluster: this frame becomes the representative.
+            rep_center = frame_idx
+        result.append((rep_center, category, fmt_name))
+
+    return result
+
+
 def degrade_lr_frame(
     frame: np.ndarray,
     degrade_cfg: dict,
@@ -779,6 +837,7 @@ def extract_and_save_streaming_distributed(
     nice_level: int = 10,
     is_hdr: bool = True,
     degrade_cfg: Optional[dict] = None,
+    center_snap_seconds: float = 1.0,
 ) -> Dict[str, int]:
     """
     Stream the video once and save patches as frames pass through the buffer.
@@ -792,54 +851,60 @@ def extract_and_save_streaming_distributed(
     The stream is terminated early once the last needed frame has been read.
 
     Args:
-        video_path:        Path to input video.
-        assignments:       Output of :func:`build_assignments_per_category`.
-        n_frames:          Frames per patch window (default 7).
-        format_config:     ``{category: {format_name: {'gt_size': …, 'lr_size': …}}}``.
-        base_dir:          Root dataset output directory.
-        fps:               Video frame rate.
-        logger:            Optional logger instance.
-        is_interesting_fn: Optional callable ``(patch: np.ndarray) -> bool`` for
-                           quality gating.  When provided, random crops are re-tried
-                           up to 5 times before falling back to a centre crop.
-        is_black_frame_fn: Optional callable ``(frame: np.ndarray) -> bool``
-                           receiving the raw center frame.  When provided and
-                           returns ``True`` the entire video position (all its
-                           category/format pairs) is skipped without saving.
-                           Defaults to :func:`is_black_frame` when ``None`` is
-                           passed (i.e. black frames are always filtered unless you
-                           explicitly pass ``lambda _: False``).
-                           Note: the ``is_black_frame`` default filter (mean < 20)
-                           partially overlaps with the variety-std check inside
-                           ``create_patch_pair`` (std < 15).  Set
-                           ``is_black_frame_fn=lambda _: False`` to disable the
-                           pre-filter entirely if you rely solely on the variety
-                           check via ``min_variety_std`` in the quality config.
-        progress_fn:       Optional callable
-                           ``(frames_examined: int,
-                              patches_so_far: Dict[str, int],
-                              raw_frames_read: int)``
-                           invoked after *every* processed assignment (saved **or**
-                           skipped).  ``raw_frames_read`` is the total number of
-                           raw video frames decoded from the stream so far.
-        use_cuda:          When ``True`` (default), enable CUDA hardware-accelerated
-                           decoding if the local FFmpeg build supports it.  Falls
-                           back to software decoding automatically when CUDA is not
-                           available.
-        nice_level:        CPU-priority adjustment passed to ``os.nice()`` for the
-                           FFmpeg subprocess (default 10 = lower priority).  Has no
-                           effect on non-Unix platforms.
-        is_hdr:            Whether the source video uses an HDR transfer function
-                           (PQ / HLG).  When ``True`` (default) the full HDR→SDR
-                           tonemap chain is applied.  When ``False`` a lightweight
-                           scale-only chain is used, avoiding incorrect
-                           re-linearisation of SDR gamma that would cause
-                           overexposure.
-        degrade_cfg:       Optional degradation config dict forwarded to
-                           :func:`create_patch_pair` / :func:`degrade_lr_frame`.
-                           When ``None`` no LR degradation is applied.  Populate
-                           from the ``quality`` section of the generator config
-                           (keys: ``lr_degrade_prob``, ``lr_dark_boost``, etc.).
+        video_path:          Path to input video.
+        assignments:         Output of :func:`build_assignments_per_category`.
+        n_frames:            Frames per patch window (default 7).
+        format_config:       ``{category: {format_name: {'gt_size': …, 'lr_size': …}}}``.
+        base_dir:            Root dataset output directory.
+        fps:                 Video frame rate.
+        logger:              Optional logger instance.
+        is_interesting_fn:   Optional callable ``(patch: np.ndarray) -> bool`` for
+                             quality gating.  When provided, random crops are re-tried
+                             up to 5 times before falling back to a centre crop.
+        is_black_frame_fn:   Optional callable ``(frame: np.ndarray) -> bool``
+                             receiving the raw center frame.  When provided and
+                             returns ``True`` the entire video position (all its
+                             category/format pairs) is skipped without saving.
+                             Defaults to :func:`is_black_frame` when ``None`` is
+                             passed (i.e. black frames are always filtered unless you
+                             explicitly pass ``lambda _: False``).
+                             Note: the ``is_black_frame`` default filter (mean < 20)
+                             partially overlaps with the variety-std check inside
+                             ``create_patch_pair`` (std < 15).  Set
+                             ``is_black_frame_fn=lambda _: False`` to disable the
+                             pre-filter entirely if you rely solely on the variety
+                             check via ``min_variety_std`` in the quality config.
+        progress_fn:         Optional callable
+                             ``(frames_examined: int,
+                                patches_so_far: Dict[str, int],
+                                raw_frames_read: int)``
+                             invoked after *every* processed assignment (saved **or**
+                             skipped).  ``raw_frames_read`` is the total number of
+                             raw video frames decoded from the stream so far.
+        use_cuda:            When ``True`` (default), enable CUDA hardware-accelerated
+                             decoding if the local FFmpeg build supports it.  Falls
+                             back to software decoding automatically when CUDA is not
+                             available.
+        nice_level:          CPU-priority adjustment passed to ``os.nice()`` for the
+                             FFmpeg subprocess (default 10 = lower priority).  Has no
+                             effect on non-Unix platforms.
+        is_hdr:              Whether the source video uses an HDR transfer function
+                             (PQ / HLG).  When ``True`` (default) the full HDR→SDR
+                             tonemap chain is applied.  When ``False`` a lightweight
+                             scale-only chain is used, avoiding incorrect
+                             re-linearisation of SDR gamma that would cause
+                             overexposure.
+        degrade_cfg:         Optional degradation config dict forwarded to
+                             :func:`create_patch_pair` / :func:`degrade_lr_frame`.
+                             When ``None`` no LR degradation is applied.  Populate
+                             from the ``quality`` section of the generator config
+                             (keys: ``lr_degrade_prob``, ``lr_dark_boost``, etc.).
+        center_snap_seconds: Tolerance in seconds for cross-category center snapping
+                             (default 1.0).  Assignments whose center frame indices
+                             lie within ``±round(fps * center_snap_seconds)`` frames
+                             of each other are unified to a shared representative
+                             center, reducing redundant window extractions when
+                             multiple categories are active.  Set to 0 to disable.
 
     Returns:
         ``{category: patches_saved_count}``
@@ -858,7 +923,25 @@ def extract_and_save_streaming_distributed(
         return {}
 
     half = n_frames // 2
-    sorted_asgn = sorted(assignments, key=lambda x: x[0])
+
+    # --- Cross-category center snapping -----------------------------------
+    # Snap assignment center indices that are within ±tol_frames of each
+    # other to a shared representative, reducing near-duplicate centers and
+    # the associated per-center overhead when multiple categories are active.
+    n_before = len(assignments)
+    unique_before = len({idx for idx, _, _ in assignments})
+    snapped_asgn = snap_assignments_to_centers(assignments, fps=fps, tol_seconds=center_snap_seconds)
+    unique_after = len({idx for idx, _, _ in snapped_asgn})
+    _snap_tol_frames = (
+        max(1, int(round(fps * center_snap_seconds))) if center_snap_seconds > 0 else 0
+    )
+    _log(
+        f"🔗 Center snapping: {n_before} assignments, "
+        f"{unique_before} unique centers → {unique_after} unique centers "
+        f"(tol={center_snap_seconds:.2f}s / {_snap_tol_frames} frames)"
+    )
+
+    sorted_asgn = sorted(snapped_asgn, key=lambda x: x[0])
 
     # Build mapping: center_frame_idx → [(category, format_name), …]
     center_map: Dict[int, List[Tuple[str, str]]] = {}

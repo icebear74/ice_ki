@@ -1258,6 +1258,7 @@ class DatasetGeneratorV2UHD:
             nice_level=self.settings.get('ffmpeg_nice', 10),
             is_hdr=is_hdr,
             degrade_cfg=self.config.get('quality'),
+            center_snap_seconds=self.config.get('processing', {}).get('center_snap_seconds', 1.0),
         )
 
         # Merge final result into patches_created.

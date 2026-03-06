@@ -27,8 +27,8 @@
   "_comment_videos": "Video list populated by 'Rescan file list' in video_manager.py. Categories assigned interactively.",
   "videos": [
     {
-      "name": "Das Fünfte Element",
-      "path": "/mnt/data/video/filme/UHD/Das Fünfte Element/Das Fünfte Element.mkv",
+      "name": "Das F\u00fcnfte Element",
+      "path": "/mnt/data/video/filme/UHD/Das F\u00fcnfte Element/Das F\u00fcnfte Element.mkv",
       "categories": [
         "master",
         "universal",
@@ -122,7 +122,7 @@
     },
     {
       "name": "Back to the Future Part II",
-      "path": "/mnt/data/video/filme/UHD/Zurück In Die Zukunft - Teil 2/Back to the Future Part II.mkv",
+      "path": "/mnt/data/video/filme/UHD/Zur\u00fcck In Die Zukunft - Teil 2/Back to the Future Part II.mkv",
       "categories": [
         "master",
         "universal"
@@ -249,8 +249,8 @@
       ]
     },
     {
-      "name": "Fifty Shades Of Grey 2 - Gefährliche Liebe",
-      "path": "/mnt/data/video/filme/UHD/Fifty Shades Of Grey 2 - Gefährliche Liebe/Fifty Shades Of Grey 2 - Gefährliche Liebe.mkv",
+      "name": "Fifty Shades Of Grey 2 - Gef\u00e4hrliche Liebe",
+      "path": "/mnt/data/video/filme/UHD/Fifty Shades Of Grey 2 - Gef\u00e4hrliche Liebe/Fifty Shades Of Grey 2 - Gef\u00e4hrliche Liebe.mkv",
       "categories": [
         "master",
         "universal"
@@ -313,8 +313,8 @@
       ]
     },
     {
-      "name": "Harry Potter Und Die Heiligtümer Des Todes - Teil 2",
-      "path": "/mnt/data/video/filme/UHD/Harry Potter Und Die Heiligtümer Des Todes - Teil 2/Harry Potter Und Die Heiligtümer Des Todes - Teil 2.mkv",
+      "name": "Harry Potter Und Die Heiligt\u00fcmer Des Todes - Teil 2",
+      "path": "/mnt/data/video/filme/UHD/Harry Potter Und Die Heiligt\u00fcmer Des Todes - Teil 2/Harry Potter Und Die Heiligt\u00fcmer Des Todes - Teil 2.mkv",
       "categories": [
         "master",
         "universal"
@@ -449,8 +449,8 @@
       ]
     },
     {
-      "name": "S01E04 (004) - Der König Der Meerenge (King Of The Narrow Sea)",
-      "path": "/mnt/data/video/SerieUHD/House Of The Dragon/S01/S01E04 (004) - Der König Der Meerenge (King Of The Narrow Sea).mkv",
+      "name": "S01E04 (004) - Der K\u00f6nig Der Meerenge (King Of The Narrow Sea)",
+      "path": "/mnt/data/video/SerieUHD/House Of The Dragon/S01/S01E04 (004) - Der K\u00f6nig Der Meerenge (King Of The Narrow Sea).mkv",
       "categories": [
         "master",
         "universal"
@@ -489,8 +489,8 @@
       ]
     },
     {
-      "name": "S01E06 (006) - Die Prinzessin Und Die Königin (The Princess And The Queen)",
-      "path": "/mnt/data/video/SerieUHD/House Of The Dragon/S01/S01E06 (006) - Die Prinzessin Und Die Königin (The Princess And The Queen).mkv",
+      "name": "S01E06 (006) - Die Prinzessin Und Die K\u00f6nigin (The Princess And The Queen)",
+      "path": "/mnt/data/video/SerieUHD/House Of The Dragon/S01/S01E06 (006) - Die Prinzessin Und Die K\u00f6nigin (The Princess And The Queen).mkv",
       "categories": [
         "master",
         "universal"
@@ -521,16 +521,16 @@
       ]
     },
     {
-      "name": "S01E08 (008) - Das Königreich Elysien (The Elysian Kingdom)",
-      "path": "/mnt/data/video/SerieUHD/Star Trek Strange New Worlds/S01/S01E08 (008) - Das Königreich Elysien (The Elysian Kingdom).mkv",
+      "name": "S01E08 (008) - Das K\u00f6nigreich Elysien (The Elysian Kingdom)",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Strange New Worlds/S01/S01E08 (008) - Das K\u00f6nigreich Elysien (The Elysian Kingdom).mkv",
       "categories": [
         "master",
         "space"
       ]
     },
     {
-      "name": "S01E09 (009) - Der Grüne Rat (The Green Council)",
-      "path": "/mnt/data/video/SerieUHD/House Of The Dragon/S01/S01E09 (009) - Der Grüne Rat (The Green Council).mkv",
+      "name": "S01E09 (009) - Der Gr\u00fcne Rat (The Green Council)",
+      "path": "/mnt/data/video/SerieUHD/House Of The Dragon/S01/S01E09 (009) - Der Gr\u00fcne Rat (The Green Council).mkv",
       "categories": [
         "master",
         "universal"
@@ -553,8 +553,8 @@
       ]
     },
     {
-      "name": "S01E10 (010) - Die Schwarze Königin (The Black Queen)",
-      "path": "/mnt/data/video/SerieUHD/House Of The Dragon/S01/S01E10 (010) - Die Schwarze Königin (The Black Queen).mkv",
+      "name": "S01E10 (010) - Die Schwarze K\u00f6nigin (The Black Queen)",
+      "path": "/mnt/data/video/SerieUHD/House Of The Dragon/S01/S01E10 (010) - Die Schwarze K\u00f6nigin (The Black Queen).mkv",
       "categories": [
         "master",
         "universal"
@@ -577,8 +577,8 @@
       ]
     },
     {
-      "name": "S02E01 (011) - Ein Sohn Für Einen Sohn (A Son For A Son)",
-      "path": "/mnt/data/video/SerieUHD/House Of The Dragon/S02/S02E01 (011) - Ein Sohn Für Einen Sohn (A Son For A Son).mkv",
+      "name": "S02E01 (011) - Ein Sohn F\u00fcr Einen Sohn (A Son For A Son)",
+      "path": "/mnt/data/video/SerieUHD/House Of The Dragon/S02/S02E01 (011) - Ein Sohn F\u00fcr Einen Sohn (A Son For A Son).mkv",
       "categories": [
         "master",
         "universal"
@@ -601,8 +601,8 @@
       ]
     },
     {
-      "name": "S02E03 (013) - Die Brennende Mühle (The Burning Mill)",
-      "path": "/mnt/data/video/SerieUHD/House Of The Dragon/S02/S02E03 (013) - Die Brennende Mühle (The Burning Mill).mkv",
+      "name": "S02E03 (013) - Die Brennende M\u00fchle (The Burning Mill)",
+      "path": "/mnt/data/video/SerieUHD/House Of The Dragon/S02/S02E03 (013) - Die Brennende M\u00fchle (The Burning Mill).mkv",
       "categories": [
         "master",
         "universal"
@@ -673,16 +673,16 @@
       ]
     },
     {
-      "name": "S02E08 (018) - Der Schlächter Von JGal (Under The Cloak Of War)",
-      "path": "/mnt/data/video/SerieUHD/Star Trek Strange New Worlds/S02/S02E08 (018) - Der Schlächter Von JGal (Under The Cloak Of War).mkv",
+      "name": "S02E08 (018) - Der Schl\u00e4chter Von JGal (Under The Cloak Of War)",
+      "path": "/mnt/data/video/SerieUHD/Star Trek Strange New Worlds/S02/S02E08 (018) - Der Schl\u00e4chter Von JGal (Under The Cloak Of War).mkv",
       "categories": [
         "master",
         "space"
       ]
     },
     {
-      "name": "S02E08 (018) - Die Königin Die Stets Eine War (The Queen Who Ever Was)",
-      "path": "/mnt/data/video/SerieUHD/House Of The Dragon/S02/S02E08 (018) - Die Königin Die Stets Eine War (The Queen Who Ever Was).mkv",
+      "name": "S02E08 (018) - Die K\u00f6nigin Die Stets Eine War (The Queen Who Ever Was)",
+      "path": "/mnt/data/video/SerieUHD/House Of The Dragon/S02/S02E08 (018) - Die K\u00f6nigin Die Stets Eine War (The Queen Who Ever Was).mkv",
       "categories": [
         "master",
         "universal"
@@ -786,7 +786,7 @@
     },
     {
       "name": "Star Trek IV- The Voyage Home",
-      "path": "/mnt/data/video/filme/UHD/Star Trek IV - Zurück In Die Gegenwart (1986)/Star Trek IV- The Voyage Home.mkv",
+      "path": "/mnt/data/video/filme/UHD/Star Trek IV - Zur\u00fcck In Die Gegenwart (1986)/Star Trek IV- The Voyage Home.mkv",
       "categories": [
         "master",
         "space"
@@ -881,16 +881,16 @@
       ]
     },
     {
-      "name": "Star Wars Episode V - Das Imperium Schlägt Zurück (The Empire Strikes Back)",
-      "path": "/mnt/data/video/filme/UHD/Star Wars Episode V - Das Imperium Schlägt Zurück (The Empire Strikes Back)/Star Wars Episode V - Das Imperium Schlägt Zurück (The Empire Strikes Back).mkv",
+      "name": "Star Wars Episode V - Das Imperium Schl\u00e4gt Zur\u00fcck (The Empire Strikes Back)",
+      "path": "/mnt/data/video/filme/UHD/Star Wars Episode V - Das Imperium Schl\u00e4gt Zur\u00fcck (The Empire Strikes Back)/Star Wars Episode V - Das Imperium Schl\u00e4gt Zur\u00fcck (The Empire Strikes Back).mkv",
       "categories": [
         "master",
         "space"
       ]
     },
     {
-      "name": "Star Wars Episode VI - Die Rückkehr Der Jedi-Ritter (Return Of The Jedi)",
-      "path": "/mnt/data/video/filme/UHD/Star Wars Episode VI - Die Rückkehr Der Jedi-Ritter (Return Of The Jedi)/Star Wars Episode VI - Die Rückkehr Der Jedi-Ritter (Return Of The Jedi).mkv",
+      "name": "Star Wars Episode VI - Die R\u00fcckkehr Der Jedi-Ritter (Return Of The Jedi)",
+      "path": "/mnt/data/video/filme/UHD/Star Wars Episode VI - Die R\u00fcckkehr Der Jedi-Ritter (Return Of The Jedi)/Star Wars Episode VI - Die R\u00fcckkehr Der Jedi-Ritter (Return Of The Jedi).mkv",
       "categories": [
         "master",
         "space"
@@ -914,7 +914,7 @@
     },
     {
       "name": "title_t00",
-      "path": "/mnt/data/video/filme/UHD/Harry Potter Und Die Heiligtümer Des Todes - Teil 1/title_t00.mkv",
+      "path": "/mnt/data/video/filme/UHD/Harry Potter Und Die Heiligt\u00fcmer Des Todes - Teil 1/title_t00.mkv",
       "categories": [
         "master",
         "universal"
@@ -929,8 +929,8 @@
       ]
     },
     {
-      "name": "Top Gun - Sie Fürchten Weder Tod Noch Teufel (1986)",
-      "path": "/mnt/data/video/filme/UHD/Top Gun - Sie Fürchten Weder Tod Noch Teufel (1986)/Top Gun - Sie Fürchten Weder Tod Noch Teufel (1986).mkv",
+      "name": "Top Gun - Sie F\u00fcrchten Weder Tod Noch Teufel (1986)",
+      "path": "/mnt/data/video/filme/UHD/Top Gun - Sie F\u00fcrchten Weder Tod Noch Teufel (1986)/Top Gun - Sie F\u00fcrchten Weder Tod Noch Teufel (1986).mkv",
       "categories": [
         "master",
         "universal"
@@ -945,8 +945,8 @@
       ]
     },
     {
-      "name": "Und Täglich Grüßt Das Murmeltier",
-      "path": "/mnt/data/video/filme/UHD/Und Täglich Grüßt Das Murmeltier/Und Täglich Grüßt Das Murmeltier.mkv",
+      "name": "Und T\u00e4glich Gr\u00fc\u00dft Das Murmeltier",
+      "path": "/mnt/data/video/filme/UHD/Und T\u00e4glich Gr\u00fc\u00dft Das Murmeltier/Und T\u00e4glich Gr\u00fc\u00dft Das Murmeltier.mkv",
       "categories": [
         "master",
         "universal"
@@ -961,16 +961,16 @@
       ]
     },
     {
-      "name": "Zurück In Die Zukunft",
-      "path": "/mnt/data/video/filme/UHD/Zurück In Die Zukunft/Zurück In Die Zukunft.mkv",
+      "name": "Zur\u00fcck In Die Zukunft",
+      "path": "/mnt/data/video/filme/UHD/Zur\u00fcck In Die Zukunft/Zur\u00fcck In Die Zukunft.mkv",
       "categories": [
         "master",
         "universal"
       ]
     },
     {
-      "name": "Zurück In Die Zukunft - Teil 3",
-      "path": "/mnt/data/video/filme/UHD/Zurück In Die Zukunft - Teil 3/Zurück In Die Zukunft - Teil 3.mkv",
+      "name": "Zur\u00fcck In Die Zukunft - Teil 3",
+      "path": "/mnt/data/video/filme/UHD/Zur\u00fcck In Die Zukunft - Teil 3/Zur\u00fcck In Die Zukunft - Teil 3.mkv",
       "categories": [
         "master",
         "universal"
@@ -1027,8 +1027,8 @@
       ]
     },
     {
-      "name": "Jurassic World 2 - Das Gefallene Königreich",
-      "path": "/mnt/data/video/filme/UHD/Jurassic World 2 - Das Gefallene Königreich/Jurassic World 2 - Das Gefallene Königreich.mkv",
+      "name": "Jurassic World 2 - Das Gefallene K\u00f6nigreich",
+      "path": "/mnt/data/video/filme/UHD/Jurassic World 2 - Das Gefallene K\u00f6nigreich/Jurassic World 2 - Das Gefallene K\u00f6nigreich.mkv",
       "categories": [
         "master"
       ]
@@ -1086,8 +1086,8 @@
       ]
     },
     {
-      "name": "S01E02 (002) - Der Königsweg (The Kingsroad)",
-      "path": "/mnt/data/video/SerieUHD/Game Of Thrones/S01/S01E02 (002) - Der Königsweg (The Kingsroad).mkv",
+      "name": "S01E02 (002) - Der K\u00f6nigsweg (The Kingsroad)",
+      "path": "/mnt/data/video/SerieUHD/Game Of Thrones/S01/S01E02 (002) - Der K\u00f6nigsweg (The Kingsroad).mkv",
       "categories": [
         "master"
       ]
@@ -1134,15 +1134,15 @@
       ]
     },
     {
-      "name": "S01E04 (004) - Krüppel, Bastarde Und Zerbrochenes (Cripples, Bastards And Broken Things)",
-      "path": "/mnt/data/video/SerieUHD/Game Of Thrones/S01/S01E04 (004) - Krüppel, Bastarde Und Zerbrochenes (Cripples, Bastards And Broken Things).mkv",
+      "name": "S01E04 (004) - Kr\u00fcppel, Bastarde Und Zerbrochenes (Cripples, Bastards And Broken Things)",
+      "path": "/mnt/data/video/SerieUHD/Game Of Thrones/S01/S01E04 (004) - Kr\u00fcppel, Bastarde Und Zerbrochenes (Cripples, Bastards And Broken Things).mkv",
       "categories": [
         "master"
       ]
     },
     {
-      "name": "S01E04 (004) - Wüsten (Deserts)",
-      "path": "/mnt/data/video/SerieUHD/Planet Earth 2 (UHD HDR Referenz)/S01E04 (004) - Wüsten (Deserts).mkv",
+      "name": "S01E04 (004) - W\u00fcsten (Deserts)",
+      "path": "/mnt/data/video/SerieUHD/Planet Earth 2 (UHD HDR Referenz)/S01E04 (004) - W\u00fcsten (Deserts).mkv",
       "categories": [
         "master"
       ],
@@ -1158,8 +1158,8 @@
       ]
     },
     {
-      "name": "S01E05 (005) - Der Wolf Und Der Löwe (The Wolf And The Lion)",
-      "path": "/mnt/data/video/SerieUHD/Game Of Thrones/S01/S01E05 (005) - Der Wolf Und Der Löwe (The Wolf And The Lion).mkv",
+      "name": "S01E05 (005) - Der Wolf Und Der L\u00f6we (The Wolf And The Lion)",
+      "path": "/mnt/data/video/SerieUHD/Game Of Thrones/S01/S01E05 (005) - Der Wolf Und Der L\u00f6we (The Wolf And The Lion).mkv",
       "categories": [
         "master"
       ]
@@ -1189,8 +1189,8 @@
       ]
     },
     {
-      "name": "S01E06 (006) - Städte (Cities)",
-      "path": "/mnt/data/video/SerieUHD/Planet Earth 2 (UHD HDR Referenz)/S01E06 (006) - Städte (Cities).mkv",
+      "name": "S01E06 (006) - St\u00e4dte (Cities)",
+      "path": "/mnt/data/video/SerieUHD/Planet Earth 2 (UHD HDR Referenz)/S01E06 (006) - St\u00e4dte (Cities).mkv",
       "categories": [
         "master"
       ],
@@ -1297,8 +1297,8 @@
       ]
     },
     {
-      "name": "S02E04 (014) - Das Rätsel Der Sphinx (The Riddle Of The Sphinx)",
-      "path": "/mnt/data/video/SerieUHD/Westworld/S02/S02E04 (014) - Das Rätsel Der Sphinx (The Riddle Of The Sphinx).mkv",
+      "name": "S02E04 (014) - Das R\u00e4tsel Der Sphinx (The Riddle Of The Sphinx)",
+      "path": "/mnt/data/video/SerieUHD/Westworld/S02/S02E04 (014) - Das R\u00e4tsel Der Sphinx (The Riddle Of The Sphinx).mkv",
       "categories": [
         "master"
       ]
@@ -1325,8 +1325,8 @@
       ]
     },
     {
-      "name": "S02E06 (016) - Alte Und Neue Götter (The Old Gods And The New)",
-      "path": "/mnt/data/video/SerieUHD/Game Of Thrones/S02/S02E06 (016) - Alte Und Neue Götter (The Old Gods And The New).mkv",
+      "name": "S02E06 (016) - Alte Und Neue G\u00f6tter (The Old Gods And The New)",
+      "path": "/mnt/data/video/SerieUHD/Game Of Thrones/S02/S02E06 (016) - Alte Und Neue G\u00f6tter (The Old Gods And The New).mkv",
       "categories": [
         "master"
       ]
@@ -1346,8 +1346,8 @@
       ]
     },
     {
-      "name": "S02E07 (017) - Häutungen (Les Echorches)",
-      "path": "/mnt/data/video/SerieUHD/Westworld/S02/S02E07 (017) - Häutungen (Les Echorches).mkv",
+      "name": "S02E07 (017) - H\u00e4utungen (Les Echorches)",
+      "path": "/mnt/data/video/SerieUHD/Westworld/S02/S02E07 (017) - H\u00e4utungen (Les Echorches).mkv",
       "categories": [
         "master"
       ]
@@ -1423,8 +1423,8 @@
       ]
     },
     {
-      "name": "S03E03 (013) - Der Weg Der Züchtigung (Walk Of Punishment)",
-      "path": "/mnt/data/video/SerieUHD/Game Of Thrones/S03/S03E03 (013) - Der Weg Der Züchtigung (Walk Of Punishment).mkv",
+      "name": "S03E03 (013) - Der Weg Der Z\u00fcchtigung (Walk Of Punishment)",
+      "path": "/mnt/data/video/SerieUHD/Game Of Thrones/S03/S03E03 (013) - Der Weg Der Z\u00fcchtigung (Walk Of Punishment).mkv",
       "categories": [
         "master"
       ]
@@ -1458,15 +1458,15 @@
       ]
     },
     {
-      "name": "S03E05 (025) - Vom Feuer Geküsst (Kissed By Fire)",
-      "path": "/mnt/data/video/SerieUHD/Game Of Thrones/S03/S03E05 (025) - Vom Feuer Geküsst (Kissed By Fire).mkv",
+      "name": "S03E05 (025) - Vom Feuer Gek\u00fcsst (Kissed By Fire)",
+      "path": "/mnt/data/video/SerieUHD/Game Of Thrones/S03/S03E05 (025) - Vom Feuer Gek\u00fcsst (Kissed By Fire).mkv",
       "categories": [
         "master"
       ]
     },
     {
-      "name": "S03E06 (026) - Dekohärenz (Decoherence)",
-      "path": "/mnt/data/video/SerieUHD/Westworld/S03/S03E06 (026) - Dekohärenz (Decoherence).mkv",
+      "name": "S03E06 (026) - Dekoh\u00e4renz (Decoherence)",
+      "path": "/mnt/data/video/SerieUHD/Westworld/S03/S03E06 (026) - Dekoh\u00e4renz (Decoherence).mkv",
       "categories": [
         "master"
       ]
@@ -1479,8 +1479,8 @@
       ]
     },
     {
-      "name": "S03E07 (027) - Der Bär Und Die Jungfrau Hehr (The Bear And The Maiden Fair)",
-      "path": "/mnt/data/video/SerieUHD/Game Of Thrones/S03/S03E07 (027) - Der Bär Und Die Jungfrau Hehr (The Bear And The Maiden Fair).mkv",
+      "name": "S03E07 (027) - Der B\u00e4r Und Die Jungfrau Hehr (The Bear And The Maiden Fair)",
+      "path": "/mnt/data/video/SerieUHD/Game Of Thrones/S03/S03E07 (027) - Der B\u00e4r Und Die Jungfrau Hehr (The Bear And The Maiden Fair).mkv",
       "categories": [
         "master"
       ]
@@ -1542,8 +1542,8 @@
       ]
     },
     {
-      "name": "S04E02 (032) - Der Löwe Und Die Rose (The Lion And The Rose)",
-      "path": "/mnt/data/video/SerieUHD/Game Of Thrones/S04/S04E02 (032) - Der Löwe Und Die Rose (The Lion And The Rose).mkv",
+      "name": "S04E02 (032) - Der L\u00f6we Und Die Rose (The Lion And The Rose)",
+      "path": "/mnt/data/video/SerieUHD/Game Of Thrones/S04/S04E02 (032) - Der L\u00f6we Und Die Rose (The Lion And The Rose).mkv",
       "categories": [
         "master"
       ]
@@ -1598,8 +1598,8 @@
       ]
     },
     {
-      "name": "S04E06 (036) - Die Gesetze Von Göttern Und Menschen (The Laws Of Gods And Men)",
-      "path": "/mnt/data/video/SerieUHD/Game Of Thrones/S04/S04E06 (036) - Die Gesetze Von Göttern Und Menschen (The Laws Of Gods And Men).mkv",
+      "name": "S04E06 (036) - Die Gesetze Von G\u00f6ttern Und Menschen (The Laws Of Gods And Men)",
+      "path": "/mnt/data/video/SerieUHD/Game Of Thrones/S04/S04E06 (036) - Die Gesetze Von G\u00f6ttern Und Menschen (The Laws Of Gods And Men).mkv",
       "categories": [
         "master"
       ]
@@ -1633,8 +1633,8 @@
       ]
     },
     {
-      "name": "S04E09 (039) - Die Wächter Auf Der Mauer (The Watchers On The Wall)",
-      "path": "/mnt/data/video/SerieUHD/Game Of Thrones/S04/S04E09 (039) - Die Wächter Auf Der Mauer (The Watchers On The Wall).mkv",
+      "name": "S04E09 (039) - Die W\u00e4chter Auf Der Mauer (The Watchers On The Wall)",
+      "path": "/mnt/data/video/SerieUHD/Game Of Thrones/S04/S04E09 (039) - Die W\u00e4chter Auf Der Mauer (The Watchers On The Wall).mkv",
       "categories": [
         "master"
       ]
@@ -1654,8 +1654,8 @@
       ]
     },
     {
-      "name": "S05E02 (042) - Das Haus Von Schwarz Und Weiß (The House Of Black And White)",
-      "path": "/mnt/data/video/SerieUHD/Game Of Thrones/S05/S05E02 (042) - Das Haus Von Schwarz Und Weiß (The House Of Black And White).mkv",
+      "name": "S05E02 (042) - Das Haus Von Schwarz Und Wei\u00df (The House Of Black And White)",
+      "path": "/mnt/data/video/SerieUHD/Game Of Thrones/S05/S05E02 (042) - Das Haus Von Schwarz Und Wei\u00df (The House Of Black And White).mkv",
       "categories": [
         "master"
       ]
@@ -1668,22 +1668,22 @@
       ]
     },
     {
-      "name": "S05E04 (044) - Die Söhne Der Harpyie (Sons Of Harpy)",
-      "path": "/mnt/data/video/SerieUHD/Game Of Thrones/S05/S05E04 (044) - Die Söhne Der Harpyie (Sons Of Harpy).mkv",
+      "name": "S05E04 (044) - Die S\u00f6hne Der Harpyie (Sons Of Harpy)",
+      "path": "/mnt/data/video/SerieUHD/Game Of Thrones/S05/S05E04 (044) - Die S\u00f6hne Der Harpyie (Sons Of Harpy).mkv",
       "categories": [
         "master"
       ]
     },
     {
-      "name": "S05E05 (045) - Töte Den Jungen (Kill The Boy)",
-      "path": "/mnt/data/video/SerieUHD/Game Of Thrones/S05/S05E05 (045) - Töte Den Jungen (Kill The Boy).mkv",
+      "name": "S05E05 (045) - T\u00f6te Den Jungen (Kill The Boy)",
+      "path": "/mnt/data/video/SerieUHD/Game Of Thrones/S05/S05E05 (045) - T\u00f6te Den Jungen (Kill The Boy).mkv",
       "categories": [
         "master"
       ]
     },
     {
-      "name": "S05E06 (046) - Ungebeugt, Ungezähmt, Ungebrochen (Unbowed, Unbent, Unbroken)",
-      "path": "/mnt/data/video/SerieUHD/Game Of Thrones/S05/S05E06 (046) - Ungebeugt, Ungezähmt, Ungebrochen (Unbowed, Unbent, Unbroken).mkv",
+      "name": "S05E06 (046) - Ungebeugt, Ungez\u00e4hmt, Ungebrochen (Unbowed, Unbent, Unbroken)",
+      "path": "/mnt/data/video/SerieUHD/Game Of Thrones/S05/S05E06 (046) - Ungebeugt, Ungez\u00e4hmt, Ungebrochen (Unbowed, Unbent, Unbroken).mkv",
       "categories": [
         "master"
       ]
@@ -1801,8 +1801,8 @@
       ]
     },
     {
-      "name": "S07E03 (063) - Die Gerechtigkeit Der Königin (The Queens Justice)",
-      "path": "/mnt/data/video/SerieUHD/Game Of Thrones/S07/S07E03 (063) - Die Gerechtigkeit Der Königin (The Queens Justice).mkv",
+      "name": "S07E03 (063) - Die Gerechtigkeit Der K\u00f6nigin (The Queens Justice)",
+      "path": "/mnt/data/video/SerieUHD/Game Of Thrones/S07/S07E03 (063) - Die Gerechtigkeit Der K\u00f6nigin (The Queens Justice).mkv",
       "categories": [
         "master"
       ]
@@ -1843,8 +1843,8 @@
       ]
     },
     {
-      "name": "S08E02 (069) - Ein Ritter Der Sieben Königslande (A Knight Of The Seven Kingdoms)",
-      "path": "/mnt/data/video/SerieUHD/Game Of Thrones/S08/S08E02 (069) - Ein Ritter Der Sieben Königslande (A Knight Of The Seven Kingdoms).mkv",
+      "name": "S08E02 (069) - Ein Ritter Der Sieben K\u00f6nigslande (A Knight Of The Seven Kingdoms)",
+      "path": "/mnt/data/video/SerieUHD/Game Of Thrones/S08/S08E02 (069) - Ein Ritter Der Sieben K\u00f6nigslande (A Knight Of The Seven Kingdoms).mkv",
       "categories": [
         "master"
       ]
@@ -1934,8 +1934,8 @@
       ]
     },
     {
-      "name": "Galaxy Quest – Planlos durchs Weltall (1999)",
-      "path": "/mnt/data/video/filme/UHD/Galaxy Quest – Planlos durchs Weltall (1999)/Galaxy Quest – Planlos durchs Weltall (1999).mkv",
+      "name": "Galaxy Quest \u2013 Planlos durchs Weltall (1999)",
+      "path": "/mnt/data/video/filme/UHD/Galaxy Quest \u2013 Planlos durchs Weltall (1999)/Galaxy Quest \u2013 Planlos durchs Weltall (1999).mkv",
       "categories": [
         "space"
       ]
@@ -1983,15 +1983,15 @@
       ]
     },
     {
-      "name": "Drachenzähmen Leicht Gemacht - Doe Legende Lebt (2025)",
-      "path": "/mnt/data/video/filme/UHD/Drachenzähmen Leicht Gemacht - Doe Legende Lebt (2025)/Drachenzähmen Leicht Gemacht - Doe Legende Lebt (2025).mkv",
+      "name": "Drachenz\u00e4hmen Leicht Gemacht - Doe Legende Lebt (2025)",
+      "path": "/mnt/data/video/filme/UHD/Drachenz\u00e4hmen Leicht Gemacht - Doe Legende Lebt (2025)/Drachenz\u00e4hmen Leicht Gemacht - Doe Legende Lebt (2025).mkv",
       "categories": [
         "toon"
       ]
     },
     {
-      "name": "Drachenzähmen Leicht Gemacht 2 (2014)",
-      "path": "/mnt/data/video/filme/UHD/Drachenzähmen Leicht Gemacht 2 (2014)/Drachenzähmen Leicht Gemacht 2 (2014).mkv",
+      "name": "Drachenz\u00e4hmen Leicht Gemacht 2 (2014)",
+      "path": "/mnt/data/video/filme/UHD/Drachenz\u00e4hmen Leicht Gemacht 2 (2014)/Drachenz\u00e4hmen Leicht Gemacht 2 (2014).mkv",
       "categories": [
         "toon"
       ]
@@ -2005,7 +2005,7 @@
     },
     {
       "name": "How to Train Your Dragon- The Hidden World",
-      "path": "/mnt/data/video/filme/UHD/Drachenzähmen Leicht Gemacht 3/How to Train Your Dragon- The Hidden World.mkv",
+      "path": "/mnt/data/video/filme/UHD/Drachenz\u00e4hmen Leicht Gemacht 3/How to Train Your Dragon- The Hidden World.mkv",
       "categories": [
         "toon"
       ]
@@ -2032,8 +2032,8 @@
       ]
     },
     {
-      "name": "Anti-Life - Tödliche Bedrohung (2020)",
-      "path": "/mnt/data/video/filme/UHD/Anti-Life - Tödliche Bedrohung (2020)/Anti-Life - Tödliche Bedrohung (2020).mkv",
+      "name": "Anti-Life - T\u00f6dliche Bedrohung (2020)",
+      "path": "/mnt/data/video/filme/UHD/Anti-Life - T\u00f6dliche Bedrohung (2020)/Anti-Life - T\u00f6dliche Bedrohung (2020).mkv",
       "categories": [
         "universal"
       ]
@@ -2116,8 +2116,8 @@
       ]
     },
     {
-      "name": "Die Glücksritter  (1983)",
-      "path": "/mnt/data/video/filme/UHD/Die Glücksritter  (1983)/Die Glücksritter  (1983).mkv",
+      "name": "Die Gl\u00fccksritter  (1983)",
+      "path": "/mnt/data/video/filme/UHD/Die Gl\u00fccksritter  (1983)/Die Gl\u00fccksritter  (1983).mkv",
       "categories": [
         "universal"
       ]
@@ -2131,7 +2131,7 @@
     },
     {
       "name": "E.T. The Extra-Terrestrial",
-      "path": "/mnt/data/video/filme/UHD/E.T. Der Außerirdische (The Extra-Terrestrial)/E.T. The Extra-Terrestrial.mkv",
+      "path": "/mnt/data/video/filme/UHD/E.T. Der Au\u00dferirdische (The Extra-Terrestrial)/E.T. The Extra-Terrestrial.mkv",
       "categories": [
         "universal"
       ]
@@ -2207,8 +2207,8 @@
       ]
     },
     {
-      "name": "Indiana Jones - Jäger Des Verlorenen Schatzes",
-      "path": "/mnt/data/video/filme/UHD/Indiana Jones - Jäger Des Verlorenen Schatzes/Indiana Jones - Jäger Des Verlorenen Schatzes.mkv",
+      "name": "Indiana Jones - J\u00e4ger Des Verlorenen Schatzes",
+      "path": "/mnt/data/video/filme/UHD/Indiana Jones - J\u00e4ger Des Verlorenen Schatzes/Indiana Jones - J\u00e4ger Des Verlorenen Schatzes.mkv",
       "categories": [
         "universal"
       ]
@@ -2221,8 +2221,8 @@
       ]
     },
     {
-      "name": "Indiana Jones Und Das Königreich Des Kristallschädels",
-      "path": "/mnt/data/video/filme/UHD/Indiana Jones Und Das Königreich Des Kristallschädels/Indiana Jones Und Das Königreich Des Kristallschädels.mkv",
+      "name": "Indiana Jones Und Das K\u00f6nigreich Des Kristallsch\u00e4dels",
+      "path": "/mnt/data/video/filme/UHD/Indiana Jones Und Das K\u00f6nigreich Des Kristallsch\u00e4dels/Indiana Jones Und Das K\u00f6nigreich Des Kristallsch\u00e4dels.mkv",
       "categories": [
         "universal"
       ]
@@ -2460,13 +2460,13 @@
       "categories": {}
     },
     {
-      "name": "Der Weiße Hai",
-      "path": "/mnt/data/video/filme/UHD/Der Weiße Hai/Der Weiße Hai.mkv",
+      "name": "Der Wei\u00dfe Hai",
+      "path": "/mnt/data/video/filme/UHD/Der Wei\u00dfe Hai/Der Wei\u00dfe Hai.mkv",
       "categories": {}
     },
     {
-      "name": "Der Weiße Hai 2 (1978)",
-      "path": "/mnt/data/video/filme/UHD/Der Weiße Hai 2 (1978)/Der Weiße Hai 2 (1978).mkv",
+      "name": "Der Wei\u00dfe Hai 2 (1978)",
+      "path": "/mnt/data/video/filme/UHD/Der Wei\u00dfe Hai 2 (1978)/Der Wei\u00dfe Hai 2 (1978).mkv",
       "categories": {}
     },
     {
@@ -2475,13 +2475,13 @@
       "categories": {}
     },
     {
-      "name": "Die Körperfresser Kommen (1978)",
-      "path": "/mnt/data/video/filme/UHD/Die Körperfresser Kommen (1978)/Die Körperfresser Kommen (1978).mkv",
+      "name": "Die K\u00f6rperfresser Kommen (1978)",
+      "path": "/mnt/data/video/filme/UHD/Die K\u00f6rperfresser Kommen (1978)/Die K\u00f6rperfresser Kommen (1978).mkv",
       "categories": {}
     },
     {
-      "name": "Die Vögel (1963)",
-      "path": "/mnt/data/video/filme/UHD/Die Vögel (1963)/Die Vögel (1963).mkv",
+      "name": "Die V\u00f6gel (1963)",
+      "path": "/mnt/data/video/filme/UHD/Die V\u00f6gel (1963)/Die V\u00f6gel (1963).mkv",
       "categories": {}
     },
     {
@@ -2510,8 +2510,8 @@
       "categories": {}
     },
     {
-      "name": "Dune - Der Wüstenplanet (1984)",
-      "path": "/mnt/data/video/filme/UHD/Dune - Der Wüstenplanet (1984)/Dune - Der Wüstenplanet (1984).mkv",
+      "name": "Dune - Der W\u00fcstenplanet (1984)",
+      "path": "/mnt/data/video/filme/UHD/Dune - Der W\u00fcstenplanet (1984)/Dune - Der W\u00fcstenplanet (1984).mkv",
       "categories": {}
     },
     {
@@ -2580,8 +2580,8 @@
       "categories": {}
     },
     {
-      "name": "Halloween 2 - Das Grauen Kehrt Zurück (1981)",
-      "path": "/mnt/data/video/filme/UHD/Halloween 2 - Das Grauen Kehrt Zurück (1981)/Halloween 2 - Das Grauen Kehrt Zurück (1981).mkv",
+      "name": "Halloween 2 - Das Grauen Kehrt Zur\u00fcck (1981)",
+      "path": "/mnt/data/video/filme/UHD/Halloween 2 - Das Grauen Kehrt Zur\u00fcck (1981)/Halloween 2 - Das Grauen Kehrt Zur\u00fcck (1981).mkv",
       "categories": {}
     },
     {
@@ -2610,8 +2610,8 @@
       "categories": {}
     },
     {
-      "name": "Hänsel Und Gretel - Hexenjäger",
-      "path": "/mnt/data/video/filme/UHD/Hänsel Und Gretel - Hexenjäger/Hänsel Und Gretel - Hexenjäger.mkv",
+      "name": "H\u00e4nsel Und Gretel - Hexenj\u00e4ger",
+      "path": "/mnt/data/video/filme/UHD/H\u00e4nsel Und Gretel - Hexenj\u00e4ger/H\u00e4nsel Und Gretel - Hexenj\u00e4ger.mkv",
       "categories": {}
     },
     {
@@ -2665,8 +2665,8 @@
       "categories": {}
     },
     {
-      "name": "Jim Knopf und Lukas der Lokomotivführer",
-      "path": "/mnt/data/video/filme/UHD/Jim Knopf und Lukas der Lokomotivführer/Jim Knopf und Lukas der Lokomotivführer.mkv",
+      "name": "Jim Knopf und Lukas der Lokomotivf\u00fchrer",
+      "path": "/mnt/data/video/filme/UHD/Jim Knopf und Lukas der Lokomotivf\u00fchrer/Jim Knopf und Lukas der Lokomotivf\u00fchrer.mkv",
       "categories": {}
     },
     {
@@ -2675,8 +2675,8 @@
       "categories": {}
     },
     {
-      "name": "Joker- Folie à Deux (2024)",
-      "path": "/mnt/data/video/filme/UHD/Joker- Folie à Deux (2024)/Joker- Folie à Deux (2024).mkv",
+      "name": "Joker- Folie \u00e0 Deux (2024)",
+      "path": "/mnt/data/video/filme/UHD/Joker- Folie \u00e0 Deux (2024)/Joker- Folie \u00e0 Deux (2024).mkv",
       "categories": {}
     },
     {
@@ -2755,18 +2755,18 @@
       "categories": {}
     },
     {
-      "name": "Maze Runner 2 - Die Auserwählten in der Brandwüste",
-      "path": "/mnt/data/video/filme/UHD/Maze Runner 2 - Die Auserwählten in der Brandwüste/Maze Runner 2 - Die Auserwählten in der Brandwüste.mkv",
+      "name": "Maze Runner 2 - Die Auserw\u00e4hlten in der Brandw\u00fcste",
+      "path": "/mnt/data/video/filme/UHD/Maze Runner 2 - Die Auserw\u00e4hlten in der Brandw\u00fcste/Maze Runner 2 - Die Auserw\u00e4hlten in der Brandw\u00fcste.mkv",
       "categories": {}
     },
     {
-      "name": "Maze Runner 3 - Die Auserwählten in der Todeszone",
-      "path": "/mnt/data/video/filme/UHD/Maze Runner 3 - Die Auserwählten in der Todeszone/Maze Runner 3 - Die Auserwählten in der Todeszone.mkv",
+      "name": "Maze Runner 3 - Die Auserw\u00e4hlten in der Todeszone",
+      "path": "/mnt/data/video/filme/UHD/Maze Runner 3 - Die Auserw\u00e4hlten in der Todeszone/Maze Runner 3 - Die Auserw\u00e4hlten in der Todeszone.mkv",
       "categories": {}
     },
     {
-      "name": "Maze Runner – Die Auserwählten im Labyrinth",
-      "path": "/mnt/data/video/filme/UHD/Maze Runner – Die Auserwählten im Labyrinth/Maze Runner – Die Auserwählten im Labyrinth.mkv",
+      "name": "Maze Runner \u2013 Die Auserw\u00e4hlten im Labyrinth",
+      "path": "/mnt/data/video/filme/UHD/Maze Runner \u2013 Die Auserw\u00e4hlten im Labyrinth/Maze Runner \u2013 Die Auserw\u00e4hlten im Labyrinth.mkv",
       "categories": {}
     },
     {
@@ -2905,8 +2905,8 @@
       "categories": {}
     },
     {
-      "name": "Reminiscence - Die Erinnerung stirbt nie - Schau nicht zurück (2021)",
-      "path": "/mnt/data/video/filme/UHD/Reminiscence - Die Erinnerung stirbt nie - Schau nicht zurück (2021)/Reminiscence - Die Erinnerung stirbt nie - Schau nicht zurück (2021).mkv",
+      "name": "Reminiscence - Die Erinnerung stirbt nie - Schau nicht zur\u00fcck (2021)",
+      "path": "/mnt/data/video/filme/UHD/Reminiscence - Die Erinnerung stirbt nie - Schau nicht zur\u00fcck (2021)/Reminiscence - Die Erinnerung stirbt nie - Schau nicht zur\u00fcck (2021).mkv",
       "categories": {}
     },
     {
@@ -2935,8 +2935,8 @@
       "categories": {}
     },
     {
-      "name": "S01E01 (001) - Teil Eins - Meister Und Schüler (Part One - Master And Apprentice)",
-      "path": "/mnt/data/video/SerieUHD/Ahsoka/S01/S01E01 (001) - Teil Eins - Meister Und Schüler (Part One - Master And Apprentice).mkv",
+      "name": "S01E01 (001) - Teil Eins - Meister Und Sch\u00fcler (Part One - Master And Apprentice)",
+      "path": "/mnt/data/video/SerieUHD/Ahsoka/S01/S01E01 (001) - Teil Eins - Meister Und Sch\u00fcler (Part One - Master And Apprentice).mkv",
       "categories": {}
     },
     {
@@ -3100,8 +3100,8 @@
       "categories": {}
     },
     {
-      "name": "The Purge - Die Säuberung (2013)",
-      "path": "/mnt/data/video/filme/UHD/The Purge - Die Säuberung (2013)/The Purge - Die Säuberung (2013).mkv",
+      "name": "The Purge - Die S\u00e4uberung (2013)",
+      "path": "/mnt/data/video/filme/UHD/The Purge - Die S\u00e4uberung (2013)/The Purge - Die S\u00e4uberung (2013).mkv",
       "categories": {}
     },
     {
@@ -3204,7 +3204,8 @@
     "scale": 3,
     "stride": 3,
     "min_scene_length": 21,
-    "scene_threshold": 30.0
+    "scene_threshold": 30.0,
+    "center_snap_seconds": 1.0
   },
   "quality": {
     "jpeg_quality": 95,
@@ -3229,5 +3230,5 @@
     "space": 100000,
     "toon": 80000
   },
-  "_comment_category_patches": "Patch count per category – how many patches to generate for each category."
+  "_comment_category_patches": "Patch count per category \u2013 how many patches to generate for each category."
 }
