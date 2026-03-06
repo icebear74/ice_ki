@@ -81,8 +81,8 @@ STREAM_HEIGHT: int = 1080
 # range=full: unambiguous 0-255 output for OpenCV.
 # Performance notes:
 #   - tonemap=reinhard is the fastest tone-mapper (simple x/(1+x) curve).
-#   - flags=bilinear is much faster than lanczos for the resize step; the
-#     difference in quality is invisible after the patch crop.
+#   - flags=lanczos gives the highest-quality resize to 1080 (important for GT
+#     quality in full-frame formats like 720_169).
 #   - filter=bilinear in each zscale step speeds up any incidental resampling.
 _TONEMAP_FILTER: str = (
     "zscale=t=linear:npl=100:filter=bilinear,"
@@ -90,14 +90,15 @@ _TONEMAP_FILTER: str = (
     "zscale=p=bt709:filter=bilinear,"
     "tonemap=tonemap=reinhard:desat=0,"
     "zscale=t=bt709:m=bt709:range=full:filter=bilinear,"
-    f"scale={STREAM_WIDTH}:{STREAM_HEIGHT}:flags=bilinear,"
+    f"scale={STREAM_WIDTH}:{STREAM_HEIGHT}:flags=lanczos,"
     "format=bgr24"
 )
 
 # SDR pass-through: Software (CPU-only).
 # No linearisation or tonemap needed — just scale + convert to BGR24.
+# flags=lanczos: highest-quality downscale, best GT fidelity.
 _SDR_FILTER: str = (
-    f"scale={STREAM_WIDTH}:{STREAM_HEIGHT}:flags=bilinear,"
+    f"scale={STREAM_WIDTH}:{STREAM_HEIGHT}:flags=lanczos,"
     "format=bgr24"
 )
 
@@ -106,8 +107,9 @@ _SDR_FILTER: str = (
 # zscale+tonemap chain is identical to _TONEMAP_FILTER.
 # Use together with -init_hw_device cuda=hw -hwaccel cuda
 #                  -hwaccel_output_format cuda.
+# interp_algo=bicubic: best quality available in scale_cuda (no lanczos).
 _TONEMAP_FILTER_SCALE_CUDA: str = (
-    f"scale_cuda={STREAM_WIDTH}:{STREAM_HEIGHT},"
+    f"scale_cuda={STREAM_WIDTH}:{STREAM_HEIGHT}:interp_algo=bicubic,"
     "hwdownload,"
     "format=p010,"
     "zscale=t=linear:npl=100:filter=bilinear,"
@@ -119,8 +121,9 @@ _TONEMAP_FILTER_SCALE_CUDA: str = (
 )
 
 # SDR pass-through: Hybrid GPU/CPU — scale on GPU, convert on CPU.
+# interp_algo=bicubic: best quality available in scale_cuda (no lanczos).
 _SDR_FILTER_SCALE_CUDA: str = (
-    f"scale_cuda={STREAM_WIDTH}:{STREAM_HEIGHT},"
+    f"scale_cuda={STREAM_WIDTH}:{STREAM_HEIGHT}:interp_algo=bicubic,"
     "hwdownload,"
     "format=bgr24"
 )
