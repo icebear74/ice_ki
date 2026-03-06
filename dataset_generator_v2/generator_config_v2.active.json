@@ -3205,9 +3205,9 @@
     "stride": 3,
     "min_scene_length": 21,
     "scene_threshold": 30.0,
-    "center_snap_seconds": 1.0
+    "center_snap_seconds": 0.0
   },
- "quality": {
+  "quality": {
     "jpeg_quality": 95,
     "min_sharpness": 30.0,
     "blur_threshold": 100.0,

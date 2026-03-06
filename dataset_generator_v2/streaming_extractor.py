@@ -36,6 +36,7 @@ save_patch_pair()
 """
 
 import os
+import queue
 import random
 import subprocess
 import threading
@@ -78,20 +79,25 @@ STREAM_HEIGHT: int = 1080
 # HDR→SDR: Software (CPU-only) fallback.
 # zscale reads tin from stream metadata → works for smpte2084, hlg, bt709.
 # range=full: unambiguous 0-255 output for OpenCV.
+# Performance notes:
+#   - tonemap=reinhard is the fastest tone-mapper (simple x/(1+x) curve).
+#   - flags=bilinear is much faster than lanczos for the resize step; the
+#     difference in quality is invisible after the patch crop.
+#   - filter=bilinear in each zscale step speeds up any incidental resampling.
 _TONEMAP_FILTER: str = (
-    "zscale=t=linear:npl=100,"
+    "zscale=t=linear:npl=100:filter=bilinear,"
     "format=gbrpf32le,"
-    "zscale=p=bt709,"
-    "tonemap=tonemap=mobius:desat=0,"
-    "zscale=t=bt709:m=bt709:range=full,"
-    f"scale={STREAM_WIDTH}:{STREAM_HEIGHT}:flags=lanczos,"
+    "zscale=p=bt709:filter=bilinear,"
+    "tonemap=tonemap=reinhard:desat=0,"
+    "zscale=t=bt709:m=bt709:range=full:filter=bilinear,"
+    f"scale={STREAM_WIDTH}:{STREAM_HEIGHT}:flags=bilinear,"
     "format=bgr24"
 )
 
 # SDR pass-through: Software (CPU-only).
 # No linearisation or tonemap needed — just scale + convert to BGR24.
 _SDR_FILTER: str = (
-    f"scale={STREAM_WIDTH}:{STREAM_HEIGHT}:flags=lanczos,"
+    f"scale={STREAM_WIDTH}:{STREAM_HEIGHT}:flags=bilinear,"
     "format=bgr24"
 )
 
@@ -104,11 +110,11 @@ _TONEMAP_FILTER_SCALE_CUDA: str = (
     f"scale_cuda={STREAM_WIDTH}:{STREAM_HEIGHT},"
     "hwdownload,"
     "format=p010,"
-    "zscale=t=linear:npl=100,"
+    "zscale=t=linear:npl=100:filter=bilinear,"
     "format=gbrpf32le,"
-    "zscale=p=bt709,"
-    "tonemap=tonemap=mobius:desat=0,"
-    "zscale=t=bt709:m=bt709:range=full,"
+    "zscale=p=bt709:filter=bilinear,"
+    "tonemap=tonemap=reinhard:desat=0,"
+    "zscale=t=bt709:m=bt709:range=full:filter=bilinear,"
     "format=bgr24"
 )
 
@@ -837,7 +843,7 @@ def extract_and_save_streaming_distributed(
     nice_level: int = 10,
     is_hdr: bool = True,
     degrade_cfg: Optional[dict] = None,
-    center_snap_seconds: float = 1.0,
+    center_snap_seconds: float = 0.0,
 ) -> Dict[str, int]:
     """
     Stream the video once and save patches as frames pass through the buffer.
@@ -900,11 +906,15 @@ def extract_and_save_streaming_distributed(
                              from the ``quality`` section of the generator config
                              (keys: ``lr_degrade_prob``, ``lr_dark_boost``, etc.).
         center_snap_seconds: Tolerance in seconds for cross-category center snapping
-                             (default 1.0).  Assignments whose center frame indices
-                             lie within ``±round(fps * center_snap_seconds)`` frames
-                             of each other are unified to a shared representative
-                             center, reducing redundant window extractions when
-                             multiple categories are active.  Set to 0 to disable.
+                             (default 0.0 = disabled).  When > 0, assignments whose
+                             center frame indices lie within
+                             ``±round(fps * center_snap_seconds)`` frames of each
+                             other are unified to a shared representative center.
+                             Useful when external code generates near-duplicate centers;
+                             has no benefit (and halves the SPS metric) when
+                             ``build_assignments_per_category`` is used, because that
+                             function already places each category on its own
+                             evenly-spaced grid.
 
     Returns:
         ``{category: patches_saved_count}``
@@ -924,22 +934,22 @@ def extract_and_save_streaming_distributed(
 
     half = n_frames // 2
 
-    # --- Cross-category center snapping -----------------------------------
-    # Snap assignment center indices that are within ±tol_frames of each
-    # other to a shared representative, reducing near-duplicate centers and
-    # the associated per-center overhead when multiple categories are active.
-    n_before = len(assignments)
-    unique_before = len({idx for idx, _, _ in assignments})
-    snapped_asgn = snap_assignments_to_centers(assignments, fps=fps, tol_seconds=center_snap_seconds)
-    unique_after = len({idx for idx, _, _ in snapped_asgn})
-    _snap_tol_frames = (
-        max(1, int(round(fps * center_snap_seconds))) if center_snap_seconds > 0 else 0
-    )
-    _log(
-        f"🔗 Center snapping: {n_before} assignments, "
-        f"{unique_before} unique centers → {unique_after} unique centers "
-        f"(tol={center_snap_seconds:.2f}s / {_snap_tol_frames} frames)"
-    )
+    # --- Optional cross-category center snapping --------------------------
+    if center_snap_seconds > 0.0:
+        n_before = len(assignments)
+        unique_before = len({idx for idx, _, _ in assignments})
+        snapped_asgn = snap_assignments_to_centers(
+            assignments, fps=fps, tol_seconds=center_snap_seconds
+        )
+        unique_after = len({idx for idx, _, _ in snapped_asgn})
+        _snap_tol_frames = max(1, int(round(fps * center_snap_seconds)))
+        _log(
+            f"🔗 Center snapping: {n_before} assignments, "
+            f"{unique_before} unique centers → {unique_after} unique centers "
+            f"(tol={center_snap_seconds:.2f}s / {_snap_tol_frames} frames)"
+        )
+    else:
+        snapped_asgn = assignments  # snapping disabled — use as-is
 
     sorted_asgn = sorted(snapped_asgn, key=lambda x: x[0])
 
@@ -951,6 +961,51 @@ def extract_and_save_streaming_distributed(
     pending_centers: List[int] = sorted(center_map.keys())
     last_needed: int = pending_centers[-1] + half if pending_centers else 0
 
+    # --- Pre-compute per-video constants ----------------------------------
+    # video_stem and output dir paths are the same for every patch in this
+    # video — compute them once to avoid Path() and os.makedirs overhead in
+    # the hot decode loop.
+    _video_stem: str = Path(video_path).stem
+    _output_dirs_cache: Dict[Tuple[str, str], Dict[str, str]] = {}
+    for _, _cat, _fmt in sorted_asgn:
+        _key = (_cat, _fmt)
+        if _key not in _output_dirs_cache:
+            _dirs = get_output_dirs_for_format(base_dir, _cat, _fmt, n_frames)
+            for _d in _dirs.values():
+                os.makedirs(_d, exist_ok=True)
+            _output_dirs_cache[_key] = _dirs
+
+    # --- Async PNG write queue --------------------------------------------
+    # Patch writing is off-loaded to background threads so that disk I/O
+    # overlaps with FFmpeg decode.  Use 2 writer threads to fill both GT and
+    # LR paths in parallel.  A bounded queue provides back-pressure when the
+    # disk is slower than the CPU.
+    _png_params = [cv2.IMWRITE_PNG_COMPRESSION, 1]
+    _write_queue: queue.Queue = queue.Queue(maxsize=256)
+
+    def _write_worker() -> None:
+        while True:
+            item = _write_queue.get()
+            if item is None:
+                _write_queue.task_done()
+                break
+            gt_img, lr_img, gt_p, lr_p = item
+            try:
+                cv2.imwrite(gt_p, gt_img, _png_params)
+                cv2.imwrite(lr_p, lr_img, _png_params)
+            except Exception as _exc:
+                if logger:
+                    logger.warning(f"[write_worker] Failed to write patch: {_exc!r}")
+            _write_queue.task_done()
+
+    _n_write_threads = 2
+    _write_threads = [
+        threading.Thread(target=_write_worker, daemon=True)
+        for _ in range(_n_write_threads)
+    ]
+    for _t in _write_threads:
+        _t.start()
+
     # Build FFmpeg command.
     #
     # Pipeline tier is chosen by build_vf_filter() based on is_hdr and
@@ -958,9 +1013,9 @@ def extract_and_save_streaming_distributed(
     #
     #  HDR source  + full-GPU   → tonemap_cuda + scale_cuda + hwdownload
     #  HDR source  + scale-GPU  → scale_cuda + hwdownload (p010) + zscale+tonemap
-    #  HDR source  + CPU-only   → zscale + tonemap + scale (software)
+    #  HDR source  + CPU-only   → zscale + tonemap(reinhard) + scale (bilinear)
     #  SDR source  + scale-GPU  → scale_cuda + hwdownload (plain scale)
-    #  SDR source  + CPU-only   → scale (software, no linearisation)
+    #  SDR source  + CPU-only   → scale bilinear (software, no linearisation)
     _use_cuda = use_cuda and cuda_available()
     _full_gpu  = _use_cuda and is_hdr and tonemap_cuda_available()
     _scale_gpu = _use_cuda and (not _full_gpu) and scale_cuda_available()
@@ -985,16 +1040,26 @@ def extract_and_save_streaming_distributed(
         pipeline_label = f"decode-GPU + CPU {'tonemap' if is_hdr else 'scale'} [{hdr_label}]"
     else:
         hw_args        = []
-        pipeline_label = f"CPU-only {'tonemap' if is_hdr else 'scale'} [{hdr_label}]"
+        pipeline_label = f"CPU-only {'tonemap/reinhard' if is_hdr else 'scale/bilinear'} [{hdr_label}]"
 
     _log(
         f"🎬 Streaming extractor: {len(sorted_asgn)} assignments, "
+        f"{len(pending_centers)} unique centers, "
         f"last frame needed: {last_needed}, "
         f"pipeline={pipeline_label}, nice={nice_level}"
     )
 
+    # -threads 0  → FFmpeg auto-selects the optimal number of decode threads
+    #               (H.264 / H.265 decoders are slice-threaded: all CPU cores
+    #               are used without this flag the decoder is single-threaded).
+    # -filter_threads 0 → same for the filter graph (zscale, scale).
+    # -loglevel warning → suppress the verbose per-frame ffmpeg info lines;
+    #               errors and warnings still appear in the stderr pipe.
     cmd = [
         "ffmpeg",
+        "-threads", "0",
+        "-filter_threads", "0",
+        "-loglevel", "warning",
         *hw_args,
         "-i", video_path,
         "-vf", vf_filter,
@@ -1124,17 +1189,16 @@ def extract_and_save_streaming_distributed(
                                     break
 
                             if gt is not None and lr is not None:
-                                ok, _, _ = save_patch_pair(
-                                    gt, lr, video_path, ts,
-                                    category, fmt_name, n_frames, base_dir,
+                                dirs = _output_dirs_cache[(category, fmt_name)]
+                                patch_name = f"{_video_stem}_{int(ts * 1000):08d}.png"
+                                _write_queue.put((
+                                    gt, lr,
+                                    os.path.join(dirs["gt"], patch_name),
+                                    os.path.join(dirs["lr"], patch_name),
+                                ))
+                                patches_created[category] = (
+                                    patches_created.get(category, 0) + 1
                                 )
-                                if ok:
-                                    patches_created[category] = (
-                                        patches_created.get(category, 0) + 1
-                                    )
-                                    _log(
-                                        f"  ✓ frame {center} → {category}/{fmt_name}"
-                                    )
 
                     if progress_fn is not None:
                         progress_fn(frames_examined, dict(patches_created), current_frame)
@@ -1177,6 +1241,13 @@ def extract_and_save_streaming_distributed(
             for _line in stderr_lines[-20:]:
                 _log(f"  [ffmpeg] {_line}")
 
+        # Drain the async write queue — wait for all pending PNG writes to
+        # finish before returning so that patches_created is accurate.
+        for _ in _write_threads:
+            _write_queue.put(None)  # poison pill per worker
+        for _t in _write_threads:
+            _t.join()
+
     # GPU pipeline produced zero frames — most likely a runtime hw-accel failure
     # (e.g. CUDA driver mismatch, scale_cuda format-negotiation bug, or FFmpeg
     # silently falling back to software decode while the filtergraph still
@@ -1201,6 +1272,7 @@ def extract_and_save_streaming_distributed(
             use_cuda=False,
             nice_level=nice_level,
             is_hdr=is_hdr,
+            center_snap_seconds=center_snap_seconds,
         )
 
     total = sum(patches_created.values())
