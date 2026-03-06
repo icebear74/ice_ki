@@ -495,12 +495,101 @@ def build_assignments_per_category(
     return sorted(all_assignments, key=lambda x: x[0])
 
 
+def degrade_lr_frame(
+    frame: np.ndarray,
+    degrade_cfg: dict,
+    center_frame: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """
+    Apply DVD-typical degradation artefacts to a single LR frame.
+
+    Degradation pipeline (all steps optional / probability-gated):
+      1. Random Gaussian noise to simulate sensor/compression noise.
+      2. Slight Gaussian blur to simulate the soft lens + encode blur of DVD.
+      3. JPEG round-trip at a low quality setting to introduce blocking / DCT
+         artefacts characteristic of MPEG-2 / DVD video.
+
+    The function is a **no-op** when ``degrade_cfg`` is ``None`` or when the
+    random draw exceeds ``lr_degrade_prob``.
+
+    Args:
+        frame:        Single LR BGR frame (numpy uint8 array).
+        degrade_cfg:  Dict with degradation parameters (see below).  When
+                      ``None`` the frame is returned unchanged.
+        center_frame: Optional original-resolution center frame used only to
+                      compute mean brightness for the dark-scene boost.  When
+                      ``None`` dark-boost is skipped.
+
+    Supported ``degrade_cfg`` keys
+    --------------------------------
+    lr_degrade_prob         float  Base probability to degrade (default 0.6).
+    lr_dark_boost           bool   Increase probability for dark scenes (default True).
+    lr_dark_threshold       float  Mean brightness 0-255 below which dark boost
+                                   applies (default 60).
+    lr_dark_boost_prob      float  Probability used instead of lr_degrade_prob
+                                   when the scene is dark (default 0.8).
+    lr_jpeg_quality_range   [int, int]  Min/max JPEG quality for round-trip
+                                   (default [55, 75]).
+    lr_noise_sigma          [float, float]  Min/max Gaussian noise std-dev added
+                                   per-channel (default [0.5, 2.5]).
+    lr_blur_sigma           [float, float]  Min/max Gaussian blur σ (default
+                                   [0.2, 0.7]).  σ < 0.3 is effectively no-op.
+
+    Returns:
+        Degraded (or original) frame as uint8 numpy array.
+    """
+    if degrade_cfg is None:
+        return frame
+
+    # Determine effective probability, optionally boosted for dark scenes.
+    base_prob: float = float(degrade_cfg.get("lr_degrade_prob", 0.6))
+    prob = base_prob
+    if degrade_cfg.get("lr_dark_boost", True) and center_frame is not None:
+        dark_threshold: float = float(degrade_cfg.get("lr_dark_threshold", 60.0))
+        if float(np.mean(center_frame)) < dark_threshold:
+            prob = float(degrade_cfg.get("lr_dark_boost_prob", 0.8))
+
+    if random.random() >= prob:
+        return frame
+
+    result = frame.astype(np.float32)
+
+    # 1. Gaussian noise (per-channel, additive)
+    noise_range = degrade_cfg.get("lr_noise_sigma", [1.0, 4.0])
+    sigma = random.uniform(float(noise_range[0]), float(noise_range[1]))
+    if sigma > 0.0:
+        noise = np.random.normal(0.0, sigma, result.shape).astype(np.float32)
+        result = result + noise
+
+    # 2. Gaussian blur (simulates soft lens / encode low-pass)
+    blur_range = degrade_cfg.get("lr_blur_sigma", [0.3, 1.0])
+    blur_sigma = random.uniform(float(blur_range[0]), float(blur_range[1]))
+    result = np.clip(result, 0, 255).astype(np.uint8)
+    if blur_sigma >= 0.3:
+        # ksize must be odd; derive from sigma: 2*ceil(2σ)+1 capped at 7
+        ksize = min(7, 2 * int(np.ceil(2.0 * blur_sigma)) + 1)
+        if ksize % 2 == 0:
+            ksize += 1
+        result = cv2.GaussianBlur(result, (ksize, ksize), blur_sigma)
+
+    # 3. JPEG round-trip (introduces DCT blocking, colour quantisation)
+    jpeg_range = degrade_cfg.get("lr_jpeg_quality_range", [35, 60])
+    quality = random.randint(int(jpeg_range[0]), int(jpeg_range[1]))
+    encode_param = [cv2.IMWRITE_JPEG_QUALITY, quality]
+    ok, buf = cv2.imencode(".jpg", result, encode_param)
+    if ok:
+        result = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+
+    return result
+
+
 def create_patch_pair(
     frames: List[np.ndarray],
     format_name: str,
     format_cfg: dict,
     force_center: bool = False,
     logger=None,
+    degrade_cfg: Optional[dict] = None,
 ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
     """
     Create a ``(GT, LR)`` patch pair from a sequence of frames.
@@ -520,6 +609,10 @@ def create_patch_pair(
     silently discarded (``(None, None)``).  If the source frame is too small
     for the requested resize target a warning is logged.
 
+    When *degrade_cfg* is provided each LR frame is optionally degraded with
+    DVD-typical artefacts (noise + blur + JPEG round-trip) by
+    :func:`degrade_lr_frame` before stacking.  GT is always kept lossless.
+
     Args:
         frames:       BGR numpy arrays, length 5 or 7.
         format_name:  Format key (e.g. ``"medium_169"``, ``"small_540"``).
@@ -527,6 +620,8 @@ def create_patch_pair(
         force_center: Square formats only – use the geometric centre of the
                       frame instead of a random crop location.
         logger:       Optional logger instance for warning messages.
+        degrade_cfg:  Optional degradation config dict (see :func:`degrade_lr_frame`).
+                      When ``None`` no degradation is applied.
 
     Returns:
         ``(gt, lr_stacked)`` or ``(None, None)`` on failure.
@@ -540,6 +635,8 @@ def create_patch_pair(
 
     frame_h, frame_w = frames[0].shape[:2]
 
+    center_idx = n // 2
+
     if format_name in ("medium_169", "720_169"):
         # Full-frame resize – the whole source frame is scaled to the target
         # size.  No crop is applied so the full 16:9 content is preserved.
@@ -551,7 +648,6 @@ def create_patch_pair(
                 )
             return None, None
 
-        center_idx = n // 2
         # GT: INTER_LANCZOS4 = highest quality (Lanczos 8×8 neighbourhood)
         gt = cv2.resize(frames[center_idx], (gt_w, gt_h), interpolation=cv2.INTER_LANCZOS4)
 
@@ -560,10 +656,13 @@ def create_patch_pair(
         if float(gray.std()) < 15.0:
             return None, None
 
-        # LR: INTER_AREA = DVD-realistic quality
+        # LR: INTER_AREA = DVD-realistic quality, then optional degradation
+        center_raw = frames[center_idx]
         lr_frames = []
         for frame in frames:
-            lr_frames.append(cv2.resize(frame, (lr_w, lr_h), interpolation=cv2.INTER_AREA))
+            lr = cv2.resize(frame, (lr_w, lr_h), interpolation=cv2.INTER_AREA)
+            lr = degrade_lr_frame(lr, degrade_cfg, center_frame=center_raw)
+            lr_frames.append(lr)
     else:
         if frame_h < gt_h or frame_w < gt_w:
             return None, None
@@ -577,7 +676,6 @@ def create_patch_pair(
             crop_x = random.randint(0, max_x)
             crop_y = random.randint(0, max_y)
 
-        center_idx = n // 2
         gt = frames[center_idx][crop_y : crop_y + gt_h, crop_x : crop_x + gt_w]
 
         # Variety check: silently discard near-uniform GT (black/white/flat)
@@ -585,10 +683,13 @@ def create_patch_pair(
         if float(gray.std()) < 15.0:
             return None, None
 
+        center_raw = frames[center_idx]
         lr_frames = []
         for frame in frames:
             crop = frame[crop_y : crop_y + gt_h, crop_x : crop_x + gt_w]
-            lr_frames.append(cv2.resize(crop, (lr_w, lr_h), interpolation=cv2.INTER_AREA))
+            lr = cv2.resize(crop, (lr_w, lr_h), interpolation=cv2.INTER_AREA)
+            lr = degrade_lr_frame(lr, degrade_cfg, center_frame=center_raw)
+            lr_frames.append(lr)
 
     lr_stacked = np.concatenate(lr_frames, axis=0)
     return gt, lr_stacked
@@ -677,6 +778,7 @@ def extract_and_save_streaming_distributed(
     use_cuda: bool = True,
     nice_level: int = 10,
     is_hdr: bool = True,
+    degrade_cfg: Optional[dict] = None,
 ) -> Dict[str, int]:
     """
     Stream the video once and save patches as frames pass through the buffer.
@@ -707,6 +809,12 @@ def extract_and_save_streaming_distributed(
                            Defaults to :func:`is_black_frame` when ``None`` is
                            passed (i.e. black frames are always filtered unless you
                            explicitly pass ``lambda _: False``).
+                           Note: the ``is_black_frame`` default filter (mean < 20)
+                           partially overlaps with the variety-std check inside
+                           ``create_patch_pair`` (std < 15).  Set
+                           ``is_black_frame_fn=lambda _: False`` to disable the
+                           pre-filter entirely if you rely solely on the variety
+                           check via ``min_variety_std`` in the quality config.
         progress_fn:       Optional callable
                            ``(frames_examined: int,
                               patches_so_far: Dict[str, int],
@@ -727,6 +835,11 @@ def extract_and_save_streaming_distributed(
                            scale-only chain is used, avoiding incorrect
                            re-linearisation of SDR gamma that would cause
                            overexposure.
+        degrade_cfg:       Optional degradation config dict forwarded to
+                           :func:`create_patch_pair` / :func:`degrade_lr_frame`.
+                           When ``None`` no LR degradation is applied.  Populate
+                           from the ``quality`` section of the generator config
+                           (keys: ``lr_degrade_prob``, ``lr_dark_boost``, etc.).
 
     Returns:
         ``{category: patches_saved_count}``
@@ -915,7 +1028,8 @@ def extract_and_save_streaming_distributed(
                                 force = attempt >= 5
                                 gt, lr = create_patch_pair(
                                     window, fmt_name, cfg,
-                                    force_center=force, logger=logger
+                                    force_center=force, logger=logger,
+                                    degrade_cfg=degrade_cfg,
                                 )
                                 if gt is None:
                                     continue
