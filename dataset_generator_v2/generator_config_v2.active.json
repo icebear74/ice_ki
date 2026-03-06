@@ -3207,11 +3207,11 @@
     "scene_threshold": 30.0,
     "center_snap_seconds": 1.0
   },
-  "quality": {
+ "quality": {
     "jpeg_quality": 95,
     "min_sharpness": 30.0,
     "blur_threshold": 100.0,
-    "min_variety_std": 10.0,
+    "min_variety_std": 8.0,
     "lr_degrade_prob": 0.6,
     "lr_dark_boost": true,
     "lr_dark_threshold": 60.0,
