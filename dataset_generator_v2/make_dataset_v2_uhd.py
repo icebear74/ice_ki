@@ -1257,6 +1257,7 @@ class DatasetGeneratorV2UHD:
             use_cuda=self.use_cuda,
             nice_level=self.settings.get('ffmpeg_nice', 10),
             is_hdr=is_hdr,
+            degrade_cfg=self.config.get('quality'),
         )
 
         # Merge final result into patches_created.
