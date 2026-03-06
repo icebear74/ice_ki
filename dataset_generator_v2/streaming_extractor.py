@@ -961,6 +961,44 @@ def extract_and_save_streaming_distributed(
     pending_centers: List[int] = sorted(center_map.keys())
     last_needed: int = pending_centers[-1] + half if pending_centers else 0
 
+    # --- Build the exact set of frames that will ever be needed -----------
+    # Each assignment requires a contiguous window [center-half … center+half].
+    # We collect every frame index in any such window, sort them, and merge
+    # adjacent indices into contiguous ranges.  These ranges are then passed
+    # to FFmpeg as a `select` filter expression so that the expensive tonemap
+    # and scale stages run *only* on the frames Python will actually use.
+    #
+    # For a typical 10-minute 24fps video with 100 scene assignments and
+    # n_frames=7, this reduces filter-chain CPU work from ~14 400 frames
+    # to ~700 frames (≈5%).
+    _all_needed: List[int] = sorted({
+        fi
+        for c in pending_centers
+        for fi in range(max(0, c - half), c + half + 1)
+    })
+    # Merge into contiguous ranges for a compact select expression.
+    _select_ranges: List[Tuple[int, int]] = []
+    if _all_needed:
+        _rs, _re = _all_needed[0], _all_needed[0]
+        for _f in _all_needed[1:]:
+            if _f == _re + 1:
+                _re = _f
+            else:
+                _select_ranges.append((_rs, _re))
+                _rs = _re = _f
+        _select_ranges.append((_rs, _re))
+
+    # FFmpeg's filtergraph parser treats commas as filter separators, so the
+    # commas inside between(n,a,b) must be escaped with a backslash so they
+    # are not misread as filter boundaries.
+    _select_expr: str = "+".join(
+        f"between(n\\,{s}\\,{e})" for s, e in _select_ranges
+    )
+
+    _select_pct = (
+        100.0 * len(_all_needed) / (last_needed + 1) if last_needed >= 0 else 100.0
+    )
+
     # --- Pre-compute per-video constants ----------------------------------
     # video_stem and output dir paths are the same for every patch in this
     # video — compute them once to avoid Path() and os.makedirs overhead in
@@ -1022,6 +1060,49 @@ def extract_and_save_streaming_distributed(
 
     vf_filter = build_vf_filter(is_hdr=is_hdr, use_cuda=use_cuda)
 
+    # --- Inject select filter to skip unused frames in the filter chain ---
+    # The `select` filter passes only the frames in `_select_expr` to
+    # downstream filter stages.  Non-selected frames are still decoded
+    # (unavoidable for H.264/H.265 inter-frame prediction) but bypass the
+    # expensive scale/tonemap/zscale stages entirely.
+    #
+    # Placement depends on the pipeline tier:
+    #   CPU path        → select goes at the very start of the filter chain.
+    #   Hybrid GPU/CPU  → GPU scale runs first (cheap, already on GPU);
+    #                     select is inserted right after hwdownload so the
+    #                     expensive CPU tonemap only runs on needed frames.
+    #   Full-GPU        → all stages are on GPU; select is placed after the
+    #                     final hwdownload to cut pipe bandwidth.
+    if _select_expr:
+        if _full_gpu:
+            # Full-GPU: insert select right before the final format=bgr24
+            # (after hwdownload+scale=iw:ih+format=yuv420p — all GPU work
+            # is already done, select avoids the final CPU format conversion
+            # and the pipe write for unwanted frames).
+            _marker = ",format=bgr24"
+            if _marker in vf_filter:
+                vf_filter = vf_filter.replace(
+                    _marker, f",select={_select_expr},format=bgr24", 1
+                )
+            else:
+                _log("⚠️  Could not inject select into full-GPU filter chain — falling back to prepend")
+                vf_filter = f"select={_select_expr},{vf_filter}"
+        elif _scale_gpu:
+            # Hybrid scale-GPU + CPU tonemap: insert select after hwdownload
+            # so the CPU-side zscale/tonemap only processes needed frames.
+            _marker = "hwdownload,"
+            if _marker in vf_filter:
+                vf_filter = vf_filter.replace(
+                    _marker, f"hwdownload,select={_select_expr},", 1
+                )
+            else:
+                _log("⚠️  Could not inject select into hybrid GPU filter chain — falling back to prepend")
+                vf_filter = f"select={_select_expr},{vf_filter}"
+        else:
+            # CPU-only (or decode-only CUDA): prepend select so tonemap/scale
+            # runs on needed frames only.
+            vf_filter = f"select={_select_expr},{vf_filter}"
+
     # -init_hw_device cuda=hw explicitly initialises the CUDA device context
     # before demuxing begins.  Without this flag some FFmpeg builds silently
     # fall back to software decoding when the GPU context fails to auto-init,
@@ -1047,6 +1128,12 @@ def extract_and_save_streaming_distributed(
         f"{len(pending_centers)} unique centers, "
         f"last frame needed: {last_needed}, "
         f"pipeline={pipeline_label}, nice={nice_level}"
+    )
+    _log(
+        f"🎯 Frame selection: {len(_all_needed)} frames needed "
+        f"({_select_pct:.1f}% of {last_needed + 1} decoded) "
+        f"in {len(_select_ranges)} ranges — "
+        f"filter-chain CPU reduced proportionally"
     )
 
     # -threads 0  → FFmpeg auto-selects the optimal number of decode threads
@@ -1111,14 +1198,17 @@ def extract_and_save_streaming_distributed(
     stderr_thread.start()
 
     try:
-        current_frame: int = 0
+        # `selected_idx` tracks our position in `_all_needed`.  FFmpeg (via the
+        # `select` filter) only outputs the frames in that list, in sorted order,
+        # so each pipe read maps directly to `_all_needed[selected_idx]`.
+        selected_idx: int = 0
         _t_start: Optional[float] = None   # set on first frame (excludes startup)
-        _log_interval: int = 100           # log throughput every N raw frames
+        _log_interval: int = 50            # log throughput every N selected frames
 
         while pending_idx < len(pending_centers):
             raw = process.stdout.read(frame_bytes)
             if len(raw) < frame_bytes:
-                _log("⚠️  Video stream ended before all assignments were processed")
+                _log("⚠️  Video stream ended before all selected frames were received")
                 break
 
             # Start the clock on the very first frame so FFmpeg startup time
@@ -1126,10 +1216,20 @@ def extract_and_save_streaming_distributed(
             if _t_start is None:
                 _t_start = time.monotonic()
 
+            # Guard against FFmpeg producing more frames than the select
+            # expression requested (shouldn't happen, but avoids IndexError).
+            if selected_idx >= len(_all_needed):
+                _log("⚠️  FFmpeg produced more frames than selected — stopping")
+                break
+
+            # Map this pipe read to its actual video frame index.
+            actual_frame: int = _all_needed[selected_idx]
+            selected_idx += 1
+
             frame = np.frombuffer(raw, dtype=np.uint8).reshape(
                 (STREAM_HEIGHT, STREAM_WIDTH, 3)
             ).copy()
-            buffer[current_frame] = frame
+            buffer[actual_frame] = frame
 
             # Evict frames that are no longer needed by any pending assignment.
             # The earliest window we still need starts at pending_center - half.
@@ -1140,7 +1240,7 @@ def extract_and_save_streaming_distributed(
             # Satisfy pending assignments whose full window is now in the buffer
             while pending_idx < len(pending_centers):
                 center = pending_centers[pending_idx]
-                if current_frame < center + half:
+                if actual_frame < center + half:
                     break  # Need more frames
 
                 # Build the n_frames window; clamp negative indices to 0
@@ -1201,29 +1301,26 @@ def extract_and_save_streaming_distributed(
                                 )
 
                     if progress_fn is not None:
-                        progress_fn(frames_examined, dict(patches_created), current_frame)
+                        # 3rd arg = actual video frame index (same semantics as
+                        # the previous raw_frames_read / current_frame counter —
+                        # monotonically increasing video frame number).
+                        progress_fn(frames_examined, dict(patches_created), actual_frame)
 
                 pending_idx += 1
 
-            current_frame += 1
-
             # Periodic throughput log.
-            # FPS = raw decoded frames per second (pipeline throughput).
-            # SPS = scene-sets completed per second (= assignments processed / s).
-            if _t_start is not None and current_frame % _log_interval == 0:
+            # SPS = scene-sets completed per second (assignments processed / s).
+            # sel/s = selected frames per second (frames FFmpeg actually piped).
+            if _t_start is not None and selected_idx % _log_interval == 0:
                 _elapsed = time.monotonic() - _t_start
                 if _elapsed > 0:
-                    _fps_actual = current_frame / _elapsed
+                    _sel_fps = selected_idx / _elapsed
                     _sps_actual = frames_examined / _elapsed
                     _log(
-                        f"  📊 frame {current_frame:>6}  "
-                        f"FPS {_fps_actual:>6.1f}  SPS {_sps_actual:>6.2f}  "
-                        f"(scenes completed: {frames_examined})"
+                        f"  📊 sel {selected_idx:>5}/{len(_all_needed)}  "
+                        f"sel/s {_sel_fps:>6.1f}  SPS {_sps_actual:>6.2f}  "
+                        f"(scenes: {frames_examined})"
                     )
-
-            # Early exit once the last required frame has been read
-            if current_frame > last_needed:
-                break
 
     finally:
         try:
@@ -1236,7 +1333,7 @@ def extract_and_save_streaming_distributed(
         # Log FFmpeg stderr whenever no frames were produced — this is the
         # most useful diagnostic for filter chain errors (e.g. unsupported
         # interp_algo, pixel format mismatch, missing filter).
-        if current_frame == 0 and stderr_lines:
+        if selected_idx == 0 and stderr_lines:
             _log("FFmpeg stderr (last 20 lines):")
             for _line in stderr_lines[-20:]:
                 _log(f"  [ffmpeg] {_line}")
@@ -1254,7 +1351,7 @@ def extract_and_save_streaming_distributed(
     # contains scale_cuda / hwdownload GPU filters).
     # Retry transparently with the CPU-only pipeline so extraction still
     # completes, rather than silently returning 0 patches.
-    if current_frame == 0 and (_full_gpu or _scale_gpu):
+    if selected_idx == 0 and (_full_gpu or _scale_gpu):
         _log(
             "⚠️  GPU pipeline produced no frames — retrying with CPU-only pipeline"
         )
@@ -1280,13 +1377,13 @@ def extract_and_save_streaming_distributed(
         (time.monotonic() - _t_start) if _t_start is not None else 0.0
     )
     if _elapsed_total > 0:
-        _fps_final = current_frame / _elapsed_total
         _sps_final = frames_examined / _elapsed_total
+        _sel_fps_final = selected_idx / _elapsed_total
         _log(
             f"✓ Streaming extraction done: {total} patches saved, "
             f"{frames_examined} assignments examined, "
-            f"{current_frame} frames decoded — "
-            f"FPS {_fps_final:.1f}  SPS {_sps_final:.2f}"
+            f"{selected_idx}/{len(_all_needed)} selected frames received — "
+            f"sel/s {_sel_fps_final:.1f}  SPS {_sps_final:.2f}"
         )
     else:
         _log(
