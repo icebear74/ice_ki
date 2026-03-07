@@ -576,6 +576,9 @@ def degrade_lr_frame(
       3. JPEG round-trip at a low quality setting to introduce blocking / DCT
          artefacts characteristic of MPEG-2 / DVD video.
 
+    Per activation, only a random subset of stages (at most ``lr_max_stages``)
+    is applied. The stage order is shuffled so the combination is unpredictable.
+
     The function is a **no-op** when ``degrade_cfg`` is ``None`` or when the
     random draw exceeds ``lr_degrade_prob``.
 
@@ -595,6 +598,10 @@ def degrade_lr_frame(
                                    applies (default 60).
     lr_dark_boost_prob      float  Probability used instead of lr_degrade_prob
                                    when the scene is dark (default 0.8).
+    lr_max_stages           int    Maximum number of degradation stages applied
+                                   per activation (1–3, default 2).
+    lr_stage_prob           float  Probability that each additional stage beyond
+                                   the first is included (default 0.4).
     lr_jpeg_quality_range   [int, int]  Min/max JPEG quality for round-trip
                                    (default [55, 75]).
     lr_noise_sigma          [float, float]  Min/max Gaussian noise std-dev added
@@ -621,31 +628,48 @@ def degrade_lr_frame(
 
     result = frame.astype(np.float32)
 
+    # Select a random subset of degradation stages (max lr_max_stages).
+    # Shuffle so the combination is unpredictable (not always noise→blur→jpeg).
+    max_stages: int = int(degrade_cfg.get("lr_max_stages", 2))
+    stage_prob: float = float(degrade_cfg.get("lr_stage_prob", 0.4))
+
+    stages = [1, 2, 3]
+    random.shuffle(stages)
+    # Always apply the first stage; add subsequent ones with stage_prob each
+    active_stages = [stages[0]]
+    for s in stages[1:max_stages]:
+        if random.random() < stage_prob:
+            active_stages.append(s)
+
     # 1. Gaussian noise (per-channel, additive)
-    noise_range = degrade_cfg.get("lr_noise_sigma", [1.0, 4.0])
-    sigma = random.uniform(float(noise_range[0]), float(noise_range[1]))
-    if sigma > 0.0:
-        noise = np.random.normal(0.0, sigma, result.shape).astype(np.float32)
-        result = result + noise
+    if 1 in active_stages:
+        noise_range = degrade_cfg.get("lr_noise_sigma", [1.0, 4.0])
+        sigma = random.uniform(float(noise_range[0]), float(noise_range[1]))
+        if sigma > 0.0:
+            noise = np.random.normal(0.0, sigma, result.shape).astype(np.float32)
+            result = result + noise
 
     # 2. Gaussian blur (simulates soft lens / encode low-pass)
-    blur_range = degrade_cfg.get("lr_blur_sigma", [0.3, 1.0])
-    blur_sigma = random.uniform(float(blur_range[0]), float(blur_range[1]))
-    result = np.clip(result, 0, 255).astype(np.uint8)
-    if blur_sigma >= 0.3:
-        # ksize must be odd; derive from sigma: 2*ceil(2σ)+1 capped at 7
-        ksize = min(7, 2 * int(np.ceil(2.0 * blur_sigma)) + 1)
-        if ksize % 2 == 0:
-            ksize += 1
-        result = cv2.GaussianBlur(result, (ksize, ksize), blur_sigma)
+    if 2 in active_stages:
+        blur_range = degrade_cfg.get("lr_blur_sigma", [0.3, 1.0])
+        blur_sigma = random.uniform(float(blur_range[0]), float(blur_range[1]))
+        result = np.clip(result, 0, 255).astype(np.uint8)
+        if blur_sigma >= 0.3:
+            ksize = min(7, 2 * int(np.ceil(2.0 * blur_sigma)) + 1)
+            if ksize % 2 == 0:
+                ksize += 1
+            result = cv2.GaussianBlur(result, (ksize, ksize), blur_sigma)
+    else:
+        result = np.clip(result, 0, 255).astype(np.uint8)
 
     # 3. JPEG round-trip (introduces DCT blocking, colour quantisation)
-    jpeg_range = degrade_cfg.get("lr_jpeg_quality_range", [35, 60])
-    quality = random.randint(int(jpeg_range[0]), int(jpeg_range[1]))
-    encode_param = [cv2.IMWRITE_JPEG_QUALITY, quality]
-    ok, buf = cv2.imencode(".jpg", result, encode_param)
-    if ok:
-        result = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+    if 3 in active_stages:
+        jpeg_range = degrade_cfg.get("lr_jpeg_quality_range", [55, 75])
+        quality = random.randint(int(jpeg_range[0]), int(jpeg_range[1]))
+        encode_param = [cv2.IMWRITE_JPEG_QUALITY, quality]
+        ok, buf = cv2.imencode(".jpg", result, encode_param)
+        if ok:
+            result = cv2.imdecode(buf, cv2.IMREAD_COLOR)
 
     return result
 
