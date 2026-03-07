@@ -718,6 +718,144 @@ def snap_assignments_to_centers(
     return result
 
 
+def _degrade_range(value, default: list) -> list:
+    """Return *value* as a two-element ``[lo, hi]`` list.
+
+    Accepts an existing list/tuple (returned as-is), a scalar (broadcast to
+    ``[v, v]``), or ``None`` (falls back to *default*).  This makes
+    ``degrade_cfg`` robust against both ``"lr_noise_sigma": 2.0`` and
+    ``"lr_noise_sigma": [1.0, 3.0]`` entries.
+    """
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        v = float(value)
+        return [v, v]
+    return list(value)
+
+
+def _sample_degrade_params(
+    degrade_cfg: dict,
+    center_frame: Optional[np.ndarray] = None,
+) -> Optional[dict]:
+    """
+    Draw degradation parameters **once** for an entire scene window.
+
+    Returns a frozen parameter dict that :func:`_apply_degrade_params` can
+    apply to every frame in the window, or ``None`` when this scene should
+    not be degraded (probability gate not passed).
+
+    Sampling once per scene is the DVD-realistic behaviour: a real MPEG-2
+    encoder uses the same quantiser settings for the whole GOP, so all frames
+    in the window share the same noise level, blur, and JPEG quality.  Each
+    frame still gets **independent** noise samples (sensor noise is
+    uncorrelated between frames) but at the same sigma.
+
+    Args:
+        degrade_cfg:  Degradation config dict (see :func:`degrade_lr_frame`).
+        center_frame: Optional original-resolution center frame used to compute
+                      mean brightness for the dark-scene probability boost.
+
+    Returns:
+        ``None`` – skip degradation for this scene.
+        ``dict`` with keys:
+
+        * ``active_stages`` – list of stage IDs (subset of {1, 2, 3}).
+        * ``noise_sigma``   – Gaussian noise std-dev (stage 1).
+        * ``blur_sigma``    – Gaussian blur σ (stage 2).
+        * ``jpeg_quality``  – JPEG quality integer 1-100 (stage 3).
+    """
+    # Determine effective probability, optionally boosted for dark scenes.
+    base_prob: float = float(degrade_cfg.get("lr_degrade_prob", 0.6))
+    prob = base_prob
+    if degrade_cfg.get("lr_dark_boost", True) and center_frame is not None:
+        dark_threshold: float = float(degrade_cfg.get("lr_dark_threshold", 60.0))
+        if float(np.mean(center_frame)) < dark_threshold:
+            prob = float(degrade_cfg.get("lr_dark_boost_prob", 0.8))
+
+    if random.random() >= prob:
+        return None  # this scene will not be degraded
+
+    # Select which stages are active (same for the whole scene).
+    max_stages: int = int(degrade_cfg.get("lr_max_stages", 2))
+    stage_prob: float = float(degrade_cfg.get("lr_stage_prob", 0.4))
+    stages = [1, 2, 3]
+    random.shuffle(stages)
+    active_stages = [stages[0]]
+    for s in stages[1:max_stages]:
+        if random.random() < stage_prob:
+            active_stages.append(s)
+
+    # Sample scalar parameters once — all frames will use these exact values.
+    noise_range  = _degrade_range(degrade_cfg.get("lr_noise_sigma"),       [1.0, 4.0])
+    noise_sigma: float = random.uniform(float(noise_range[0]), float(noise_range[1]))
+
+    blur_range   = _degrade_range(degrade_cfg.get("lr_blur_sigma"),        [0.3, 1.0])
+    blur_sigma: float = random.uniform(float(blur_range[0]), float(blur_range[1]))
+
+    jpeg_range   = _degrade_range(degrade_cfg.get("lr_jpeg_quality_range"), [55, 75])
+    jpeg_quality: int = random.randint(int(jpeg_range[0]), int(jpeg_range[1]))
+
+    return {
+        "active_stages": active_stages,
+        "noise_sigma":   noise_sigma,
+        "blur_sigma":    blur_sigma,
+        "jpeg_quality":  jpeg_quality,
+    }
+
+
+def _apply_degrade_params(
+    frame: np.ndarray,
+    params: dict,
+) -> np.ndarray:
+    """
+    Apply pre-sampled degradation parameters to a single LR frame.
+
+    Unlike :func:`degrade_lr_frame` this function never draws new random
+    scalars — it uses the values in *params* verbatim.  Additive noise is
+    still drawn freshly for each frame (sensor noise is per-frame
+    independent), but the noise sigma is fixed so all frames in the window
+    share the same intensity level.
+
+    Args:
+        frame:  Single LR BGR frame (uint8 numpy array).
+        params: Dict returned by :func:`_sample_degrade_params`.
+
+    Returns:
+        Degraded frame as uint8 numpy array.
+    """
+    active_stages = params["active_stages"]
+    result = frame.astype(np.float32)
+
+    # Stage 1: Gaussian noise — new samples per frame, same sigma for all.
+    if 1 in active_stages:
+        sigma = params["noise_sigma"]
+        if sigma > 0.0:
+            noise = np.random.normal(0.0, sigma, result.shape).astype(np.float32)
+            result = result + noise
+
+    # Stage 2: Gaussian blur — same kernel for every frame in the window.
+    if 2 in active_stages:
+        blur_sigma = params["blur_sigma"]
+        result = np.clip(result, 0, 255).astype(np.uint8)
+        if blur_sigma >= 0.3:
+            ksize = min(7, 2 * int(np.ceil(2.0 * blur_sigma)) + 1)
+            if ksize % 2 == 0:
+                ksize += 1
+            result = cv2.GaussianBlur(result, (ksize, ksize), blur_sigma)
+    else:
+        result = np.clip(result, 0, 255).astype(np.uint8)
+
+    # Stage 3: JPEG round-trip — same quality for every frame in the window.
+    if 3 in active_stages:
+        encode_param = [cv2.IMWRITE_JPEG_QUALITY, params["jpeg_quality"]]
+        ok, buf = cv2.imencode(".jpg", result, encode_param)
+        if ok:
+            result = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+
+    return result
+
+
 def degrade_lr_frame(
     frame: np.ndarray,
     degrade_cfg: dict,
@@ -726,9 +864,16 @@ def degrade_lr_frame(
     """
     Apply DVD-typical degradation artefacts to a single LR frame.
 
+    This is a convenience wrapper for single-frame callers.  When degrading
+    a multi-frame scene window, use :func:`_sample_degrade_params` once and
+    then :func:`_apply_degrade_params` per frame so that all frames in the
+    window share the same degradation parameters (blur sigma, JPEG quality,
+    noise sigma) — matching the behaviour of a real MPEG-2 encoder whose
+    quantiser settings are constant within a GOP.
+
     Degradation pipeline (all steps optional / probability-gated):
-      1. Random Gaussian noise to simulate sensor/compression noise.
-      2. Slight Gaussian blur to simulate the soft lens + encode blur of DVD.
+      1. Gaussian noise to simulate sensor/compression noise.
+      2. Gaussian blur to simulate the soft lens + encode blur of DVD.
       3. JPEG round-trip at a low quality setting to introduce blocking / DCT
          artefacts characteristic of MPEG-2 / DVD video.
 
@@ -770,64 +915,10 @@ def degrade_lr_frame(
     """
     if degrade_cfg is None:
         return frame
-
-    # Determine effective probability, optionally boosted for dark scenes.
-    base_prob: float = float(degrade_cfg.get("lr_degrade_prob", 0.6))
-    prob = base_prob
-    if degrade_cfg.get("lr_dark_boost", True) and center_frame is not None:
-        dark_threshold: float = float(degrade_cfg.get("lr_dark_threshold", 60.0))
-        if float(np.mean(center_frame)) < dark_threshold:
-            prob = float(degrade_cfg.get("lr_dark_boost_prob", 0.8))
-
-    if random.random() >= prob:
+    params = _sample_degrade_params(degrade_cfg, center_frame=center_frame)
+    if params is None:
         return frame
-
-    result = frame.astype(np.float32)
-
-    # Select a random subset of degradation stages (max lr_max_stages).
-    # Shuffle so the combination is unpredictable (not always noise→blur→jpeg).
-    max_stages: int = int(degrade_cfg.get("lr_max_stages", 2))
-    stage_prob: float = float(degrade_cfg.get("lr_stage_prob", 0.4))
-
-    stages = [1, 2, 3]
-    random.shuffle(stages)
-    # Always apply the first stage; add subsequent ones with stage_prob each
-    active_stages = [stages[0]]
-    for s in stages[1:max_stages]:
-        if random.random() < stage_prob:
-            active_stages.append(s)
-
-    # 1. Gaussian noise (per-channel, additive)
-    if 1 in active_stages:
-        noise_range = degrade_cfg.get("lr_noise_sigma", [1.0, 4.0])
-        sigma = random.uniform(float(noise_range[0]), float(noise_range[1]))
-        if sigma > 0.0:
-            noise = np.random.normal(0.0, sigma, result.shape).astype(np.float32)
-            result = result + noise
-
-    # 2. Gaussian blur (simulates soft lens / encode low-pass)
-    if 2 in active_stages:
-        blur_range = degrade_cfg.get("lr_blur_sigma", [0.3, 1.0])
-        blur_sigma = random.uniform(float(blur_range[0]), float(blur_range[1]))
-        result = np.clip(result, 0, 255).astype(np.uint8)
-        if blur_sigma >= 0.3:
-            ksize = min(7, 2 * int(np.ceil(2.0 * blur_sigma)) + 1)
-            if ksize % 2 == 0:
-                ksize += 1
-            result = cv2.GaussianBlur(result, (ksize, ksize), blur_sigma)
-    else:
-        result = np.clip(result, 0, 255).astype(np.uint8)
-
-    # 3. JPEG round-trip (introduces DCT blocking, colour quantisation)
-    if 3 in active_stages:
-        jpeg_range = degrade_cfg.get("lr_jpeg_quality_range", [55, 75])
-        quality = random.randint(int(jpeg_range[0]), int(jpeg_range[1]))
-        encode_param = [cv2.IMWRITE_JPEG_QUALITY, quality]
-        ok, buf = cv2.imencode(".jpg", result, encode_param)
-        if ok:
-            result = cv2.imdecode(buf, cv2.IMREAD_COLOR)
-
-    return result
+    return _apply_degrade_params(frame, params)
 
 
 def create_patch_pair(
@@ -856,9 +947,15 @@ def create_patch_pair(
     silently discarded (``(None, None)``).  If the source frame is too small
     for the requested resize target a warning is logged.
 
-    When *degrade_cfg* is provided each LR frame is optionally degraded with
-    DVD-typical artefacts (noise + blur + JPEG round-trip) by
-    :func:`degrade_lr_frame` before stacking.  GT is always kept lossless.
+    When *degrade_cfg* is provided the degradation parameters are **sampled
+    once per scene** via :func:`_sample_degrade_params` (using the center
+    frame for the dark-scene probability boost), then applied to every LR
+    frame with :func:`_apply_degrade_params`.  This means all frames in the
+    window share the same noise sigma, blur sigma, and JPEG quality — matching
+    the behaviour of a real MPEG-2 encoder where the same quantiser settings
+    apply to the whole GOP.  Additive noise samples are still drawn
+    independently per frame (sensor noise is uncorrelated), but at the
+    consistent sigma.  GT is always kept lossless.
 
     Args:
         frames:       BGR numpy arrays, length 5 or 7.
@@ -903,12 +1000,16 @@ def create_patch_pair(
         if float(gray.std()) < 15.0:
             return None, None
 
-        # LR: INTER_AREA = DVD-realistic quality, then optional degradation
+        # LR: INTER_AREA = DVD-realistic quality, then optional degradation.
+        # Parameters are sampled once for the whole scene so that every frame
+        # in the window receives identical blur/quality/noise-level settings.
         center_raw = frames[center_idx]
+        _scene_params = _sample_degrade_params(degrade_cfg, center_frame=center_raw) if degrade_cfg else None
         lr_frames = []
         for frame in frames:
             lr = cv2.resize(frame, (lr_w, lr_h), interpolation=cv2.INTER_AREA)
-            lr = degrade_lr_frame(lr, degrade_cfg, center_frame=center_raw)
+            if _scene_params is not None:
+                lr = _apply_degrade_params(lr, _scene_params)
             lr_frames.append(lr)
     else:
         if frame_h < gt_h or frame_w < gt_w:
@@ -931,11 +1032,16 @@ def create_patch_pair(
             return None, None
 
         center_raw = frames[center_idx]
+        # Sample degradation parameters once for the whole scene window so
+        # that all 7 LR frames share the same noise sigma, blur sigma, and
+        # JPEG quality — consistent with how a real MPEG-2 encoder works.
+        _scene_params = _sample_degrade_params(degrade_cfg, center_frame=center_raw) if degrade_cfg else None
         lr_frames = []
         for frame in frames:
             crop = frame[crop_y : crop_y + gt_h, crop_x : crop_x + gt_w]
             lr = cv2.resize(crop, (lr_w, lr_h), interpolation=cv2.INTER_AREA)
-            lr = degrade_lr_frame(lr, degrade_cfg, center_frame=center_raw)
+            if _scene_params is not None:
+                lr = _apply_degrade_params(lr, _scene_params)
             lr_frames.append(lr)
 
     lr_stacked = np.concatenate(lr_frames, axis=0)
