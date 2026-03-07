@@ -29,15 +29,17 @@ build_dual_vf_filter()
     an HD (1920×1080) output stream in a single FFmpeg pass.
 
 extract_and_save_streaming_dual()
-    Preferred entry point.  Dual-stream 4K pipeline: streams the video
-    once via two named FIFO pipes, fills separate rolling buffers for 4K
-    and HD frames, and routes each format to the correct buffer.  Falls
-    back to :func:`extract_and_save_streaming_distributed` on Windows or
-    when the source video is smaller than 4K.
+    Preferred entry point.  Two-pass pipeline: runs
+    :func:`extract_and_save_streaming_distributed` twice — once at 4K for
+    720/720_169 formats, once at 1080p for 540 formats.  Falls back to a
+    single 1080p pass when the source video is smaller than 4K.
 
 extract_and_save_streaming_distributed()
-    Legacy single-stream entry point.  Launches one FFmpeg process,
-    streams BGR24 frames at 1920×1080, saves patches on-the-fly.
+    Core single-stream entry point.  Launches one FFmpeg process, streams
+    BGR24 frames at the requested resolution (default 1920×1080), saves
+    patches on-the-fly.  Accepts optional ``stream_width``/``stream_height``
+    for caller-specified output dimensions.  Uses ``-filter_complex_script``
+    to pass the filter chain via file, avoiding OS ARG_MAX limits.
 
 create_patch_pair()
     Create a (GT, LR) patch pair from a sequence of frames.
@@ -294,24 +296,28 @@ def is_hdr_transfer(color_transfer: Optional[str]) -> bool:
     return color_transfer.strip().lower() in _HDR_TRANSFERS
 
 
-def build_vf_filter(is_hdr: bool, use_cuda: bool = True) -> str:
+def build_vf_filter(is_hdr: bool, use_cuda: bool = True,
+                    width: int = STREAM_WIDTH, height: int = STREAM_HEIGHT) -> str:
     """Return the FFmpeg ``-vf`` filter string for the given video type.
 
     Selects the best available pipeline tier at call time:
 
-    * HDR + full-GPU  → ``_TONEMAP_FILTER_CUDA``
-    * HDR + scale-GPU → ``_TONEMAP_FILTER_SCALE_CUDA``
-    * HDR + CPU-only  → ``_TONEMAP_FILTER``
-    * SDR + scale-GPU → ``_SDR_FILTER_SCALE_CUDA``
-    * SDR + CPU-only  → ``_SDR_FILTER``
+    * HDR + full-GPU  → tonemap_cuda + scale_cuda pipeline
+    * HDR + scale-GPU → scale_cuda + CPU zscale/tonemap pipeline
+    * HDR + CPU-only  → CPU zscale + tonemap + scale pipeline
+    * SDR + scale-GPU → scale_cuda pipeline
+    * SDR + CPU-only  → scale pipeline
 
     Args:
         is_hdr:    Whether the source video is HDR (PQ or HLG transfer).
         use_cuda:  Whether CUDA acceleration is requested.  Still falls back
                    to CPU-only when the local FFmpeg has no CUDA support.
+        width:     Output width in pixels (default ``STREAM_WIDTH`` = 1920).
+        height:    Output height in pixels (default ``STREAM_HEIGHT`` = 1080).
 
     Returns:
-        FFmpeg filter string ready for ``-vf``.
+        FFmpeg filter string ready for ``-vf`` (or for wrapping in
+        ``-filter_complex`` as ``[0:v]<filter>[label]``).
     """
     _use_cuda = use_cuda and cuda_available()
     _full_gpu  = _use_cuda and tonemap_cuda_available()
@@ -319,16 +325,48 @@ def build_vf_filter(is_hdr: bool, use_cuda: bool = True) -> str:
 
     if is_hdr:
         if _full_gpu:
-            return _TONEMAP_FILTER_CUDA
+            return (
+                f"tonemap_cuda=tonemap=mobius:desat=0:peak=100,"
+                f"scale_cuda={width}:{height}:interp_algo=bicubic,"
+                "hwdownload,"
+                "scale=iw:ih,"
+                "format=yuv420p,"
+                "format=bgr24"
+            )
         if _scale_gpu:
-            return _TONEMAP_FILTER_SCALE_CUDA
-        return _TONEMAP_FILTER
+            return (
+                f"scale_cuda={width}:{height}:interp_algo=bicubic,"
+                "hwdownload,"
+                "format=p010,"
+                "zscale=t=linear:npl=100:filter=bilinear,"
+                "format=gbrpf32le,"
+                "zscale=p=bt709:filter=bilinear,"
+                "tonemap=tonemap=reinhard:desat=0,"
+                "zscale=t=bt709:m=bt709:range=full:filter=bilinear,"
+                "format=bgr24"
+            )
+        return (
+            "zscale=t=linear:npl=100:filter=bilinear,"
+            "format=gbrpf32le,"
+            "zscale=p=bt709:filter=bilinear,"
+            "tonemap=tonemap=reinhard:desat=0,"
+            "zscale=t=bt709:m=bt709:range=full:filter=bilinear,"
+            f"scale={width}:{height}:flags=lanczos,"
+            "format=bgr24"
+        )
     else:
         # SDR: no tone-mapping needed; applying it would re-linearise the
         # already-correct gamma and make images too bright.
         if _scale_gpu:
-            return _SDR_FILTER_SCALE_CUDA
-        return _SDR_FILTER
+            return (
+                f"scale_cuda={width}:{height}:interp_algo=bicubic,"
+                "hwdownload,"
+                "format=bgr24"
+            )
+        return (
+            f"scale={width}:{height}:flags=lanczos,"
+            "format=bgr24"
+        )
 
 
 def build_dual_vf_filter(is_hdr: bool, use_cuda: bool = True) -> str:
@@ -1052,15 +1090,18 @@ def extract_and_save_streaming_distributed(
     is_hdr: bool = True,
     degrade_cfg: Optional[dict] = None,
     center_snap_seconds: float = 0.0,
+    stream_width: int = STREAM_WIDTH,
+    stream_height: int = STREAM_HEIGHT,
 ) -> Dict[str, int]:
     """
     Stream the video once and save patches as frames pass through the buffer.
 
     A single FFmpeg process reads the video linearly (no ``-ss`` seeking).
-    Frames are piped as raw BGR24 data at 1920×1080.  A rolling dictionary
-    buffer keeps the last ``n_frames`` decoded frames in memory.  When a
-    target centre frame has been decoded and all ``n_frames`` of its window
-    are in the buffer, the patch is created and saved immediately.
+    Frames are piped as raw BGR24 data at *stream_width* × *stream_height*
+    (default 1920×1080).  A rolling dictionary buffer keeps the last
+    ``n_frames`` decoded frames in memory.  When a target centre frame has
+    been decoded and all ``n_frames`` of its window are in the buffer, the
+    patch is created and saved immediately.
 
     The stream is terminated early once the last needed frame has been read.
 
@@ -1123,6 +1164,11 @@ def extract_and_save_streaming_distributed(
                              ``build_assignments_per_category`` is used, because that
                              function already places each category on its own
                              evenly-spaced grid.
+        stream_width:        Width of the decoded frame piped from FFmpeg (default
+                             ``STREAM_WIDTH`` = 1920).  Pass ``STREAM_4K_WIDTH``
+                             (3840) to stream at 4K for the 720/720_169 formats.
+        stream_height:       Height of the decoded frame (default ``STREAM_HEIGHT``
+                             = 1080).  Pass ``STREAM_4K_HEIGHT`` (2160) for 4K.
 
     Returns:
         ``{category: patches_saved_count}``
@@ -1266,7 +1312,10 @@ def extract_and_save_streaming_distributed(
     _full_gpu  = _use_cuda and is_hdr and tonemap_cuda_available()
     _scale_gpu = _use_cuda and (not _full_gpu) and scale_cuda_available()
 
-    vf_filter = build_vf_filter(is_hdr=is_hdr, use_cuda=use_cuda)
+    vf_filter = build_vf_filter(
+        is_hdr=is_hdr, use_cuda=use_cuda,
+        width=stream_width, height=stream_height,
+    )
 
     # --- Inject select filter to skip unused frames in the filter chain ---
     # The `select` filter passes only the frames in `_select_expr` to
@@ -1335,6 +1384,7 @@ def extract_and_save_streaming_distributed(
         f"🎬 Streaming extractor: {len(sorted_asgn)} assignments, "
         f"{len(pending_centers)} unique centers, "
         f"last frame needed: {last_needed}, "
+        f"stream={stream_width}×{stream_height}, "
         f"pipeline={pipeline_label}, nice={nice_level}"
     )
     _log(
@@ -1344,26 +1394,25 @@ def extract_and_save_streaming_distributed(
         f"filter-chain CPU reduced proportionally"
     )
 
-    # -threads 0  → FFmpeg auto-selects the optimal number of decode threads
-    #               (H.264 / H.265 decoders are slice-threaded: all CPU cores
-    #               are used without this flag the decoder is single-threaded).
-    # -filter_threads 0 → same for the filter graph (zscale, scale).
-    # -loglevel warning → suppress the verbose per-frame ffmpeg info lines;
-    #               errors and warnings still appear in the stderr pipe.
-    cmd = [
-        "ffmpeg",
-        "-threads", "0",
-        "-filter_threads", "0",
-        "-loglevel", "warning",
-        *hw_args,
-        "-i", video_path,
-        "-vf", vf_filter,
-        "-f", "rawvideo",
-        "-pix_fmt", "bgr24",
-        "pipe:1",
-    ]
+    # Write the filter chain to a temp file so that a long _select_expr
+    # (thousands of between() terms for a dense assignment list) never
+    # exceeds the OS ARG_MAX limit (~2 MB on Linux) and causes execve() to
+    # fail with E2BIG.  -filter_complex_script reads from a file and has no
+    # length restriction.  We wrap the vf-style filter in a minimal
+    # filter_complex graph: [0:v]<filter>[vout], then map [vout] to output.
+    #
+    # Initialise all variables that the finally block references to safe
+    # defaults so that a failure in mkstemp or Popen cannot produce a
+    # NameError in the cleanup path.
+    _fc_script_path: Optional[str] = None
+    process = None
+    stderr_thread: Optional[threading.Thread] = None
+    stderr_lines: List[str] = []
+    selected_idx: int = 0
+    _t_start: Optional[float] = None
+    _log_interval: int = 50
 
-    frame_bytes: int = STREAM_WIDTH * STREAM_HEIGHT * 3
+    frame_bytes: int = stream_width * stream_height * 3
     patches_created: Dict[str, int] = {}
 
     # Rolling buffer: frame_idx → BGR frame (numpy array)
@@ -1384,34 +1433,46 @@ def extract_and_save_streaming_distributed(
         except Exception:
             pass
 
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    _set_nice(process.pid)
-
-    # Drain stderr in a background thread so the pipe never blocks the writer.
-    # The collected lines are logged if FFmpeg produces no frames (crash/error).
-    stderr_lines: List[str] = []
-
-    def drain_stderr(pipe: "subprocess.IO[bytes]") -> None:
-        for raw in pipe:
-            stderr_lines.append(raw.decode(errors="replace").rstrip())
-        pipe.close()
-
-    stderr_thread = threading.Thread(
-        target=drain_stderr, args=(process.stderr,), daemon=True
-    )
-    stderr_thread.start()
-
     try:
+        _fc_fd, _fc_script_path = tempfile.mkstemp(suffix=".txt", prefix="dsg_fc_")
+        with os.fdopen(_fc_fd, "w", encoding="utf-8") as _fc_fh:
+            _fc_fh.write(f"[0:v]{vf_filter}[vout]")
+
+        cmd = [
+            "ffmpeg",
+            "-threads", "0",
+            "-filter_threads", "0",
+            "-loglevel", "warning",
+            *hw_args,
+            "-i", video_path,
+            "-filter_complex_script", _fc_script_path,
+            "-map", "[vout]",
+            "-f", "rawvideo",
+            "-pix_fmt", "bgr24",
+            "pipe:1",
+        ]
+
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        _set_nice(process.pid)
+
+        # Drain stderr in a background thread so the pipe never blocks the writer.
+        # The collected lines are logged if FFmpeg produces no frames (crash/error).
+        def drain_stderr(pipe: "subprocess.IO[bytes]") -> None:
+            for raw in pipe:
+                stderr_lines.append(raw.decode(errors="replace").rstrip())
+            pipe.close()
+
+        stderr_thread = threading.Thread(
+            target=drain_stderr, args=(process.stderr,), daemon=True
+        )
+        stderr_thread.start()
         # `selected_idx` tracks our position in `_all_needed`.  FFmpeg (via the
         # `select` filter) only outputs the frames in that list, in sorted order,
         # so each pipe read maps directly to `_all_needed[selected_idx]`.
-        selected_idx: int = 0
-        _t_start: Optional[float] = None   # set on first frame (excludes startup)
-        _log_interval: int = 50            # log throughput every N selected frames
 
         while pending_idx < len(pending_centers):
             raw = process.stdout.read(frame_bytes)
@@ -1435,7 +1496,7 @@ def extract_and_save_streaming_distributed(
             selected_idx += 1
 
             frame = np.frombuffer(raw, dtype=np.uint8).reshape(
-                (STREAM_HEIGHT, STREAM_WIDTH, 3)
+                (stream_height, stream_width, 3)
             ).copy()
             buffer[actual_frame] = frame
 
@@ -1531,13 +1592,15 @@ def extract_and_save_streaming_distributed(
                     )
 
     finally:
-        try:
-            process.stdout.close()
-        except Exception:
-            pass
-        process.kill()
-        process.wait()
-        stderr_thread.join(timeout=2)
+        if process is not None:
+            try:
+                process.stdout.close()
+            except Exception:
+                pass
+            process.kill()
+            process.wait()
+        if stderr_thread is not None:
+            stderr_thread.join(timeout=2)
         # Always persist FFmpeg stderr to the log file so that filter-chain
         # errors, codec warnings and hw-accel failures are visible after the
         # run even when they didn't prevent frame output.
@@ -1555,6 +1618,13 @@ def extract_and_save_streaming_distributed(
             _write_queue.put(None)  # poison pill per worker
         for _t in _write_threads:
             _t.join()
+
+        # Remove the temporary filter script.
+        if _fc_script_path is not None:
+            try:
+                os.unlink(_fc_script_path)
+            except Exception:
+                pass
 
     # GPU pipeline produced zero frames — most likely a runtime hw-accel failure
     # (e.g. CUDA driver mismatch, scale_cuda format-negotiation bug, or FFmpeg
@@ -1581,6 +1651,8 @@ def extract_and_save_streaming_distributed(
             nice_level=nice_level,
             is_hdr=is_hdr,
             center_snap_seconds=center_snap_seconds,
+            stream_width=stream_width,
+            stream_height=stream_height,
         )
 
     total = sum(patches_created.values())
@@ -1604,6 +1676,7 @@ def extract_and_save_streaming_distributed(
     return patches_created
 
 
+
 def extract_and_save_streaming_dual(
     video_path: str,
     assignments: List[Tuple[int, str, str]],
@@ -1622,19 +1695,24 @@ def extract_and_save_streaming_dual(
     center_snap_seconds: float = 0.0,
 ) -> Dict[str, int]:
     """
-    Dual-stream 4K pipeline: stream the video ONCE and produce both a 4K
-    (3840×2160) and an HD (1920×1080) output in a single FFmpeg pass via
-    ``-filter_complex`` and two named FIFO pipes.
+    Dual-resolution pipeline: two sequential passes over the video using the
+    proven :func:`extract_and_save_streaming_distributed` engine.
 
-    * Formats in ``FORMATS_4K_STREAM`` (720, large_720, 720_169, medium_169)
-      are served from the 4K stream.
-    * Formats in ``FORMATS_HD_STREAM`` (540, small_540) are served from the
-      HD stream.
+    * Pass 1 — 4K (3840×2160): handles formats in ``FORMATS_4K_STREAM``
+      (720, large_720, 720_169, medium_169).  GT crops / resizes benefit from
+      the full source resolution without an intermediate 1080p downscale.
+    * Pass 2 — HD (1920×1080): handles formats in ``FORMATS_HD_STREAM``
+      (540, small_540).
 
-    Falls back to :func:`extract_and_save_streaming_distributed` when:
+    Each pass only processes the assignments that belong to its format group,
+    so the total work is equivalent to a single pass over all assignments.
+    The implementation is a thin wrapper — all frame selection, rolling buffer,
+    select-filter injection, GPU tier selection, and error handling are
+    inherited from :func:`extract_and_save_streaming_distributed` unchanged.
 
-    * ``os.mkfifo`` is not available (Windows).
-    * The source video is smaller than 4K (< 3840×2160).
+    Falls back to a single 1080p pass when the source video is smaller than
+    4K (< 3840×2160) — the 720 formats are then served at whatever resolution
+    the video provides.
 
     The function signature is identical to
     :func:`extract_and_save_streaming_distributed` and serves as a drop-in
@@ -1667,33 +1745,7 @@ def extract_and_save_streaming_dual(
             logger.info(msg)
 
     # ------------------------------------------------------------------
-    # Fallback #1: Windows — no mkfifo
-    # ------------------------------------------------------------------
-    if not hasattr(os, "mkfifo"):
-        _log(
-            "⚠️  os.mkfifo not available (Windows) — "
-            "falling back to single-stream 1080p pipeline"
-        )
-        return extract_and_save_streaming_distributed(
-            video_path=video_path,
-            assignments=assignments,
-            n_frames=n_frames,
-            format_config=format_config,
-            base_dir=base_dir,
-            fps=fps,
-            logger=logger,
-            is_interesting_fn=is_interesting_fn,
-            is_black_frame_fn=is_black_frame_fn,
-            progress_fn=progress_fn,
-            use_cuda=use_cuda,
-            nice_level=nice_level,
-            is_hdr=is_hdr,
-            degrade_cfg=degrade_cfg,
-            center_snap_seconds=center_snap_seconds,
-        )
-
-    # ------------------------------------------------------------------
-    # Fallback #2: Video smaller than 4K
+    # Fallback: source video smaller than 4K → single 1080p pass
     # ------------------------------------------------------------------
     vid_w, vid_h = _get_video_dimensions(video_path)
     if vid_w > 0 and (vid_w < STREAM_4K_WIDTH or vid_h < STREAM_4K_HEIGHT):
@@ -1720,476 +1772,26 @@ def extract_and_save_streaming_dual(
         )
 
     _log(
-        f"🎬 Dual-stream 4K pipeline: "
-        f"[out4k]={STREAM_4K_WIDTH}×{STREAM_4K_HEIGHT} (720/720_169), "
-        f"[out1080]={STREAM_HD_WIDTH}×{STREAM_HD_HEIGHT} (540)"
+        f"🎬 Dual-stream pipeline: "
+        f"pass-1 {STREAM_4K_WIDTH}×{STREAM_4K_HEIGHT} (720/720_169), "
+        f"pass-2 {STREAM_HD_WIDTH}×{STREAM_HD_HEIGHT} (540)"
     )
 
-    # Default: always filter black frames unless caller opts out explicitly.
-    _black_fn: Callable[[np.ndarray], bool] = (
-        is_black_frame_fn if is_black_frame_fn is not None else is_black_frame
-    )
+    # Split assignments by target resolution.
+    asgn_4k = [(f, c, fmt) for f, c, fmt in assignments if fmt in FORMATS_4K_STREAM]
+    asgn_hd = [(f, c, fmt) for f, c, fmt in assignments if fmt not in FORMATS_4K_STREAM]
 
-    if not assignments:
-        return {}
-
-    half = n_frames // 2
-
-    # --- Optional cross-category center snapping --------------------------
-    if center_snap_seconds > 0.0:
-        n_before = len(assignments)
-        unique_before = len({idx for idx, _, _ in assignments})
-        snapped_asgn = snap_assignments_to_centers(
-            assignments, fps=fps, tol_seconds=center_snap_seconds
-        )
-        unique_after = len({idx for idx, _, _ in snapped_asgn})
-        _snap_tol_frames = max(1, int(round(fps * center_snap_seconds)))
-        _log(
-            f"🔗 Center snapping: {n_before} assignments, "
-            f"{unique_before} unique centers → {unique_after} unique centers "
-            f"(tol={center_snap_seconds:.2f}s / {_snap_tol_frames} frames)"
-        )
-    else:
-        snapped_asgn = assignments
-
-    sorted_asgn = sorted(snapped_asgn, key=lambda x: x[0])
-
-    # Build mapping: center_frame_idx → [(category, format_name), …]
-    center_map: Dict[int, List[Tuple[str, str]]] = {}
-    for frame_idx, category, fmt_name in sorted_asgn:
-        center_map.setdefault(frame_idx, []).append((category, fmt_name))
-
-    pending_centers: List[int] = sorted(center_map.keys())
-    last_needed: int = pending_centers[-1] + half if pending_centers else 0
-
-    # --- Build the exact set of frames that will ever be needed -----------
-    # Both streams share the same select expression since they use the same
-    # center_map and assignment list.
-    _all_needed: List[int] = sorted({
-        fi
-        for c in pending_centers
-        for fi in range(max(0, c - half), c + half + 1)
-    })
-    _select_ranges: List[Tuple[int, int]] = []
-    if _all_needed:
-        _rs, _re = _all_needed[0], _all_needed[0]
-        for _f in _all_needed[1:]:
-            if _f == _re + 1:
-                _re = _f
-            else:
-                _select_ranges.append((_rs, _re))
-                _rs = _re = _f
-        _select_ranges.append((_rs, _re))
-
-    _select_expr: str = "+".join(
-        f"between(n\\,{s}\\,{e})" for s, e in _select_ranges
-    )
-
-    _select_pct = (
-        100.0 * len(_all_needed) / (last_needed + 1) if last_needed >= 0 else 100.0
-    )
-
-    # --- Pre-compute per-video constants ----------------------------------
-    _video_stem: str = Path(video_path).stem
-    _output_dirs_cache: Dict[Tuple[str, str], Dict[str, str]] = {}
-    for _, _cat, _fmt in sorted_asgn:
-        _key = (_cat, _fmt)
-        if _key not in _output_dirs_cache:
-            _dirs = get_output_dirs_for_format(base_dir, _cat, _fmt, n_frames)
-            for _d in _dirs.values():
-                os.makedirs(_d, exist_ok=True)
-            _output_dirs_cache[_key] = _dirs
-
-    # --- Async PNG write queue --------------------------------------------
-    _png_params = [cv2.IMWRITE_PNG_COMPRESSION, 1]
-    _write_queue: queue.Queue = queue.Queue(maxsize=256)
-
-    def _write_worker() -> None:
-        while True:
-            item = _write_queue.get()
-            if item is None:
-                _write_queue.task_done()
-                break
-            gt_img, lr_img, gt_p, lr_p = item
-            try:
-                cv2.imwrite(gt_p, gt_img, _png_params)
-                cv2.imwrite(lr_p, lr_img, _png_params)
-            except Exception as _exc:
-                if logger:
-                    logger.warning(f"[write_worker] Failed to write patch: {_exc!r}")
-            _write_queue.task_done()
-
-    _n_write_threads = 2
-    _write_threads = [
-        threading.Thread(target=_write_worker, daemon=True)
-        for _ in range(_n_write_threads)
-    ]
-    for _t in _write_threads:
-        _t.start()
-
-    # --- GPU pipeline detection -------------------------------------------
-    _use_cuda = use_cuda and cuda_available()
-    _full_gpu  = _use_cuda and is_hdr and tonemap_cuda_available()
-    _scale_gpu = _use_cuda and (not _full_gpu) and scale_cuda_available()
-
-    hdr_label = "HDR" if is_hdr else "SDR"
-    _CUDA_HW_INIT = ["-init_hw_device", "cuda=hw"]
-    if _full_gpu:
-        hw_args        = [*_CUDA_HW_INIT, "-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
-        pipeline_label = f"full-GPU tonemap_cuda+scale_cuda [{hdr_label}]"
-    elif _scale_gpu:
-        hw_args        = [*_CUDA_HW_INIT, "-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
-        pipeline_label = f"scale-GPU + CPU {'zscale/tonemap' if is_hdr else 'passthrough'} [{hdr_label}]"
-    elif _use_cuda:
-        hw_args        = [*_CUDA_HW_INIT, "-hwaccel", "cuda"]
-        pipeline_label = f"decode-GPU + CPU {'tonemap' if is_hdr else 'scale'} [{hdr_label}]"
-    else:
-        hw_args        = []
-        pipeline_label = f"CPU-only [{hdr_label}]"
-
-    # --- Build filter_complex with select injection -----------------------
-    fc_str = build_dual_vf_filter(is_hdr=is_hdr, use_cuda=use_cuda)
-
-    # Inject the select filter into both output branches of the filter_complex
-    # so the expensive tonemap/scale stages only run on needed frames.
-    # The same _select_expr is used for both branches because both streams
-    # decode the same set of frame indices.
-    if _select_expr:
-        # HDR path: 4K branch ends with [s4k]null[out4k]; HD branch starts
-        # with [s4k_b]scale=…
-        fc_str = fc_str.replace(
-            "[s4k]null[out4k]",
-            f"[s4k]select={_select_expr}[out4k]",
-        )
-        # SDR GPU path: both branches start with scale_cuda=
-        fc_str = fc_str.replace(
-            "[s4k]scale_cuda=",
-            f"[s4k]select={_select_expr},scale_cuda=",
-        )
-        # SDR CPU path: both branches start with scale=
-        fc_str = fc_str.replace(
-            "[s4k]scale=",
-            f"[s4k]select={_select_expr},scale=",
-        )
-        # HD branch (all paths)
-        fc_str = fc_str.replace(
-            "[s4k_b]scale_cuda=",
-            f"[s4k_b]select={_select_expr},scale_cuda=",
-        )
-        fc_str = fc_str.replace(
-            "[s4k_b]scale=",
-            f"[s4k_b]select={_select_expr},scale=",
-        )
-
-    _log(
-        f"🎬 Dual-stream extractor: {len(sorted_asgn)} assignments, "
-        f"{len(pending_centers)} unique centers, "
-        f"last frame needed: {last_needed}, "
-        f"pipeline={pipeline_label}, nice={nice_level}"
-    )
-    _log(
-        f"🎯 Frame selection: {len(_all_needed)} frames needed "
-        f"({_select_pct:.1f}% of {last_needed + 1} decoded) "
-        f"in {len(_select_ranges)} ranges"
-    )
-
-    # --- Create named FIFO pipes ------------------------------------------
-    tmpdir = tempfile.mkdtemp(prefix="dsg_dual_")
-    pipe_4k_path = os.path.join(tmpdir, "stream_4k.yuv")
-    pipe_hd_path = os.path.join(tmpdir, "stream_hd.yuv")
-    fc_script_path = os.path.join(tmpdir, "filter_complex.txt")
-    os.mkfifo(pipe_4k_path)
-    os.mkfifo(pipe_hd_path)
-
-    # Write the filter_complex to a file instead of passing it inline.
-    # When _select_expr contains thousands of between() terms (one per needed
-    # frame range, injected into both the 4K and HD branches) the combined
-    # string can easily exceed Linux ARG_MAX (~2 MB), causing execve() to
-    # fail with ENOMEM/E2BIG.  -filter_complex_script reads from a file and
-    # has no length restriction.
-    with open(fc_script_path, "w", encoding="utf-8") as _fc_fh:
-        _fc_fh.write(fc_str)
-
-    # --- FFmpeg command ---------------------------------------------------
-    cmd = [
-        "ffmpeg", "-threads", "0", "-filter_threads", "0",
-        "-loglevel", "warning",
-        *hw_args,
-        "-i", video_path,
-        "-filter_complex_script", fc_script_path,
-        "-map", "[out4k]",   "-f", "rawvideo", "-pix_fmt", "bgr24", pipe_4k_path,
-        "-map", "[out1080]", "-f", "rawvideo", "-pix_fmt", "bgr24", pipe_hd_path,
-    ]
-
-    def _set_nice(pid: int) -> None:
-        if nice_level == 0 or _sys.platform == "win32":
-            return
-        try:
-            import psutil as _psutil
-            _psutil.Process(pid).nice(nice_level)
-        except Exception:
-            pass
-
-    # Queues: hold raw frame bytes from reader threads.
-    # Keep maxsize small to limit peak memory; reader threads naturally
-    # pace themselves when the main thread is slow.
-    _q_maxsize = max(n_frames, 16)
-    q_4k: queue.Queue = queue.Queue(maxsize=_q_maxsize)
-    q_hd: queue.Queue = queue.Queue(maxsize=_q_maxsize * 4)  # HD frames are 4× smaller
-
-    # Reader thread: open FIFO, read raw frames, push (sel_idx, raw) into queue.
-    # A sentinel value of None signals that the stream has ended.
-    def _reader(pipe_path: str, frame_bytes_size: int, out_q: queue.Queue) -> None:
-        try:
-            with open(pipe_path, "rb") as f:
-                sel_idx = 0
-                while True:
-                    raw = f.read(frame_bytes_size)
-                    if len(raw) < frame_bytes_size:
-                        break
-                    out_q.put((sel_idx, raw))
-                    sel_idx += 1
-        except Exception as exc:
-            if logger:
-                logger.warning(f"[dual_reader] {exc!r}")
-        finally:
-            out_q.put(None)  # sentinel
-
-    # Start reader threads BEFORE launching FFmpeg so the open() calls are
-    # registered before FFmpeg tries to open the FIFOs for writing.
-    t_4k = threading.Thread(
-        target=_reader, args=(pipe_4k_path, FRAME_BYTES_4K, q_4k), daemon=True
-    )
-    t_hd = threading.Thread(
-        target=_reader, args=(pipe_hd_path, FRAME_BYTES_HD, q_hd), daemon=True
-    )
-    t_4k.start()
-    t_hd.start()
-
-    process = subprocess.Popen(cmd, stderr=subprocess.PIPE)
-    _set_nice(process.pid)
-
-    stderr_lines: List[str] = []
-
-    def _drain_stderr(pipe: "subprocess.IO[bytes]") -> None:
-        for raw in pipe:
-            stderr_lines.append(raw.decode(errors="replace").rstrip())
-        pipe.close()
-
-    stderr_thread = threading.Thread(
-        target=_drain_stderr, args=(process.stderr,), daemon=True
-    )
-    stderr_thread.start()
-
-    # --- Main decode loop -------------------------------------------------
     patches_created: Dict[str, int] = {}
-    buffer_4k: Dict[int, np.ndarray] = {}
-    buffer_hd: Dict[int, np.ndarray] = {}
-    pending_idx: int = 0
-    selected_idx: int = 0
-    frames_examined: int = 0
-    _t_start: Optional[float] = None
-    _log_interval: int = 50
-    _TIMEOUT = 300  # seconds
 
-    try:
-        while pending_idx < len(pending_centers):
-            # Read one frame from each stream per iteration.
-            # Sequential get() is safe because both reader threads run
-            # concurrently — they fill their respective queues independently,
-            # so FFmpeg is never blocked waiting for both consumers.
-            try:
-                item_4k = q_4k.get(timeout=_TIMEOUT)
-            except queue.Empty:
-                _log("⚠️  4K stream timeout — aborting dual pipeline")
-                break
-            if item_4k is None:
-                _log("⚠️  4K stream ended before all selected frames were received")
-                break
-
-            try:
-                item_hd = q_hd.get(timeout=_TIMEOUT)
-            except queue.Empty:
-                _log("⚠️  HD stream timeout — aborting dual pipeline")
-                break
-            if item_hd is None:
-                _log("⚠️  HD stream ended before all selected frames were received")
-                break
-
-            sel_i, raw_4k = item_4k
-            _, raw_hd = item_hd  # same selected index for both streams
-
-            if _t_start is None:
-                _t_start = time.monotonic()
-
-            # Guard against FFmpeg producing more frames than selected.
-            if sel_i >= len(_all_needed):
-                _log("⚠️  FFmpeg produced more frames than selected — stopping")
-                break
-
-            actual_frame: int = _all_needed[sel_i]
-            selected_idx = sel_i + 1
-
-            buffer_4k[actual_frame] = np.frombuffer(raw_4k, dtype=np.uint8).reshape(
-                (STREAM_4K_HEIGHT, STREAM_4K_WIDTH, 3)
-            ).copy()
-            buffer_hd[actual_frame] = np.frombuffer(raw_hd, dtype=np.uint8).reshape(
-                (STREAM_HD_HEIGHT, STREAM_HD_WIDTH, 3)
-            ).copy()
-
-            # Evict frames that are no longer needed by any pending assignment.
-            min_keep = max(0, pending_centers[pending_idx] - half)
-            for old_idx in [k for k in buffer_4k if k < min_keep]:
-                del buffer_4k[old_idx]
-            for old_idx in [k for k in buffer_hd if k < min_keep]:
-                del buffer_hd[old_idx]
-
-            # Satisfy pending assignments whose full window is now in both buffers.
-            while pending_idx < len(pending_centers):
-                center = pending_centers[pending_idx]
-                if actual_frame < center + half:
-                    break  # Need more frames
-
-                # Build n_frames windows from both streams.
-                window_4k: List[np.ndarray] = []
-                window_hd: List[np.ndarray] = []
-                ok = True
-                for fi in range(center - half, center + half + 1):
-                    fi_c = max(0, fi)
-                    f4 = buffer_4k.get(fi_c)
-                    fh = buffer_hd.get(fi_c)
-                    if f4 is None or fh is None:
-                        ok = False
-                        break
-                    window_4k.append(f4)
-                    window_hd.append(fh)
-
-                if ok and len(window_4k) == n_frames:
-                    ts = center / fps
-                    # Use the HD center frame for the black-frame check
-                    # (it's cheaper at 1080p and equivalent for darkness).
-                    center_raw_hd = window_hd[n_frames // 2]
-                    frames_examined += 1
-
-                    if _black_fn(center_raw_hd):
-                        _log(f"  ⏭ frame {center} skipped (black frame)")
-                    else:
-                        for category, fmt_name in center_map[center]:
-                            cfg = format_config.get(category, {}).get(fmt_name, {})
-                            if not cfg:
-                                continue
-
-                            # Choose 4K or HD window based on format.
-                            window = (
-                                window_4k
-                                if fmt_name in FORMATS_4K_STREAM
-                                else window_hd
-                            )
-
-                            is_resize_fmt = fmt_name in ("medium_169", "720_169")
-                            max_attempts = 1 if is_resize_fmt else 6
-                            gt, lr = None, None
-                            for attempt in range(max_attempts):
-                                force = attempt >= 5
-                                gt, lr = create_patch_pair(
-                                    window, fmt_name, cfg,
-                                    force_center=force, logger=logger,
-                                    degrade_cfg=degrade_cfg,
-                                )
-                                if gt is None:
-                                    continue
-                                if (
-                                    is_interesting_fn is None
-                                    or is_interesting_fn(gt)
-                                    or force
-                                ):
-                                    break
-
-                            if gt is not None and lr is not None:
-                                dirs = _output_dirs_cache[(category, fmt_name)]
-                                patch_name = (
-                                    f"{_video_stem}_{int(ts * 1000):08d}.png"
-                                )
-                                _write_queue.put((
-                                    gt, lr,
-                                    os.path.join(dirs["gt"], patch_name),
-                                    os.path.join(dirs["lr"], patch_name),
-                                ))
-                                patches_created[category] = (
-                                    patches_created.get(category, 0) + 1
-                                )
-
-                    if progress_fn is not None:
-                        progress_fn(frames_examined, dict(patches_created), actual_frame)
-
-                pending_idx += 1
-
-            # Periodic throughput log.
-            if _t_start is not None and selected_idx % _log_interval == 0:
-                _elapsed = time.monotonic() - _t_start
-                if _elapsed > 0:
-                    _sel_fps = selected_idx / _elapsed
-                    _sps_actual = frames_examined / _elapsed
-                    _log(
-                        f"  📊 sel {selected_idx:>5}/{len(_all_needed)}  "
-                        f"sel/s {_sel_fps:>6.1f}  SPS {_sps_actual:>6.2f}  "
-                        f"(scenes: {frames_examined})"
-                    )
-
-    finally:
-        # Kill FFmpeg first so both FIFO write-ends are closed, which allows
-        # the reader threads to reach EOF and exit naturally.
-        process.kill()
-        process.wait()
-        stderr_thread.join(timeout=2)
-
-        # Drain both queues so the reader threads can finish their put() calls
-        # and exit (they may be blocked on a full queue at this point).
-        for _q in (q_4k, q_hd):
-            while True:
-                try:
-                    _q.get_nowait()
-                except queue.Empty:
-                    break
-
-        t_4k.join(timeout=5)
-        t_hd.join(timeout=5)
-
-        # Always persist FFmpeg stderr to the log file so that filter-chain
-        # errors, codec warnings and hw-accel failures are visible after the
-        # run even when they didn't prevent frame output.
-        _append_ffmpeg_log(base_dir, video_path, stderr_lines, pipeline_label)
-        # Also echo to the logger when no frames were produced.
-        if selected_idx == 0 and stderr_lines:
-            _log("FFmpeg stderr (last 20 lines):")
-            for _line in stderr_lines[-20:]:
-                _log(f"  [ffmpeg] {_line}")
-
-        # Drain the async write queue.
-        for _ in _write_threads:
-            _write_queue.put(None)
-        for _t in _write_threads:
-            _t.join()
-
-        # FIFO cleanup.
-        for p in [pipe_4k_path, pipe_hd_path]:
-            try:
-                os.unlink(p)
-            except Exception:
-                pass
-        try:
-            os.rmdir(tmpdir)
-        except Exception:
-            pass
-
-    # GPU pipeline produced zero frames — retry with CPU-only pipeline.
-    if selected_idx == 0 and (_full_gpu or _scale_gpu):
+    # --- Pass 1: 4K stream ------------------------------------------------
+    if asgn_4k:
         _log(
-            "⚠️  GPU pipeline produced no frames — retrying with CPU-only pipeline"
+            f"  🔵 Pass 1 (4K): {len(asgn_4k)} assignments "
+            f"for formats {sorted(FORMATS_4K_STREAM)}"
         )
-        return extract_and_save_streaming_dual(
+        result_4k = extract_and_save_streaming_distributed(
             video_path=video_path,
-            assignments=assignments,
+            assignments=asgn_4k,
             n_frames=n_frames,
             format_config=format_config,
             base_dir=base_dir,
@@ -2198,29 +1800,45 @@ def extract_and_save_streaming_dual(
             is_interesting_fn=is_interesting_fn,
             is_black_frame_fn=is_black_frame_fn,
             progress_fn=progress_fn,
-            use_cuda=False,
+            use_cuda=use_cuda,
             nice_level=nice_level,
             is_hdr=is_hdr,
             degrade_cfg=degrade_cfg,
             center_snap_seconds=center_snap_seconds,
+            stream_width=STREAM_4K_WIDTH,
+            stream_height=STREAM_4K_HEIGHT,
         )
+        for cat, cnt in result_4k.items():
+            patches_created[cat] = patches_created.get(cat, 0) + cnt
+
+    # --- Pass 2: HD stream ------------------------------------------------
+    if asgn_hd:
+        _log(
+            f"  🟢 Pass 2 (HD): {len(asgn_hd)} assignments "
+            f"for formats {sorted(FORMATS_HD_STREAM)}"
+        )
+        result_hd = extract_and_save_streaming_distributed(
+            video_path=video_path,
+            assignments=asgn_hd,
+            n_frames=n_frames,
+            format_config=format_config,
+            base_dir=base_dir,
+            fps=fps,
+            logger=logger,
+            is_interesting_fn=is_interesting_fn,
+            is_black_frame_fn=is_black_frame_fn,
+            progress_fn=progress_fn,
+            use_cuda=use_cuda,
+            nice_level=nice_level,
+            is_hdr=is_hdr,
+            degrade_cfg=degrade_cfg,
+            center_snap_seconds=center_snap_seconds,
+            stream_width=STREAM_HD_WIDTH,
+            stream_height=STREAM_HD_HEIGHT,
+        )
+        for cat, cnt in result_hd.items():
+            patches_created[cat] = patches_created.get(cat, 0) + cnt
 
     total = sum(patches_created.values())
-    _elapsed_total = (
-        (time.monotonic() - _t_start) if _t_start is not None else 0.0
-    )
-    if _elapsed_total > 0:
-        _sps_final = frames_examined / _elapsed_total
-        _sel_fps_final = selected_idx / _elapsed_total
-        _log(
-            f"✓ Dual-stream extraction done: {total} patches saved, "
-            f"{frames_examined} assignments examined, "
-            f"{selected_idx}/{len(_all_needed)} selected frames received — "
-            f"sel/s {_sel_fps_final:.1f}  SPS {_sps_final:.2f}"
-        )
-    else:
-        _log(
-            f"✓ Dual-stream extraction done: {total} patches saved, "
-            f"{frames_examined} assignments examined"
-        )
+    _log(f"✓ Dual-stream done: {total} patches total")
     return patches_created
