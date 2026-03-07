@@ -939,9 +939,20 @@ def create_patch_pair(
         (DVD-realistic quality).
 
     **Square formats** (``small_540``, ``large_720``, …):
-      * GT – centre frame, cropped to ``gt_size``.
-      * LR – all frames cropped and downscaled to ``lr_size`` with
-        ``INTER_AREA``, stacked vertically (axis 0).
+      * GT – centre frame.  When the source frame is large enough to support
+        2× oversampling (``frame_h ≥ 2*gt_h`` **and** ``frame_w ≥ 2*gt_w``,
+        e.g. native 4K for the ``720``/``large_720`` formats), a
+        ``2*gt_size`` crop is taken from the source and Lanczos4-downsampled
+        to ``gt_size``.  The 2× Lanczos4 step averages out per-pixel H.265
+        in-loop deblocking softness and produces a clean GT visually
+        comparable to the ``INTER_LANCZOS4`` full-frame resize used by the
+        ``720_169`` family.  For smaller sources (e.g. 1080p for ``540``) the
+        frame is too small to oversample and a direct 1:1 crop is used
+        instead (existing behaviour).
+      * LR – all frames, same crop region, downscaled to ``lr_size`` with
+        ``INTER_AREA`` (stacked vertically on axis 0).  The LR crop covers
+        the same spatial area as the GT crop at 3× lower resolution
+        (LR/GT = ``scale``), keeping the super-resolution task well-defined.
 
     In both cases a near-uniform GT (plain black, white, or flat colour) is
     silently discarded (``(None, None)``).  If the source frame is too small
@@ -1012,11 +1023,28 @@ def create_patch_pair(
                 lr = _apply_degrade_params(lr, _scene_params)
             lr_frames.append(lr)
     else:
-        if frame_h < gt_h or frame_w < gt_w:
+        # -----------------------------------------------------------------------
+        # Square crop formats
+        # -----------------------------------------------------------------------
+        # When the source is large enough for 2× oversampling (e.g. native 4K
+        # for the 720/large_720 formats, where 3840≥1440 and 2160≥1440), take
+        # a 2×gt_size crop and Lanczos4-downsample it to gt_size for the GT.
+        # The 2× Lanczos4 step averages H.265 in-loop deblocking softness and
+        # produces a clean GT comparable to the full-frame INTER_LANCZOS4 resize
+        # used by 720_169/medium_169.
+        #
+        # For smaller sources (1080p → 540/small_540, and any format in the
+        # 1080p fallback path) a 2×gt_size crop would exceed the frame height
+        # so we fall back to the existing 1:1 native-resolution crop.
+        oversample: int = 2 if (frame_h >= 2 * gt_h and frame_w >= 2 * gt_w) else 1
+        sample_h: int = gt_h * oversample
+        sample_w: int = gt_w * oversample
+
+        if frame_h < sample_h or frame_w < sample_w:
             return None, None
 
-        max_x = frame_w - gt_w
-        max_y = frame_h - gt_h
+        max_x = frame_w - sample_w
+        max_y = frame_h - sample_h
 
         if force_center:
             crop_x, crop_y = max_x // 2, max_y // 2
@@ -1024,7 +1052,15 @@ def create_patch_pair(
             crop_x = random.randint(0, max_x)
             crop_y = random.randint(0, max_y)
 
-        gt = frames[center_idx][crop_y : crop_y + gt_h, crop_x : crop_x + gt_w]
+        center_crop = frames[center_idx][
+            crop_y : crop_y + sample_h, crop_x : crop_x + sample_w
+        ]
+
+        # GT: Lanczos4 downsample from oversampled crop; direct slice otherwise.
+        if oversample > 1:
+            gt = cv2.resize(center_crop, (gt_w, gt_h), interpolation=cv2.INTER_LANCZOS4)
+        else:
+            gt = center_crop
 
         # Variety check: silently discard near-uniform GT (black/white/flat)
         gray = cv2.cvtColor(gt, cv2.COLOR_BGR2GRAY)
@@ -1038,8 +1074,10 @@ def create_patch_pair(
         _scene_params = _sample_degrade_params(degrade_cfg, center_frame=center_raw) if degrade_cfg else None
         lr_frames = []
         for frame in frames:
-            crop = frame[crop_y : crop_y + gt_h, crop_x : crop_x + gt_w]
-            lr = cv2.resize(crop, (lr_w, lr_h), interpolation=cv2.INTER_AREA)
+            # LR is derived from the same oversampled area so the LR/GT ratio
+            # is always exactly `scale` (e.g. 240/720 = 1/3 for scale=3).
+            raw_crop = frame[crop_y : crop_y + sample_h, crop_x : crop_x + sample_w]
+            lr = cv2.resize(raw_crop, (lr_w, lr_h), interpolation=cv2.INTER_AREA)
             if _scene_params is not None:
                 lr = _apply_degrade_params(lr, _scene_params)
             lr_frames.append(lr)
