@@ -18,6 +18,7 @@ from torch.cuda.amp import autocast
 from ..utils.ui_display import draw_ui, get_activity_data
 from ..utils.keyboard_handler import KeyboardHandler
 from ..utils.ui_terminal import C_GREEN, C_CYAN, C_YELLOW, C_RESET, show_cursor
+from ..core.data_strategy import DataStrategyScheduler
 
 
 class VSRTrainer:
@@ -419,11 +420,22 @@ class VSRTrainer:
                     current_lr = self.lr_scheduler.get_current_lr()
                     lr_phase = self.lr_scheduler.get_current_phase()
                 
-                # Update plateau tracker (only meaningful after LR warmup)
+                # Update plateau tracker (only meaningful after BOTH warmup phases):
+                # 1. LR Warmup (~2000 Steps) AND
+                # 2. DataStrategy Phase 1 (WARMUP_END = 15000 Steps)
+                _lr_warmup = getattr(self.lr_scheduler, 'warmup_steps', 1000)
+                _data_warmup = (
+                    DataStrategyScheduler.WARMUP_END
+                    if self.data_strategy_scheduler is not None
+                    else 0
+                )
+                _effective_warmup = max(_lr_warmup, _data_warmup)
+
                 self.adaptive_system.update_plateau_tracker(
                     loss_dict['total'].item() if torch.is_tensor(loss_dict['total']) else loss_dict['total'],
+                    quality=self.last_validation_quality,
                     step=self.global_step,
-                    warmup_steps=getattr(self.lr_scheduler, 'warmup_steps', 1000)
+                    warmup_steps=_effective_warmup
                 )
                 
                 # Get activity
@@ -834,6 +846,20 @@ class VSRTrainer:
                 # Track maximum raw value across all layers
                 peak_activity_value = max(peak_activity_value, raw_value)
         
+        # Perceptual trend: +1 wenn EMA quality steigt, -1 wenn fallend, 0 sonst
+        _ema_q = getattr(self.adaptive_system, 'ema_quality', None)
+        _best_q = getattr(self.adaptive_system, 'best_quality', None)
+        if _ema_q is not None and _best_q is not None and _best_q > 0:
+            _trend_ratio = _ema_q / _best_q
+            if _trend_ratio > 1.001:   # >0.1% above best → improving
+                _perceptual_trend = 1
+            elif _trend_ratio < 0.998:  # >0.2% below best → declining
+                _perceptual_trend = -1
+            else:
+                _perceptual_trend = 0
+        else:
+            _perceptual_trend = 0
+        
         # Debug: Print first update to verify data flow
         if self.global_step == 1:
             print(f"\n🔍 Web UI Debug - First Update:")
@@ -873,7 +899,7 @@ class VSRTrainer:
                 adaptive_plateau_counter=adaptive_status.get('plateau_counter', 0),
                 adaptive_plateau_patience=adaptive_status.get('plateau_patience', 100),
                 adaptive_lr_boost_available=adaptive_status.get('lr_boost_available', False),
-                adaptive_perceptual_trend=0,  # TODO: calculate trend
+                adaptive_perceptual_trend=_perceptual_trend,
                 
                 # Lernrate
                 learning_rate_value=current_lr,
