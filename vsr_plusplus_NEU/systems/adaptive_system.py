@@ -499,18 +499,22 @@ class AdaptiveSystem:
             loss:         Current total loss value
             quality:      Optional quality metric (KI quality %)
             step:         Current global training step
-            warmup_steps: Number of LR warmup steps (from LR scheduler config).
-                          Plateau tracking is frozen below this value so the
-                          counter only starts once the model is in a stable
-                          learning regime after the LR ramp-up is complete.
+            warmup_steps: Effective warmup guard: plateau tracking is frozen while
+                          step < warmup_steps.  The caller (trainer) is responsible
+                          for passing max(lr_warmup_steps, data_strategy_warmup_end)
+                          so that the counter only starts once BOTH the LR ramp-up
+                          AND the DataStrategy Phase-1 data curriculum are complete.
         """
-        # During LR warmup the loss is dominated by the ramp-up schedule, not
-        # by genuine convergence.  Keep the tracker reset so it starts fresh
-        # with a clean slate once warmup ends.
+        # During warmup the loss is dominated by the LR ramp-up schedule and the
+        # homogeneous Phase-1 data distribution, not by genuine convergence.
+        # Keep the tracker reset so it starts fresh with a clean slate once both
+        # warmup phases end.
         if step < warmup_steps:
             self.plateau_counter = 0
             self.ema_loss = None
             self.best_loss = float('inf')
+            self.ema_quality = None
+            self.best_quality = 0.0
             return
         # Initialize EMA on first call
         if self.ema_loss is None:
