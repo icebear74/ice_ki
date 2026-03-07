@@ -1897,8 +1897,18 @@ def extract_and_save_streaming_dual(
     tmpdir = tempfile.mkdtemp(prefix="dsg_dual_")
     pipe_4k_path = os.path.join(tmpdir, "stream_4k.yuv")
     pipe_hd_path = os.path.join(tmpdir, "stream_hd.yuv")
+    fc_script_path = os.path.join(tmpdir, "filter_complex.txt")
     os.mkfifo(pipe_4k_path)
     os.mkfifo(pipe_hd_path)
+
+    # Write the filter_complex to a file instead of passing it inline.
+    # When _select_expr contains thousands of between() terms (one per needed
+    # frame range, injected into both the 4K and HD branches) the combined
+    # string can easily exceed Linux ARG_MAX (~2 MB), causing execve() to
+    # fail with ENOMEM/E2BIG.  -filter_complex_script reads from a file and
+    # has no length restriction.
+    with open(fc_script_path, "w", encoding="utf-8") as _fc_fh:
+        _fc_fh.write(fc_str)
 
     # --- FFmpeg command ---------------------------------------------------
     cmd = [
@@ -1906,7 +1916,7 @@ def extract_and_save_streaming_dual(
         "-loglevel", "warning",
         *hw_args,
         "-i", video_path,
-        "-filter_complex", fc_str,
+        "-filter_complex_script", fc_script_path,
         "-map", "[out4k]",   "-f", "rawvideo", "-pix_fmt", "bgr24", pipe_4k_path,
         "-map", "[out1080]", "-f", "rawvideo", "-pix_fmt", "bgr24", pipe_hd_path,
     ]
