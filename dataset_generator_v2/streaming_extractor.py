@@ -46,8 +46,9 @@ extract_and_save_streaming_distributed()
     Core single-stream entry point.  Launches one FFmpeg process, streams
     BGR24 frames at the requested resolution (default 1920×1080), saves
     patches on-the-fly.  Accepts optional ``stream_width``/``stream_height``
-    for caller-specified output dimensions.  Uses ``-filter_complex_script``
-    to pass the filter chain via file, avoiding OS ARG_MAX limits.
+    for caller-specified output dimensions.  Passes the filter chain via a
+    temp file (``-/filter_complex`` on FFmpeg ≥ 5, ``-filter_complex_script``
+    on FFmpeg 4), avoiding OS ARG_MAX limits.
 
 create_patch_pair()
     Create a (GT, LR) patch pair from a sequence of frames.
@@ -207,6 +208,9 @@ _tonemap_cuda_available: Optional[bool] = None
 # Cached output of `ffmpeg -filters` (shared by both filter probes).
 _ffmpeg_filters_output: Optional[str] = None
 
+# Cached FFmpeg major version (4 = conservative fallback).
+_ffmpeg_major_ver: Optional[int] = None
+
 
 def _get_ffmpeg_filters() -> str:
     """Return (cached) output of ``ffmpeg -hide_banner -filters``."""
@@ -271,6 +275,69 @@ def tonemap_cuda_available() -> bool:
         out = _get_ffmpeg_filters()
         _tonemap_cuda_available = "tonemap_cuda" in out and "scale_cuda" in out
     return _tonemap_cuda_available
+
+
+def _get_ffmpeg_major_version() -> int:
+    """Return the major version of the installed FFmpeg (cached).
+
+    Used to select the correct output options:
+      * FFmpeg ≥ 5: ``-fps_mode passthrough`` (replaces deprecated ``-vsync``)
+                    and ``-/filter_complex file`` (replaces ``-filter_complex_script``)
+      * FFmpeg 4:   ``-vsync 0``  and  ``-filter_complex_script file``
+
+    Standard release builds report the version as a numeric string, e.g.
+    ``"ffmpeg version 6.1.1 …"``.  Git snapshot builds use a non-numeric
+    token such as ``"ffmpeg version N-123114-gfb3012269e …"``.  In that case
+    we fall back to parsing the ``libavutil`` major version, which is
+    incremented with every FFmpeg major release:
+
+      libavutil 56 → FFmpeg 4.x
+      libavutil 57 → FFmpeg 5.x
+      libavutil 58 → FFmpeg 6.x
+      libavutil 59 → FFmpeg 7.x
+      libavutil 60 → FFmpeg 8.x (dev / nightly builds as of early 2026)
+
+    Returns 4 as a conservative fallback if all detection attempts fail.
+    """
+    global _ffmpeg_major_ver
+    if _ffmpeg_major_ver is None:
+        detected: Optional[int] = None
+        try:
+            out = subprocess.check_output(
+                ["ffmpeg", "-version"], stderr=subprocess.DEVNULL, timeout=5,
+            ).decode(errors="replace")
+
+            # First attempt: parse the standard numeric version token.
+            # e.g. "ffmpeg version 6.1.1 Copyright…" → parts[2] = "6.1.1"
+            parts = out.split("\n", 1)[0].split()
+            if len(parts) >= 3:
+                ver_token = parts[2]
+                if ver_token[0].isdigit():
+                    try:
+                        detected = int(ver_token.split(".")[0])
+                    except ValueError:
+                        pass
+
+            # Second attempt (git/nightly builds like "N-123114-gfb3012269e"):
+            # libavutil major is always available in the -version output.
+            if detected is None:
+                for line in out.split("\n"):
+                    if "libavutil" in line:
+                        for tok in line.split():
+                            if tok[0].isdigit() and "." in tok:
+                                try:
+                                    # libavutil major 56 = FFmpeg 4, 57 = 5, …
+                                    detected = max(4, int(tok.split(".")[0]) - 52)
+                                    break
+                                except ValueError:
+                                    pass
+                        if detected is not None:
+                            break
+        except Exception:
+            pass
+
+        _ffmpeg_major_ver = detected if detected is not None else 4
+    return _ffmpeg_major_ver
 
 # ---------------------------------------------------------------------------
 # HDR detection and per-video filter-chain selection
@@ -1590,17 +1657,38 @@ def extract_and_save_streaming_distributed(
         with os.fdopen(_fc_fd, "w", encoding="utf-8") as _fc_fh:
             _fc_fh.write(f"[0:v]{vf_filter}[vout]")
 
+        # Select the right filter-file and vsync options depending on the
+        # installed FFmpeg version.  FFmpeg 5+ deprecated -filter_complex_script
+        # (replaced by -/filter_complex) and -vsync (replaced by -fps_mode).
+        # -vsync 0 / -fps_mode passthrough is CRITICAL: without it, FFmpeg fills
+        # PTS gaps left by the select filter with duplicated frames, so Python
+        # would read only frames from the very start of the video.
+        _ffmpeg_ver = _get_ffmpeg_major_version()
+        _fc_args = (
+            ["-/filter_complex", _fc_script_path]
+            if _ffmpeg_ver >= 5
+            else ["-filter_complex_script", _fc_script_path]
+        )
+        _vsync_args = (
+            ["-fps_mode", "passthrough"]
+            if _ffmpeg_ver >= 5
+            else ["-vsync", "0"]
+        )
+
         cmd = [
             "ffmpeg",
             "-threads", "0",
             "-filter_threads", "0",
             "-loglevel", "warning",
             *hw_args,
+            "-probesize", "100M",
+            "-analyzeduration", "100M",
             "-i", video_path,
-            "-filter_complex_script", _fc_script_path,
+            *_fc_args,
             "-map", "[vout]",
             "-f", "rawvideo",
             "-pix_fmt", "bgr24",
+            *_vsync_args,
             "pipe:1",
         ]
 
@@ -2126,17 +2214,38 @@ def extract_and_save_streaming_dual(
         with os.fdopen(_fc_fd, "w", encoding="utf-8") as _fc_fh:
             _fc_fh.write(f"[0:v]{vf_filter}[vout]")
 
+        # Select the right filter-file and vsync options depending on the
+        # installed FFmpeg version.  FFmpeg 5+ deprecated -filter_complex_script
+        # (replaced by -/filter_complex) and -vsync (replaced by -fps_mode).
+        # -vsync 0 / -fps_mode passthrough is CRITICAL: without it, FFmpeg fills
+        # PTS gaps left by the select filter with duplicated frames, so Python
+        # would read only frames from the very start of the video.
+        _ffmpeg_ver = _get_ffmpeg_major_version()
+        _fc_args = (
+            ["-/filter_complex", _fc_script_path]
+            if _ffmpeg_ver >= 5
+            else ["-filter_complex_script", _fc_script_path]
+        )
+        _vsync_args = (
+            ["-fps_mode", "passthrough"]
+            if _ffmpeg_ver >= 5
+            else ["-vsync", "0"]
+        )
+
         cmd = [
             "ffmpeg",
             "-threads", "0",
             "-filter_threads", "0",
             "-loglevel", "warning",
             *hw_args,
+            "-probesize", "100M",
+            "-analyzeduration", "100M",
             "-i", video_path,
-            "-filter_complex_script", _fc_script_path,
+            *_fc_args,
             "-map", "[vout]",
             "-f", "rawvideo",
             "-pix_fmt", "bgr24",
+            *_vsync_args,
             "pipe:1",
         ]
 
