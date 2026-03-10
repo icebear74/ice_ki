@@ -469,14 +469,11 @@ class VSRTrainer:
                 
                 # Reset loop timer for next iteration
                 loop_start_time = time.time()
-                # Use mem_get_info() so the value matches nvidia-smi:
-                # total - free = actual process VRAM including CUDA context + cuDNN.
-                # memory_allocated() only shows live tensors and reads ~0 between steps.
-                if torch.cuda.is_available():
-                    _free, _total = torch.cuda.mem_get_info()
-                    vram = (_total - _free) / (1024**3)
-                else:
-                    vram = 0.0
+                # memory_reserved() = memory that PyTorch's caching allocator holds from
+                # the CUDA driver.  This matches what nvidia-smi reports for the Python
+                # process, unlike memory_allocated() (only live tensors, ~0 between steps)
+                # or mem_get_info() total-free (sums ALL GPU processes, overshoots).
+                vram = torch.cuda.memory_reserved() / (1024**3) if torch.cuda.is_available() else 0.0
                 
                 # Track loss history (raw values)
                 raw_total_loss = loss_dict['total'].item() if torch.is_tensor(loss_dict['total']) else loss_dict['total']
@@ -852,14 +849,10 @@ class VSRTrainer:
         
         # Update web monitor with COMPLETE training state (ALL data)
         best_quality = self.checkpoint_mgr.best_quality if self.checkpoint_mgr.best_quality > 0 else 0.0
-        # Use mem_get_info() so the WebUI value matches nvidia-smi.
-        # memory_allocated() only returns live tensors (~0 between steps).
-        # total - free includes CUDA context, cuDNN cache, PyTorch allocator pool.
-        if torch.cuda.is_available():
-            _free, _total = torch.cuda.mem_get_info()
-            gpu_mem = (_total - _free) / (1024**3)
-        else:
-            gpu_mem = 0.0
+        # memory_reserved() = memory held by PyTorch's caching allocator from the CUDA
+        # driver.  This matches nvidia-smi's per-process column, unlike mem_get_info()
+        # total-free which sums ALL GPU processes and therefore overshoots.
+        gpu_mem = torch.cuda.memory_reserved() / (1024**3) if torch.cuda.is_available() else 0.0
         
         # Konvertiere Layer-Aktivitäten in Dict-Format
         layer_act_dict = {}

@@ -146,11 +146,11 @@ class CompleteTrainingDataStore:
             },
             
             # Adaptive Batch Configuration (per-size, read-only info)
-            # Werte aus config.active.py / runtime_config.json
+            # Werte gemessen mit Gradient-Checkpointing (FP32, 7f, 26b, 72f)
             'adaptive_batch_config': {
-                '720_169': {'batch': 2, 'accum': 4, 'effective': 8, 'vram_gb': 5.14},
-                '540':     {'batch': 2, 'accum': 3, 'effective': 6, 'vram_gb': 5.15},
-                '720':     {'batch': 1, 'accum': 4, 'effective': 4, 'vram_gb': 6.14},
+                '720_169': {'batch': 2, 'accum': 4, 'effective': 8, 'vram_gb': 2.9},
+                '540':     {'batch': 2, 'accum': 3, 'effective': 6, 'vram_gb': 2.9},
+                '720':     {'batch': 1, 'accum': 4, 'effective': 4, 'vram_gb': 3.4},
             },
             
             # Statusflags
@@ -1348,7 +1348,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         
         <div class="layer-activity-container">
             <div style="font-size: 0.8em; color: var(--text-secondary); margin-bottom: 10px;">
-                Gemessene VRAM-Werte (7f | 26b | 72f | FP32)
+                Gemessene VRAM-Werte (7f | 26b | 72f | FP32 + Checkpointing)
             </div>
             <table style="width: 100%; border-collapse: collapse; font-size: 0.88em;">
                 <thead>
@@ -2104,7 +2104,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 const c = cfg[key];
                 if (!c) continue;
                 const vram = typeof c.vram_gb === 'number' ? c.vram_gb.toFixed(2) + ' GB' : '–';
-                const vramColor = c.vram_gb >= 6.0 ? 'var(--accent-orange)' : 'var(--accent-green)';
+                const vramColor = c.vram_gb >= 3.5 ? 'var(--accent-orange)' : 'var(--accent-green)';
                 html += `<tr style="border-bottom: 1px solid var(--border-color);">
                     <td style="padding: 5px 6px; color: var(--text-primary);">${labels[key] || key}</td>
                     <td style="padding: 5px 6px; text-align: center; color: var(--accent-blue); font-weight: bold;">${c.batch}</td>
