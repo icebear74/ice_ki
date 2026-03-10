@@ -37,8 +37,6 @@ class _NumPySafeEncoder(json.JSONEncoder):
                 return obj.item() if obj.numel() == 1 else obj.tolist()
         return super().default(obj)
 
-# Import runtime_config module at module level to avoid repeated imports
-from ..systems.runtime_config import RUNTIME_SAFE_PARAMS, RUNTIME_CAREFUL_PARAMS, STARTUP_ONLY_PARAMS
 
 
 def detect_local_ip():
@@ -186,7 +184,6 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
     data_repository = None
     action_queue = None
     refresh_interval_sec = 5
-    runtime_config_manager = None
     
     def log_message(self, format, *args):
         """Unterdrückt Standard-Logging"""
@@ -234,25 +231,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             'auto_refresh_enabled': True
         }
         
-        # Add runtime configuration if available
-        if hasattr(self, 'runtime_config_manager') and self.runtime_config_manager is not None:
-            try:
-                runtime_config = self.runtime_config_manager.get_all()
-                config['runtime_config'] = runtime_config
-                
-                # Add metadata about parameter categories (imported at module level)
-                config['config_categories'] = {
-                    'safe': list(RUNTIME_SAFE_PARAMS.keys()),
-                    'careful': list(RUNTIME_CAREFUL_PARAMS.keys()),
-                    'startup_only': list(STARTUP_ONLY_PARAMS)
-                }
-                config['config_ranges'] = {
-                    **RUNTIME_SAFE_PARAMS,
-                    **RUNTIME_CAREFUL_PARAMS
-                }
-            except Exception as e:
-                config['runtime_config_error'] = str(e)
-        
+        # Add runtime configuration if available - removed (no runtime_config)
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Cache-Control', 'no-cache')
@@ -2371,23 +2350,18 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
 
 
 class WebMonitoringInterface:
-    """Hauptklasse für das Web-Monitoring-System"""
-    
-    def __init__(self, port_num=5050, refresh_seconds=5, runtime_config=None):
+    """Main class for the web monitoring system"""
+
+    def __init__(self, port_num=5050, refresh_seconds=5):
         self.server_port = port_num
         self.data_store = CompleteTrainingDataStore()
         self.command_inbox = Queue()
         self.http_server_instance = None
         self.server_daemon_thread = None
-        self.runtime_config = runtime_config
-        
-        # Setze Refresh-Intervall
+
         WebMonitorRequestProcessor.refresh_interval_sec = refresh_seconds
-        
-        # Konfiguriere Request-Handler
         WebMonitorRequestProcessor.data_repository = self.data_store
         WebMonitorRequestProcessor.action_queue = self.command_inbox
-        WebMonitorRequestProcessor.runtime_config_manager = runtime_config
         
         self._start_http_server()
     

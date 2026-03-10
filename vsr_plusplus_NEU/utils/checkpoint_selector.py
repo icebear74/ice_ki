@@ -97,22 +97,8 @@ def get_checkpoint_dir_from_config():
         
         config = cfg.get_config()
         DATASET_ROOT = config.get('DATASET_ROOT', "/mnt/data/training/Dataset/Universal/Mastermodell")
-        
-        # Try to load runtime_config for dataset-specific paths
-        runtime_config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "runtime_config.json")
-        dataset_name = 'master'  # Default
-        
-        if os.path.exists(runtime_config_path):
-            try:
-                import json
-                with open(runtime_config_path, 'r') as f:
-                    rt_config = json.load(f)
-                data_config = rt_config.get('data', {})
-                DATASET_ROOT = data_config.get('root', DATASET_ROOT)
-                dataset_name = data_config.get('dataset_name', 'master')
-            except (json.JSONDecodeError, IOError, KeyError):
-                pass
-        
+        dataset_name = config.get('DEFAULT_DATASET_NAME', 'master')
+
         # Dataset-specific checkpoint directory
         checkpoint_dir = os.path.join(DATASET_ROOT, dataset_name)
         

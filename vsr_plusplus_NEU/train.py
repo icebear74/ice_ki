@@ -36,7 +36,6 @@ from vsr_plusplus_NEU.training.lr_scheduler import AdaptiveLRScheduler
 from vsr_plusplus_NEU.systems.checkpoint_manager import CheckpointManager
 from vsr_plusplus_NEU.systems.logger import TrainingLogger, TensorBoardLogger
 from vsr_plusplus_NEU.systems.adaptive_system import AdaptiveSystem
-from vsr_plusplus_NEU.systems.runtime_config import RuntimeConfigManager
 
 # NOTE: config.py is a LOCAL configuration file that exists on each developer's machine.
 # It is listed in .gitignore (line 58) and should NEVER be pushed to the repository!
@@ -112,137 +111,29 @@ def start_tensorboard(log_dir, port=6006):
         return False
 
 
-def validate_startup_config(runtime_config_manager):
-    """
-    Validate startup configuration for 7-frame VSR training
-    
-    Args:
-        runtime_config_manager: RuntimeConfigManager instance
-        
-    Returns:
-        True if validation passes, False otherwise
-    """
-    print(f"\n{C_CYAN}{'='*80}{C_RESET}")
-    print(f"{C_CYAN}Validating Startup Configuration{C_RESET}")
-    print(f"{C_CYAN}{'='*80}{C_RESET}\n")
-    
-    # Validate configuration
-    is_valid, errors = runtime_config_manager.validate()
-    
-    if not is_valid:
-        print(f"{C_RED}{C_BOLD}❌ Configuration Validation Failed!{C_RESET}\n")
-        for i, error in enumerate(errors, 1):
-            print(f"{C_RED}  {i}. {error}{C_RESET}")
-        print(f"\n{C_YELLOW}Please fix the configuration issues and try again.{C_RESET}\n")
-        return False
-    
-    # Print validation success
-    print(f"{C_GREEN}✅ Configuration validation passed!{C_RESET}\n")
-    
-    # Print key config values
-    config = runtime_config_manager.get_all()
-    
-    if 'model' in config:
-        print(f"{C_BOLD}Model Configuration:{C_RESET}")
-        print(f"  • Frames: {config['model'].get('n_frames', 'N/A')}")
-        print(f"  • Features: {config['model'].get('n_feats', 'N/A')}")
-        print(f"  • Blocks: {config['model'].get('n_blocks', 'N/A')}")
-        print(f"  • Precision: {config['model'].get('precision', 'N/A')}")
-        print()
-    
-    if 'training' in config:
-        print(f"{C_BOLD}Training Configuration:{C_RESET}")
-        print(f"  • Effective Batch Size: {config['training'].get('effective_batch_size', 'N/A')}")
-        print()
-        
-        if 'adaptive_batch' in config['training']:
-            print(f"  {C_BOLD}Adaptive Batch Configs:{C_RESET}")
-            for size, batch_config in config['training']['adaptive_batch'].items():
-                batch = batch_config.get('batch', 'N/A')
-                accum = batch_config.get('accum', 'N/A')
-                print(f"    • {size}: batch={batch}, accum={accum}")
-            print()
-    
-    if 'size_distribution' in config:
-        print(f"{C_BOLD}Size Distribution:{C_RESET}")
-        total = 0.0
-        for size, percentage in config['size_distribution'].items():
-            print(f"  • {size}: {percentage*100:.1f}%")
-            total += percentage
-        print(f"  • Total: {total*100:.1f}%")
-        print()
-    
-    print(f"{C_CYAN}{'='*80}{C_RESET}\n")
-    return True
-
-
-
 def main():
     """Main training entry point"""
     
     # Load configuration from config.py
     config = cfg.get_config()
     
-    # Override paths from config if they exist
-    DATA_ROOT = config.get('DATA_ROOT', "/mnt/data/training/Universal/Mastermodell/Learn")
+    # All paths come from config.py — no runtime_config.json involved
+    DATA_ROOT    = config.get('DATA_ROOT',    "/mnt/data/training/Universal/Mastermodell/Learn")
     DATASET_ROOT = config.get('DATASET_ROOT', "/mnt/data/training/Dataset/Universal/Mastermodell")
+    dataset_name = config.get('DEFAULT_DATASET_NAME', 'master')
     
-    # Load runtime_config early to get dataset-specific paths
-    runtime_config_path = os.path.join(os.path.dirname(__file__), "runtime_config.json")
-    rt_config = None
-    dataset_name = 'master'  # Default
-    
-    if not os.path.exists(runtime_config_path):
-        # No config found — create one from hardcoded defaults so multi-size
-        # training is enabled on the very first run.
-        _default_rt = {
-            "data": {
-                "root": DATASET_ROOT,
-                "dataset_name": dataset_name,
-                "paths": {
-                    "train_gt": "patches/{size_key}/GT",
-                    "train_lr": "patches/{size_key}/LR_7frames",
-                    "val_gt":   "val/{size_key}/GT",
-                    "val_lr":   "patches/{size_key}/LR_7frames"
-                }
-            },
-            "validation": {
-                "sizes": ["540", "720_169", "720"]
-            }
-        }
-        try:
-            with open(runtime_config_path, 'w') as _f:
-                json.dump(_default_rt, _f, indent=2)
-            print(f"{C_GREEN}✅ Created default runtime_config.json: {runtime_config_path}{C_RESET}")
-            print(f"{C_YELLOW}   Edit this file to customise paths, batch sizes, and validation sizes.{C_RESET}")
-        except Exception as _e:
-            print(f"{C_YELLOW}⚠ Could not write default runtime_config.json: {_e}{C_RESET}")
-
-    if os.path.exists(runtime_config_path):
-        try:
-            with open(runtime_config_path, 'r') as f:
-                rt_config = json.load(f)
-            data_config = rt_config.get('data', {})
-            DATASET_ROOT = data_config.get('root', DATASET_ROOT)
-            dataset_name = data_config.get('dataset_name', 'master')
-        except Exception as e:
-            print(f"{C_YELLOW}⚠ Failed to load runtime_config.json: {e}{C_RESET}")
-    
-    # Use dataset-specific paths for checkpoints and logs
-    # E.g., /mnt/data/training/datasetNeu/master/ (not DATA_ROOT)
+    # Dataset-specific root for checkpoints and logs
     DATASET_SPECIFIC_ROOT = os.path.join(DATASET_ROOT, dataset_name)
     
-    # DEBUG: Show all path configurations
+    # Show path configuration
     print(f"\n{C_CYAN}{'='*80}{C_RESET}")
     print(f"{C_CYAN}PATH CONFIGURATION{C_RESET}")
     print(f"{C_CYAN}{'='*80}{C_RESET}")
-    print(f"  config.py DATASET_ROOT:     {config.get('DATASET_ROOT', 'NOT SET')}")
-    print(f"  runtime_config DATASET_ROOT: {rt_config.get('data', {}).get('root', 'NOT SET') if rt_config else 'N/A (no runtime_config.json)'}")
-    print(f"  Final DATASET_ROOT:          {DATASET_ROOT}")
-    print(f"  Dataset Name:                {dataset_name}")
-    print(f"  DATASET_SPECIFIC_ROOT:       {DATASET_SPECIFIC_ROOT}")
-    print(f"  Checkpoints will be in:      {DATASET_SPECIFIC_ROOT}/checkpoint_*.pth")
-    print(f"  Logs will be in:             {DATASET_SPECIFIC_ROOT}/logs/")
+    print(f"  DATASET_ROOT:          {DATASET_ROOT}")
+    print(f"  Dataset Name:          {dataset_name}")
+    print(f"  DATASET_SPECIFIC_ROOT: {DATASET_SPECIFIC_ROOT}")
+    print(f"  Checkpoints:           {DATASET_SPECIFIC_ROOT}/checkpoint_*.pth")
+    print(f"  Logs:                  {DATASET_SPECIFIC_ROOT}/logs/")
     print(f"{C_CYAN}{'='*80}{C_RESET}\n")
     
     print("\n" + "="*80)
@@ -316,8 +207,6 @@ def main():
     # Extract parameters from config
     n_feats = config['N_FEATS']
     n_blocks = config['N_BLOCKS']
-    batch_size = config['BATCH_SIZE']
-    accumulation_steps = config['ACCUMULATION_STEPS']
     
     # Create model - USING 7-FRAME MODEL (as intended by dataset_generator_v2)
     print("Creating 7-frame model...")
@@ -423,44 +312,25 @@ def main():
     # Create datasets
     print("Loading datasets...")
 
-    # Locate runtime_config.json (OPTIONAL — only used to override paths/validation config).
-    # Multi-size training always runs from DATASET_ROOT in config.py.
-    # It does NOT require runtime_config.json to exist or be valid.
-    runtime_config_path = os.path.join(os.path.dirname(__file__), "runtime_config.json")
-    if not os.path.exists(runtime_config_path):
-        runtime_config_path = os.path.join(DATA_ROOT, "runtime_config.json")
+    # All paths come from config.py — no runtime_config.json
+    data_root        = DATASET_ROOT
+    train_gt_pattern = 'patches/{size_key}/GT'
+    train_lr_pattern = 'patches/{size_key}/LR_7frames'
 
-    rt_config = {}
-    if os.path.exists(runtime_config_path):
-        try:
-            with open(runtime_config_path, 'r') as f:
-                rt_config = json.load(f)
-        except Exception as e:
-            print(f"{C_YELLOW}⚠ Failed to load runtime_config.json: {e} — using config.py defaults{C_RESET}")
-
-    # Paths come from config.py (DATASET_ROOT, dataset_name).
-    # runtime_config.json 'data' section can optionally override them.
-    _rt_data    = rt_config.get('data', {})
-    data_root   = _rt_data.get('root', DATASET_ROOT)   # config.py DATASET_ROOT is the default
-    dataset_name = _rt_data.get('dataset_name', 'master')
-    paths_config = _rt_data.get('paths', {})
-    train_gt_pattern = paths_config.get('train_gt', 'patches/{size_key}/GT')
-
-    # Always try multi-size detection — NOT gated on runtime_config.json.
+    # Detect which size directories exist and have GT files
     available_sizes = []
     print(f"{C_CYAN}Checking for dataset sizes in: {os.path.join(data_root, dataset_name)}{C_RESET}")
     print(f"{C_CYAN}  Using path pattern: {train_gt_pattern}{C_RESET}")
 
     for size_key in KNOWN_SIZE_KEYS:
-        train_path = train_gt_pattern.replace('{size_key}', size_key)
-        train_dir  = os.path.join(data_root, dataset_name, train_path)
+        train_dir = os.path.join(data_root, dataset_name,
+                                 train_gt_pattern.replace('{size_key}', size_key))
         print(f"{C_CYAN}  Checking {size_key}: {train_dir}{C_RESET}")
-
         if os.path.exists(train_dir):
             files = [f for f in os.listdir(train_dir) if f.lower().endswith('.png')]
             if files:
                 available_sizes.append(size_key)
-                print(f"{C_GREEN}    ✓ Found {len(files)} files for size {size_key}{C_RESET}")
+                print(f"{C_GREEN}    ✓ Found {len(files)} files{C_RESET}")
             else:
                 print(f"{C_YELLOW}    ⚠ Directory exists but no .png files found{C_RESET}")
         else:
@@ -475,111 +345,54 @@ def main():
     else:
         print(f"{C_YELLOW}⚠ No training data found in {os.path.join(data_root, dataset_name)}{C_RESET}")
         print(f"{C_YELLOW}  Falling back to single-size training (size_key=540){C_RESET}")
-    
-    # Helper function to auto-detect available sizes
-    def detect_available_sizes(data_root, dataset_name, train_gt_pattern='patches/{size_key}/GT'):
-        """Detect which dataset sizes are available by checking directories.
-        
-        Args:
-            data_root: Root directory
-            dataset_name: Dataset name (e.g., 'master')
-            train_gt_pattern: Path pattern with {size_key} placeholder
-        """
-        available = []
-        print(f"{C_CYAN}Detecting available sizes in: {os.path.join(data_root, dataset_name)}{C_RESET}")
-        print(f"{C_CYAN}  Using path pattern: {train_gt_pattern}{C_RESET}")
-        
-        for size_key in KNOWN_SIZE_KEYS:
-            # Build path using pattern
-            train_path = train_gt_pattern.replace('{size_key}', size_key)
-            train_dir = os.path.join(data_root, dataset_name, train_path)
-            print(f"{C_CYAN}  Checking {size_key}: {train_dir}{C_RESET}")
-            
-            if os.path.exists(train_dir):
-                # Check for both .png and .PNG files (case-insensitive)
-                files = [f for f in os.listdir(train_dir) if f.lower().endswith('.png')]
-                if files:
-                    available.append((size_key, len(files)))
-                    print(f"{C_GREEN}    ✓ Found {len(files)} files{C_RESET}")
-                else:
-                    print(f"{C_YELLOW}    ⚠ Directory exists but no .png files found{C_RESET}")
-            else:
-                print(f"{C_YELLOW}    ⚠ Directory does not exist{C_RESET}")
-        
-        return available
-    
+
     # Graduated data/loss strategy scheduler (set to None unless multi-size)
     data_strategy_scheduler = None
-    
+
     if use_multi_size:
-        # Use multi-size dataloader
+        # Build sizes_config from FIXED_BATCH_CONFIG
         try:
             from vsr_plusplus_NEU.core.dataloader import create_train_loader
-            
-            # Extract data config
-            data_config = rt_config.get('data', {})
-            data_root = data_config.get('root', DATASET_ROOT)
-            dataset_name = data_config.get('dataset_name', 'master')
 
-            # Batch/accum config comes from FIXED_BATCH_CONFIG — hardcoded at the top
-            # of this module.  NOT read from config.py, runtime_config.json, or anywhere
-            # else.  These fixed values guarantee correct GPU memory usage.
-
-            # Auto-detect available sizes and create config
             sizes_config = {}
-            paths_config = data_config.get('paths', {})
-            train_gt_pattern = paths_config.get('train_gt', 'patches/{size_key}/GT')
-            available = detect_available_sizes(data_root, dataset_name, train_gt_pattern)
-
-            for size_key, file_count in available:
+            for size_key in available_sizes:
                 batch_cfg = FIXED_BATCH_CONFIG.get(size_key)
                 if batch_cfg is None:
-                    print(f"{C_RED}❌ size_key '{size_key}' not found in FIXED_BATCH_CONFIG in train.py!{C_RESET}")
-                    print(f"{C_RED}   Add an entry for '{size_key}' with 'batch' and 'accum' keys.{C_RESET}")
-                    raise ValueError(
-                        f"Unknown size_key '{size_key}': add it to FIXED_BATCH_CONFIG in train.py"
-                    )
+                    print(f"{C_RED}❌ size_key '{size_key}' not in FIXED_BATCH_CONFIG — add it to train.py!{C_RESET}")
+                    raise ValueError(f"Unknown size_key '{size_key}'")
                 sizes_config[size_key] = {
-                    'enabled': True,
-                    'distribution': 1.0 / len(available),  # equal distribution (only selects sizes)
+                    'enabled':    True,
+                    'distribution': 1.0 / len(available_sizes),
                     'batch_size': batch_cfg['batch'],
-                    'accum': batch_cfg['accum'],
+                    'accum':      batch_cfg['accum'],
                 }
-            
-            # ── STARTUP DIAGNOSTIC ──────────────────────────────────────────
-            # Count GT and LR files on disk per size BEFORE any loading logic,
-            # so mismatches / missing LR files are visible right away.
+
+            # Startup diagnostic: file counts per size
             import time as _time
-            train_lr_pattern = paths_config.get('train_lr', 'patches/{size_key}/LR_7frames')
             print(f"\n{C_CYAN}{'━'*56}")
             print(f"  📋  DATASET FILE COUNTS (pre-load diagnostic)")
             print(f"{'━'*56}{C_RESET}")
-            for sk, _ in available:
-                gt_dir  = os.path.join(data_root, dataset_name,
-                                       train_gt_pattern.replace('{size_key}', sk))
-                lr_dir  = os.path.join(data_root, dataset_name,
-                                       train_lr_pattern.replace('{size_key}', sk))
+            for sk in available_sizes:
+                gt_dir = os.path.join(data_root, dataset_name,
+                                      train_gt_pattern.replace('{size_key}', sk))
+                lr_dir = os.path.join(data_root, dataset_name,
+                                      train_lr_pattern.replace('{size_key}', sk))
                 gt_files = sorted([f for f in os.listdir(gt_dir)
                                    if f.lower().endswith('.png')]) if os.path.isdir(gt_dir) else []
                 lr_files = sorted([f for f in os.listdir(lr_dir)
                                    if f.lower().endswith('.png')]) if os.path.isdir(lr_dir) else []
-                gt_count = len(gt_files)
-                lr_count = len(lr_files)
                 match_count = len(set(gt_files) & set(lr_files))
-                ok = gt_count > 0 and lr_count > 0 and match_count > 0
+                ok = len(gt_files) > 0 and len(lr_files) > 0 and match_count > 0
                 status = f"{C_GREEN}✓" if ok else f"{C_RED}✗"
-                print(f"  {status}  {sk:8s}{C_RESET}  GT={gt_count:6,}  LR={lr_count:6,}  "
-                      f"matched={match_count:6,}  "
-                      f"GT dir: {gt_dir}")
+                cfg_info = FIXED_BATCH_CONFIG.get(sk, {})
+                print(f"  {status}  {sk:8s}{C_RESET}  GT={len(gt_files):6,}  LR={len(lr_files):6,}  "
+                      f"matched={match_count:6,}  BS={cfg_info.get('batch','?')} accum={cfg_info.get('accum','?')}")
                 if not os.path.isdir(lr_dir):
                     print(f"           {C_RED}⚠  LR directory NOT FOUND: {lr_dir}{C_RESET}")
-                elif lr_count == 0:
-                    print(f"           {C_YELLOW}⚠  LR directory is empty (no .png files){C_RESET}")
+                elif len(lr_files) == 0:
+                    print(f"           {C_YELLOW}⚠  LR directory is empty{C_RESET}")
                 elif match_count == 0:
-                    print(f"           {C_RED}⚠  No GT/LR filename matches — check naming!{C_RESET}")
-                    if gt_files and lr_files:
-                        print(f"           GT sample : {gt_files[0]}")
-                        print(f"           LR sample : {lr_files[0]}")
+                    print(f"           {C_RED}⚠  No GT/LR filename matches!{C_RESET}")
             print(f"{C_CYAN}{'━'*56}{C_RESET}")
             print(f"{C_YELLOW}  ⏳  Starting in 10 seconds — press Ctrl+C to abort …{C_RESET}")
             for _i in range(10, 0, -1):
@@ -587,34 +400,29 @@ def main():
                 _time.sleep(1)
             print(f"  {C_GREEN}▶  Continuing …{C_RESET}                    ")
             print(f"{C_CYAN}{'━'*56}{C_RESET}\n")
-            # ── END DIAGNOSTIC ──────────────────────────────────────────────
-            
-            # Prepare config for multi-size loader
+
             loader_config = {
-                'data_root': data_root,
+                'data_root':    data_root,
                 'dataset_name': dataset_name,
-                'sizes': sizes_config,
-                'augment': True,
-                'shuffle': True,
-                'paths': paths_config  # NEW: Pass paths config
+                'sizes':        sizes_config,
+                'augment':      True,
+                'shuffle':      True,
+                'paths':        None,  # use default path patterns
             }
-            
             train_loader = create_train_loader(loader_config)
-            
-            # Count total samples across all sizes
+
             total_samples = sum(len(ds) for ds in train_loader.datasets_dict.values())
             print(f"✅ Multi-size training samples: {total_samples:,}")
-            print(f"{C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{C_RESET}")
+            print(f"{C_CYAN}{'━'*47}{C_RESET}")
             print(f"{C_CYAN}📊 Dataset Sizes Loaded at Startup:{C_RESET}")
-            for size_key, dataset in train_loader.datasets_dict.items():
-                # Calculate actual distribution from file counts
-                dist = len(dataset) / total_samples if total_samples > 0 else 0.0
-                print(f"  • {size_key}: {len(dataset):,} samples ({dist*100:.1f}%)")
-            print(f"{C_CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━{C_RESET}")
-            print(f"{C_YELLOW}⚠️  To change dataset sizes, modify runtime_config.json and RESTART training{C_RESET}")
-            print()
-            
-            # Create graduated data/loss strategy scheduler for multi-size training
+            for sk, ds in train_loader.datasets_dict.items():
+                dist = len(ds) / total_samples if total_samples > 0 else 0.0
+                cfg_info = FIXED_BATCH_CONFIG.get(sk, {})
+                print(f"  • {sk}: {len(ds):,} samples ({dist*100:.1f}%)  "
+                      f"BS={cfg_info.get('batch','?')} accum={cfg_info.get('accum','?')}")
+            print(f"{C_CYAN}{'━'*47}{C_RESET}\n")
+
+            # Graduated data/loss strategy scheduler
             from vsr_plusplus_NEU.core.dataloader import DataStrategyScheduler
             data_strategy_scheduler = DataStrategyScheduler(
                 all_size_keys=list(train_loader.datasets_dict.keys())
@@ -626,33 +434,20 @@ def main():
                   f"{DataStrategyScheduler.CROP_INTRO_END}): "
                   f"linear mix-in, perceptual 0.0→{DataStrategyScheduler.TARGET_PERCEPTUAL_WEIGHT}")
             print(f"  • Phase 3 (steps {DataStrategyScheduler.CROP_INTRO_END}+): "
-                  f"natural file-count sampling (no override), perceptual={DataStrategyScheduler.TARGET_PERCEPTUAL_WEIGHT}")
+                  f"natural file-count sampling, perceptual={DataStrategyScheduler.TARGET_PERCEPTUAL_WEIGHT}")
             print()
+
         except Exception as e:
             import traceback
             print(f"{C_RED}❌ Error creating multi-size dataloader: {e}{C_RESET}")
             traceback.print_exc()
             print(f"{C_YELLOW}Falling back to single-size training{C_RESET}")
             use_multi_size = False
-    
+
     if not use_multi_size:
-        # Use traditional single-size dataloader - get config from runtime_config if available
-        if rt_config:
-            data_config = rt_config.get('data', {})
-            data_root = data_config.get('root', DATASET_ROOT)
-            dataset_name = data_config.get('dataset_name', 'master')
-            paths_config = data_config.get('paths', None)  # NEW: Get paths config
-            # Auto-detect first available size
-            train_gt_pattern = paths_config.get('train_gt', 'patches/{size_key}/GT') if paths_config else 'patches/{size_key}/GT'
-            available = detect_available_sizes(data_root, dataset_name, train_gt_pattern)
-            size_key = available[0][0] if available else '540'
-        else:
-            # Fallback to defaults
-            data_root = DATASET_ROOT
-            dataset_name = 'master'
-            size_key = '540'
-            paths_config = None
-        
+        # Single-size fallback: use first detected size or '540' as last resort
+        size_key = available_sizes[0] if available_sizes else '540'
+        batch_cfg = FIXED_BATCH_CONFIG.get(size_key, {'batch': 1, 'accum': 4})
         try:
             train_dataset = VSRDataset(
                 root=data_root,
@@ -660,63 +455,45 @@ def main():
                 size_key=size_key,
                 mode='train',
                 augment=True,
-                paths_config=paths_config  # NEW: Pass paths config
+                paths_config=None,
             )
-            
             print(f"✅ Training samples: {len(train_dataset):,}\n")
         except Exception as e:
             print(f"❌ Error loading datasets: {e}")
             return
-        
-        # Create single-size data loader
+
         train_loader = DataLoader(
             train_dataset,
-            batch_size=batch_size,
+            batch_size=batch_cfg['batch'],
             shuffle=True,
             num_workers=config['NUM_WORKERS'],
-            pin_memory=config['PIN_MEMORY']
+            pin_memory=config['PIN_MEMORY'],
         )
     
-    # Load validation datasets - use ALL configured sizes from runtime_config
+    # Load validation datasets — auto-detect from val/{size_key}/GT directories
     val_loaders = []  # List of (size_key, loader) tuples
-    
-    if rt_config:
-        data_config = rt_config.get('data', {})
-        data_root = data_config.get('root', DATASET_ROOT)
-        dataset_name = data_config.get('dataset_name', 'master')
-        paths_config = data_config.get('paths', None)  # NEW: Get paths config
-        # Get validation sizes from config
-        val_sizes = rt_config.get('validation', {}).get('sizes', [])
-        if not val_sizes:
-            # Auto-detect from validation GT directories (NOT training dirs)
-            val_gt_pattern = paths_config.get('val_gt', 'val/{size_key}/GT') if paths_config else 'val/{size_key}/GT'
-            val_sizes = []
-            for sk in KNOWN_SIZE_KEYS:
-                val_dir = os.path.join(data_root, dataset_name, val_gt_pattern.replace('{size_key}', sk))
-                if os.path.isdir(val_dir):
-                    files = [f for f in os.listdir(val_dir) if f.lower().endswith('.png')]
-                    if files:
-                        val_sizes.append(sk)
-            if not val_sizes:
-                val_sizes = ['540']
-    else:
-        # Fallback to defaults
-        data_root = DATASET_ROOT
-        dataset_name = 'master'
-        val_sizes = ['540']
-        paths_config = None
-    
-    # Create validation dataset and loader for EACH size
-    print(f"{C_CYAN}Creating validation datasets for sizes: {', '.join(val_sizes)}{C_RESET}")
-    
+    val_gt_pattern = 'val/{size_key}/GT'
+
     # Ensure validation GT subdirs exist so the user can copy images into them
     for size_key in KNOWN_SIZE_KEYS:
-        val_gt_dir = os.path.join(data_root, dataset_name, 'val', size_key, 'GT')
-        os.makedirs(val_gt_dir, exist_ok=True)
-    print(f"{C_GREEN}✅ Validation GT directories ready: {os.path.join(data_root, dataset_name, 'val', '{size_key}', 'GT')}{C_RESET}")
-    
+        os.makedirs(os.path.join(data_root, dataset_name, 'val', size_key, 'GT'), exist_ok=True)
+    print(f"{C_GREEN}✅ Validation GT directories ready: "
+          f"{os.path.join(data_root, dataset_name, 'val', '{size_key}', 'GT')}{C_RESET}")
+
+    # Auto-detect validation sizes
+    val_sizes = []
+    for sk in KNOWN_SIZE_KEYS:
+        val_dir = os.path.join(data_root, dataset_name, val_gt_pattern.replace('{size_key}', sk))
+        if os.path.isdir(val_dir):
+            files = [f for f in os.listdir(val_dir) if f.lower().endswith('.png')]
+            if files:
+                val_sizes.append(sk)
+    if not val_sizes:
+        val_sizes = available_sizes[:1] if available_sizes else ['540']
+
+    print(f"{C_CYAN}Creating validation datasets for sizes: {', '.join(val_sizes)}{C_RESET}")
     total_val_samples = 0
-    
+
     for size_key in val_sizes:
         try:
             val_dataset = VSRDataset(
@@ -725,42 +502,32 @@ def main():
                 size_key=size_key,
                 mode='val',
                 augment=False,
-                paths_config=paths_config  # NEW: Pass paths config
+                paths_config=None,
             )
-            
             val_loader = DataLoader(
                 val_dataset,
                 batch_size=config.get('VAL_BATCH_SIZE', 1),
                 shuffle=False,
                 num_workers=2,
-                pin_memory=False  # Disable for validation (saves VRAM)
+                pin_memory=False,
             )
-            
             val_loaders.append((size_key, val_loader))
             total_val_samples += len(val_dataset)
             print(f"  ✓ {size_key}: {len(val_dataset):,} samples")
-            
         except Exception as e:
             print(f"  ⚠️  Warning: Could not load validation for {size_key}: {e}")
-    
+
     if not val_loaders:
         print(f"❌ Error: No validation datasets loaded!")
         return
-    
+
     print(f"{C_GREEN}✅ Total validation samples: {total_val_samples:,} across {len(val_loaders)} sizes{C_RESET}\n")
-    
-    # For backward compatibility, use first loader as primary val_loader
-    # (trainer will iterate through all in val_loaders list)
-    val_loader = val_loaders[0][1]  # Primary loader for validator initialization
-    
-    # Create checkpoint manager (use dataset-specific root)
+
+    # First loader is used as the primary validator target
+    val_loader = val_loaders[0][1]
+
+    # Create checkpoint manager
     checkpoint_mgr = CheckpointManager(DATASET_SPECIFIC_ROOT)
-    
-    # Create runtime config manager (reuse runtime_config_path defined earlier)
-    runtime_config = RuntimeConfigManager(
-        config_path=runtime_config_path,
-        base_config=config
-    )
     
     # Create loggers (use dataset-specific paths)
     log_dir = os.path.join(DATASET_SPECIFIC_ROOT, "logs")
@@ -813,7 +580,6 @@ def main():
         adaptive_system=adaptive_system,
         config=config,
         device=device,
-        runtime_config=runtime_config,
         scaler=scaler,
         use_amp=use_amp
     )

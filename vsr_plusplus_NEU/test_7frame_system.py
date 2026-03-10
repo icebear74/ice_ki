@@ -43,84 +43,6 @@ def test_adaptive_batch():
             print()
 
 
-def test_runtime_config():
-    """Test runtime configuration manager"""
-    print("\n" + "="*80)
-    print("Testing Runtime Configuration Manager")
-    print("="*80 + "\n")
-    
-    # Direct import to avoid torch dependency
-    import importlib.util
-    spec = importlib.util.spec_from_file_location(
-        "runtime_config",
-        "vsr_plusplus_NEU/systems/runtime_config.py"
-    )
-    runtime_config_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(runtime_config_module)
-    EnhancedRuntimeConfigManager = runtime_config_module.EnhancedRuntimeConfigManager
-    
-    import tempfile
-    import json
-    
-    # Create temp config file
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-        config_path = f.name
-    
-    try:
-        # Create config manager
-        manager = EnhancedRuntimeConfigManager(config_path, use_new_structure=True)
-        
-        print("Initial configuration:")
-        config = manager.get_all()
-        print(json.dumps(config, indent=2))
-        print()
-        
-        # Validate
-        is_valid, errors = manager.validate()
-        if is_valid:
-            print("✅ Configuration is valid!\n")
-        else:
-            print("❌ Validation errors:")
-            for error in errors:
-                print(f"  - {error}")
-            print()
-        
-        # Update effective batch size
-        print("Updating effective batch size to 8...")
-        success = manager.update_effective_batch_size(8)
-        if success:
-            print("✅ Updated successfully\n")
-        else:
-            print("❌ Update failed\n")
-        
-        # Update size distribution
-        print("Updating size distribution...")
-        success = manager.update_size_distribution({
-            '540': 0.70,
-            '720_169': 0.30,
-            '720': 0.00
-        })
-        if success:
-            print("✅ Updated successfully\n")
-        else:
-            print("❌ Update failed\n")
-        
-        # Final validation
-        is_valid, errors = manager.validate()
-        if is_valid:
-            print("✅ Final configuration is valid!\n")
-        else:
-            print("❌ Final validation errors:")
-            for error in errors:
-                print(f"  - {error}")
-            print()
-    
-    finally:
-        # Cleanup
-        if os.path.exists(config_path):
-            os.unlink(config_path)
-
-
 def test_size_tracking():
     """Test size tracking system"""
     print("\n" + "="*80)
@@ -261,19 +183,18 @@ def main():
     print("\n" + "="*80)
     print("7-Frame VSR Training System - Component Tests")
     print("="*80)
-    
+
     # Run tests that don't require torch
     test_adaptive_batch()
-    test_runtime_config()
     test_size_tracking()
     test_terminal_ui()
-    
+
     # Try model tests (may fail if torch not installed)
     try:
         test_models()
     except Exception as e:
         print(f"\nℹ️  Skipping model tests (torch not available): {e}\n")
-    
+
     print("="*80)
     print("All Tests Complete!")
     print("="*80 + "\n")
