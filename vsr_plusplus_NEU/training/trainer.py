@@ -14,7 +14,7 @@ import time
 import os
 import json
 import torch
-from torch.cuda.amp import autocast
+from torch.amp import autocast
 from ..utils.ui_display import draw_ui, get_activity_data
 from ..utils.keyboard_handler import KeyboardHandler
 from ..utils.ui_terminal import C_GREEN, C_CYAN, C_YELLOW, C_RESET, show_cursor
@@ -353,7 +353,7 @@ class VSRTrainer:
                 )
             
             # Forward pass with mixed precision
-            with autocast(enabled=self.use_amp):
+            with autocast('cuda', enabled=self.use_amp):
                 output = self.model(lr_stack)
                 
                 # Compute L1 loss for adaptive system
@@ -469,9 +469,14 @@ class VSRTrainer:
                 
                 # Reset loop timer for next iteration
                 loop_start_time = time.time()
-                # Use current allocated memory (not peak) for per-step VRAM display.
-                # Peak (max_memory_allocated) is logged separately to TensorBoard.
-                vram = torch.cuda.memory_allocated() / (1024**3)
+                # Use mem_get_info() so the value matches nvidia-smi:
+                # total - free = actual process VRAM including CUDA context + cuDNN.
+                # memory_allocated() only shows live tensors and reads ~0 between steps.
+                if torch.cuda.is_available():
+                    _free, _total = torch.cuda.mem_get_info()
+                    vram = (_total - _free) / (1024**3)
+                else:
+                    vram = 0.0
                 
                 # Track loss history (raw values)
                 raw_total_loss = loss_dict['total'].item() if torch.is_tensor(loss_dict['total']) else loss_dict['total']
@@ -847,9 +852,14 @@ class VSRTrainer:
         
         # Update web monitor with COMPLETE training state (ALL data)
         best_quality = self.checkpoint_mgr.best_quality if self.checkpoint_mgr.best_quality > 0 else 0.0
-        # Use current allocated memory (not peak) so the web monitor shows
-        # live VRAM, not the maximum since training start.
-        gpu_mem = torch.cuda.memory_allocated() / (1024**3) if torch.cuda.is_available() else 0.0
+        # Use mem_get_info() so the WebUI value matches nvidia-smi.
+        # memory_allocated() only returns live tensors (~0 between steps).
+        # total - free includes CUDA context, cuDNN cache, PyTorch allocator pool.
+        if torch.cuda.is_available():
+            _free, _total = torch.cuda.mem_get_info()
+            gpu_mem = (_total - _free) / (1024**3)
+        else:
+            gpu_mem = 0.0
         
         # Konvertiere Layer-Aktivitäten in Dict-Format
         layer_act_dict = {}

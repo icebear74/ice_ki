@@ -16,7 +16,7 @@ import sys
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 import subprocess
 import socket
 import time
@@ -217,6 +217,14 @@ def main():
         n_blocks=n_blocks,
         use_checkpointing=use_checkpointing
     ).to(device)
+
+    # Verify FP32: Tesla P4 has no native FP16 hardware, so we must stay in float32.
+    # Explicitly cast to float32 in case any sub-module initialised differently.
+    model = model.float()
+    param_dtypes = set(p.dtype for p in model.parameters())
+    if param_dtypes != {torch.float32}:
+        raise RuntimeError(f"Model parameters are NOT float32! Found: {param_dtypes}")
+    print(f"{C_GREEN}✅ Model dtype: float32 (FP32) confirmed — AMP/FP16 is OFF{C_RESET}")
     
     if use_checkpointing:
         print("✅ Gradient checkpointing ENABLED - saves ~40% activation memory")
@@ -302,7 +310,7 @@ def main():
     
     # Create GradScaler for mixed precision training if enabled
     use_amp = config.get('USE_AMP', False)
-    scaler = GradScaler() if use_amp else None
+    scaler = GradScaler('cuda') if use_amp else None
     
     if use_amp:
         print(f"{C_GREEN}✅ Mixed Precision (AMP) enabled - reduced VRAM usage{C_RESET}\n")
