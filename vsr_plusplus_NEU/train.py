@@ -513,28 +513,38 @@ def main():
         try:
             from vsr_plusplus_NEU.core.dataloader import create_train_loader
             
-            # Extract data from new runtime_config.json structure
+            # Extract data config
             data_config = rt_config.get('data', {})
             data_root = data_config.get('root', DATASET_ROOT)
             dataset_name = data_config.get('dataset_name', 'master')
-            adaptive_batch = rt_config.get('training', {}).get('adaptive_batch', {})
-            
+
+            # Batch/accum config comes exclusively from ADAPTIVE_BATCH_CONFIG in
+            # config.py — never from runtime_config.json (which is obsolete for
+            # training params).  This guarantees fixed, predictable per-size values:
+            #   720_169: BS=2, accum=4  → eff=8
+            #   720:     BS=1, accum=4  → eff=4
+            #   540:     BS=2, accum=3  → eff=6
+            adaptive_batch_config = config.get('ADAPTIVE_BATCH_CONFIG', {})
+
             # Auto-detect available sizes and create config
             sizes_config = {}
             paths_config = data_config.get('paths', {})
             train_gt_pattern = paths_config.get('train_gt', 'patches/{size_key}/GT')
             available = detect_available_sizes(data_root, dataset_name, train_gt_pattern)
-            
+
             for size_key, file_count in available:
-                batch_info = adaptive_batch.get(size_key, {})
-                # Fall back to the same per-size defaults used by SizeGroupedSampler
-                # and create_train_loader (720→4, 720_169→4, 540→3)
-                default_accum = 4 if size_key == '720' else (4 if size_key == '720_169' else 3)
+                if size_key not in adaptive_batch_config:
+                    print(f"{C_RED}❌ size_key '{size_key}' not found in ADAPTIVE_BATCH_CONFIG in config.py!{C_RESET}")
+                    print(f"{C_RED}   Add an entry for '{size_key}' with 'batch' and 'accum' keys.{C_RESET}")
+                    raise ValueError(
+                        f"Unknown size_key '{size_key}': add it to ADAPTIVE_BATCH_CONFIG in config.py"
+                    )
+                batch_cfg = adaptive_batch_config[size_key]
                 sizes_config[size_key] = {
-                    'enabled': True,  # All detected sizes are enabled
-                    'distribution': 1.0 / len(available),  # Equal distribution (not used for weighting)
-                    'batch_size': batch_info.get('batch', config.get('BATCH_SIZE', 1)),
-                    'accum': batch_info.get('accum', default_accum),
+                    'enabled': True,
+                    'distribution': 1.0 / len(available),  # equal distribution (only selects sizes)
+                    'batch_size': batch_cfg['batch'],
+                    'accum': batch_cfg['accum'],
                 }
             
             # ── STARTUP DIAGNOSTIC ──────────────────────────────────────────

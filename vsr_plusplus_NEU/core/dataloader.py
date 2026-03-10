@@ -57,11 +57,13 @@ class SizeGroupedSampler(Sampler):
         if not self.active_sizes:
             raise ValueError("No datasets provided")
 
-        # Per-size accumulation steps (default: 4 für '720', 4 für '720_169', 3 für '540')
+        # Per-size accumulation steps — fixed values matching ADAPTIVE_BATCH_CONFIG:
+        #   '720_169': 4,  '720': 4,  '540': 3
+        # Any unknown size_key gets a safe default of 4.
         if accum_steps is None:
             accum_steps = {}
         self.accum_steps = {
-            sk: accum_steps.get(sk, 4 if sk == '720' else (4 if sk == '720_169' else 3))
+            sk: accum_steps.get(sk, 4)
             for sk in self.active_sizes
         }
 
@@ -384,11 +386,10 @@ def create_train_loader(config):
         
         datasets_dict[size_key] = dataset
         size_distribution[size_key] = distribution
-        batch_sizes[size_key] = size_cfg.get('batch_size', 1)
-        # Extract accumulation steps for this size; fall back to per-size defaults
-        # (4 für '720', 4 für '720_169', 3 für '540')
-        default_accum = 4 if size_key == '720' else (4 if size_key == '720_169' else 3)
-        accum_steps[size_key] = size_cfg.get('accum', default_accum)
+        # batch_size and accum must be explicitly set in sizes_config — they come
+        # from ADAPTIVE_BATCH_CONFIG in config.py (fixed values, no guessing).
+        batch_sizes[size_key] = size_cfg['batch_size']
+        accum_steps[size_key] = size_cfg['accum']
     
     if not datasets_dict:
         raise ValueError("No training datasets could be loaded for any size. Check GT/LR directories and file extensions.")

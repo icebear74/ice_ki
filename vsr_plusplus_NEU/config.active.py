@@ -30,24 +30,11 @@ N_BLOCKS = 28
 
 
 # ============================================================================
-# TRAINING BATCH PARAMETERS (Optimized for 7-Frame Model)
+# ADAPTIVE BATCH CONFIGURATION (Per-Size — einzige Wahrheitsquelle!)
 # ============================================================================
-
-# Batch size per iteration
-# Default: 2 (für 720_169 und 540 getestet; 720 bleibt bei batch=1 wegen OOM-Risiko)
-BATCH_SIZE = 2
-
-# Gradient accumulation steps
-# Effektive Batch = BATCH_SIZE * ACCUMULATION_STEPS = 2 * 4 = 8 (für 720_169)
-# Neuer Standard passt zu 720_169-Konfiguration
-ACCUMULATION_STEPS = 4
-
-
-# ============================================================================
-# ADAPTIVE BATCH CONFIGURATION (Per-Size Optimized)
-# ============================================================================
-# Basierend auf gemessenen VRAM-Werten aus config_test_results.txt
-# (7f | 26b | 72f | FP32 - aktive Modellkonfiguration)
+# Diese Werte werden DIREKT im Training verwendet — kein dynamisches Ermitteln,
+# keine Runtime-Überschreibung.  Basierend auf gemessenen VRAM-Werten
+# (7f | 28b | 72f | FP32 - aktive Modellkonfiguration).
 #
 # 720_169 (720×405) - Vollbilder 16:9:
 #   BS=2, A=4 → eff. Batch=8 | VRAM: ~5.14 GB ✅
@@ -57,12 +44,28 @@ ACCUMULATION_STEPS = 4
 #
 # 720 (720×720) - 4K Crops (VRAM-kritisch!):
 #   BS=1, A=4 → eff. Batch=4 | VRAM: ~6.14 GB ✅  (BS=2 = OOM!)
+#
+# WICHTIG: Für jede neue size_key hier einen Eintrag anlegen!
+# Training bricht mit klarem Fehler ab, wenn ein size_key fehlt.
 
 ADAPTIVE_BATCH_CONFIG = {
     '720_169': {'batch': 2, 'accum': 4},   # eff=8 | ~5.14 GB | Vollbilder 16:9
     '540':     {'batch': 2, 'accum': 3},   # eff=6 | ~5.15 GB | 1080p Crops
     '720':     {'batch': 1, 'accum': 4},   # eff=4 | ~6.14 GB | 4K Crops (BS=1 pflicht!)
 }
+
+
+# ============================================================================
+# TRAINING BATCH PARAMETERS (Fallback für single-size Modus)
+# ============================================================================
+# Diese Werte werden NUR im single-size Fallback-Pfad genutzt.
+# Im Multi-Size-Training (Normalfall) gelten ausschließlich ADAPTIVE_BATCH_CONFIG.
+
+# Batch size per iteration (single-size fallback — entspricht 720_169)
+BATCH_SIZE = 2
+
+# Gradient accumulation steps (single-size fallback — entspricht 720_169)
+ACCUMULATION_STEPS = 4
 
 
 # ============================================================================

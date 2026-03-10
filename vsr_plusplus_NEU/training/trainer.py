@@ -262,21 +262,14 @@ class VSRTrainer:
                 else:
                     size_key = 'default'
             
-            # Dynamic accumulation steps: priority order —
-            # 1. ADAPTIVE_BATCH_CONFIG from runtime_config (training.adaptive_batch)
-            # 2. ADAPTIVE_BATCH_CONFIG from main config
-            # 3. Hardcoded defaults (4 for '720', 6 for others)
-            adaptive_batch_cfg = None
-            if self.runtime_config is not None:
-                adaptive_batch_cfg = self.runtime_config.get('training.adaptive_batch')
-            if adaptive_batch_cfg is None:
-                adaptive_batch_cfg = self.config.get('ADAPTIVE_BATCH_CONFIG')
+            # Accumulation steps come exclusively from ADAPTIVE_BATCH_CONFIG in
+            # config.py.  This is the single source of truth for per-size values.
+            adaptive_batch_cfg = self.config.get('ADAPTIVE_BATCH_CONFIG')
             if adaptive_batch_cfg and size_key in adaptive_batch_cfg:
-                current_accum_steps = adaptive_batch_cfg[size_key].get('accum', default_accum_steps)
-            elif size_key == '720':
-                current_accum_steps = 4
+                current_accum_steps = adaptive_batch_cfg[size_key]['accum']
             else:
-                current_accum_steps = default_accum_steps
+                # Hard fallback for unknown size keys (should not happen in normal use)
+                current_accum_steps = 4
 
             # ── Size-key transition: enforce clean accumulation boundaries ────
             # If the resolution block changes mid-accumulation (e.g. due to a
