@@ -53,7 +53,7 @@ class AdaptiveBatchCalculator:
         self.vram_safe_gb = VRAM_SAFE_GB
     
     def calculate_batch_config(self, gt_size: str, effective_batch: int,
-                               batch_size: int = None) -> Dict[str, Any]:
+                               batch_size: Optional[int] = None) -> Dict[str, Any]:
         """
         Calculate batch and accumulation configuration for a given size
 
@@ -160,7 +160,7 @@ class AdaptiveBatchCalculator:
 
         # Check VRAM limit
         vram_est = batch_config.get('vram_est')
-        if vram_est is None:
+        if vram_est is None or vram_est == 0.0:
             errors.append(
                 f"VRAM estimate is not available for this configuration (likely OOM risk)"
             )

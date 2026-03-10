@@ -147,6 +147,14 @@ class CompleteTrainingDataStore:
                 'total_files_in_epoch': 0  # Total files in this epoch
             },
             
+            # Adaptive Batch Configuration (per-size, read-only info)
+            # Werte aus config.active.py / runtime_config.json
+            'adaptive_batch_config': {
+                '720_169': {'batch': 2, 'accum': 4, 'effective': 8, 'vram_gb': 5.14},
+                '540':     {'batch': 2, 'accum': 3, 'effective': 6, 'vram_gb': 5.15},
+                '720':     {'batch': 1, 'accum': 4, 'effective': 4, 'vram_gb': 6.14},
+            },
+            
             # Statusflags
             'training_active': True,
             'validation_running': False,
@@ -190,12 +198,6 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             self._deliver_json_snapshot()
         elif self.path == '/monitoring/config' or self.path == '/config':
             self._deliver_config_json()
-        elif self.path == '/config/ui':
-            self._deliver_config_page()
-        elif self.path.startswith('/api/size_stats'):
-            self._handle_size_stats()
-        elif self.path.startswith('/api/batch_preview'):
-            self._handle_batch_preview()
         elif self.path.startswith('/monitoring'):
             self._deliver_main_page()
         else:
@@ -205,10 +207,6 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         """POST-Request-Handler"""
         if self.path == '/monitoring/command':
             self._process_user_command()
-        elif self.path == '/api/update_size_distribution':
-            self._handle_update_size_distribution()
-        elif self.path.startswith('/api/update_batch_config'):
-            self._handle_update_batch_config()
         else:
             self.send_error(404)
     
@@ -262,31 +260,6 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         
         self.wfile.write(json.dumps(config, indent=2).encode('utf-8'))
     
-    def _deliver_config_page(self):
-        """Liefert Config-HTML-Seite (config_7frame.html template)"""
-        import os
-        
-        # Load config template
-        template_path = os.path.join(
-            os.path.dirname(os.path.dirname(__file__)),
-            'web', 'templates', 'config_7frame.html'
-        )
-        
-        try:
-            with open(template_path, 'r', encoding='utf-8') as f:
-                html_content = f.read()
-            
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/html; charset=utf-8')
-            self.send_header('Cache-Control', 'no-cache')
-            self.end_headers()
-            self.wfile.write(html_content.encode('utf-8'))
-            
-        except FileNotFoundError:
-            self.send_error(404, f'Config template not found: {template_path}')
-        except Exception as e:
-            self.send_error(500, f'Error loading config template: {str(e)}')
-    
     def _process_user_command(self):
         """Verarbeitet Befehle vom Benutzer"""
         content_length = int(self.headers.get('Content-Length', 0))
@@ -327,162 +300,6 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         except Exception as e:
             self.send_error(400, str(e))
     
-    def _handle_size_stats(self):
-        """Handle /api/size_stats GET request"""
-        try:
-            # Return placeholder stats for now
-            # In a real implementation, this would get actual dataset statistics
-            stats = {
-                '720': {'train': 0, 'val': 0},
-                '540': {'train': 0, 'val': 0},
-                '720_169': {'train': 0, 'val': 0}
-            }
-            
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Cache-Control', 'no-cache')
-            self.end_headers()
-            self.wfile.write(json.dumps(stats).encode('utf-8'))
-            
-        except Exception as e:
-            self.send_error(500, str(e))
-    
-    def _handle_batch_preview(self):
-        """Handle /api/batch_preview GET request"""
-        try:
-            # Parse query parameters
-            from urllib.parse import urlparse, parse_qs
-            parsed = urlparse(self.path)
-            params = parse_qs(parsed.query)
-            
-            effective_batch = int(params.get('effective_batch', [6])[0])
-            
-            # Return batch preview
-            preview = {
-                'effective_batch': effective_batch,
-                'gpu_batch': min(effective_batch, 3),
-                'accumulation': max(1, effective_batch // 3),
-                'estimated_vram': f'{effective_batch * 0.8:.1f} GB'
-            }
-            
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Cache-Control', 'no-cache')
-            self.end_headers()
-            self.wfile.write(json.dumps(preview).encode('utf-8'))
-            
-        except Exception as e:
-            self.send_error(500, str(e))
-    
-    def _handle_update_size_distribution(self):
-        """Handle /api/update_size_distribution POST request"""
-        try:
-            content_length = int(self.headers.get('Content-Length', 0))
-            request_body = self.rfile.read(content_length)
-            data = json.loads(request_body.decode('utf-8'))
-            
-            # Get distribution - handle both formats
-            if 'distribution' in data:
-                # New format: {'distribution': {'720': 0.4, '540': 0.3, '720_169': 0.3}}
-                distribution = data['distribution']
-            else:
-                # Old format from config template: {'small_540': 0.3, 'medium_169': 0.3, 'large_720': 0.4}
-                # Map to correct keys
-                key_mapping = {
-                    'small_540': '540',
-                    'medium_169': '720_169',
-                    'large_720': '720'
-                }
-                distribution = {}
-                for old_key, value in data.items():
-                    new_key = key_mapping.get(old_key, old_key)
-                    distribution[new_key] = value
-            
-            # Validate distribution
-            total = sum(float(v) for v in distribution.values())
-            
-            if abs(total - 1.0) > 0.01:
-                response = {
-                    'success': False,
-                    'error': f'Distribution must sum to 1.0 (currently {total:.2f})'
-                }
-            else:
-                # Update runtime config if available
-                if hasattr(self, 'runtime_config_manager') and self.runtime_config_manager is not None:
-                    try:
-                        self.runtime_config_manager.set('size_distribution', distribution)
-                        response = {
-                            'success': True,
-                            'message': 'Distribution updated successfully',
-                            'distribution': distribution
-                        }
-                    except Exception as e:
-                        response = {
-                            'success': False,
-                            'error': f'Failed to update config: {str(e)}'
-                        }
-                else:
-                    response = {
-                        'success': False,
-                        'error': 'Runtime config not available'
-                    }
-            
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps(response).encode('utf-8'))
-            
-        except json.JSONDecodeError as e:
-            self.send_error(400, f'Invalid JSON: {str(e)}')
-        except Exception as e:
-            self.send_error(500, str(e))
-    
-    def _handle_update_batch_config(self):
-        """Handle /api/update_batch_config POST request"""
-        try:
-            # Parse query parameters
-            from urllib.parse import urlparse, parse_qs
-            parsed = urlparse(self.path)
-            params = parse_qs(parsed.query)
-            
-            effective_batch = int(params.get('effective_batch', [6])[0])
-            
-            # Update runtime config if available
-            if hasattr(self, 'runtime_config_manager') and self.runtime_config_manager is not None:
-                try:
-                    # Calculate batch_size and accumulation_steps
-                    batch_size = min(effective_batch, 3)
-                    accumulation_steps = max(1, effective_batch // batch_size)
-                    
-                    self.runtime_config_manager.set('batch_size', batch_size)
-                    self.runtime_config_manager.set('accumulation_steps', accumulation_steps)
-                    
-                    response = {
-                        'success': True,
-                        'message': 'Batch configuration updated',
-                        'batch_size': batch_size,
-                        'accumulation_steps': accumulation_steps,
-                        'effective_batch': batch_size * accumulation_steps
-                    }
-                except Exception as e:
-                    response = {
-                        'success': False,
-                        'error': f'Failed to update config: {str(e)}'
-                    }
-            else:
-                response = {
-                    'success': False,
-                    'error': 'Runtime config not available'
-                }
-            
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.end_headers()
-            self.wfile.write(json.dumps(response).encode('utf-8'))
-            
-        except Exception as e:
-            self.send_error(500, str(e))
-    
     def _deliver_main_page(self):
         """Liefert Haupt-HTML-Seite mit eingebettetem JavaScript"""
         html_page = self._build_complete_dashboard_html()
@@ -520,13 +337,17 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
             background: var(--bg-dark);
             color: var(--text-primary);
-            padding: 20px;
             line-height: 1.6;
+            height: 100vh;
+            overflow: hidden;
         }
         
         .main-container {
             max-width: 1600px;
             margin: 0 auto;
+            height: 100vh;
+            overflow-y: auto;
+            padding: 20px;
         }
         
         .header-section {
@@ -536,6 +357,31 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             background: var(--bg-card);
             border: 1px solid var(--border-color);
             border-radius: 8px;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+        
+        .header-iter-bar {
+            display: flex;
+            justify-content: center;
+            flex-wrap: wrap;
+            gap: 6px 20px;
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid var(--border-color);
+            font-size: 0.88em;
+        }
+        
+        .header-iter-item {
+            color: var(--text-secondary);
+            white-space: nowrap;
+        }
+        
+        .header-iter-item span {
+            color: var(--accent-blue);
+            font-weight: 600;
+            font-family: 'Courier New', monospace;
         }
         
         h1 {
@@ -1050,9 +896,6 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 <button class="btn btn-success" onclick="requestValidation()" title="Validierungsdurchlauf manuell starten">
                     🔍 Validierung starten
                 </button>
-                <button class="btn btn-primary" onclick="openConfigPage()" title="Trainingsparameter live anpassen">
-                    ⚙️ Konfiguration
-                </button>
                 <button class="btn btn-success" id="checkpointBtn" onclick="triggerCheckpoint()" title="Aktuellen Modellzustand sofort speichern">
                     💾 Checkpoint speichern
                 </button>
@@ -1065,6 +908,17 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 <button class="btn btn-primary" onclick="exportLogs()" title="Trainingsmetriken als JSON exportieren">
                     📊 Logs exportieren
                 </button>
+            </div>
+            
+            <!-- Kompakte Iterationszeile – immer sichtbar -->
+            <div class="header-iter-bar">
+                <div class="header-iter-item">🔢 Schritt: <span id="hdrStep">0</span> / <span id="hdrMaxSteps">–</span></div>
+                <div class="header-iter-item">📉 Loss: <span id="hdrLoss">–</span></div>
+                <div class="header-iter-item">🎓 LR: <span id="hdrLR">–</span></div>
+                <div class="header-iter-item">💾 VRAM: <span id="hdrVRAM">–</span> GB</div>
+                <div class="header-iter-item">⏱️ ETA: <span id="hdrETA">–</span></div>
+                <div class="header-iter-item">⚡ <span id="hdrSpeed">–</span> It/s</div>
+                <div class="header-iter-item">📐 Größe: <span id="hdrSizeKey">–</span></div>
             </div>
         </div>
         
@@ -1511,6 +1365,28 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             </div>
         </div>
         
+        <div class="section-header">⚙️ Batch-Konfiguration</div>
+        
+        <div class="layer-activity-container">
+            <div style="font-size: 0.8em; color: var(--text-secondary); margin-bottom: 10px;">
+                Gemessene VRAM-Werte (7f | 26b | 72f | FP32)
+            </div>
+            <table style="width: 100%; border-collapse: collapse; font-size: 0.88em;">
+                <thead>
+                    <tr style="color: var(--accent-blue); border-bottom: 1px solid var(--border-color);">
+                        <th style="text-align: left; padding: 4px 6px;">Größe</th>
+                        <th style="text-align: center; padding: 4px 6px;">BS</th>
+                        <th style="text-align: center; padding: 4px 6px;">Accum</th>
+                        <th style="text-align: center; padding: 4px 6px;">Eff.</th>
+                        <th style="text-align: right; padding: 4px 6px;">VRAM</th>
+                    </tr>
+                </thead>
+                <tbody id="batchConfigTableBody">
+                    <tr><td colspan="5" style="color: var(--text-secondary); padding: 8px 6px;">Lade…</td></tr>
+                </tbody>
+            </table>
+        </div>
+        
         <div class="section-header">🎮 Steuerung</div>
         
         <div class="controls-section">
@@ -1570,6 +1446,20 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             document.getElementById('iterSpeed').textContent = iterSpeed.toFixed(2);
             document.getElementById('vramUsage').textContent = data.vram_usage_gb.toFixed(1);
             document.getElementById('adamMomentum').textContent = data.adam_momentum_avg.toFixed(3);
+            
+            // Header iteration bar (sticky top)
+            document.getElementById('hdrStep').textContent = data.step_current.toLocaleString('de-DE');
+            document.getElementById('hdrMaxSteps').textContent = data.step_max.toLocaleString('de-DE');
+            document.getElementById('hdrLoss').textContent = data.total_loss_value.toFixed(4);
+            document.getElementById('hdrLR').textContent = data.learning_rate_value.toExponential(2);
+            document.getElementById('hdrVRAM').textContent = data.vram_usage_gb.toFixed(1);
+            document.getElementById('hdrETA').textContent = data.eta_total_formatted;
+            document.getElementById('hdrSpeed').textContent = iterSpeed.toFixed(2);
+            const batch = data.current_batch || {};
+            const sizeKey = batch.size_key || '–';
+            const batchSize = batch.batch_size || '–';
+            document.getElementById('hdrSizeKey').textContent =
+                sizeKey !== '–' ? `${sizeKey} (BS=${batchSize})` : '–';
             
             // Loss components with weights
             document.getElementById('l1Loss').textContent = data.l1_loss_value.toFixed(4);
@@ -1699,6 +1589,9 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             
             // Current batch files
             updateBatchFiles(data);
+            
+            // Adaptive batch config (static display)
+            updateAdaptiveBatchConfig(data.adaptive_batch_config);
             
             // TensorBoard link
             const tbLink = document.getElementById('tensorboardLink');
@@ -2219,6 +2112,31 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             }
         }
         
+        function updateAdaptiveBatchConfig(cfg) {
+            const tbody = document.getElementById('batchConfigTableBody');
+            if (!cfg || Object.keys(cfg).length === 0) {
+                tbody.innerHTML = '<tr><td colspan="5" style="color: var(--text-secondary); padding: 8px 6px;">Keine Daten</td></tr>';
+                return;
+            }
+            const order = ['720_169', '540', '720'];
+            const labels = {'720_169': '720×405 (16:9)', '540': '540×540', '720': '720×720'};
+            let html = '';
+            for (const key of order) {
+                const c = cfg[key];
+                if (!c) continue;
+                const vram = typeof c.vram_gb === 'number' ? c.vram_gb.toFixed(2) + ' GB' : '–';
+                const vramColor = c.vram_gb >= 6.0 ? 'var(--accent-orange)' : 'var(--accent-green)';
+                html += `<tr style="border-bottom: 1px solid var(--border-color);">
+                    <td style="padding: 5px 6px; color: var(--text-primary);">${labels[key] || key}</td>
+                    <td style="padding: 5px 6px; text-align: center; color: var(--accent-blue); font-weight: bold;">${c.batch}</td>
+                    <td style="padding: 5px 6px; text-align: center; color: var(--accent-blue);">${c.accum}</td>
+                    <td style="padding: 5px 6px; text-align: center; color: var(--accent-green); font-weight: bold;">${c.effective}</td>
+                    <td style="padding: 5px 6px; text-align: right; color: ${vramColor};">~${vram}</td>
+                </tr>`;
+            }
+            tbody.innerHTML = html;
+        }
+        
         function downloadDataAsJSON() {
             // Fetch current data and trigger download
             fetch('/monitoring/data')
@@ -2257,11 +2175,6 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         
         function requestValidation() {
             triggerValidation();
-        }
-        
-        function openConfigPage() {
-            // Open config UI page
-            window.open('/config/ui', '_blank');
         }
         
         function triggerCheckpoint() {
