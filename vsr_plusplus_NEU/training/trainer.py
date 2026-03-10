@@ -20,19 +20,6 @@ from ..utils.keyboard_handler import KeyboardHandler
 from ..utils.ui_terminal import C_GREEN, C_CYAN, C_YELLOW, C_RESET, show_cursor
 from ..core.data_strategy import DataStrategyScheduler
 
-# Fixed per-size batch and gradient accumulation configuration.
-# These values are hardcoded to guarantee correct GPU memory usage.
-# They are NOT read from config.py, runtime_config.json, or anywhere else.
-# This is the single source of truth for batch/accum decisions inside the trainer.
-#
-#   720_169 (720×405) – 16:9 full frames:  BS=2, accum=4 → eff=8  (~5.14 GB)
-#   540     (540×540) – 1080p crops:       BS=2, accum=3 → eff=6  (~5.15 GB)
-#   720     (720×720) – 4K crops:          BS=1, accum=4 → eff=4  (~6.14 GB, BS=2 = OOM)
-FIXED_BATCH_CONFIG = {
-    '720_169': {'batch': 2, 'accum': 4},
-    '540':     {'batch': 2, 'accum': 3},
-    '720':     {'batch': 1, 'accum': 4},
-}
 
 
 class VSRTrainer:
@@ -108,12 +95,30 @@ class VSRTrainer:
         # Set via trainer.data_strategy_scheduler = DataStrategyScheduler(...)
         self.data_strategy_scheduler = None
         
-        # Keyboard handler
-        self.keyboard = KeyboardHandler()
+        # Per-size VRAM tracker: running EMA of memory_reserved() measured
+        # right after each optimizer step, keyed by size_key.  Sent to the
+        # WebUI so the batch-config table shows live values instead of
+        # hardcoded placeholders.
+        self._vram_per_size: dict = {}
         
         # Web interface for remote monitoring
         from ..systems.web_ui import WebMonitoringInterface
         self.web_monitor = WebMonitoringInterface(port_num=5050, refresh_seconds=5)
+        # Push ADAPTIVE_BATCH_CONFIG from config into the WebUI state so the
+        # batch-config table reflects what is actually configured, not the
+        # hardcoded placeholder that web_ui.py uses as its initial state.
+        adaptive_cfg = self.config.get('ADAPTIVE_BATCH_CONFIG', {})
+        if adaptive_cfg:
+            ui_batch_cfg = {}
+            for sk, v in adaptive_cfg.items():
+                entry = {'batch': v['batch'], 'accum': v['accum'],
+                         'effective': v['batch'] * v['accum']}
+                if 'vram_gb' in v:
+                    entry['vram_gb'] = v['vram_gb']
+                ui_batch_cfg[sk] = entry
+            self.web_monitor.data_store.update_all_metrics(
+                adaptive_batch_config=ui_batch_cfg
+            )
     
     def set_start_step(self, step):
         """Set starting step (for resume)"""
@@ -275,10 +280,9 @@ class VSRTrainer:
                 else:
                     size_key = 'default'
             
-            # Accumulation steps come from FIXED_BATCH_CONFIG (module-level constant).
-            # Never from self.config, runtime_config, or any external source.
-            _fixed = FIXED_BATCH_CONFIG.get(size_key)
-            current_accum_steps = _fixed['accum'] if _fixed is not None else 4
+            # Accumulation steps come from ADAPTIVE_BATCH_CONFIG in config.
+            _batch_cfg = self.config.get('ADAPTIVE_BATCH_CONFIG', {}).get(size_key)
+            current_accum_steps = _batch_cfg['accum'] if _batch_cfg is not None else self.config.get('ACCUMULATION_STEPS', 4)
 
             # ── Size-key transition: enforce clean accumulation boundaries ────
             # If the resolution block changes mid-accumulation (e.g. due to a
@@ -474,6 +478,14 @@ class VSRTrainer:
                 # process, unlike memory_allocated() (only live tensors, ~0 between steps)
                 # or mem_get_info() total-free (sums ALL GPU processes, overshoots).
                 vram = torch.cuda.memory_reserved() / (1024**3) if torch.cuda.is_available() else 0.0
+
+                # Update per-size VRAM tracker with EMA (α=0.1) so the WebUI
+                # batch-config table shows a stable measured value per resolution.
+                if vram > 0.0 and size_key not in ('unknown', 'default'):
+                    prev = self._vram_per_size.get(size_key)
+                    self._vram_per_size[size_key] = (
+                        0.9 * prev + 0.1 * vram if prev is not None else vram
+                    )
                 
                 # Track loss history (raw values)
                 raw_total_loss = loss_dict['total'].item() if torch.is_tensor(loss_dict['total']) else loss_dict['total']
@@ -945,6 +957,9 @@ class VSRTrainer:
                 layer_activity_map=layer_act_dict,
                 layer_activity_peak_value=peak_activity_value,
                 
+                # Batch-Konfiguration mit gemessenen VRAM-Werten
+                adaptive_batch_config=self._build_ui_batch_config(),
+                
                 # Status
                 training_active=not paused,
                 validation_running=False,
@@ -955,7 +970,30 @@ class VSRTrainer:
             print(f"\n⚠️  Web UI update failed: {e}")
             import traceback
             traceback.print_exc()
-    
+
+    def _build_ui_batch_config(self) -> dict:
+        """Build the adaptive_batch_config dict for the WebUI.
+
+        Merges the static ADAPTIVE_BATCH_CONFIG from self.config with the
+        live per-size VRAM measurements collected in self._vram_per_size.
+        The WebUI table therefore always shows the actual measured values
+        instead of the hardcoded placeholders from web_ui.py.
+        """
+        result = {}
+        for sk, v in self.config.get('ADAPTIVE_BATCH_CONFIG', {}).items():
+            entry = {
+                'batch': v['batch'],
+                'accum': v['accum'],
+                'effective': v['batch'] * v['accum'],
+            }
+            measured = self._vram_per_size.get(sk)
+            if measured is not None:
+                entry['vram_gb'] = round(measured, 2)
+            elif 'vram_gb' in v:
+                entry['vram_gb'] = v['vram_gb']
+            result[sk] = entry
+        return result
+
     def _apply_ema_smoothing(self, loss_dict):
         """
         Apply exponential moving average smoothing to losses for GUI display

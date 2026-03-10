@@ -179,6 +179,11 @@ INITIAL_GRAD_CLIP = 1.5
 # Disabled to save VRAM and improve training speed.
 USE_AMP = False
 
+# Enable gradient checkpointing (activation recomputation).
+# Reduces activation memory by ~40% at the cost of ~10-15% compute overhead.
+# Set to False to disable (higher VRAM usage, slightly faster training).
+USE_CHECKPOINTING = True
+
 
 # ============================================================================
 # HELPER FUNCTION
@@ -236,6 +241,7 @@ def get_config():
     
     # Add AMP setting (always include so training code can rely on its presence)
     config['USE_AMP'] = USE_AMP
+    config['USE_CHECKPOINTING'] = USE_CHECKPOINTING
     
     return config
 
@@ -302,6 +308,7 @@ def print_config():
 
     print("\nPERFORMANCE:")
     print(f"  Mixed Precision (AMP):  {USE_AMP}")
+    print(f"  Gradient Checkpointing: {USE_CHECKPOINTING}")
 
     print("\n" + "="*80)
     print("CONFIGURATION NOTES:")
