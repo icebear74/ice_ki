@@ -34,13 +34,35 @@ N_BLOCKS = 28
 # ============================================================================
 
 # Batch size per iteration
-# Keep at 1 for safety with 7-frame model (VRAM tested: ~3.77 GB @ batch=1)
-BATCH_SIZE = 1
+# Default: 2 (für 720_169 und 540 getestet; 720 bleibt bei batch=1 wegen OOM-Risiko)
+BATCH_SIZE = 2
 
 # Gradient accumulation steps
-# Effective batch = BATCH_SIZE * ACCUMULATION_STEPS = 1 * 6 = 6
-# This provides stable gradients without excessive VRAM usage
-ACCUMULATION_STEPS = 6
+# Effektive Batch = BATCH_SIZE * ACCUMULATION_STEPS = 2 * 4 = 8 (für 720_169)
+# Neuer Standard passt zu 720_169-Konfiguration
+ACCUMULATION_STEPS = 4
+
+
+# ============================================================================
+# ADAPTIVE BATCH CONFIGURATION (Per-Size Optimized)
+# ============================================================================
+# Basierend auf gemessenen VRAM-Werten aus config_test_results.txt
+# (7f | 26b | 72f | FP32 - aktive Modellkonfiguration)
+#
+# 720_169 (720×405) - Vollbilder 16:9:
+#   BS=2, A=4 → eff. Batch=8 | VRAM: ~5.14 GB ✅
+#
+# 540 (540×540) - Crops aus 1080p:
+#   BS=2, A=3 → eff. Batch=6 | VRAM: ~5.15 GB ✅
+#
+# 720 (720×720) - 4K Crops (VRAM-kritisch!):
+#   BS=1, A=4 → eff. Batch=4 | VRAM: ~6.14 GB ✅  (BS=2 = OOM!)
+
+ADAPTIVE_BATCH_CONFIG = {
+    '720_169': {'batch': 2, 'accum': 4},   # eff=8 | ~5.14 GB | Vollbilder 16:9
+    '540':     {'batch': 2, 'accum': 3},   # eff=6 | ~5.15 GB | 1080p Crops
+    '720':     {'batch': 1, 'accum': 4},   # eff=4 | ~6.14 GB | 4K Crops (BS=1 pflicht!)
+}
 
 
 # ============================================================================
@@ -175,6 +197,7 @@ def get_config():
         # Batch
         'BATCH_SIZE': BATCH_SIZE,
         'ACCUMULATION_STEPS': ACCUMULATION_STEPS,
+        'ADAPTIVE_BATCH_CONFIG': ADAPTIVE_BATCH_CONFIG,
         
         # Learning rate
         'LR_EXPONENT': LR_EXPONENT,
@@ -226,11 +249,14 @@ def print_config():
     print(f"  Features (n_feats):     {N_FEATS}")
     print(f"  Blocks (n_blocks):      {N_BLOCKS}")
     
-    print("\nBATCH SETTINGS (VRAM-Safe):")
-    print(f"  Batch Size:             {BATCH_SIZE}")
-    print(f"  Accumulation Steps:     {ACCUMULATION_STEPS}")
-    print(f"  Effective Batch Size:   {BATCH_SIZE * ACCUMULATION_STEPS}")
-    print(f"  Estimated VRAM:         ~2.2 GB @ batch=1 (with gradient checkpointing)")
+    print("\nBATCH SETTINGS (Per-Size Optimiert):")
+    print(f"  Standard Batch Size:    {BATCH_SIZE}")
+    print(f"  Standard Accum Steps:   {ACCUMULATION_STEPS}")
+    print(f"  Effektive Batch Size:   {BATCH_SIZE * ACCUMULATION_STEPS}")
+    print(f"  Per-Size Konfiguration (gemessene VRAM-Werte):")
+    for size_key, cfg in ADAPTIVE_BATCH_CONFIG.items():
+        eff = cfg['batch'] * cfg['accum']
+        print(f"    {size_key:<10}: BS={cfg['batch']}, A={cfg['accum']} → eff={eff}")
     
     print("\nLEARNING RATE:")
     print(f"  Initial LR:             {10**LR_EXPONENT:.2e} (10^{LR_EXPONENT})")
@@ -320,7 +346,7 @@ def print_config():
     print("  - Size-specific directories: patches/{size_key}/ and val/{size_key}/")
     print("  - Validation LR files auto-found in patches/{size_key}/LR_7frames/")
     print("  - VGG perceptual loss enabled for quality")
-    print("  - Gradient accumulation for effective batch size 6")
+    print("  - Gradient accumulation für per-size optimierte effektive Batch-Größen")
     print("="*80 + "\n")
 
 

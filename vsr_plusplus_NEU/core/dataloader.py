@@ -41,7 +41,7 @@ class SizeGroupedSampler(Sampler):
         batch_sizes:       Dict mapping size_key to batch size
         shuffle:           Whether to shuffle indices within each size group
         accum_steps:       Dict mapping size_key to gradient accumulation steps
-                           (default: 4 for '720', 6 for all other sizes)
+                           (default: 4 für '720', 4 für '720_169', 3 für '540')
     """
 
     def __init__(self, datasets_dict, size_distribution, batch_sizes, shuffle=True,
@@ -57,11 +57,11 @@ class SizeGroupedSampler(Sampler):
         if not self.active_sizes:
             raise ValueError("No datasets provided")
 
-        # Per-size accumulation steps (default: 4 for '720', 6 for others)
+        # Per-size accumulation steps (default: 4 für '720', 4 für '720_169', 3 für '540')
         if accum_steps is None:
             accum_steps = {}
         self.accum_steps = {
-            sk: accum_steps.get(sk, 4 if sk == '720' else 6)
+            sk: accum_steps.get(sk, 4 if sk == '720' else (4 if sk == '720_169' else 3))
             for sk in self.active_sizes
         }
 
@@ -298,13 +298,13 @@ def create_train_loader(config):
             - 'sizes': Dict with size configs, e.g.:
                 {
                     '720': {'enabled': True, 'distribution': 0.4, 'batch_size': 1, 'accum': 4},
-                    '540': {'enabled': True, 'distribution': 0.4, 'batch_size': 1, 'accum': 6},
-                    '720_169': {'enabled': True, 'distribution': 0.2, 'batch_size': 1, 'accum': 6}
+                    '540': {'enabled': True, 'distribution': 0.4, 'batch_size': 2, 'accum': 3},
+                    '720_169': {'enabled': True, 'distribution': 0.2, 'batch_size': 2, 'accum': 4}
                 }
                 Note: 'distribution' > 0 means "load this size", the value itself
                       is only informational (files on disk determine actual ratio).
                       'accum' sets gradient accumulation steps for this size
-                      (defaults: 4 for '720', 6 for all other sizes).
+                      (defaults: 4 for '720', 4 for '720_169', 3 for '540').
             - 'augment': Whether to use augmentations (default: True)
             - 'shuffle': Whether to shuffle batches (default: True)
     
@@ -357,9 +357,9 @@ def create_train_loader(config):
         datasets_dict[size_key] = dataset
         size_distribution[size_key] = distribution
         batch_sizes[size_key] = size_cfg.get('batch_size', 1)
-        # Extract accumulation steps for this size; fall back to legacy defaults
-        # (4 for '720', 6 for all other sizes)
-        default_accum = 4 if size_key == '720' else 6
+        # Extract accumulation steps for this size; fall back to per-size defaults
+        # (4 für '720', 4 für '720_169', 3 für '540')
+        default_accum = 4 if size_key == '720' else (4 if size_key == '720_169' else 3)
         accum_steps[size_key] = size_cfg.get('accum', default_accum)
     
     if not datasets_dict:
