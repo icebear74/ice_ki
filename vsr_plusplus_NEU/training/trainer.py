@@ -101,6 +101,9 @@ class VSRTrainer:
         # hardcoded placeholders.
         self._vram_per_size: dict = {}
         
+        # Keyboard handler for interactive training control
+        self.keyboard = KeyboardHandler()
+
         # Web interface for remote monitoring
         from ..systems.web_ui import WebMonitoringInterface
         self.web_monitor = WebMonitoringInterface(port_num=5050, refresh_seconds=5)
