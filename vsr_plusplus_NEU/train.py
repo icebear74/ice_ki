@@ -422,70 +422,59 @@ def main():
     
     # Create datasets
     print("Loading datasets...")
-    
-    # Check for runtime_config.json to enable multi-size training
-    # Look in vsr_plusplus_NEU directory first, then in DATA_ROOT
+
+    # Locate runtime_config.json (OPTIONAL — only used to override paths/validation config).
+    # Multi-size training always runs from DATASET_ROOT in config.py.
+    # It does NOT require runtime_config.json to exist or be valid.
     runtime_config_path = os.path.join(os.path.dirname(__file__), "runtime_config.json")
     if not os.path.exists(runtime_config_path):
         runtime_config_path = os.path.join(DATA_ROOT, "runtime_config.json")
-    
-    use_multi_size = False
-    rt_config = None
-    
+
+    rt_config = {}
     if os.path.exists(runtime_config_path):
         try:
             with open(runtime_config_path, 'r') as f:
                 rt_config = json.load(f)
-            
-            # New runtime_config.json structure:
-            # {
-            #   "data": {"root": "...", "dataset_name": "master"},
-            #   "validation": {"sizes": ["540", "720_169", "720"]}
-            # }
-            # model/training params come from config.py (no duplication)
-            
-            # Auto-detect which sizes are available by checking for directories
-            data_config = rt_config.get('data', {})
-            data_root = data_config.get('root', DATASET_ROOT)
-            dataset_name = data_config.get('dataset_name', 'master')
-            
-            # Get configurable paths (with defaults)
-            paths_config = data_config.get('paths', {})
-            train_gt_pattern = paths_config.get('train_gt', 'patches/{size_key}/GT')
-            
-            print(f"{C_CYAN}Checking for dataset sizes in: {os.path.join(data_root, dataset_name)}{C_RESET}")
-            print(f"{C_CYAN}  Using path pattern: {train_gt_pattern}{C_RESET}")
-            
-            # Check which size directories exist and have files
-            available_sizes = []
-            for size_key in KNOWN_SIZE_KEYS:
-                # Build path using pattern
-                train_path = train_gt_pattern.replace('{size_key}', size_key)
-                train_dir = os.path.join(data_root, dataset_name, train_path)
-                print(f"{C_CYAN}  Checking {size_key}: {train_dir}{C_RESET}")
-                
-                if os.path.exists(train_dir):
-                    # Check for both .png and .PNG files (case-insensitive)
-                    files = [f for f in os.listdir(train_dir) if f.lower().endswith('.png')]
-                    if files:
-                        available_sizes.append(size_key)
-                        print(f"{C_GREEN}    ✓ Found {len(files)} files for size {size_key}{C_RESET}")
-                    else:
-                        print(f"{C_YELLOW}    ⚠ Directory exists but no .png files found{C_RESET}")
-                else:
-                    print(f"{C_YELLOW}    ⚠ Directory does not exist{C_RESET}")
-            
-            if available_sizes:
-                use_multi_size = True
-                if len(available_sizes) == 1:
-                    print(f"{C_CYAN}✓ Single-size detected ({available_sizes[0]}), using multi-size loader for consistency{C_RESET}")
-                else:
-                    print(f"{C_CYAN}✓ Multi-size training enabled: {', '.join(available_sizes)}{C_RESET}")
-            else:
-                print(f"{C_YELLOW}⚠ No training data found, falling back to defaults{C_RESET}")
         except Exception as e:
-            print(f"{C_YELLOW}⚠ Failed to load runtime_config.json: {e}{C_RESET}")
-            print(f"{C_YELLOW}Using single-size training{C_RESET}")
+            print(f"{C_YELLOW}⚠ Failed to load runtime_config.json: {e} — using config.py defaults{C_RESET}")
+
+    # Paths come from config.py (DATASET_ROOT, dataset_name).
+    # runtime_config.json 'data' section can optionally override them.
+    _rt_data    = rt_config.get('data', {})
+    data_root   = _rt_data.get('root', DATASET_ROOT)   # config.py DATASET_ROOT is the default
+    dataset_name = _rt_data.get('dataset_name', 'master')
+    paths_config = _rt_data.get('paths', {})
+    train_gt_pattern = paths_config.get('train_gt', 'patches/{size_key}/GT')
+
+    # Always try multi-size detection — NOT gated on runtime_config.json.
+    available_sizes = []
+    print(f"{C_CYAN}Checking for dataset sizes in: {os.path.join(data_root, dataset_name)}{C_RESET}")
+    print(f"{C_CYAN}  Using path pattern: {train_gt_pattern}{C_RESET}")
+
+    for size_key in KNOWN_SIZE_KEYS:
+        train_path = train_gt_pattern.replace('{size_key}', size_key)
+        train_dir  = os.path.join(data_root, dataset_name, train_path)
+        print(f"{C_CYAN}  Checking {size_key}: {train_dir}{C_RESET}")
+
+        if os.path.exists(train_dir):
+            files = [f for f in os.listdir(train_dir) if f.lower().endswith('.png')]
+            if files:
+                available_sizes.append(size_key)
+                print(f"{C_GREEN}    ✓ Found {len(files)} files for size {size_key}{C_RESET}")
+            else:
+                print(f"{C_YELLOW}    ⚠ Directory exists but no .png files found{C_RESET}")
+        else:
+            print(f"{C_YELLOW}    ⚠ Directory does not exist{C_RESET}")
+
+    use_multi_size = bool(available_sizes)
+    if use_multi_size:
+        if len(available_sizes) == 1:
+            print(f"{C_CYAN}✓ Single-size detected ({available_sizes[0]}), using multi-size loader for consistency{C_RESET}")
+        else:
+            print(f"{C_CYAN}✓ Multi-size training enabled: {', '.join(available_sizes)}{C_RESET}")
+    else:
+        print(f"{C_YELLOW}⚠ No training data found in {os.path.join(data_root, dataset_name)}{C_RESET}")
+        print(f"{C_YELLOW}  Falling back to single-size training (size_key=540){C_RESET}")
     
     # Helper function to auto-detect available sizes
     def detect_available_sizes(data_root, dataset_name, train_gt_pattern='patches/{size_key}/GT'):
