@@ -200,8 +200,15 @@ class VSRTrainer:
             )
         # ── End graduated data strategy ──────────────────────────────────────
         
-        default_accum_steps = self.config.get('ACCUMULATION_STEPS', 6)
-        steps_per_epoch = len(self.train_loader) // default_accum_steps
+        default_accum_steps = self.config.get('ACCUMULATION_STEPS', 4)
+        # Prefer the sampler's exact optimizer-step count (accounts for per-size
+        # accum_steps).  Fall back to dividing total forward passes by the global
+        # default only when the sampler is unavailable (single-size DataLoader).
+        _sampler = getattr(self.train_loader, 'sampler', None)
+        if _sampler is not None and hasattr(_sampler, 'optimizer_steps'):
+            steps_per_epoch = _sampler.optimizer_steps
+        else:
+            steps_per_epoch = len(self.train_loader) // default_accum_steps
         current_epoch_step = 0
         accum_counter = 0  # Running counter for dynamic accumulation
         prev_size_key = None  # Track size-key changes for clean boundary enforcement
@@ -290,11 +297,18 @@ class VSRTrainer:
             # Track batch files for WebUI display — always update counters, filenames when available
             if hasattr(self, 'web_monitor') and self.web_monitor:
                 batch_size_val = lr_stack.size(0)
+                # files_used: sum of all images seen so far this epoch across all
+                # forward passes (batch_idx counts forward passes, not optimizer steps)
                 files_used_in_epoch = (batch_idx + 1) * batch_size_val
                 
-                # Get total files in epoch
-                if hasattr(self.train_loader, 'sampler'):
-                    total_files_in_epoch = len(self.train_loader.sampler) * batch_size_val
+                # total_files: use the sampler's exact count when available so that
+                # different physical batch sizes per size are accounted for correctly
+                # (e.g. BS=2 for 540/720_169, BS=1 for 720).
+                _sampler = getattr(self.train_loader, 'sampler', None)
+                if _sampler is not None and hasattr(_sampler, 'total_files'):
+                    total_files_in_epoch = _sampler.total_files
+                elif _sampler is not None:
+                    total_files_in_epoch = len(_sampler) * batch_size_val
                 elif hasattr(self.train_loader, '__len__'):
                     total_files_in_epoch = len(self.train_loader) * batch_size_val
                 else:
@@ -453,7 +467,9 @@ class VSRTrainer:
                 
                 # Reset loop timer for next iteration
                 loop_start_time = time.time()
-                vram = torch.cuda.max_memory_allocated() / (1024**3)
+                # Use current allocated memory (not peak) for per-step VRAM display.
+                # Peak (max_memory_allocated) is logged separately to TensorBoard.
+                vram = torch.cuda.memory_allocated() / (1024**3)
                 
                 # Track loss history (raw values)
                 raw_total_loss = loss_dict['total'].item() if torch.is_tensor(loss_dict['total']) else loss_dict['total']
@@ -834,7 +850,9 @@ class VSRTrainer:
         
         # Update web monitor with COMPLETE training state (ALL data)
         best_quality = self.checkpoint_mgr.best_quality if self.checkpoint_mgr.best_quality > 0 else 0.0
-        gpu_mem = torch.cuda.max_memory_allocated() / (1024**3) if torch.cuda.is_available() else 0.0
+        # Use current allocated memory (not peak) so the web monitor shows
+        # live VRAM, not the maximum since training start.
+        gpu_mem = torch.cuda.memory_allocated() / (1024**3) if torch.cuda.is_available() else 0.0
         
         # Konvertiere Layer-Aktivitäten in Dict-Format
         layer_act_dict = {}

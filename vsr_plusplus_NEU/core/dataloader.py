@@ -225,8 +225,36 @@ class SizeGroupedSampler(Sampler):
                 yield (size_key, indices_per_size[size_key][start_idx:end_idx])
 
     def __len__(self):
-        """Total number of batches across all active size groups."""
+        """Total number of batches (forward passes) across all active size groups."""
         return self.total_batches
+
+    @property
+    def optimizer_steps(self):
+        """Total number of optimizer steps in one epoch.
+
+        Each size group fires an optimizer step every accum_steps[sk] forward
+        passes.  Summing over all active sizes gives the correct per-epoch
+        count instead of dividing total_batches by a single global value.
+        """
+        return sum(
+            self.num_batches_per_size[sk] // self.accum_steps.get(sk, 1)
+            for sk in self.active_sizes
+            if self.num_batches_per_size.get(sk, 0) > 0
+        )
+
+    @property
+    def total_files(self):
+        """Total number of individual training images in one epoch.
+
+        Computed as the sum of (batches × batch_size) per size, which accounts
+        for the fact that different sizes may have different physical batch sizes
+        (e.g. BS=2 for 540/720_169, BS=1 for 720).
+        """
+        return sum(
+            self.num_batches_per_size[sk] * self.batch_sizes.get(sk, 1)
+            for sk in self.active_sizes
+            if self.num_batches_per_size.get(sk, 0) > 0
+        )
 
 
 class MultiSizeDataLoader:

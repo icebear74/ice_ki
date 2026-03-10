@@ -527,8 +527,9 @@ def main():
             
             for size_key, file_count in available:
                 batch_info = adaptive_batch.get(size_key, {})
-                # Fall back to the same defaults used by SizeGroupedSampler
-                default_accum = 4 if size_key == '720' else 6
+                # Fall back to the same per-size defaults used by SizeGroupedSampler
+                # and create_train_loader (720→4, 720_169→4, 540→3)
+                default_accum = 4 if size_key == '720' else (4 if size_key == '720_169' else 3)
                 sizes_config[size_key] = {
                     'enabled': True,  # All detected sizes are enabled
                     'distribution': 1.0 / len(available),  # Equal distribution (not used for weighting)
