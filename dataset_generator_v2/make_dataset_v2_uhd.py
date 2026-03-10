@@ -37,6 +37,7 @@ from utils.format_definitions import (
 from streaming_extractor import (
     build_assignments_per_category,
     extract_and_save_streaming_distributed,
+    extract_and_save_streaming_dual,
     create_patch_pair,
     is_black_frame as _streaming_is_black_frame,
     is_hdr_transfer,
@@ -1243,7 +1244,7 @@ class DatasetGeneratorV2UHD:
             # Throttled redraw (respects self.update_interval)
             self._update_terminal_ui()
 
-        streaming_result = extract_and_save_streaming_distributed(
+        streaming_result = extract_and_save_streaming_dual(
             video_path=video_path,
             assignments=assignments,
             n_frames=n_frames,
