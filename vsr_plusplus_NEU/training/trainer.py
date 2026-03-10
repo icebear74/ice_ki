@@ -20,6 +20,20 @@ from ..utils.keyboard_handler import KeyboardHandler
 from ..utils.ui_terminal import C_GREEN, C_CYAN, C_YELLOW, C_RESET, show_cursor
 from ..core.data_strategy import DataStrategyScheduler
 
+# Fixed per-size batch and gradient accumulation configuration.
+# These values are hardcoded to guarantee correct GPU memory usage.
+# They are NOT read from config.py, runtime_config.json, or anywhere else.
+# This is the single source of truth for batch/accum decisions inside the trainer.
+#
+#   720_169 (720×405) – 16:9 full frames:  BS=2, accum=4 → eff=8  (~5.14 GB)
+#   540     (540×540) – 1080p crops:       BS=2, accum=3 → eff=6  (~5.15 GB)
+#   720     (720×720) – 4K crops:          BS=1, accum=4 → eff=4  (~6.14 GB, BS=2 = OOM)
+FIXED_BATCH_CONFIG = {
+    '720_169': {'batch': 2, 'accum': 4},
+    '540':     {'batch': 2, 'accum': 3},
+    '720':     {'batch': 1, 'accum': 4},
+}
+
 
 class VSRTrainer:
     """
@@ -262,14 +276,10 @@ class VSRTrainer:
                 else:
                     size_key = 'default'
             
-            # Accumulation steps come exclusively from ADAPTIVE_BATCH_CONFIG in
-            # config.py.  This is the single source of truth for per-size values.
-            adaptive_batch_cfg = self.config.get('ADAPTIVE_BATCH_CONFIG')
-            if adaptive_batch_cfg and size_key in adaptive_batch_cfg:
-                current_accum_steps = adaptive_batch_cfg[size_key]['accum']
-            else:
-                # Hard fallback for unknown size keys (should not happen in normal use)
-                current_accum_steps = 4
+            # Accumulation steps come from FIXED_BATCH_CONFIG (module-level constant).
+            # Never from self.config, runtime_config, or any external source.
+            _fixed = FIXED_BATCH_CONFIG.get(size_key)
+            current_accum_steps = _fixed['accum'] if _fixed is not None else 4
 
             # ── Size-key transition: enforce clean accumulation boundaries ────
             # If the resolution block changes mid-accumulation (e.g. due to a

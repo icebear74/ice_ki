@@ -60,6 +60,20 @@ C_RESET = "\033[0m"
 # Canonical list of all supported training/validation size keys
 KNOWN_SIZE_KEYS = ['540', '720', '720_169']
 
+# Fixed per-size batch and gradient accumulation configuration.
+# These values are hardcoded to guarantee correct GPU memory usage.
+# They are NOT read from config.py, runtime_config.json, or any other file —
+# this is the single source of truth for batch decisions.
+#
+#   720_169 (720×405) – 16:9 full frames:  BS=2, accum=4 → eff=8  (~5.14 GB)
+#   540     (540×540) – 1080p crops:       BS=2, accum=3 → eff=6  (~5.15 GB)
+#   720     (720×720) – 4K crops:          BS=1, accum=4 → eff=4  (~6.14 GB, BS=2 = OOM)
+FIXED_BATCH_CONFIG = {
+    '720_169': {'batch': 2, 'accum': 4},
+    '540':     {'batch': 2, 'accum': 3},
+    '720':     {'batch': 1, 'accum': 4},
+}
+
 
 def is_tensorboard_running(port=6006):
     """Check if TensorBoard is already running on the specified port"""
@@ -518,13 +532,9 @@ def main():
             data_root = data_config.get('root', DATASET_ROOT)
             dataset_name = data_config.get('dataset_name', 'master')
 
-            # Batch/accum config comes exclusively from ADAPTIVE_BATCH_CONFIG in
-            # config.py — never from runtime_config.json (which is obsolete for
-            # training params).  This guarantees fixed, predictable per-size values:
-            #   720_169: BS=2, accum=4  → eff=8
-            #   720:     BS=1, accum=4  → eff=4
-            #   540:     BS=2, accum=3  → eff=6
-            adaptive_batch_config = config.get('ADAPTIVE_BATCH_CONFIG', {})
+            # Batch/accum config comes from FIXED_BATCH_CONFIG — hardcoded at the top
+            # of this module.  NOT read from config.py, runtime_config.json, or anywhere
+            # else.  These fixed values guarantee correct GPU memory usage.
 
             # Auto-detect available sizes and create config
             sizes_config = {}
@@ -533,13 +543,13 @@ def main():
             available = detect_available_sizes(data_root, dataset_name, train_gt_pattern)
 
             for size_key, file_count in available:
-                if size_key not in adaptive_batch_config:
-                    print(f"{C_RED}❌ size_key '{size_key}' not found in ADAPTIVE_BATCH_CONFIG in config.py!{C_RESET}")
+                batch_cfg = FIXED_BATCH_CONFIG.get(size_key)
+                if batch_cfg is None:
+                    print(f"{C_RED}❌ size_key '{size_key}' not found in FIXED_BATCH_CONFIG in train.py!{C_RESET}")
                     print(f"{C_RED}   Add an entry for '{size_key}' with 'batch' and 'accum' keys.{C_RESET}")
                     raise ValueError(
-                        f"Unknown size_key '{size_key}': add it to ADAPTIVE_BATCH_CONFIG in config.py"
+                        f"Unknown size_key '{size_key}': add it to FIXED_BATCH_CONFIG in train.py"
                     )
-                batch_cfg = adaptive_batch_config[size_key]
                 sizes_config[size_key] = {
                     'enabled': True,
                     'distribution': 1.0 / len(available),  # equal distribution (only selects sizes)
