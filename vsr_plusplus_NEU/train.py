@@ -59,19 +59,21 @@ C_RESET = "\033[0m"
 # Canonical list of all supported training/validation size keys
 KNOWN_SIZE_KEYS = ['540', '720', '720_169']
 
-# Fixed per-size batch and gradient accumulation configuration.
-# These values are hardcoded to guarantee correct GPU memory usage.
-# They are NOT read from config.py, runtime_config.json, or any other file —
-# this is the single source of truth for batch decisions.
+# Default per-size batch and gradient accumulation configuration.
+# Used as fallback when ADAPTIVE_BATCH_CONFIG is not present in config.py.
+# PRIMARY SOURCE: config.py → ADAPTIVE_BATCH_CONFIG  (set after config is loaded in main())
 #
 #   720_169 (720×405) – 16:9 full frames:  BS=2, accum=4 → eff=8  (~5.14 GB)
 #   540     (540×540) – 1080p crops:       BS=2, accum=3 → eff=6  (~5.15 GB)
 #   720     (720×720) – 4K crops:          BS=1, accum=4 → eff=4  (~6.14 GB, BS=2 = OOM)
-FIXED_BATCH_CONFIG = {
+_DEFAULT_BATCH_CONFIG = {
     '720_169': {'batch': 2, 'accum': 4},
     '540':     {'batch': 2, 'accum': 3},
     '720':     {'batch': 1, 'accum': 4},
 }
+# Runtime batch config — overwritten in main() from config.ADAPTIVE_BATCH_CONFIG.
+# Code outside main() that needs it should use get_batch_config() below.
+FIXED_BATCH_CONFIG = _DEFAULT_BATCH_CONFIG  # backward-compat alias; prefer batch_config in main()
 
 
 def is_tensorboard_running(port=6006):
@@ -116,6 +118,13 @@ def main():
     
     # Load configuration from config.py
     config = cfg.get_config()
+
+    # Resolve batch config: prefer ADAPTIVE_BATCH_CONFIG from config.py over the
+    # module-level default so users can change batch/accum in config.py and have
+    # those values actually take effect everywhere in this file.
+    global FIXED_BATCH_CONFIG
+    FIXED_BATCH_CONFIG = config.get('ADAPTIVE_BATCH_CONFIG', _DEFAULT_BATCH_CONFIG)
+
     
     # All paths come from config.py — no runtime_config.json involved
     DATA_ROOT    = config.get('DATA_ROOT',    "/mnt/data/training/Universal/Mastermodell/Learn")
