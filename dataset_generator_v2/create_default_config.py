@@ -50,13 +50,14 @@ _DEFAULT_CONFIG = {
         "blur_threshold": 80.0,
         "min_sharpness":  30.0,
         "jpeg_quality":   95,
-        "lr_degrade_prob":       0.6,
+        "lr_degrade_prob":       0.50,
         "lr_dark_boost":         True,
         "lr_dark_threshold":     60.0,
-        "lr_dark_boost_prob":    0.8,
-        "lr_jpeg_quality_range": [72, 85],
+        "lr_dark_boost_prob":    0.65,
+        "lr_jpeg_quality_range": [78, 92],
         "lr_noise_sigma":        [0.5, 2.0],
-        "lr_blur_sigma":         [0.2, 0.6]
+        "lr_blur_sigma":         [0.1, 0.4],
+        "lr_stage_prob":         0.25
     },
     "workers":         8,
     "batch_size":      4,
