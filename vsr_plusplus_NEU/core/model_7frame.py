@@ -267,15 +267,45 @@ class VSRBidirectional_7frames_3x(nn.Module):
     """
     7-Frame Bidirectional VSR Model — P4-Optimized Architecture v2
 
-    Input:  [B, 7, 3, H, W]   (7 LR frames)
-    Output: [B, 3, H*3, W*3]  (3x upscaled center frame)
+    Input:  [B, 7, 3, H, W]   (7 LR frames, F1..F7)
+    Output: [B, 3, H*3, W*3]  (3x upscaled center frame F4)
 
-    Improvements over v1:
+    ── Which frames does each component touch? ───────────────────────────────
+
+        F1   F2   F3  [F4]  F5   F6   F7
+        │    │    │    │    │    │    │
+        └────┴────┴───►│◄───┴────┴────┘
+                  feat_extract         ← ALL 7 frames (single shared Conv2d)
+
+        F4 is center (starting point, never passed through fuse/align directly)
+
+        Backward direction — processes F5, F6, F7 (3 frames AFTER center):
+            F5 → TemporalAlignBlock + GatedFusionBlock + trunk
+            F6 → TemporalAlignBlock + GatedFusionBlock + trunk
+            F7 → TemporalAlignBlock + GatedFusionBlock + trunk
+
+        Forward direction — processes F3, F2, F1 (3 frames BEFORE center):
+            F3 → TemporalAlignBlock + GatedFusionBlock + trunk
+            F2 → TemporalAlignBlock + GatedFusionBlock + trunk
+            F1 → TemporalAlignBlock + GatedFusionBlock + trunk
+
+        Final fusion — combines bidirectional results:
+            GatedFusionBlock(cat[back_prop, forw_prop])
+
+    ── Component scope summary ───────────────────────────────────────────────
+
+        feat_extract       : ALL 7 frames (F1–F7)
+        TemporalAlignBlock : 6 neighbor frames (F5,F6,F7 backward + F3,F2,F1 forward)
+        GatedFusionBlock   : 6 neighbor frames + 1 final fusion = 7 fusion steps total
+        AttentionGate      : inside every ResidualBlock (trunk), fired 6×n_blocks times
+        Center frame F4    : starting point only — features never go through fuse/align
+
+    ── Improvements over v1 ──────────────────────────────────────────────────
 
     1. TemporalAlignBlock (NEW):
        Before fusing neighbor frame features, they are ALIGNED to the propagated
        features using a learned offset field. This compensates for motion between
-       frames so that FusionBlock only needs to combine content, not correct motion.
+       frames so that GatedFusionBlock only needs to combine content, not correct motion.
 
     2. GatedFusionBlock (NEW):
        Replaces FusionBlock. Adds a pixel-wise gate: output = main * gate.
@@ -285,27 +315,28 @@ class VSRBidirectional_7frames_3x(nn.Module):
        Filters the skip connection based on what the block processed.
        Prevents film grain and motion blur from being copied through residual paths.
 
-    Data flow:
+    ── Data flow ─────────────────────────────────────────────────────────────
+
         [7 frames] → feat_extract → [7 feature maps]
 
-        center_feat = feats[:, 3]
+        back_prop = forward_prop = center_feat = feats[:, 3]
 
         Backward: F4 → F5 → F6 → F7
             for each neighbor i in [4, 5, 6]:
-                aligned_i = backward_align(back_prop, feats[:, i])   ← NEW
-                fused = backward_fuse(cat([back_prop, aligned_i]))    ← GATED
-                back_prop = trunk(fused)
+                aligned_i = backward_align(back_prop, feats[:, i])   ← TemporalAlign
+                fused = backward_fuse(cat([back_prop, aligned_i]))    ← GatedFusion
+                back_prop = trunk(fused)                              ← AttentionGate inside
 
         Forward: F4 → F3 → F2 → F1
             for each neighbor i in [2, 1, 0]:
-                aligned_i = forward_align(forw_prop, feats[:, i])    ← NEW
-                fused = forward_fuse(cat([forw_prop, aligned_i]))     ← GATED
-                forw_prop = trunk(fused)
+                aligned_i = forward_align(forw_prop, feats[:, i])    ← TemporalAlign
+                fused = forward_fuse(cat([forw_prop, aligned_i]))     ← GatedFusion
+                forw_prop = trunk(fused)                              ← AttentionGate inside
 
-        final = fusion(cat([back_prop, forw_prop]))                   ← GATED
+        final = fusion(cat([back_prop, forw_prop]))                   ← GatedFusion
         output = upsample(final) + bilinear_base
 
-    VRAM estimate vs v1 (n_feats=72, n_blocks=26):
+    ── VRAM estimate vs v1 (n_feats=72, n_blocks=26) ────────────────────────
         TemporalAlignBlocks (2x): ~20 MB
         AttentionGates (26x):     ~8 MB
         GatedFusionBlock extra:   ~2 MB
