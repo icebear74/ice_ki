@@ -859,6 +859,14 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             font-weight: bold;
             margin-top: 10px;
         }
+
+        /* On mobile devices, disable sticky header – it doesn't behave
+           correctly on small screens and blocks too much viewport space. */
+        @media (max-width: 768px) {
+            .header-section {
+                position: static;
+            }
+        }
     </style>
 </head>
 <body>
