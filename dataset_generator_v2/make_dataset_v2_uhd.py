@@ -77,6 +77,8 @@ _FORMATS_169: frozenset = frozenset({'720_169', 'medium_169'})
 
 # Phase 2 (crop_hq): crop/oversample formats – need the 4K dual-buffer path
 # so that the 2× oversampled 720/large_720 crop is taken from a 4K source.
+_FORMATS_CROP: frozenset = frozenset({'540', '720', 'small_540', 'large_720'})
+
 _PLAN_VERSION = '3.0'
 
 class DatasetGeneratorV2UHD:
