@@ -54,9 +54,9 @@ _DEFAULT_CONFIG = {
         "lr_dark_boost":         True,
         "lr_dark_threshold":     60.0,
         "lr_dark_boost_prob":    0.8,
-        "lr_jpeg_quality_range": [55, 75],
-        "lr_noise_sigma":        [0.5, 2.5],
-        "lr_blur_sigma":         [0.2, 0.7]
+        "lr_jpeg_quality_range": [72, 85],
+        "lr_noise_sigma":        [0.5, 2.0],
+        "lr_blur_sigma":         [0.2, 0.6]
     },
     "workers":         8,
     "batch_size":      4,

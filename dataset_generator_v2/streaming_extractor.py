@@ -854,13 +854,15 @@ def _sample_degrade_params(
             active_stages.append(s)
 
     # Sample scalar parameters once — all frames will use these exact values.
-    noise_range  = _degrade_range(degrade_cfg.get("lr_noise_sigma"),       [1.0, 4.0])
+    # Fallback ranges are calibrated to real DVD quality (MPEG-2 ≈ JPEG 72-85,
+    # minimal added blur after INTER_AREA downscale, low sensor noise).
+    noise_range  = _degrade_range(degrade_cfg.get("lr_noise_sigma"),       [0.5, 2.0])
     noise_sigma: float = random.uniform(float(noise_range[0]), float(noise_range[1]))
 
-    blur_range   = _degrade_range(degrade_cfg.get("lr_blur_sigma"),        [0.3, 1.0])
+    blur_range   = _degrade_range(degrade_cfg.get("lr_blur_sigma"),        [0.2, 0.6])
     blur_sigma: float = random.uniform(float(blur_range[0]), float(blur_range[1]))
 
-    jpeg_range   = _degrade_range(degrade_cfg.get("lr_jpeg_quality_range"), [55, 75])
+    jpeg_range   = _degrade_range(degrade_cfg.get("lr_jpeg_quality_range"), [72, 85])
     jpeg_quality: int = random.randint(int(jpeg_range[0]), int(jpeg_range[1]))
 
     return {
