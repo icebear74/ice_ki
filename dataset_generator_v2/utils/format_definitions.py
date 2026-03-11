@@ -6,21 +6,21 @@ FORMATS = {
     '540': {
         'gt_size': (540, 540),
         'scale': 3,
-        'output_dir': 'patches/540',
+        'output_dir': '540',
         'suffix': '',
         'aspect_ratio': '1:1'
     },
     '720_169': {
         'gt_size': (720, 405),  # (width, height) = 720 wide, 405 tall = 16:9 landscape
         'scale': 3,
-        'output_dir': 'patches/720_169',
+        'output_dir': '720_169',
         'suffix': '',
         'aspect_ratio': '16:9'
     },
     '720': {
         'gt_size': (720, 720),
         'scale': 3,
-        'output_dir': 'patches/720',
+        'output_dir': '720',
         'suffix': '',
         'aspect_ratio': '1:1'
     },
@@ -28,21 +28,21 @@ FORMATS = {
     'small_540': {
         'gt_size': (540, 540),
         'scale': 3,
-        'output_dir': 'patches/540',
+        'output_dir': '540',
         'suffix': '',
         'aspect_ratio': '1:1'
     },
     'medium_169': {
         'gt_size': (720, 405),  # (width, height) = 720 wide, 405 tall = 16:9 landscape
         'scale': 3,
-        'output_dir': 'patches/720_169',
+        'output_dir': '720_169',
         'suffix': '',
         'aspect_ratio': '16:9'
     },
     'large_720': {
         'gt_size': (720, 720),
         'scale': 3,
-        'output_dir': 'patches/720',
+        'output_dir': '720',
         'suffix': '',
         'aspect_ratio': '1:1'
     }
@@ -123,8 +123,8 @@ def get_output_dirs_for_format(base_path, category, format_name, lr_frames=5):
     lr_dir_name = 'LR' if lr_frames == 5 else 'LR_7frames'
     
     return {
-        'gt': f"{base_path}/{category_path}/{base_format_dir}/GT",
-        'lr': f"{base_path}/{category_path}/{base_format_dir}/{lr_dir_name}",
+        'gt': f"{base_path}/{category_path}/patches/{base_format_dir}/GT",
+        'lr': f"{base_path}/{category_path}/patches/{base_format_dir}/{lr_dir_name}",
         'val_gt': f"{base_path}/{category_path}/val/{base_format_dir}/GT",
         'val_lr': f"{base_path}/{category_path}/val/{base_format_dir}/{lr_dir_name}"
     }

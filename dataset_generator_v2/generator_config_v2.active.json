@@ -5,7 +5,7 @@
   "_comment_see_also": "README: dataset_generator_v2/README_CONFIGS.md",
   "_comment_source_dirs": "Source directories to scan for video files. Independent of categories. Add/edit via: python video_manager.py",
   "dataset_name": "master",
-  "root_path": "/mnt/data/training/datasetNeu",
+  "root_path": "/mnt/data/training/datasetNeu4k",
   "source_dirs": [
     {
       "path": "/mnt/data/video/SerieUHD",
@@ -3178,7 +3178,7 @@
       ],
       "scale": 3,
       "enabled": true,
-      "weight": 25
+      "weight": 30
     },
     "540": {
       "gt_size": [
@@ -3187,7 +3187,7 @@
       ],
       "scale": 3,
       "enabled": true,
-      "weight": 50
+      "weight": 20
     },
     "720_169": {
       "gt_size": [
@@ -3196,7 +3196,7 @@
       ],
       "scale": 3,
       "enabled": true,
-      "weight": 25
+      "weight": 50
     }
   },
   "processing": {
