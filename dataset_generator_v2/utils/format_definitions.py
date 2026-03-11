@@ -125,6 +125,7 @@ def get_output_dirs_for_format(base_path, category, format_name, lr_frames=5):
     return {
         'gt': f"{base_path}/{category_path}/patches/{base_format_dir}/GT",
         'lr': f"{base_path}/{category_path}/patches/{base_format_dir}/{lr_dir_name}",
+        'lr_center': f"{base_path}/{category_path}/patches/{base_format_dir}/LR_Center",
         'val_gt': f"{base_path}/{category_path}/val/{base_format_dir}/GT",
         'val_lr': f"{base_path}/{category_path}/val/{base_format_dir}/{lr_dir_name}"
     }

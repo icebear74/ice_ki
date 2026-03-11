@@ -1011,9 +1011,9 @@ def create_patch_pair(
     force_center: bool = False,
     logger=None,
     degrade_cfg: Optional[dict] = None,
-) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
     """
-    Create a ``(GT, LR)`` patch pair from a sequence of frames.
+    Create a ``(GT, LR, LR_Center)`` patch pair from a sequence of frames.
 
     **16:9 formats** (``medium_169`` / ``720_169``):
       * GT – full-frame resize to ``gt_size`` with ``INTER_LANCZOS4``
@@ -1062,11 +1062,14 @@ def create_patch_pair(
                       When ``None`` no degradation is applied.
 
     Returns:
-        ``(gt, lr_stacked)`` or ``(None, None)`` on failure.
+        ``(gt, lr_stacked, lr_center)`` or ``(None, None, None)`` on failure.
+        *lr_center* is the single degraded center frame (the image to be
+        super-resolved), stored separately in ``LR_Center/`` for visual
+        inspection of how much the LR degrades relative to the GT.
     """
     n = len(frames)
     if n not in (5, 7):
-        return None, None
+        return None, None, None
 
     gt_w, gt_h = format_cfg["gt_size"]
     lr_w, lr_h = format_cfg["lr_size"]
@@ -1084,7 +1087,7 @@ def create_patch_pair(
                     f"[{format_name}] Frame too small for resize: "
                     f"{frame_w}×{frame_h} < {gt_w}×{gt_h} – skipped"
                 )
-            return None, None
+            return None, None, None
 
         # GT: INTER_LANCZOS4 = highest quality (Lanczos 8×8 neighbourhood)
         gt = cv2.resize(frames[center_idx], (gt_w, gt_h), interpolation=cv2.INTER_LANCZOS4)
@@ -1092,7 +1095,7 @@ def create_patch_pair(
         # Variety check: silently discard near-uniform GT (black/white/flat)
         gray = cv2.cvtColor(gt, cv2.COLOR_BGR2GRAY)
         if float(gray.std()) < 15.0:
-            return None, None
+            return None, None, None
 
         # LR: INTER_AREA = DVD-realistic quality, then optional degradation.
         # Parameters are sampled once for the whole scene so that every frame
@@ -1124,7 +1127,7 @@ def create_patch_pair(
         sample_w: int = gt_w * oversample
 
         if frame_h < sample_h or frame_w < sample_w:
-            return None, None
+            return None, None, None
 
         max_x = frame_w - sample_w
         max_y = frame_h - sample_h
@@ -1148,7 +1151,7 @@ def create_patch_pair(
         # Variety check: silently discard near-uniform GT (black/white/flat)
         gray = cv2.cvtColor(gt, cv2.COLOR_BGR2GRAY)
         if float(gray.std()) < 15.0:
-            return None, None
+            return None, None, None
 
         center_raw = frames[center_idx]
         # Sample degradation parameters once for the whole scene window so
@@ -1165,8 +1168,9 @@ def create_patch_pair(
                 lr = _apply_degrade_params(lr, _scene_params)
             lr_frames.append(lr)
 
+    lr_center = lr_frames[center_idx]
     lr_stacked = np.concatenate(lr_frames, axis=0)
-    return gt, lr_stacked
+    return gt, lr_stacked, lr_center
 
 
 def save_patch_pair(
@@ -1178,9 +1182,10 @@ def save_patch_pair(
     format_name: str,
     n_frames: int,
     base_dir: str,
+    lr_center: Optional[np.ndarray] = None,
 ) -> Tuple[bool, Optional[str], Optional[str]]:
     """
-    Persist a ``(GT, LR)`` patch pair to the correct output directories.
+    Persist a ``(GT, LR, LR_Center)`` patch pair to the correct output directories.
 
     Directories are created on demand.  Both images are written with PNG
     compression level 1 for a good speed/size trade-off.
@@ -1194,6 +1199,9 @@ def save_patch_pair(
         format_name: Format key (e.g. ``"small_540"``).
         n_frames:    Number of frames (5 or 7) – selects LR subdirectory.
         base_dir:    Root dataset output directory.
+        lr_center:   Optional single center LR frame (BGR numpy array).
+                     When provided it is written to the ``LR_Center/``
+                     sub-directory for visual quality inspection.
 
     Returns:
         ``(success, gt_path, lr_path)``
@@ -1202,9 +1210,11 @@ def save_patch_pair(
         output_dirs = get_output_dirs_for_format(base_dir, category, format_name, n_frames)
         gt_dir = output_dirs["gt"]
         lr_dir = output_dirs["lr"]
+        lr_center_dir = output_dirs["lr_center"]
 
         os.makedirs(gt_dir, exist_ok=True)
         os.makedirs(lr_dir, exist_ok=True)
+        os.makedirs(lr_center_dir, exist_ok=True)
 
         video_stem = Path(video_path).stem
         patch_name = f"{video_stem}_{int(timestamp * 1000):08d}.png"
@@ -1214,6 +1224,10 @@ def save_patch_pair(
 
         cv2.imwrite(gt_path, gt, [cv2.IMWRITE_PNG_COMPRESSION, 1])
         cv2.imwrite(lr_path, lr, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+
+        if lr_center is not None:
+            lr_center_path = os.path.join(lr_center_dir, patch_name)
+            cv2.imwrite(lr_center_path, lr_center, [cv2.IMWRITE_PNG_COMPRESSION, 1])
 
         return True, gt_path, lr_path
     except Exception:
@@ -1516,10 +1530,11 @@ def extract_and_save_streaming_distributed(
             if item is None:
                 _write_queue.task_done()
                 break
-            gt_img, lr_img, gt_p, lr_p = item
+            gt_img, lr_img, gt_p, lr_p, lr_center_img, lr_center_p = item
             try:
                 cv2.imwrite(gt_p, gt_img, _png_params)
                 cv2.imwrite(lr_p, lr_img, _png_params)
+                cv2.imwrite(lr_center_p, lr_center_img, _png_params)
             except Exception as _exc:
                 if logger:
                     logger.warning(f"[write_worker] Failed to write patch: {_exc!r}")
@@ -1796,10 +1811,10 @@ def extract_and_save_streaming_distributed(
                             # frame – retrying never changes the result.
                             is_resize_fmt = fmt_name in ("medium_169", "720_169")
                             max_attempts = 1 if is_resize_fmt else 6
-                            gt, lr = None, None
+                            gt, lr, lr_center = None, None, None
                             for attempt in range(max_attempts):
                                 force = attempt >= 5
-                                gt, lr = create_patch_pair(
+                                gt, lr, lr_center = create_patch_pair(
                                     window, fmt_name, cfg,
                                     force_center=force, logger=logger,
                                     degrade_cfg=degrade_cfg,
@@ -1820,6 +1835,8 @@ def extract_and_save_streaming_distributed(
                                     gt, lr,
                                     os.path.join(dirs["gt"], patch_name),
                                     os.path.join(dirs["lr"], patch_name),
+                                    lr_center,
+                                    os.path.join(dirs["lr_center"], patch_name),
                                 ))
                                 patches_created[category] = (
                                     patches_created.get(category, 0) + 1
@@ -2110,10 +2127,11 @@ def extract_and_save_streaming_dual(
             if item is None:
                 _write_queue.task_done()
                 break
-            gt_img, lr_img, gt_p, lr_p = item
+            gt_img, lr_img, gt_p, lr_p, lr_center_img, lr_center_p = item
             try:
                 cv2.imwrite(gt_p, gt_img, _png_params)
                 cv2.imwrite(lr_p, lr_img, _png_params)
+                cv2.imwrite(lr_center_p, lr_center_img, _png_params)
             except Exception as _exc:
                 if logger:
                     logger.warning(f"[write_worker] Failed to write patch: {_exc!r}")
@@ -2363,10 +2381,10 @@ def extract_and_save_streaming_dual(
 
                             is_resize_fmt = fmt_name in ("medium_169", "720_169")
                             max_attempts = 1 if is_resize_fmt else 6
-                            gt, lr = None, None
+                            gt, lr, lr_center = None, None, None
                             for attempt in range(max_attempts):
                                 force = attempt >= 5
-                                gt, lr = create_patch_pair(
+                                gt, lr, lr_center = create_patch_pair(
                                     window, fmt_name, cfg,
                                     force_center=force, logger=logger,
                                     degrade_cfg=degrade_cfg,
@@ -2387,6 +2405,8 @@ def extract_and_save_streaming_dual(
                                     gt, lr,
                                     os.path.join(dirs["gt"], patch_name),
                                     os.path.join(dirs["lr"], patch_name),
+                                    lr_center,
+                                    os.path.join(dirs["lr_center"], patch_name),
                                 ))
                                 patches_created[category] = (
                                     patches_created.get(category, 0) + 1

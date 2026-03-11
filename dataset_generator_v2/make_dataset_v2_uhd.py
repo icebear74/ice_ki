@@ -66,6 +66,18 @@ console = Console() if RICH_AVAILABLE else None
 # Don't configure basic logging here - will be done in _setup_logger based on UI mode
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Format groups for two-phase extraction
+# ---------------------------------------------------------------------------
+# Phase 1 (169_fast): full-frame resize formats – extracted at 1080p for speed.
+# The GT LANCZOS4 downscale from 1920×1080 → 720×405 is visually equivalent
+# to the 4K path; the H.265 codec quality is the effective limit, not the
+# scale ratio.
+_FORMATS_169: frozenset = frozenset({'720_169', 'medium_169'})
+
+# Phase 2 (crop_hq): crop/oversample formats – need the 4K dual-buffer path
+# so that the 2× oversampled 720/large_720 crop is taken from a 4K source.
+_PLAN_VERSION = '3.0'
 
 class DatasetGeneratorV2UHD:
     """
@@ -96,6 +108,7 @@ class DatasetGeneratorV2UHD:
         self.base_dir = self.settings['output_base_dir']
         self.temp_dir = self.settings['temp_dir']
         self.status_file = self.settings['status_file']
+        self.plan_file = os.path.join(self.base_dir, 'extraction_plan.json')
         
         # Terminal UI setting (MUST be before logger setup!)
         self.use_terminal_ui = True  # Enable terminal GUI by default
@@ -1107,7 +1120,7 @@ class DatasetGeneratorV2UHD:
                 format_config = config['format_config']
                 
                 # Create patch pair for this category/format
-                gt, lr = create_patch_pair(frames, format_name, format_config, logger=self.logger)
+                gt, lr, lr_center = create_patch_pair(frames, format_name, format_config, logger=self.logger)
                 
                 if gt is None or lr is None:
                     continue
@@ -1115,7 +1128,7 @@ class DatasetGeneratorV2UHD:
                 # Save patches for this category
                 saved, gt_path, lr_path = self._save_patch_pair(
                     gt, lr, video_path, current_time,
-                    category, format_name, n_frames
+                    category, format_name, n_frames, lr_center=lr_center
                 )
                 
                 if saved:
@@ -1368,7 +1381,7 @@ class DatasetGeneratorV2UHD:
                             continue
                         
                         # Create patch pair for this category/format
-                        gt, lr = create_patch_pair(frames, format_name, format_config, logger=self.logger)
+                        gt, lr, lr_center = create_patch_pair(frames, format_name, format_config, logger=self.logger)
                         
                         if gt is None or lr is None:
                             retry_count += 1
@@ -1380,7 +1393,7 @@ class DatasetGeneratorV2UHD:
                         # Save patches for this category/format
                         saved, gt_path, lr_path = self._save_patch_pair(
                             gt, lr, video_path, retry_time,
-                            category, format_name, n_frames
+                            category, format_name, n_frames, lr_center=lr_center
                         )
                         
                         if saved:
@@ -1519,7 +1532,7 @@ class DatasetGeneratorV2UHD:
                             continue
                         
                         # Create patch pair for this category/format
-                        gt, lr = create_patch_pair(frames, format_name, format_config, logger=self.logger)
+                        gt, lr, lr_center = create_patch_pair(frames, format_name, format_config, logger=self.logger)
                         
                         if gt is None or lr is None:
                             retry_count += 1
@@ -1531,7 +1544,7 @@ class DatasetGeneratorV2UHD:
                         # Save patches for this category/format
                         saved, gt_path, lr_path = self._save_patch_pair(
                             gt, lr, video_path, retry_time,
-                            category, format_name, n_frames
+                            category, format_name, n_frames, lr_center=lr_center
                         )
                         
                         if saved:
@@ -1816,26 +1829,27 @@ class DatasetGeneratorV2UHD:
     
     def _save_patch_pair(self, gt: np.ndarray, lr: np.ndarray,
                         video_path: str, timestamp: float,
-                        category: str, format_name: str, n_frames: int) -> tuple:
+                        category: str, format_name: str, n_frames: int,
+                        lr_center: Optional[np.ndarray] = None) -> tuple:
         """
-        Save GT and LR patches to appropriate directories.
+        Save GT, LR and LR_Center patches to appropriate directories.
         
         Returns:
             Tuple of (success: bool, gt_path: str or None, lr_path: str or None)
         """
         try:
-            lr_version = f"{n_frames}frames"
-            
             # Get output directories (returns a dictionary)
             output_dirs = get_output_dirs_for_format(
                 self.base_dir, category, format_name, n_frames
             )
             gt_dir = output_dirs['gt']
             lr_dir = output_dirs['lr']
+            lr_center_dir = output_dirs['lr_center']
             
             # Create directories
             os.makedirs(gt_dir, exist_ok=True)
             os.makedirs(lr_dir, exist_ok=True)
+            os.makedirs(lr_center_dir, exist_ok=True)
             
             # Generate filename
             video_name = Path(video_path).stem
@@ -1847,213 +1861,531 @@ class DatasetGeneratorV2UHD:
             
             cv2.imwrite(gt_path, gt, [cv2.IMWRITE_PNG_COMPRESSION, 1])
             cv2.imwrite(lr_path, lr, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+
+            if lr_center is not None:
+                lr_center_path = os.path.join(lr_center_dir, patch_name)
+                cv2.imwrite(lr_center_path, lr_center, [cv2.IMWRITE_PNG_COMPRESSION, 1])
             
             return (True, gt_path, lr_path)
         
         except Exception as e:
             self.logger.error(f"Error saving patches: {e}")
             return (False, None, None)
-    
-    def run(self):
-        """Main generation loop with proportional distribution"""
+
+    # ------------------------------------------------------------------
+    # Extraction plan persistence
+    # ------------------------------------------------------------------
+
+    def _build_extraction_plan(self, distribution: Dict[str, Dict[str, int]]) -> dict:
+        """
+        Build the two-phase extraction plan from the proportional distribution.
+
+        The plan is a JSON-serialisable dict that is persisted to
+        ``<base_dir>/extraction_plan.json``.  On subsequent runs it is loaded
+        instead of being re-computed so that the generator can resume exactly
+        where it left off.
+
+        Phase structure
+        ~~~~~~~~~~~~~~~
+        * ``phase_169``: fast 1080-p pass for ``720_169``/``medium_169``
+          (full-frame resize only – no crop oversampling).
+        * ``phase_crop``: high-quality 4K pass for ``540``/``720`` and their
+          legacy aliases (crop + optional 2× oversampling).
+
+        Assignments are derived from ``build_assignments_per_category`` called
+        ONCE with the FULL per-video format_distribution so that scene
+        timestamps are interleaved across all formats and no duplicate GTs
+        appear within a single category.  The resulting list is then split by
+        format type into the two phases.
+
+        Args:
+            distribution: ``{video_path: {category: total_patches}}`` as
+                          returned by ``calculate_proportional_distribution``.
+
+        Returns:
+            The plan dict (also stored as ``self._plan``).
+        """
+        plan: dict = {
+            'version': _PLAN_VERSION,
+            'plan_created_at': datetime.now().isoformat(),
+            'current_phase': 'phase_169',
+            'phase_169': {
+                'description': 'Fast 1080p pass – full-frame 720_169/medium_169 formats',
+                'formats': sorted(_FORMATS_169),
+                'stream': [1920, 1080],
+                'status': 'pending',
+                'videos': [],
+            },
+            'phase_crop': {
+                'description': 'High-quality 4K pass – crop/oversample 540/720 formats',
+                'formats': sorted(_FORMATS_CROP),
+                'stream': [3840, 2160],
+                'status': 'pending',
+                'videos': [],
+            },
+        }
+
+        lr_versions = self.settings.get('lr_versions', ['7frames'])
+        n_frames = 7 if '7frames' in lr_versions else 5
+
+        for video in self.videos:
+            video_path = video['path']
+            video_name = video.get('name', os.path.basename(video_path))
+            category_targets = distribution.get(video_path, {})
+            if not category_targets:
+                continue
+
+            # Build the per-video format_distribution the same way process_video does.
+            format_distribution: Dict[str, Dict[str, int]] = {}
+            for category, patches in category_targets.items():
+                if category not in self.format_config:
+                    continue
+                format_probs = self.format_probabilities.get(category, {})
+                format_distribution[category] = {}
+                remaining = patches
+                sorted_formats = sorted(format_probs.items(), key=lambda x: x[1], reverse=True)
+                for idx_f, (fmt, prob) in enumerate(sorted_formats):
+                    if idx_f == len(sorted_formats) - 1:
+                        format_distribution[category][fmt] = remaining
+                    else:
+                        cnt = int(patches * prob)
+                        format_distribution[category][fmt] = cnt
+                        remaining -= cnt
+
+            # Split per-phase targets by format type.
+            # We do NOT call build_assignments_per_category here – that happens
+            # at extraction time so the frame-level plan stays compact.
+            def _phase_targets(fmt_set: frozenset) -> Dict[str, Dict[str, int]]:
+                result: Dict[str, Dict[str, int]] = {}
+                for cat, fmts in format_distribution.items():
+                    sub = {f: c for f, c in fmts.items() if f in fmt_set and c > 0}
+                    if sub:
+                        result[cat] = sub
+                return result
+
+            targets_169 = _phase_targets(_FORMATS_169)
+            targets_crop = _phase_targets(_FORMATS_CROP)
+
+            # Collect video metadata for logging/resumption (best-effort).
+            meta = self._get_video_metadata(video_path) or {}
+            base_entry = {
+                'path': video_path,
+                'name': video_name,
+                'duration': meta.get('duration', 0.0),
+                'fps': meta.get('fps', 25.0),
+                'is_hdr': meta.get('is_hdr', True),
+            }
+
+            if targets_169:
+                plan['phase_169']['videos'].append({
+                    **base_entry,
+                    'n_frames': n_frames,
+                    'targets': targets_169,
+                    'status': 'pending',
+                    'patches_created': {},
+                })
+
+            if targets_crop:
+                plan['phase_crop']['videos'].append({
+                    **base_entry,
+                    'n_frames': n_frames,
+                    'targets': targets_crop,
+                    'status': 'pending',
+                    'patches_created': {},
+                })
+
+        return plan
+
+    def _load_plan(self) -> Optional[dict]:
+        """Load the extraction plan from disk; return None if not found/invalid."""
+        if not os.path.exists(self.plan_file):
+            return None
         try:
-            # Hide cursor for clean terminal UI — inside try so finally always restores it
+            with open(self.plan_file, 'r', encoding='utf-8') as fh:
+                plan = json.load(fh)
+            if plan.get('version') != _PLAN_VERSION:
+                self.logger.warning("extraction_plan.json has unexpected version – rebuilding")
+                return None
+            self.logger.info(f"📋 Loaded existing extraction plan from {self.plan_file}")
+            return plan
+        except Exception as exc:
+            self.logger.warning(f"Could not load extraction_plan.json: {exc} – rebuilding")
+            return None
+
+    def _save_plan(self, plan: dict) -> None:
+        """Atomically write the extraction plan to disk."""
+        os.makedirs(self.base_dir, exist_ok=True)
+        tmp = self.plan_file + '.tmp'
+        try:
+            with open(tmp, 'w', encoding='utf-8') as fh:
+                json.dump(plan, fh, indent=2, ensure_ascii=False)
+                fh.flush()
+                try:
+                    os.fsync(fh.fileno())
+                except OSError:
+                    pass
+            os.replace(tmp, self.plan_file)
+        except Exception as exc:
+            self.logger.warning(f"Could not save extraction_plan.json: {exc}")
+
+    def _mark_video_done(self, plan: dict, phase_key: str, video_path: str,
+                         patches_created: Dict[str, int]) -> None:
+        """Mark a video as done in the plan and save to disk."""
+        for entry in plan[phase_key]['videos']:
+            if entry['path'] == video_path:
+                entry['status'] = 'done'
+                entry['patches_created'] = {k: int(v) for k, v in patches_created.items()}
+                break
+        self._save_plan(plan)
+
+    def _mark_video_skipped(self, plan: dict, phase_key: str,
+                            video_path: str, reason: str = '') -> None:
+        """Mark a video as skipped in the plan and save to disk."""
+        for entry in plan[phase_key]['videos']:
+            if entry['path'] == video_path:
+                entry['status'] = 'skipped'
+                if reason:
+                    entry['skip_reason'] = reason
+                break
+        self._save_plan(plan)
+
+    def _phase_complete(self, plan: dict, phase_key: str) -> bool:
+        """Return True when every video in a phase is done or skipped."""
+        return all(
+            v['status'] in ('done', 'skipped')
+            for v in plan[phase_key]['videos']
+        )
+
+    def _run_phase(
+        self,
+        plan: dict,
+        phase_key: str,
+        use_dual_4k: bool,
+    ) -> None:
+        """
+        Execute one extraction phase (either ``phase_169`` or ``phase_crop``).
+
+        Iterates over the video list in the plan for this phase, skipping any
+        that are already marked ``'done'`` or ``'skipped'``.  After each video
+        the plan is updated on disk so a crash allows the next run to resume
+        from the correct position.
+
+        Args:
+            plan:        The full extraction plan dict (mutated in-place).
+            phase_key:   ``'phase_169'`` or ``'phase_crop'``.
+            use_dual_4k: When ``True`` use ``extract_and_save_streaming_dual``
+                         (4K dual-buffer pipeline).  When ``False`` use
+                         ``extract_and_save_streaming_distributed`` at 1080p
+                         (faster, sufficient for full-frame resize formats).
+        """
+        phase = plan[phase_key]
+        phase['status'] = 'in_progress'
+        self._save_plan(plan)
+
+        videos = phase['videos']
+        total = len(videos)
+        done_count = sum(1 for v in videos if v['status'] in ('done', 'skipped'))
+
+        self.logger.info(
+            f"\n{'='*70}\n"
+            f"  {'Phase 1/2' if phase_key == 'phase_169' else 'Phase 2/2'}: "
+            f"{phase['description']}\n"
+            f"  {done_count}/{total} videos already done – "
+            f"{total - done_count} remaining\n"
+            f"{'='*70}"
+        )
+
+        for v_idx, entry in enumerate(videos):
+            if not self.running:
+                break
+
+            if entry['status'] in ('done', 'skipped'):
+                continue
+
+            video_path = entry['path']
+            video_name = entry['name']
+            duration = entry.get('duration', 0.0)
+            fps = entry.get('fps', 25.0)
+            is_hdr = entry.get('is_hdr', True)
+            n_frames = entry.get('n_frames', 7)
+            targets = entry['targets']  # {category: {format: count}}
+
+            # Skip videos with missing files
+            if not os.path.exists(video_path):
+                self.logger.warning(f"⏭  {video_name}: file not found – skipping")
+                self._mark_video_skipped(plan, phase_key, video_path, 'file_not_found')
+                continue
+
+            done_so_far = sum(1 for v in videos if v['status'] in ('done', 'skipped'))
+            self.logger.info(
+                f"\n{'─'*60}\n"
+                f"  [{done_so_far+1}/{total}] {video_name}\n"
+                f"  phase={phase_key}  HDR={is_hdr}  fps={fps:.2f}\n"
+                f"  targets: { {cat: sum(fmts.values()) for cat, fmts in targets.items()} }\n"
+                f"{'─'*60}"
+            )
+
+            # Update UI state
+            self.ui_state['current_video_name'] = video_name
+            self.ui_state['current_video_index'] = done_so_far + 1
+            self.ui_state['total_videos'] = total
+
+            prior_total = self.ui_state.get('patches_created_total', 0)
+            self._prior_raw_frames = self.ui_state.get('frames_read_total', 0)
+            last_tracker: Dict[str, int] = {cat: 0 for cat in targets}
+            video_t0 = time.monotonic()
+
+            self.ui_state['current_video_progress'] = {
+                cat: {'created': 0, 'target': sum(fmts.values()), 'percent': 0.0}
+                for cat, fmts in targets.items()
+            }
+
+            def _on_progress(
+                frames_examined: int,
+                patches_so_far: Dict[str, int],
+                raw_frames_read: int,
+            ) -> None:
+                self.ui_state['frames_processed_total'] = frames_examined
+                self.ui_state['frames_read_total'] = (
+                    self._prior_raw_frames + raw_frames_read
+                )
+                self.ui_state['patches_created_total'] = (
+                    prior_total + sum(patches_so_far.values())
+                )
+                elapsed = time.monotonic() - video_t0
+                if elapsed > 0:
+                    self.ui_state['live_fps'] = raw_frames_read / elapsed
+                    self.ui_state['live_sps'] = frames_examined / elapsed
+                cur_prog = self.ui_state.get('current_video_progress', {})
+                for cat, new_total in patches_so_far.items():
+                    if cat in cur_prog:
+                        tgt = cur_prog[cat].get('target', 0)
+                        cur_prog[cat]['created'] = new_total
+                        cur_prog[cat]['percent'] = (
+                            new_total / tgt * 100 if tgt > 0 else 0.0
+                        )
+                for cat, new_total in patches_so_far.items():
+                    delta = new_total - last_tracker.get(cat, 0)
+                    if delta > 0:
+                        self.tracker.increment_category_images(cat, delta)
+                        last_tracker[cat] = new_total
+                self._update_terminal_ui()
+
+            try:
+                if use_dual_4k:
+                    # 4K dual-buffer pipeline (crop formats)
+                    assignments = build_assignments_per_category(
+                        format_distribution=targets,
+                        duration=duration,
+                        fps=fps,
+                        n_frames=n_frames,
+                    )
+                    result = extract_and_save_streaming_dual(
+                        video_path=video_path,
+                        assignments=assignments,
+                        n_frames=n_frames,
+                        format_config=self.format_config,
+                        base_dir=self.base_dir,
+                        fps=fps,
+                        logger=self.logger,
+                        is_interesting_fn=self.is_interesting_patch,
+                        is_black_frame_fn=_streaming_is_black_frame,
+                        progress_fn=_on_progress,
+                        use_cuda=self.use_cuda,
+                        nice_level=self.settings.get('ffmpeg_nice', 10),
+                        is_hdr=is_hdr,
+                        degrade_cfg=self.config.get('quality'),
+                        center_snap_seconds=self.config.get(
+                            'processing', {}
+                        ).get('center_snap_seconds', 1.0),
+                    )
+                else:
+                    # Fast 1080p single-stream pipeline (169 formats)
+                    assignments = build_assignments_per_category(
+                        format_distribution=targets,
+                        duration=duration,
+                        fps=fps,
+                        n_frames=n_frames,
+                    )
+                    result = extract_and_save_streaming_distributed(
+                        video_path=video_path,
+                        assignments=assignments,
+                        n_frames=n_frames,
+                        format_config=self.format_config,
+                        base_dir=self.base_dir,
+                        fps=fps,
+                        logger=self.logger,
+                        is_interesting_fn=None,   # 720_169/medium_169 = full-frame resize, no crop variety filter
+                        is_black_frame_fn=_streaming_is_black_frame,
+                        progress_fn=_on_progress,
+                        use_cuda=self.use_cuda,
+                        nice_level=self.settings.get('ffmpeg_nice', 10),
+                        is_hdr=is_hdr,
+                        degrade_cfg=self.config.get('quality'),
+                        stream_width=1920,
+                        stream_height=1080,
+                    )
+
+                patches_created = dict(result)
+                total_created = sum(patches_created.values())
+                self.logger.info(
+                    f"  ✓ {video_name}: {total_created} patches "
+                    f"({patches_created})"
+                )
+
+                self._mark_video_done(plan, phase_key, video_path, patches_created)
+                self.ui_state['patches_created_total'] = (
+                    prior_total + total_created
+                )
+                self.last_update_time = 0.0
+                self._update_terminal_ui()
+                self.tracker.save()
+
+            except Exception as exc:
+                self.logger.error(
+                    f"  ✗ {video_name}: extraction failed – {exc!r}"
+                )
+                import traceback as _tb
+                _tb.print_exc()
+                # Leave as 'pending' so the next run retries it.
+                self._save_plan(plan)
+
+        if self._phase_complete(plan, phase_key):
+            phase['status'] = 'complete'
+        self._save_plan(plan)
+
+    def run(self):
+        """
+        Main generation loop – two-phase extraction with plan persistence.
+
+        Phase 1 (169_fast)
+            Fast 1080p single-stream pass for all 720_169/medium_169 formats
+            across EVERY video.  These are full-frame resizes so a 1080p
+            source is sufficient quality and decodes ~4× faster than 4K.
+
+        Phase 2 (crop_hq)
+            High-quality 4K dual-buffer pass for all 540/720 formats across
+            every video.  These require the 2× oversampled 4K crop for GT
+            quality.
+
+        The complete extraction plan is saved to
+        ``<base_dir>/extraction_plan.json`` after every video so a restart
+        resumes exactly where it left off.  Videos are individually check-
+        boxed (``"done"`` / ``"skipped"`` / ``"pending"``) so no work is
+        duplicated on resumption.
+
+        No duplicate GTs within a category: ``build_assignments_per_category``
+        is called with the phase-specific format_distribution, which is a
+        deterministic split of the full distribution.  Within each phase the
+        interleaved assignment algorithm guarantees one unique scene per GT.
+        """
+        try:
             if self.use_terminal_ui:
                 hide_cursor()
 
             if RICH_AVAILABLE:
                 console.print(Panel.fit(
                     "[bold cyan]Dataset Generator V2 - UHD Quality[/bold cyan]\n"
-                    "UHD Preservation • Multi-Category • Priorities • Proportional Distribution",
+                    "Phase 1: Full-frame 720_169 (1080p)  →  Phase 2: Crop formats (4K)",
                     border_style="cyan"
                 ))
-            
-            # Phase 1: Scan all videos to get durations
-            self.logger.info("Starting Phase 1: Scanning video durations...")
+
+            # ── Step 1: scan durations ────────────────────────────────────
+            self.logger.info("Scanning video durations…")
             try:
                 durations = self.scan_video_durations()
-            except Exception as e:
-                self.logger.error(f"FATAL: Error during video duration scanning: {e}")
-                self.logger.error(f"This often indicates: out of memory, file access issues, or corrupted videos")
-                import traceback
-                traceback.print_exc()
+            except Exception as exc:
+                self.logger.error(f"FATAL: scan_video_durations failed: {exc}")
+                import traceback; traceback.print_exc()
                 return
-            
             if not durations:
                 self.logger.error("No video durations found, cannot proceed")
                 return
-            
-            # Phase 2: Calculate proportional distribution
-            self.logger.info("Starting Phase 2: Calculating proportional distribution...")
+
+            # ── Step 2: proportional distribution ────────────────────────
+            self.logger.info("Calculating proportional distribution…")
             try:
                 distribution = self.calculate_proportional_distribution(durations)
-                
-                # Count only videos that have at least one category assigned
-                videos_with_categories = sum(1 for v in self.videos 
-                                            if distribution.get(v['path'], {}))
-                self.logger.info(f"Videos with categories: {videos_with_categories} / {len(self.videos)}")
-                
-                # Store for UI display
-                self.total_videos_with_categories = videos_with_categories
-                
-                # Initialize UI with starting state
+                self.total_videos_with_categories = sum(
+                    1 for v in self.videos if distribution.get(v['path'], {})
+                )
                 if self.use_terminal_ui:
                     clear_screen()
                     draw_dataset_ui(self.ui_state)
-                    time.sleep(1)  # Give user a moment to see initial state
-                    
-            except Exception as e:
-                self.logger.error(f"FATAL: Error during distribution calculation: {e}")
-                import traceback
-                traceback.print_exc()
+                    time.sleep(1)
+            except Exception as exc:
+                self.logger.error(f"FATAL: distribution calculation failed: {exc}")
+                import traceback; traceback.print_exc()
                 return
-            
-            # Console output removed - all info shown in terminal GUI
-            # No need to print here, user sees progress in the GUI
 
-            # Sort videos so that any video with forced_frames is processed first.
-            # Stable sort preserves the relative order within each group.
+            # ── Step 3: forced-frame videos first ─────────────────────────
             forced_count = sum(1 for v in self.videos if v.get('forced_frames'))
             self.videos.sort(key=lambda v: 0 if v.get('forced_frames') else 1)
             if forced_count:
                 self.logger.info(
-                    f"⚡ Forced-frame videos promoted to front of queue: {forced_count} / {len(self.videos)}"
+                    f"⚡ {forced_count} forced-frame video(s) moved to front"
                 )
 
-            # Get resume point
-            start_idx = self.tracker.status['progress']['current_video_index']
-            
-            if start_idx > 0:
-                self.logger.info(f"Resuming from video {start_idx + 1}/{len(self.videos)}")
-            
-            # Sequential processing: One video at a time, fully complete before moving to next
-            self.logger.info("\n" + "=" * 80)
-            self.logger.info("SEQUENTIAL MODE: Processing one video completely before moving to next")
-            self.logger.info("=" * 80)
-            
-            # Process videos sequentially
-            for idx in range(start_idx, len(self.videos)):
-                if not self.running:
-                    break
-                
-                video = self.videos[idx]
-                video_path = video['path']
-                video_name = video.get('name', os.path.basename(video_path))
-                video_cat_targets = distribution.get(video_path, {})
-                
-                # Calculate total patches for this video (sum across all categories)
-                total_patches = sum(video_cat_targets.values()) if video_cat_targets else 0
-                
-                # Skip if no patches allocated
-                if total_patches == 0:
-                    self.logger.info(f"\n⏭️  Skipping video {idx + 1}/{len(self.videos)}: {video_name} (no patches allocated)")
-                    continue
-                
-                # Also skip if video has no categories
-                if not video.get('categories', {}):
-                    self.logger.info(f"\n⏭️  Skipping video {idx + 1}/{len(self.videos)}: {video_name} (no categories assigned)")
-                    continue
-                
-                # Log start
-                self.logger.info(f"\n{'='*80}")
-                self.logger.info(f"📹 Processing video {idx + 1}/{len(self.videos)}: {video_name}")
-                self.logger.info(f"   Target: {total_patches} patches across {len(video_cat_targets)} categories")
-                if video_cat_targets:
-                    cat_summary = ", ".join([f"{cat}: {cnt}" for cat, cnt in video_cat_targets.items()])
-                    self.logger.info(f"   Per-category: {cat_summary}")
-                self.logger.info(f"{'='*80}")
-                
-                # Set target for this video
-                self._current_video_target = total_patches
-                
-                # Set current video info in UI state BEFORE processing starts
-                self.ui_state['current_video_name'] = video_name
-                self.ui_state['current_video_index'] = idx + 1  # 1-based for display
-                self.ui_state['total_videos'] = self.total_videos_with_categories  # Only count videos with categories!
-                
-                # Initialize current video progress with targets (0 created so far)
-                self.ui_state['current_video_progress'] = {}
-                for category in video_cat_targets.keys():
-                    self.ui_state['current_video_progress'][category] = {
-                        'created': 0,  # Fixed: was 'current', display expects 'created'
-                        'target': video_cat_targets[category],
-                        'percent': 0.0  # Added: display expects this
-                    }
-                
-                # Update UI to show video info before processing starts
-                if self.use_terminal_ui:
-                    print(f"\n{'='*80}")
-                    print(f"🎬 STARTING VIDEO: {video_name} ({idx+1}/{len(self.videos)})")
-                    print(f"   Category targets: {video_cat_targets}")
-                    print(f"{'='*80}\n")
-                    self._update_terminal_ui()
-                
-                # Mark this video as "in progress" BEFORE we start work so
-                # that a crash or pipeline failure causes a retry on the next
-                # run rather than silently skipping it (the old code wrote
-                # idx+1 AFTER completion, meaning a video that produced 0
-                # patches was treated as done and never retried).
-                self.tracker.update_progress(current_video_index=idx)
-                self.tracker.save()
+            # ── Step 4: load or build the extraction plan ─────────────────
+            plan = self._load_plan()
+            if plan is None:
+                self.logger.info("Building new extraction plan…")
+                plan = self._build_extraction_plan(distribution)
+                self._save_plan(plan)
+                self.logger.info(
+                    f"  Phase 169 : {len(plan['phase_169']['videos'])} videos\n"
+                    f"  Phase crop: {len(plan['phase_crop']['videos'])} videos\n"
+                    f"  Plan saved → {self.plan_file}"
+                )
+            else:
+                n169 = len(plan['phase_169']['videos'])
+                ncrop = len(plan['phase_crop']['videos'])
+                done169 = sum(
+                    1 for v in plan['phase_169']['videos']
+                    if v['status'] in ('done', 'skipped')
+                )
+                donecrop = sum(
+                    1 for v in plan['phase_crop']['videos']
+                    if v['status'] in ('done', 'skipped')
+                )
+                self.logger.info(
+                    f"  Resuming from plan:\n"
+                    f"  Phase 169 : {done169}/{n169} done\n"
+                    f"  Phase crop: {donecrop}/{ncrop} done"
+                )
 
-                try:
-                    # Process this video completely (extraction + processing)
-                    stats = self.process_video(idx, video_cat_targets)
-                    
-                    # Check if video was skipped
-                    if stats.get('skipped'):
-                        self.logger.info(f"⏭️  Skipped: {video_name} - {stats.get('reason', 'unknown')}")
-                        # Advance past this video only after a deliberate skip
-                        self.tracker.update_progress(
-                            current_video_index=idx + 1,
-                            patches_created=0
-                        )
-                    else:
-                        # Update patches count; advance index only when patches
-                        # were actually created so a failed extraction is retried.
-                        patches_created = stats.get('patches_created', 0)
-                        if patches_created > 0:
-                            self.tracker.update_progress(
-                                current_video_index=idx + 1,
-                                patches_created=patches_created
-                            )
-                        else:
-                            self.tracker.update_progress(patches_created=0)
-                            self.logger.warning(
-                                f"⚠️  {video_name}: 0 patches created — "
-                                f"video will be retried on next run"
-                            )
-                        self.logger.info(f"✅ Complete: {video_name} - {patches_created} patches created")
-                    
-                    # Log category progress after each video
-                    progress_info = self.tracker.get_all_category_progress()
-                    self.logger.info(f"\n{progress_info}\n")
-                    
-                    # Save progress after each video
-                    self.tracker.save()
-                    
-                except Exception as e:
-                    self.logger.error(f"❌ Error processing {video_name}: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    # Save progress even on error
-                    self.tracker.save()
-            
+            # ── Step 5: execute phases ────────────────────────────────────
+            current_phase = plan.get('current_phase', 'phase_169')
+
+            if current_phase == 'phase_169' and not self._phase_complete(plan, 'phase_169'):
+                self._run_phase(plan, 'phase_169', use_dual_4k=False)
+                if self._phase_complete(plan, 'phase_169'):
+                    plan['current_phase'] = 'phase_crop'
+                    self._save_plan(plan)
+                    self.logger.info(
+                        "\n🎉 Phase 1 complete – all 720_169/medium_169 frames extracted.\n"
+                        "   Starting Phase 2 (4K crop)…"
+                    )
+
+            if self.running and not self._phase_complete(plan, 'phase_crop'):
+                self._run_phase(plan, 'phase_crop', use_dual_4k=True)
+                if self._phase_complete(plan, 'phase_crop'):
+                    plan['current_phase'] = 'complete'
+                    self._save_plan(plan)
+
             if RICH_AVAILABLE:
                 console.print("\n[bold green]✅ Generation Complete![/bold green]")
-            
             self.logger.info("Generation completed")
-            
-        except Exception as e:
-            self.logger.error(f"FATAL: Unexpected error in run(): {e}")
-            import traceback
-            traceback.print_exc()
+            self.tracker.save()
+
+        except Exception as exc:
+            self.logger.error(f"FATAL: Unexpected error in run(): {exc}")
+            import traceback; traceback.print_exc()
             raise
         finally:
-            # Restore cursor and clean terminal on exit
             if self.use_terminal_ui:
                 show_cursor()
-                print("\n")  # Clean exit
+                print("\n")
 
 
 def main():
