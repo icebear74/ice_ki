@@ -31,7 +31,7 @@ class DataStrategyScheduler:
                25000 the override values closely match what is already on disk.
                step 15000 → {720_169: 1.00, 540: 0.00, 720: 0.00}
                step ~25000 → approaching {720_169: 0.25, 540: 0.50, 720: 0.25}
-        Loss : perceptual weight 0.0 → 0.05 (linear)
+        Loss : perceptual weight 0.0 → 0.08 (linear)
 
     Phase 3 – Stable Training (steps 25000+):
         Data : natural file-count proportional sampling (no override).
@@ -72,7 +72,7 @@ class DataStrategyScheduler:
     }
 
     # Perceptual weight at end of Phase 2 / throughout Phase 3
-    TARGET_PERCEPTUAL_WEIGHT = 0.05
+    TARGET_PERCEPTUAL_WEIGHT = 0.08
 
     def __init__(self, all_size_keys=None):
         self._all_size_keys = all_size_keys or list(self.CROP_INTRO_END_DISTRIBUTION.keys())

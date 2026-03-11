@@ -40,29 +40,39 @@ class ResidualBlock(nn.Module):
 
 class FusionBlock(nn.Module):
     """
-    Fusion block with spatial awareness for improved ghosting/shadow suppression.
-    Uses 3x3 conv for spatial context, followed by 1x1 conv for gating logic.
-    Tracks activity of both layers separately for detailed WebUI visualization.
+    FusionBlock v2: Mit Residual Skip-Connection (1x1).
+
+    Der Skip-Pfad (1x1 Conv, kein Bias) projiziert in_feats → out_feats direkt.
+    Der Haupt-Pfad (3x3 → ReLU → 1x1) lernt nur noch die Korrektur.
+    Bewährtes ResNet-Muster: stabilere, schnellere Konvergenz.
+
+    Trackt Aktivität aller drei Conv-Layer getrennt für WebUI-Visualisierung.
     """
     def __init__(self, in_feats, out_feats):
         super().__init__()
         self.conv3x3 = nn.Conv2d(in_feats, out_feats, 3, 1, 1)
-        self.relu = nn.LeakyReLU(0.1, inplace=False)
+        self.relu    = nn.LeakyReLU(0.1, inplace=False)
         self.conv1x1 = nn.Conv2d(out_feats, out_feats, 1)
-        self.last_activity_3x3 = 0.0
-        self.last_activity_1x1 = 0.0
-    
+        # Skip: projiziert in_feats → out_feats (kein Bias, kein räumlicher Kontext)
+        # Entspricht dem Dimensions-Anpassungs-Skip aus ResNet (Option B)
+        self.skip    = nn.Conv2d(in_feats, out_feats, 1, bias=False)
+        self.last_activity_3x3  = 0.0
+        self.last_activity_1x1  = 0.0
+        self.last_activity_skip = 0.0
+
     def forward(self, x):
+        # Skip-Pfad: direkte Projektion (günstig, stabil)
+        identity = self.skip(x)
+        self.last_activity_skip = identity.detach().abs().mean().item()
+
+        # Haupt-Pfad: lernt nur noch die Korrektur auf identity
         out = self.conv3x3(x)
-        # Track 3x3 conv activity
         self.last_activity_3x3 = out.detach().abs().mean().item()
-        
         out = self.relu(out)
         out = self.conv1x1(out)
-        # Track 1x1 conv activity
         self.last_activity_1x1 = out.detach().abs().mean().item()
-        
-        return out
+
+        return out + identity
 
 class VSRBidirectional_7frames_3x(nn.Module):
     """
@@ -154,15 +164,15 @@ class VSRBidirectional_7frames_3x(nn.Module):
     def get_layer_activity(self):
         """
         Returns activity levels for all blocks including fusion layers
-        
+
         Returns:
             Dict with activities:
             {
                 'backward_trunk': [list of ResidualBlock activities],
-                'backward_fuse': [3x3 activity, 1x1 activity],
+                'backward_fuse': [3x3 activity, 1x1 activity, skip activity],
                 'forward_trunk': [list of ResidualBlock activities],
-                'forward_fuse': [3x3 activity, 1x1 activity],
-                'fusion': [3x3 activity, 1x1 activity]
+                'forward_fuse': [3x3 activity, 1x1 activity, skip activity],
+                'fusion': [3x3 activity, 1x1 activity, skip activity]
             }
         """
         backward_activities = []
@@ -175,9 +185,9 @@ class VSRBidirectional_7frames_3x(nn.Module):
         
         return {
             'backward_trunk': backward_activities,
-            'backward_fuse': [self.backward_fuse.last_activity_3x3, self.backward_fuse.last_activity_1x1],
+            'backward_fuse': [self.backward_fuse.last_activity_3x3, self.backward_fuse.last_activity_1x1, self.backward_fuse.last_activity_skip],
             'forward_trunk': forward_activities,
-            'forward_fuse': [self.forward_fuse.last_activity_3x3, self.forward_fuse.last_activity_1x1],
-            'fusion': [self.fusion.last_activity_3x3, self.fusion.last_activity_1x1]
+            'forward_fuse': [self.forward_fuse.last_activity_3x3, self.forward_fuse.last_activity_1x1, self.forward_fuse.last_activity_skip],
+            'fusion': [self.fusion.last_activity_3x3, self.fusion.last_activity_1x1, self.fusion.last_activity_skip]
         }
 

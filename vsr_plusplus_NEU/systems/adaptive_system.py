@@ -74,8 +74,8 @@ class AdaptiveSystem:
         self.normal_blur_threshold = 0.75
         
         # L1 loss thresholds for perceptual weight control
-        self.l1_stable_threshold = 0.010  # L1 below this is "stable and good"
-        self.l1_unstable_threshold = 0.020  # L1 above this is "unstable"
+        self.l1_stable_threshold = 0.025  # L1 below this is "stable and good" (realistischer für Phase 3)
+        self.l1_unstable_threshold = 0.045  # L1 above this is "unstable"
         
         # Update frequencies
         self.aggressive_update_frequency = 10

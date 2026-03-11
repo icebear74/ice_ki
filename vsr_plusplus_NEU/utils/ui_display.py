@@ -134,7 +134,12 @@ def get_activity_data(model):
     def add_fusion_activity(name, activity):
         """Add fusion layer activity - handles both FusionBlock (list) and TrackedConv2d (float)"""
         if isinstance(activity, list):
-            if len(activity) == 2:
+            if len(activity) == 3:
+                # 7-frame FusionBlock v2: [conv3x3_act, conv1x1_act, skip_act]
+                activities_with_names.append((f"{name} 3x3", float(activity[0]) if activity[0] is not None else 0.0))
+                activities_with_names.append((f"{name} 1x1", float(activity[1]) if activity[1] is not None else 0.0))
+                activities_with_names.append((f"{name} Skip", float(activity[2]) if activity[2] is not None else 0.0))
+            elif len(activity) == 2:
                 # 7-frame FusionBlock: [conv3x3_act, conv1x1_act]
                 activities_with_names.append((f"{name} 3x3", float(activity[0]) if activity[0] is not None else 0.0))
                 activities_with_names.append((f"{name} 1x1", float(activity[1]) if activity[1] is not None else 0.0))
