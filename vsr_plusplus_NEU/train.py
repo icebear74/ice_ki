@@ -263,7 +263,8 @@ def main():
     other_params = []
     
     for name, param in model.named_parameters():
-        if 'fusion.conv3x3' in name or 'fusion.conv1x1' in name:  # Final fusion layer (FusionBlock)
+        # Final fusion layer: conv3x3, conv1x1 UND skip (neu in FusionBlock v2)
+        if 'fusion.conv3x3' in name or 'fusion.conv1x1' in name or 'fusion.skip' in name:
             final_fusion_params.append(param)
         else:
             other_params.append(param)

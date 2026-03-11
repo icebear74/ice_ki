@@ -230,10 +230,16 @@ class TensorBoardLogger:
         
         Args:
             name: Base name for the TensorBoard scalar (e.g., 'Backward_Fuse')
-            activity: Either a float (old format) or list [conv3x3_act, conv1x1_act] (7-frame)
+            activity: Either a float (old format), list [conv3x3_act, conv1x1_act] (7-frame),
+                      or list [conv3x3_act, conv1x1_act, skip_act] (7-frame FusionBlock v2)
             step: Training step number
         """
-        if isinstance(activity, list) and len(activity) == 2:
+        if isinstance(activity, list) and len(activity) == 3:
+            # 7-frame FusionBlock v2 format: [conv3x3, conv1x1, skip]
+            self.writer.add_scalar(f'Layers/{name}_3x3', float(activity[0]), step)
+            self.writer.add_scalar(f'Layers/{name}_1x1', float(activity[1]), step)
+            self.writer.add_scalar(f'Layers/{name}_Skip', float(activity[2]), step)
+        elif isinstance(activity, list) and len(activity) == 2:
             # 7-frame FusionBlock format: [conv3x3, conv1x1]
             self.writer.add_scalar(f'Layers/{name}_3x3', float(activity[0]), step)
             self.writer.add_scalar(f'Layers/{name}_1x1', float(activity[1]), step)
