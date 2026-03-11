@@ -409,10 +409,27 @@ def build_vf_filter(is_hdr: bool, use_cuda: bool = True,
     Returns:
         FFmpeg filter string ready for ``-vf`` (or for wrapping in
         ``-filter_complex`` as ``[0:v]<filter>[label]``).
+
+    Note:
+        When ``is_hdr=True`` and a CUDA GPU tier is selected the intermediate
+        pixel formats ``p010`` (scale-GPU tier) and ``yuv420p`` (full-GPU tier)
+        both use YUV 4:2:0 chroma subsampling, which requires **even** width
+        *and* height.  The function rounds ``width`` and ``height`` up to the
+        nearest even value when this constraint applies so that callers do not
+        need to know about it.  The actual FFmpeg output will be at the (possibly
+        rounded-up) dimensions — callers that parse raw frame bytes must account
+        for this.  In practice ``_phase1_stream_size`` already returns even dims,
+        so no rounding occurs under normal operation.
     """
     _use_cuda = use_cuda and cuda_available()
     _full_gpu  = _use_cuda and tonemap_cuda_available()
     _scale_gpu = _use_cuda and (not _full_gpu) and scale_cuda_available()
+
+    # p010 and yuv420p (YUV 4:2:0) require even width and height.
+    # Round up defensively; the caller's frame_bytes must use the same values.
+    if is_hdr and (_full_gpu or _scale_gpu):
+        width  = width  + width  % 2
+        height = height + height % 2
 
     if is_hdr:
         if _full_gpu:
@@ -1988,9 +2005,11 @@ def extract_and_save_streaming_distributed(
             use_cuda=False,
             nice_level=nice_level,
             is_hdr=is_hdr,
+            degrade_cfg=degrade_cfg,
             center_snap_seconds=center_snap_seconds,
             stream_width=stream_width,
             stream_height=stream_height,
+            resize_first=resize_first,
         )
 
     total = sum(patches_created.values())

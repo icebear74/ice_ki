@@ -95,6 +95,12 @@ def _phase1_stream_size(format_config: dict) -> tuple:
     the piped frame to the individual gt_size.
 
     Falls back to ``(720, 405)`` when the formats are absent from the config.
+
+    Both dimensions are rounded **up** to the nearest even number so that
+    intermediate YUV formats with chroma subsampling (``p010``, ``yuv420p``)
+    are valid at the FFmpeg filter level.  The tiny 1-pixel overshoot (e.g.
+    405 → 406) is trimmed transparently by the final ``cv2.resize`` inside
+    ``create_patch_pair`` which always resizes to the exact gt_size anyway.
     """
     max_w, max_h = 720, 405  # safe defaults matching the FORMATS definition
     for cat_cfg in format_config.values():
@@ -103,6 +109,10 @@ def _phase1_stream_size(format_config: dict) -> tuple:
                 gt = cat_cfg[fmt_name].get('gt_size', [max_w, max_h])
                 max_w = max(max_w, int(gt[0]))
                 max_h = max(max_h, int(gt[1]))
+    # Ensure even dimensions: YUV 4:2:0 chroma subsampling (p010, yuv420p)
+    # requires both width and height to be divisible by 2.
+    max_w += max_w % 2
+    max_h += max_h % 2
     return max_w, max_h
 
 
