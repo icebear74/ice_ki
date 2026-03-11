@@ -128,11 +128,76 @@ class VSRTrainer:
         self.start_step = step
         self.global_step = step
     
+    def _reload_val_datasets_if_needed(self):
+        """
+        Check every validation dataset for file changes and reload immediately if found.
+
+        Called unconditionally before every validation run so that each validation
+        always uses the most current image data — regardless of whether the periodic
+        100-step check has already fired for this step.
+
+        Covers:
+          - multi-size loaders  (self.val_loaders list of (size_key, loader) tuples)
+          - single-size loader  (self.val_loader)
+        """
+        # ── Multi-size validation loaders ────────────────────────────────────
+        val_loaders = getattr(self, 'val_loaders', None)
+        if val_loaders and isinstance(val_loaders, list):
+            for size_key, val_loader in val_loaders:
+                try:
+                    if not hasattr(val_loader, 'dataset'):
+                        continue
+                    val_ds = val_loader.dataset
+                    if not hasattr(val_ds, 'check_for_new_files') or not hasattr(val_ds, 'reload_files'):
+                        continue
+                    val_changes = val_ds.check_for_new_files()
+                    if val_changes['has_new']:
+                        delta = val_changes['new_files']
+                        delta_str = f"+{delta}" if delta >= 0 else str(delta)
+                        print(f"\n📂 Pre-validation check: {size_key} changed ({delta_str} files). Reloading...")
+                        reload_result = val_ds.reload_files()
+                        if reload_result['success']:
+                            print(f"   ✅ {size_key}: {reload_result['files_before']} → {reload_result['files_after']} files")
+                            if hasattr(self, 'train_logger') and self.train_logger:
+                                self.train_logger.log_event(
+                                    f"Pre-val reload {size_key}: {reload_result['files_before']} → {reload_result['files_after']} files"
+                                )
+                        else:
+                            print(f"   ❌ {size_key} reload failed: {reload_result.get('error', 'Unknown error')}")
+                except Exception as e:
+                    print(f"⚠️  Pre-validation reload error for {size_key}: {e}")
+
+        # ── Single validation loader ──────────────────────────────────────────
+        elif hasattr(self, 'val_loader') and hasattr(self.val_loader, 'dataset'):
+            try:
+                val_ds = self.val_loader.dataset
+                if hasattr(val_ds, 'check_for_new_files') and hasattr(val_ds, 'reload_files'):
+                    val_changes = val_ds.check_for_new_files()
+                    if val_changes['has_new']:
+                        delta = val_changes['new_files']
+                        delta_str = f"+{delta}" if delta >= 0 else str(delta)
+                        print(f"\n📂 Pre-validation check: validation dataset changed ({delta_str} files). Reloading...")
+                        reload_result = val_ds.reload_files()
+                        if reload_result['success']:
+                            print(f"   ✅ {reload_result['files_before']} → {reload_result['files_after']} files")
+                            if hasattr(self, 'train_logger') and self.train_logger:
+                                self.train_logger.log_event(
+                                    f"Pre-val reload: {reload_result['files_before']} → {reload_result['files_after']} files"
+                                )
+                        else:
+                            print(f"   ❌ Reload failed: {reload_result.get('error', 'Unknown error')}")
+            except Exception as e:
+                print(f"⚠️  Pre-validation reload error: {e}")
+
     def _run_multi_size_validation(self):
         """
         Run validation on all configured sizes
         Returns combined metrics averaging across all sizes
         """
+        # Always refresh validation datasets before running so every validation
+        # uses the most current images (covers periodic, manual, web-UI and snapshot calls).
+        self._reload_val_datasets_if_needed()
+
         if not hasattr(self, 'val_loaders') or not self.val_loaders:
             # Fallback to single-size validation
             return self.validator.validate(self.global_step)
