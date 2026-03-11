@@ -589,6 +589,7 @@ class VSRTrainer:
                     self.tb_logger.log_adaptive(self.global_step, adaptive_status)
                     self.tb_logger.log_system(self.global_step, avg_time, vram)
                     self.tb_logger.log_gradients(self.global_step, grad_norm, self.last_activities)
+                    self.tb_logger.log_arch_block_metrics(self.global_step, self.last_activities)
                     self.tb_logger.log_lr_phase(self.global_step, lr_phase)
                     
                     # Log adaptive mode/phase transitions
