@@ -69,17 +69,24 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Format groups for two-phase extraction
 # ---------------------------------------------------------------------------
-# Phase 1 (169_fast): full-frame resize formats – extracted at 1080p for speed.
-# The GT LANCZOS4 downscale from 1920×1080 → 720×405 is visually equivalent
-# to the 4K path; the H.265 codec quality is the effective limit, not the
-# scale ratio.
-_FORMATS_169: frozenset = frozenset({'720_169', 'medium_169'})
+# Phase 1 (169_fast): unused – kept for plan-schema compatibility only.
+# 720_169/medium_169 were previously extracted at 1080p but now use the same
+# 4K dual-buffer path as the crop formats (see _FORMATS_CROP below) so that
+# the full-frame Lanczos4 resize benefits from native UHD sharpness.
+_FORMATS_169: frozenset = frozenset()
 
-# Phase 2 (crop_hq): crop/oversample formats – need the 4K dual-buffer path
-# so that the 2× oversampled 720/large_720 crop is taken from a 4K source.
-_FORMATS_CROP: frozenset = frozenset({'540', '720', 'small_540', 'large_720'})
+# Phase 2 (4K dual-buffer):
+#   • 720_169 / medium_169  – full-frame resize from 4K  (FORMATS_4K_STREAM)
+#   • 720 / large_720       – 2× oversampled crop from 4K (FORMATS_4K_STREAM)
+#   • 540 / small_540       – 1:1 crop from 1080p buffer derived from 4K
+#                             (FORMATS_HD_STREAM, in-memory Lanczos4 downscale)
+_FORMATS_CROP: frozenset = frozenset({
+    '720_169', 'medium_169',   # full-frame UHD resize
+    '720', 'large_720',        # 2× oversampled crop from UHD
+    '540', 'small_540',        # native 1080p crop (HD content)
+})
 
-_PLAN_VERSION = '3.0'
+_PLAN_VERSION = '3.1'
 
 class DatasetGeneratorV2UHD:
     """
@@ -1889,10 +1896,13 @@ class DatasetGeneratorV2UHD:
 
         Phase structure
         ~~~~~~~~~~~~~~~
-        * ``phase_169``: fast 1080-p pass for ``720_169``/``medium_169``
-          (full-frame resize only – no crop oversampling).
-        * ``phase_crop``: high-quality 4K pass for ``540``/``720`` and their
-          legacy aliases (crop + optional 2× oversampling).
+        * ``phase_169``: always empty – kept only for plan-schema compatibility.
+          All formats now run through the 4K dual-buffer pipeline.
+        * ``phase_crop``: high-quality 4K dual-buffer pass for every format.
+          - ``720_169`` / ``medium_169``: full-frame Lanczos4 resize from 4K.
+          - ``720`` / ``large_720``: 2× oversampled crop from 4K.
+          - ``540`` / ``small_540``: 1:1 crop from 1080p buffer (derived
+            in-memory from 4K via Lanczos4 downscale, no extra FFmpeg pass).
 
         Assignments are derived from ``build_assignments_per_category`` called
         ONCE with the FULL per-video format_distribution so that scene
@@ -1912,14 +1922,17 @@ class DatasetGeneratorV2UHD:
             'plan_created_at': datetime.now().isoformat(),
             'current_phase': 'phase_169',
             'phase_169': {
-                'description': 'Fast 1080p pass – full-frame 720_169/medium_169 formats',
+                'description': 'Unused – all formats now use the Phase 2 4K dual-buffer path',
                 'formats': sorted(_FORMATS_169),
-                'stream': [1920, 1080],
+                'stream': [3840, 2160],
                 'status': 'pending',
                 'videos': [],
             },
             'phase_crop': {
-                'description': 'High-quality 4K pass – crop/oversample 540/720 formats',
+                'description': (
+                    '4K dual-buffer pass – 720_169/medium_169 full-frame UHD resize; '
+                    '720/large_720 2× oversampled UHD crop; 540/small_540 1080p crop'
+                ),
                 'formats': sorted(_FORMATS_CROP),
                 'stream': [3840, 2160],
                 'status': 'pending',
@@ -2202,7 +2215,9 @@ class DatasetGeneratorV2UHD:
                         ).get('center_snap_seconds', 1.0),
                     )
                 else:
-                    # Fast 1080p single-stream pipeline (169 formats)
+                    # Fallback 1080p single-stream pipeline (phase_169 is currently always
+                    # empty so this branch is never reached in normal operation, but is
+                    # retained as a safety fallback for future use).
                     assignments = build_assignments_per_category(
                         format_distribution=targets,
                         duration=duration,
@@ -2217,7 +2232,7 @@ class DatasetGeneratorV2UHD:
                         base_dir=self.base_dir,
                         fps=fps,
                         logger=self.logger,
-                        is_interesting_fn=None,   # 720_169/medium_169 = full-frame resize, no crop variety filter
+                        is_interesting_fn=None,   # full-frame resize formats don't benefit from crop variety filter
                         is_black_frame_fn=_streaming_is_black_frame,
                         progress_fn=_on_progress,
                         use_cuda=self.use_cuda,
@@ -2261,14 +2276,18 @@ class DatasetGeneratorV2UHD:
         Main generation loop – two-phase extraction with plan persistence.
 
         Phase 1 (169_fast)
-            Fast 1080p single-stream pass for all 720_169/medium_169 formats
-            across EVERY video.  These are full-frame resizes so a 1080p
-            source is sufficient quality and decodes ~4× faster than 4K.
+            Always empty – kept for plan-schema compatibility.  All formats
+            now run through the Phase 2 4K dual-buffer pipeline so phase 1
+            completes instantly.
 
         Phase 2 (crop_hq)
-            High-quality 4K dual-buffer pass for all 540/720 formats across
-            every video.  These require the 2× oversampled 4K crop for GT
-            quality.
+            High-quality 4K dual-buffer pass for ALL formats across every
+            video:
+            * 720_169 / medium_169  – full-frame Lanczos4 resize from 4K
+              (UHD sharpness preserved, previously used 1080p source).
+            * 720 / large_720       – 2× oversampled crop from 4K.
+            * 540 / small_540       – 1:1 crop from in-memory 1080p buffer
+              (derived from 4K via Lanczos4 downscale, no extra FFmpeg pass).
 
         The complete extraction plan is saved to
         ``<base_dir>/extraction_plan.json`` after every video so a restart
@@ -2288,7 +2307,10 @@ class DatasetGeneratorV2UHD:
             if RICH_AVAILABLE:
                 console.print(Panel.fit(
                     "[bold cyan]Dataset Generator V2 - UHD Quality[/bold cyan]\n"
-                    "Phase 1: Full-frame 720_169 (1080p)  →  Phase 2: Crop formats (4K)",
+                    "Phase 1: (skipped)  →  Phase 2: All formats via 4K dual-buffer\n"
+                    "  720_169/medium_169 → full-frame UHD resize\n"
+                    "  720/large_720      → 2× oversampled UHD crop\n"
+                    "  540/small_540      → 1080p crop (in-memory from 4K)",
                     border_style="cyan"
                 ))
 
@@ -2365,8 +2387,8 @@ class DatasetGeneratorV2UHD:
                     plan['current_phase'] = 'phase_crop'
                     self._save_plan(plan)
                     self.logger.info(
-                        "\n🎉 Phase 1 complete – all 720_169/medium_169 frames extracted.\n"
-                        "   Starting Phase 2 (4K crop)…"
+                        "\n✅ Phase 1 complete (no videos – all formats use Phase 2 4K pipeline).\n"
+                        "   Starting Phase 2 (4K dual-buffer)…"
                     )
 
             if self.running and not self._phase_complete(plan, 'phase_crop'):
