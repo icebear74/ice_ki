@@ -1300,9 +1300,11 @@ class VSRTrainer:
                                 }
                                 
                                 if val_changes['has_new']:
-                                    print(f"\n📂 New validation files detected for {size_key}: +{val_changes['new_files']} files")
+                                    delta = val_changes['new_files']
+                                    delta_str = f"+{delta}" if delta >= 0 else str(delta)
+                                    print(f"\n📂 Validation dataset changed for {size_key}: {delta_str} files (GT dir: {val_changes['new_gt_count']}, loaded: {val_changes['current_loaded']})")
                                     print(f"   🔄 Reloading {size_key} validation dataset...")
-                                    
+
                                     if hasattr(val_ds, 'reload_files'):
                                         reload_result = val_ds.reload_files()
                                         if reload_result['success']:
@@ -1310,7 +1312,7 @@ class VSRTrainer:
                                             dataset_info['val'][size_key]['count'] = reload_result['files_after']
                                             if hasattr(self, 'train_logger') and self.train_logger:
                                                 self.train_logger.log_event(
-                                                    f"Reloaded {size_key} validation: +{reload_result['new_files_loaded']} files"
+                                                    f"Reloaded {size_key} validation: {reload_result['files_before']} → {reload_result['files_after']} files"
                                                 )
                                         else:
                                             print(f"   ❌ Reload failed: {reload_result.get('error', 'Unknown error')}")
@@ -1343,9 +1345,11 @@ class VSRTrainer:
                         }
                         
                         if val_changes['has_new']:
-                            print(f"\n📂 New validation files detected for {size_key}: +{val_changes['new_files']} files")
+                            delta = val_changes['new_files']
+                            delta_str = f"+{delta}" if delta >= 0 else str(delta)
+                            print(f"\n📂 Validation dataset changed for {size_key}: {delta_str} files (GT dir: {val_changes['new_gt_count']}, loaded: {val_changes['current_loaded']})")
                             print(f"   🔄 Reloading validation dataset...")
-                            
+
                             if hasattr(val_ds, 'reload_files'):
                                 reload_result = val_ds.reload_files()
                                 if reload_result['success']:
@@ -1353,7 +1357,7 @@ class VSRTrainer:
                                     dataset_info['val'][size_key]['count'] = reload_result['files_after']
                                     if hasattr(self, 'train_logger') and self.train_logger:
                                         self.train_logger.log_event(
-                                            f"Reloaded validation: +{reload_result['new_files_loaded']} files"
+                                            f"Reloaded validation: {reload_result['files_before']} → {reload_result['files_after']} files"
                                         )
                                 else:
                                     print(f"   ❌ Reload failed: {reload_result.get('error', 'Unknown error')}")

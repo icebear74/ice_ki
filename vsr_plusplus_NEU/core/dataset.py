@@ -362,31 +362,53 @@ class VSRDataset(Dataset):
     
     def check_for_new_files(self):
         """
-        Check if new files have been added to the dataset directories
-        
+        Check if files have been added to or removed from the dataset directories.
+
+        Uses an internal ``_last_gt_scan_count`` counter so that *both* additions
+        and deletions are detected on every periodic check.  On the very first
+        call the counter is bootstrapped from the current on-disk GT count, so a
+        permanently-missing LR file does not cause spurious reload loops.
+
         Returns:
             dict with:
-                - has_new: bool
+                - has_new: bool  – True when the GT directory count changed
                 - new_gt_count: int (total GT files in directory now)
                 - current_loaded: int (files currently loaded)
-                - new_files: int (difference)
+                - new_files: int (difference vs. current_loaded; negative = deletions)
         """
         if not os.path.exists(self.gt_dir):
+            self._last_gt_scan_count = 0
             return {
                 'has_new': False,
                 'new_gt_count': 0,
                 'current_loaded': len(self.gt_files),
                 'new_files': 0
             }
-        
+
         # Count all GT files in directory
         all_gt_files = sorted([f for f in os.listdir(self.gt_dir) if f.lower().endswith('.png')])
         new_gt_count = len(all_gt_files)
         current_loaded = len(self.gt_files)
         new_files = new_gt_count - current_loaded
-        
+
+        # Determine whether a reload is needed.
+        # Compare against the last *scanned* GT count rather than the loaded count.
+        # This correctly detects deletions (new_gt_count < last scan) and avoids
+        # a permanent spurious trigger when some GT files have no matching LR file.
+        last_gt_scan = getattr(self, '_last_gt_scan_count', None)
+        if last_gt_scan is None:
+            # First call: trigger a reload only when new unloaded GT files exist
+            # (same behaviour as before for the very first scan).
+            has_new = new_gt_count > current_loaded
+        else:
+            # Subsequent calls: any change in the GT directory count triggers reload
+            has_new = new_gt_count != last_gt_scan
+
+        # Always persist the latest scan count
+        self._last_gt_scan_count = new_gt_count
+
         return {
-            'has_new': new_files > 0,
+            'has_new': has_new,
             'new_gt_count': new_gt_count,
             'current_loaded': current_loaded,
             'new_files': new_files
