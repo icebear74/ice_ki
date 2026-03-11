@@ -116,6 +116,10 @@ class CompleteTrainingDataStore:
             # Layer-Aktivitäten (dict: layer_name -> percentage)
             'layer_activity_map': {},
             
+            # TemporalAlign flow magnitudes
+            'align_backward_flow': 0.0,   # TemporalAlign backward: mean flow magnitude
+            'align_forward_flow': 0.0,    # TemporalAlign forward: mean flow magnitude
+            
             # Dataset File Information (NEW)
             'dataset_files': {
                 'train_per_size': {
@@ -1201,6 +1205,35 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             </div>
         </div>
         
+        <div class="section-header">🔬 TemporalAlign &amp; GatedFusion</div>
+        
+        <div class="layer-activity-container">
+            <div class="card-title" style="font-size:1.1em; margin-bottom:15px;">
+                🧭 Temporal Alignment – Bewegungskompensation (Flow-Magnitude)
+            </div>
+            <div class="layer-row">
+                <div class="layer-name" style="color: var(--accent-blue);" title="Mittlere absolute Offset-Magnitude des TemporalAlignBlock im Rückwärts-Stream (F5/F6/F7). 0 = kein Versatz gelernt, &gt;0 = Bewegung wird kompensiert">⬅️ Backward Align Flow</div>
+                <div class="layer-bar-container">
+                    <div class="layer-bar-fill" id="backwardAlignBar" style="width:0%; background: linear-gradient(90deg, #06b6d4, #0284c7);"></div>
+                </div>
+                <div class="layer-value" id="backwardAlignValue">0.0000</div>
+            </div>
+            <div class="layer-row">
+                <div class="layer-name" style="color: var(--accent-green);" title="Mittlere absolute Offset-Magnitude des TemporalAlignBlock im Vorwärts-Stream (F3/F2/F1). 0 = kein Versatz gelernt, &gt;0 = Bewegung wird kompensiert">➡️ Forward Align Flow</div>
+                <div class="layer-bar-container">
+                    <div class="layer-bar-fill" id="forwardAlignBar" style="width:0%; background: linear-gradient(90deg, #22c55e, #16a34a);"></div>
+                </div>
+                <div class="layer-value" id="forwardAlignValue">0.0000</div>
+            </div>
+
+            <div class="card-title" style="font-size:1.1em; margin:20px 0 15px 0;">
+                🔀 GatedFusion – Gate-Öffnung (0=geschlossen, 1=offen)
+            </div>
+            <div id="gatedFusionLayers">
+                <div style="color: var(--text-secondary); text-align:center;">Warte auf Daten...</div>
+            </div>
+        </div>
+        
         <div class="section-header">📊 Layer-Aktivitäten (Details)</div>
         
         <div id="layerActivitiesBackward" class="layer-activity-container">
@@ -1570,6 +1603,9 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             
             // Layer activities with grouping
             updateLayerActivities(data.layer_activity_map);
+            
+            // TemporalAlign / GatedFusion arch-block section
+            updateArchBlocks(data);
             
             // Dataset files
             updateDatasetFiles(data);
@@ -1971,6 +2007,52 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 document.getElementById('fusionLayers').innerHTML = 
                     '<div style="color: var(--text-secondary); text-align: center;">Keine Layer</div>';
             }
+        }
+        
+        function updateArchBlocks(data) {
+            const actMap = data.layer_activity_map || {};
+            // max_offset constant from TemporalAlignBlock (normalised offset units, range 0–max_offset)
+            // A flow magnitude of max_offset fills the bar to 100%
+            const ALIGN_MAX_OFFSET = 0.2;
+            // Gate thresholds: >70 % = high (orange), >40 % = moderate (cyan), else low (green)
+            const GATE_HIGH_THRESHOLD = 70;
+            const GATE_MODERATE_THRESHOLD = 40;
+
+            // Helper: map a raw flow value to a 0–100 bar-width percentage
+            function alignPct(val) {
+                return Math.min(val / ALIGN_MAX_OFFSET * 100, 100);
+            }
+
+            // Backward / Forward Align flow bars
+            const bwAlign = actMap['Backward Align'] || 0;
+            const fwAlign = actMap['Forward Align'] || 0;
+            document.getElementById('backwardAlignBar').style.width = alignPct(bwAlign) + '%';
+            document.getElementById('backwardAlignValue').textContent = bwAlign.toFixed(4);
+            document.getElementById('forwardAlignBar').style.width = alignPct(fwAlign) + '%';
+            document.getElementById('forwardAlignValue').textContent = fwAlign.toFixed(4);
+
+            // GatedFusion Gate layers (values are 0–1 sigmoid outputs)
+            const gateNames = ['Backward Fuse Gate', 'Forward Fuse Gate', 'Final Fusion Gate'];
+            let gateHtml = '';
+            for (const name of gateNames) {
+                const val = actMap[name];
+                if (val !== undefined) {
+                    const pct = Math.min(val * 100, 100);
+                    const colorClass = pct > GATE_HIGH_THRESHOLD ? 'activity-high'
+                                     : pct > GATE_MODERATE_THRESHOLD ? 'activity-moderate'
+                                     : 'activity-low';
+                    gateHtml += `
+                        <div class="layer-row">
+                            <div class="layer-name" title="Gate-Öffnungsgrad: 0=vollständig geschlossen (blockiert alles), 1=vollständig offen (lässt alles durch)">${name}</div>
+                            <div class="layer-bar-container">
+                                <div class="layer-bar-fill fusion ${colorClass}" style="width:${pct.toFixed(1)}%"></div>
+                            </div>
+                            <div class="layer-value">${pct.toFixed(1)}%</div>
+                        </div>`;
+                }
+            }
+            document.getElementById('gatedFusionLayers').innerHTML = gateHtml ||
+                '<div style="color: var(--text-secondary); text-align:center;">Keine Gate-Daten</div>';
         }
         
         function triggerValidation() {

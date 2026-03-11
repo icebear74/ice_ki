@@ -126,8 +126,10 @@ def get_activity_data(model):
     # Combine backward and forward trunk activities + fusion layers into a single list
     backward = activity_dict.get('backward_trunk', [])
     backward_fuse = activity_dict.get('backward_fuse', 0.0)
+    backward_align_flow = activity_dict.get('backward_align_flow', None)
     forward = activity_dict.get('forward_trunk', [])
     forward_fuse = activity_dict.get('forward_fuse', 0.0)
+    forward_align_flow = activity_dict.get('forward_align_flow', None)
     fusion = activity_dict.get('fusion', 0.0)
     
     # Helper function to convert fusion activity (handles both list and float)
@@ -135,10 +137,10 @@ def get_activity_data(model):
         """Add fusion layer activity - handles both FusionBlock (list) and TrackedConv2d (float)"""
         if isinstance(activity, list):
             if len(activity) == 3:
-                # 7-frame FusionBlock v2: [conv3x3_act, conv1x1_act, skip_act]
+                # GatedFusionBlock v2: [conv3x3_act, conv1x1_act, gate_act]
                 activities_with_names.append((f"{name} 3x3", float(activity[0]) if activity[0] is not None else 0.0))
                 activities_with_names.append((f"{name} 1x1", float(activity[1]) if activity[1] is not None else 0.0))
-                activities_with_names.append((f"{name} Skip", float(activity[2]) if activity[2] is not None else 0.0))
+                activities_with_names.append((f"{name} Gate", float(activity[2]) if activity[2] is not None else 0.0))
             elif len(activity) == 2:
                 # 7-frame FusionBlock: [conv3x3_act, conv1x1_act]
                 activities_with_names.append((f"{name} 3x3", float(activity[0]) if activity[0] is not None else 0.0))
@@ -167,12 +169,20 @@ def get_activity_data(model):
     # Backward fuse layer
     add_fusion_activity("Backward Fuse", backward_fuse)
     
+    # Backward align flow (TemporalAlignBlock)
+    if backward_align_flow is not None:
+        activities_with_names.append(("Backward Align", float(backward_align_flow)))
+    
     # Forward trunk blocks
     for i, act in enumerate(forward):
         activities_with_names.append((f"Forward {i+1}", float(act) if act is not None else 0.0))
     
     # Forward fuse layer
     add_fusion_activity("Forward Fuse", forward_fuse)
+    
+    # Forward align flow (TemporalAlignBlock)
+    if forward_align_flow is not None:
+        activities_with_names.append(("Forward Align", float(forward_align_flow)))
     
     # Final fusion layer
     add_fusion_activity("Final Fusion", fusion)

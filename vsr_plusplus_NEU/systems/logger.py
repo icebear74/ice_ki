@@ -196,6 +196,11 @@ class TensorBoardLogger:
         self.writer.add_scalar('Quality/KI_Quality', self._to_float(metrics.get('ki_quality', 0)), step)
         self.writer.add_scalar('Quality/Improvement', self._to_float(metrics.get('improvement', 0)), step)
         
+        # Percent-scaled variants (0-100) for better TensorBoard readability
+        self.writer.add_scalar('Quality/LR_Quality_Pct', self._to_float(metrics.get('lr_quality', 0)) * 100, step)
+        self.writer.add_scalar('Quality/KI_Quality_Pct', self._to_float(metrics.get('ki_quality', 0)) * 100, step)
+        self.writer.add_scalar('Quality/Improvement_Pct', self._to_float(metrics.get('improvement', 0)) * 100, step)
+        
         # Add to CoreMetrics dashboard
         self.writer.add_scalars('Training/CoreMetrics', {
             'KI_Quality': self._to_float(metrics.get('ki_quality', 0)) * 100,       # 0-1 -> 0-100%
@@ -205,8 +210,10 @@ class TensorBoardLogger:
         # Log additional GT difference metrics if available
         if 'ki_to_gt' in metrics:
             self.writer.add_scalar('Quality/KI_to_GT', self._to_float(metrics.get('ki_to_gt', 0)), step)
+            self.writer.add_scalar('Quality/KI_to_GT_Pct', self._to_float(metrics.get('ki_to_gt', 0)) * 100, step)
         if 'lr_to_gt' in metrics:
             self.writer.add_scalar('Quality/LR_to_GT', self._to_float(metrics.get('lr_to_gt', 0)), step)
+            self.writer.add_scalar('Quality/LR_to_GT_Pct', self._to_float(metrics.get('lr_to_gt', 0)) * 100, step)
     
     def log_metrics(self, step, metrics):
         """Log PSNR/SSIM metrics"""
@@ -235,10 +242,10 @@ class TensorBoardLogger:
             step: Training step number
         """
         if isinstance(activity, list) and len(activity) == 3:
-            # 7-frame FusionBlock v2 format: [conv3x3, conv1x1, skip]
+            # GatedFusionBlock v2 format: [conv3x3, conv1x1, gate]
             self.writer.add_scalar(f'Layers/{name}_3x3', float(activity[0]), step)
             self.writer.add_scalar(f'Layers/{name}_1x1', float(activity[1]), step)
-            self.writer.add_scalar(f'Layers/{name}_Skip', float(activity[2]), step)
+            self.writer.add_scalar(f'Layers/{name}_Gate', float(activity[2]), step)
         elif isinstance(activity, list) and len(activity) == 2:
             # 7-frame FusionBlock format: [conv3x3, conv1x1]
             self.writer.add_scalar(f'Layers/{name}_3x3', float(activity[0]), step)
@@ -280,6 +287,61 @@ class TensorBoardLogger:
             if forw_acts:
                 avg_forw = sum(forw_acts) / len(forw_acts)
                 self.writer.add_scalar('Activity/Forward_Trunk_Avg', avg_forw, step)
+    
+    def log_arch_block_metrics(self, step, activities_dict):
+        """Log TemporalAlign flow magnitudes and GatedFusion gate activities"""
+        if not activities_dict:
+            return
+        
+        bw_align = activities_dict.get('backward_align_flow')
+        fw_align = activities_dict.get('forward_align_flow')
+        bw_fuse = activities_dict.get('backward_fuse', [])
+        fw_fuse = activities_dict.get('forward_fuse', [])
+        fusion = activities_dict.get('fusion', [])
+        
+        # Extract gate and 3x3 values from fuse activity lists (index 2 = gate, index 0 = 3x3)
+        def _get_fuse_val(lst, idx):
+            """Return float at index idx from a fusion activity list, or None if unavailable."""
+            if isinstance(lst, list) and len(lst) > idx and lst[idx] is not None:
+                return float(lst[idx])
+            return None
+        
+        bw_gate  = _get_fuse_val(bw_fuse, 2)
+        fw_gate  = _get_fuse_val(fw_fuse, 2)
+        final_gate = _get_fuse_val(fusion, 2)
+        bw_3x3   = _get_fuse_val(bw_fuse, 0)
+        fw_3x3   = _get_fuse_val(fw_fuse, 0)
+        
+        # Log individual ArchBlock scalars
+        if bw_align is not None:
+            self.writer.add_scalar('ArchBlocks/TemporalAlign_Backward_Flow', float(bw_align), step)
+        if fw_align is not None:
+            self.writer.add_scalar('ArchBlocks/TemporalAlign_Forward_Flow', float(fw_align), step)
+        if bw_gate is not None:
+            self.writer.add_scalar('ArchBlocks/GatedFusion_Backward_Gate', bw_gate, step)
+        if fw_gate is not None:
+            self.writer.add_scalar('ArchBlocks/GatedFusion_Forward_Gate', fw_gate, step)
+        if final_gate is not None:
+            self.writer.add_scalar('ArchBlocks/GatedFusion_Final_Gate', final_gate, step)
+        if bw_3x3 is not None:
+            self.writer.add_scalar('ArchBlocks/GatedFusion_Backward_3x3', bw_3x3, step)
+        if fw_3x3 is not None:
+            self.writer.add_scalar('ArchBlocks/GatedFusion_Forward_3x3', fw_3x3, step)
+        
+        # Combined overview dashboard
+        scalars = {}
+        if bw_align is not None:
+            scalars['Backward_Align_Flow'] = float(bw_align)
+        if fw_align is not None:
+            scalars['Forward_Align_Flow'] = float(fw_align)
+        if bw_gate is not None:
+            scalars['Backward_Gate'] = bw_gate
+        if fw_gate is not None:
+            scalars['Forward_Gate'] = fw_gate
+        if final_gate is not None:
+            scalars['Final_Gate'] = final_gate
+        if scalars:
+            self.writer.add_scalars('ArchBlocks/AlignAndGate_Overview', scalars, step)
     
     def log_lr_phase(self, step, phase):
         """Log LR schedule phase"""
