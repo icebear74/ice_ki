@@ -372,7 +372,8 @@ def is_hdr_transfer(color_transfer: Optional[str]) -> bool:
 
 
 def build_vf_filter(is_hdr: bool, use_cuda: bool = True,
-                    width: int = STREAM_WIDTH, height: int = STREAM_HEIGHT) -> str:
+                    width: int = STREAM_WIDTH, height: int = STREAM_HEIGHT,
+                    resize_first: bool = False) -> str:
     """Return the FFmpeg ``-vf`` filter string for the given video type.
 
     Selects the best available pipeline tier at call time:
@@ -383,12 +384,27 @@ def build_vf_filter(is_hdr: bool, use_cuda: bool = True,
     * SDR + scale-GPU → scale_cuda pipeline
     * SDR + CPU-only  → scale pipeline
 
+    When ``resize_first=True`` the resize is moved **before** the tonemap step.
+    This is the optimal order for Phase 1 (full-frame 720_169/medium_169):
+
+    * Full-GPU:  ``scale_cuda`` (4K→target, still HDR) → ``tonemap_cuda``
+      (tonemap runs on the small frame → much faster on GPU).
+    * scale-GPU: already resize-first (scale_cuda then CPU tonemap) – unchanged.
+    * CPU-only:  linearise → ``scale`` in linear light → tonemap at target size.
+      Linearising in 4K and then scaling down before tonemap is both
+      mathematically correct (interpolation in linear light) and much faster
+      (tonemap runs on the small frame, not at 4K).
+
     Args:
-        is_hdr:    Whether the source video is HDR (PQ or HLG transfer).
-        use_cuda:  Whether CUDA acceleration is requested.  Still falls back
-                   to CPU-only when the local FFmpeg has no CUDA support.
-        width:     Output width in pixels (default ``STREAM_WIDTH`` = 1920).
-        height:    Output height in pixels (default ``STREAM_HEIGHT`` = 1080).
+        is_hdr:       Whether the source video is HDR (PQ or HLG transfer).
+        use_cuda:     Whether CUDA acceleration is requested.  Still falls back
+                      to CPU-only when the local FFmpeg has no CUDA support.
+        width:        Output width in pixels (default ``STREAM_WIDTH`` = 1920).
+        height:       Output height in pixels (default ``STREAM_HEIGHT`` = 1080).
+        resize_first: When ``True`` resize to ``width``×``height`` before the
+                      tonemap step (see above).  Default ``False`` preserves
+                      the original tonemap-then-scale order used for Phase 2
+                      crop formats where the 4K buffer must stay intact.
 
     Returns:
         FFmpeg filter string ready for ``-vf`` (or for wrapping in
@@ -400,6 +416,18 @@ def build_vf_filter(is_hdr: bool, use_cuda: bool = True,
 
     if is_hdr:
         if _full_gpu:
+            if resize_first:
+                # Scale the HDR frame on GPU first (still in HDR colour space),
+                # then tonemap at the smaller target resolution.  Tonemap on a
+                # 720p frame is ~28× cheaper than on a 4K frame.
+                return (
+                    f"scale_cuda={width}:{height}:interp_algo=bicubic,"
+                    "tonemap_cuda=tonemap=mobius:desat=0:peak=100,"
+                    "hwdownload,"
+                    "scale=iw:ih,"
+                    "format=yuv420p,"
+                    "format=bgr24"
+                )
             return (
                 f"tonemap_cuda=tonemap=mobius:desat=0:peak=100,"
                 f"scale_cuda={width}:{height}:interp_algo=bicubic,"
@@ -409,11 +437,27 @@ def build_vf_filter(is_hdr: bool, use_cuda: bool = True,
                 "format=bgr24"
             )
         if _scale_gpu:
+            # scale_cuda already runs before the CPU tonemap in this tier, so
+            # resize_first is naturally satisfied regardless of the flag.
             return (
                 f"scale_cuda={width}:{height}:interp_algo=bicubic,"
                 "hwdownload,"
                 "format=p010,"
                 "zscale=t=linear:npl=100:filter=bilinear,"
+                "format=gbrpf32le,"
+                "zscale=p=bt709:filter=bilinear,"
+                "tonemap=tonemap=reinhard:desat=0,"
+                "zscale=t=bt709:m=bt709:range=full:filter=bilinear,"
+                "format=bgr24"
+            )
+        if resize_first:
+            # CPU-only: linearise at 4K (unavoidable – PQ→linear conversion
+            # needs the full-range HDR signal), then resize in linear light
+            # (mathematically correct interpolation), then tonemap at the
+            # small target resolution (much cheaper than at 4K).
+            return (
+                "zscale=t=linear:npl=100:filter=bilinear,"
+                f"scale={width}:{height}:flags=lanczos,"
                 "format=gbrpf32le,"
                 "zscale=p=bt709:filter=bilinear,"
                 "tonemap=tonemap=reinhard:desat=0,"
@@ -1341,6 +1385,7 @@ def extract_and_save_streaming_distributed(
     center_snap_seconds: float = 0.0,
     stream_width: int = STREAM_WIDTH,
     stream_height: int = STREAM_HEIGHT,
+    resize_first: bool = False,
 ) -> Dict[str, int]:
     """
     Stream the video once and save patches as frames pass through the buffer.
@@ -1414,10 +1459,20 @@ def extract_and_save_streaming_distributed(
                              function already places each category on its own
                              evenly-spaced grid.
         stream_width:        Width of the decoded frame piped from FFmpeg (default
-                             ``STREAM_WIDTH`` = 1920).  Pass ``STREAM_4K_WIDTH``
-                             (3840) to stream at 4K for the 720/720_169 formats.
+                             ``STREAM_WIDTH`` = 1920).  For Phase 1 pass the
+                             ``720_169`` gt width (e.g. 720) so that FFmpeg
+                             outputs at the target resolution directly.
         stream_height:       Height of the decoded frame (default ``STREAM_HEIGHT``
-                             = 1080).  Pass ``STREAM_4K_HEIGHT`` (2160) for 4K.
+                             = 1080).  For Phase 1 pass the ``720_169`` gt height
+                             (e.g. 405) to match the target resolution.
+        resize_first:        When ``True``, instructs :func:`build_vf_filter` to
+                             resize to ``stream_width``×``stream_height`` *before*
+                             the tonemap step.  Use for Phase 1 (full-frame resize
+                             formats): the HDR frame is scaled to 720p on GPU first,
+                             then tonemapped at the smaller resolution (~28× fewer
+                             pixels than 4K).  Default ``False`` keeps the original
+                             tonemap-then-scale order required for Phase 2 crop
+                             formats where the 4K buffer must remain intact.
 
     Returns:
         ``{category: patches_saved_count}``
@@ -1565,6 +1620,7 @@ def extract_and_save_streaming_distributed(
     vf_filter = build_vf_filter(
         is_hdr=is_hdr, use_cuda=use_cuda,
         width=stream_width, height=stream_height,
+        resize_first=resize_first,
     )
 
     # --- Inject select filter to skip unused frames in the filter chain ---
@@ -1580,6 +1636,11 @@ def extract_and_save_streaming_distributed(
     #                     expensive CPU tonemap only runs on needed frames.
     #   Full-GPU        → all stages are on GPU; select is placed after the
     #                     final hwdownload to cut pipe bandwidth.
+    #
+    # With resize_first=True the filter chain order changes for the full-GPU
+    # and CPU tiers but the injection markers (`,format=bgr24` for full-GPU,
+    # `hwdownload,` for scale-GPU, prepend for CPU) remain identical.  No
+    # change is needed here.
     if _select_expr:
         if _full_gpu:
             # Full-GPU: insert select right before the final format=bgr24
@@ -1617,18 +1678,22 @@ def extract_and_save_streaming_distributed(
     _CUDA_HW_INIT = ["-init_hw_device", "cuda=hw"]
 
     hdr_label = "HDR" if is_hdr else "SDR"
+    _rf_label  = " resize-first" if resize_first else ""
     if _full_gpu:
         hw_args        = [*_CUDA_HW_INIT, "-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
-        pipeline_label = f"full-GPU tonemap_cuda+scale_cuda [{hdr_label}]"
+        pipeline_label = f"full-GPU scale_cuda+tonemap_cuda{_rf_label} [{hdr_label}]"
     elif _scale_gpu:
         hw_args        = [*_CUDA_HW_INIT, "-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
-        pipeline_label = f"scale-GPU + CPU {'zscale/tonemap' if is_hdr else 'passthrough'} [{hdr_label}]"
+        pipeline_label = f"scale-GPU + CPU {'zscale/tonemap' if is_hdr else 'passthrough'}{_rf_label} [{hdr_label}]"
     elif _use_cuda:
         hw_args        = [*_CUDA_HW_INIT, "-hwaccel", "cuda"]
-        pipeline_label = f"decode-GPU + CPU {'tonemap' if is_hdr else 'scale'} [{hdr_label}]"
+        pipeline_label = f"decode-GPU + CPU {'tonemap' if is_hdr else 'scale'}{_rf_label} [{hdr_label}]"
     else:
         hw_args        = []
-        pipeline_label = f"CPU-only {'tonemap/reinhard' if is_hdr else 'scale/bilinear'} [{hdr_label}]"
+        _cpu_label = "linearize→resize→tonemap" if (is_hdr and resize_first) else (
+            "tonemap/reinhard" if is_hdr else "scale/bilinear"
+        )
+        pipeline_label = f"CPU-only {_cpu_label} [{hdr_label}]"
 
     _log(
         f"🎬 Streaming extractor: {len(sorted_asgn)} assignments, "

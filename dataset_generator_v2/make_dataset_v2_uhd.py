@@ -84,6 +84,28 @@ _FORMATS_CROP: frozenset = frozenset({'540', '720', 'small_540', 'large_720'})
 
 _PLAN_VERSION = '3.2'
 
+
+def _phase1_stream_size(format_config: dict) -> tuple:
+    """Return ``(width, height)`` for the Phase 1 single-stream FFmpeg output.
+
+    Scans ``format_config`` for every ``720_169``/``medium_169`` entry and
+    returns the **maximum** gt_size found so that the FFmpeg stream is at
+    least as large as any individual format's target.
+    ``create_patch_pair`` will then do a no-op (or trivial) final resize from
+    the piped frame to the individual gt_size.
+
+    Falls back to ``(720, 405)`` when the formats are absent from the config.
+    """
+    max_w, max_h = 720, 405  # safe defaults matching the FORMATS definition
+    for cat_cfg in format_config.values():
+        for fmt_name in _FORMATS_169:
+            if fmt_name in cat_cfg:
+                gt = cat_cfg[fmt_name].get('gt_size', [max_w, max_h])
+                max_w = max(max_w, int(gt[0]))
+                max_h = max(max_h, int(gt[1]))
+    return max_w, max_h
+
+
 class DatasetGeneratorV2UHD:
     """
     Enhanced Dataset Generator V2
@@ -1892,8 +1914,9 @@ class DatasetGeneratorV2UHD:
 
         Phase structure
         ~~~~~~~~~~~~~~~
-        * ``phase_169``: 4K UHD pass for ``720_169``/``medium_169`` – full-frame
-          Lanczos4 resize from native UHD so the GT captures maximum sharpness.
+        * ``phase_169``: single-stream at ``720_169`` gt_size – FFmpeg resizes
+          4K→720p (CUDA scale_cuda if available), then tonemaps at the small
+          resolution.  No dual buffer – ~28× less pipe bandwidth than 4K.
         * ``phase_crop``: 4K dual-buffer pass for ``540``/``720`` and their
           aliases – 2× oversampled crop from 4K for 720/large_720, 1:1 crop
           from an in-memory 1080p buffer for 540/small_540.
@@ -1916,7 +1939,11 @@ class DatasetGeneratorV2UHD:
             'plan_created_at': datetime.now().isoformat(),
             'current_phase': 'phase_169',
             'phase_169': {
-                'description': 'UHD 4K pass – full-frame Lanczos4 resize for 720_169/medium_169',
+                'description': (
+                    'Single-stream UHD pass – FFmpeg resizes 4K→720p directly '
+                    '(CUDA scale_cuda if available) then tonemaps at the small '
+                    'resolution; no dual buffer needed'
+                ),
                 'formats': sorted(_FORMATS_169),
                 'stream': [3840, 2160],
                 'status': 'pending',
@@ -2083,9 +2110,13 @@ class DatasetGeneratorV2UHD:
             plan:        The full extraction plan dict (mutated in-place).
             phase_key:   ``'phase_169'`` or ``'phase_crop'``.
             use_dual_4k: When ``True`` use ``extract_and_save_streaming_dual``
-                         (4K dual-buffer pipeline).  When ``False`` use
-                         ``extract_and_save_streaming_distributed`` at 1080p
-                         (retained as a fallback; not used in normal operation).
+                         (4K dual-buffer pipeline) – used for Phase 2 crop
+                         formats.  When ``False`` use
+                         ``extract_and_save_streaming_distributed`` with the
+                         720_169 gt_size as the stream resolution and
+                         ``resize_first=True`` so FFmpeg performs the
+                         4K→720p resize (with CUDA if available) before the
+                         tonemap step – used for Phase 1.
         """
         phase = plan[phase_key]
         phase['status'] = 'in_progress'
@@ -2209,9 +2240,13 @@ class DatasetGeneratorV2UHD:
                         ).get('center_snap_seconds', 1.0),
                     )
                 else:
-                    # Fallback 1080p single-stream pipeline (phase_169 is currently always
-                    # empty so this branch is never reached in normal operation, but is
-                    # retained as a safety fallback for future use).
+                    # Phase 1: single-stream at the 720_169 gt_size.
+                    # FFmpeg resizes directly to the target resolution (CUDA
+                    # scale if available) and tonemaps on the small frame –
+                    # ~28× less data piped vs a 4K stream.  No dual buffer
+                    # is needed because 720_169/medium_169 are full-frame
+                    # resize formats with no HD-buffer dependency.
+                    _stream_w, _stream_h = _phase1_stream_size(self.format_config)
                     assignments = build_assignments_per_category(
                         format_distribution=targets,
                         duration=duration,
@@ -2226,15 +2261,16 @@ class DatasetGeneratorV2UHD:
                         base_dir=self.base_dir,
                         fps=fps,
                         logger=self.logger,
-                        is_interesting_fn=None,   # no quality gating in the 1080p fallback path
+                        is_interesting_fn=self.is_interesting_patch,
                         is_black_frame_fn=_streaming_is_black_frame,
                         progress_fn=_on_progress,
                         use_cuda=self.use_cuda,
                         nice_level=self.settings.get('ffmpeg_nice', 10),
                         is_hdr=is_hdr,
                         degrade_cfg=self.config.get('quality'),
-                        stream_width=1920,
-                        stream_height=1080,
+                        stream_width=_stream_w,
+                        stream_height=_stream_h,
+                        resize_first=True,
                     )
 
                 patches_created = dict(result)
@@ -2270,10 +2306,11 @@ class DatasetGeneratorV2UHD:
         Main generation loop – two-phase extraction with plan persistence.
 
         Phase 1 (169_uhd)
-            4K UHD pass for all 720_169/medium_169 formats across EVERY video.
-            The full source frame is Lanczos4-resized to the GT size so the
-            network learns from native UHD sharpness.  Uses the same 4K
-            dual-buffer pipeline as Phase 2 (``extract_and_save_streaming_dual``).
+            Single-stream pass for 720_169/medium_169.  FFmpeg resizes the
+            4K source frame directly to the 720_169 gt_size (CUDA scale_cuda
+            if available) and tonemaps at the small resolution.  No dual
+            buffer is used – only 720p frames are piped to Python (~28×
+            less data than a 4K stream).
 
         Phase 2 (crop_hq)
             4K dual-buffer pass for all 540/720 crop formats across every
@@ -2299,8 +2336,8 @@ class DatasetGeneratorV2UHD:
             if RICH_AVAILABLE:
                 console.print(Panel.fit(
                     "[bold cyan]Dataset Generator V2 - UHD Quality[/bold cyan]\n"
-                    "Phase 1: 720_169/medium_169 full-frame UHD resize  →  Phase 2: Crop formats\n"
-                    "  Phase 1 & 2 both use extract_and_save_streaming_dual (4K dual-buffer)",
+                    "Phase 1: 720_169/medium_169 – FFmpeg resizes 4K→720p (CUDA if available) + tonemap\n"
+                    "Phase 2: crop formats – 4K dual-buffer (720/large_720 oversample, 540/small_540 HD)",
                     border_style="cyan"
                 ))
 
@@ -2372,7 +2409,7 @@ class DatasetGeneratorV2UHD:
             current_phase = plan.get('current_phase', 'phase_169')
 
             if current_phase == 'phase_169' and not self._phase_complete(plan, 'phase_169'):
-                self._run_phase(plan, 'phase_169', use_dual_4k=True)
+                self._run_phase(plan, 'phase_169', use_dual_4k=False)
                 if self._phase_complete(plan, 'phase_169'):
                     plan['current_phase'] = 'phase_crop'
                     self._save_plan(plan)
