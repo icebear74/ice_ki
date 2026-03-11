@@ -214,9 +214,22 @@ class DatasetGeneratorV2UHD:
             'categories': list(self.category_targets.keys()),
             # Only format-size columns that actually exist in the config
             'format_sizes': list(next(iter(self.format_config.values()), {}).keys()),
+            # Which extraction phase is currently running ('phase_169' or 'phase_crop')
+            'current_phase': 'phase_169',
+            # Per-category patch counts produced by Phase 1 (populated once Phase 1 is done)
+            'phase1_totals': {},
         }
         # Terminal UI already set before logger init (line 89)
         self.ui_update_counter = 0
+
+        # Pre-compute per-category sum of crop-format probabilities so the
+        # UI update loop doesn't recompute it on every refresh tick.
+        self._cat_crop_prob_sum: dict = {
+            category: sum(
+                v for k, v in probs.items() if k in _FORMATS_CROP
+            )
+            for category, probs in self.format_probabilities.items()
+        }
         
         # Display priority distribution
         if RICH_AVAILABLE:
@@ -351,24 +364,53 @@ class DatasetGeneratorV2UHD:
                         'percent': percent,
                     }
 
-            # Patch distribution by category and format
+            # Patch distribution by category and format – phase-aware counts
+            # ---------------------------------------------------------------
+            # Phase 1 (phase_169): ALL created patches are 169-type formats;
+            #   crop formats (540, 720) have not been generated yet → count = 0.
+            # Phase 2 (phase_crop): 169 count is fixed at the Phase 1 total;
+            #   crop patches = (images_created − phase1_total), split proportionally
+            #   by the crop-format probabilities for that category.
+            current_phase   = self.ui_state.get('current_phase', 'phase_169')
+            phase1_totals   = self.ui_state.get('phase1_totals', {})
+
             patch_dist = {}
             for category in self.format_config.keys():
                 patch_dist[category] = {}
-                if category in self.format_config:
-                    for format_name in self.format_config[category].keys():
-                        if category in category_stats:
-                            total = category_stats[category].get('images_created', 0)
-                            prob = self.format_probabilities.get(category, {}).get(format_name, 0.0)
-                            current = int(total * prob)
-                            target_total = self.category_targets.get(category, 0)
-                            target = int(target_total * prob)
-                            patch_dist[category][format_name] = {
-                                'count': current,
-                                'target': target,
-                            }
+                cat_stats   = category_stats.get(category)
+                cat_total   = cat_stats.get('images_created', 0) if cat_stats else 0
+                target_total = self.category_targets.get(category, 0)
+
+                cat_crop_prob_sum = self._cat_crop_prob_sum.get(category, 0.0)
+
+                for format_name in self.format_config[category].keys():
+                    fmt_prob   = self.format_probabilities.get(category, {}).get(format_name, 0.0)
+                    fmt_target = int(target_total * fmt_prob)
+
+                    if current_phase == 'phase_169':
+                        # Phase 1: 169-type formats accumulate ALL created patches;
+                        # crop formats are 0 (not started yet).
+                        if format_name in _FORMATS_169:
+                            fmt_count = cat_total
                         else:
-                            patch_dist[category][format_name] = {'count': 0, 'target': 0}
+                            fmt_count = 0
+                    else:
+                        # Phase 2: 169-type formats are frozen at their Phase 1 total;
+                        # new patches (above that baseline) are crop patches – split
+                        # by each crop format's share of the total crop probability.
+                        phase1_done  = phase1_totals.get(category, 0)
+                        phase2_total = max(0, cat_total - phase1_done)
+                        if format_name in _FORMATS_169:
+                            fmt_count = phase1_done
+                        elif cat_crop_prob_sum > 0:
+                            fmt_count = int(phase2_total * fmt_prob / cat_crop_prob_sum)
+                        else:
+                            fmt_count = 0
+
+                    patch_dist[category][format_name] = {
+                        'count':  fmt_count,
+                        'target': fmt_target,
+                    }
             self.ui_state['patch_distribution'] = patch_dist
 
             # ETA calculation: use global rate (total saved / elapsed)
@@ -2131,6 +2173,17 @@ class DatasetGeneratorV2UHD:
         phase = plan[phase_key]
         phase['status'] = 'in_progress'
         self._save_plan(plan)
+
+        # ── Update UI phase tracking ──────────────────────────────────────
+        self.ui_state['current_phase'] = phase_key
+        # Rebuild Phase 1 per-category totals from completed plan entries.
+        # During phase_169 these will be zero (patches_created not yet set).
+        # During phase_crop (including resumes) they reflect actual Phase 1 output.
+        phase1_totals: dict = {}
+        for entry in plan.get('phase_169', {}).get('videos', []):
+            for cat, cnt in entry.get('patches_created', {}).items():
+                phase1_totals[cat] = phase1_totals.get(cat, 0) + int(cnt)
+        self.ui_state['phase1_totals'] = phase1_totals
 
         videos = phase['videos']
         total = len(videos)

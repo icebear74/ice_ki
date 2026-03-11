@@ -145,7 +145,14 @@ def _draw_overall_progress_section(state, width):
 
 def _draw_patch_distribution_table(state, width):
     """Draw patch distribution table"""
-    print_section_header("PATCH-VERTEILUNG NACH KATEGORIE UND GRÖẞE")
+    current_phase = state.get('current_phase', '')
+    if current_phase == 'phase_169':
+        phase_suffix = '  [Phase 1/2: 169-Format]'
+    elif current_phase == 'phase_crop':
+        phase_suffix = '  [Phase 2/2: Crop-Formate]'
+    else:
+        phase_suffix = ''
+    print_section_header(f"PATCH-VERTEILUNG NACH KATEGORIE UND GRÖẞE{phase_suffix}")
     
     patch_dist = state.get('patch_distribution', {})
     categories = state.get('categories') or list(patch_dist.keys())
