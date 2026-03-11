@@ -33,13 +33,23 @@ N_BLOCKS = 28
 # TRAINING BATCH PARAMETERS (Optimized for 7-Frame Model)
 # ============================================================================
 
-# Batch size per iteration
-# Keep at 1 for safety with 7-frame model (VRAM tested: ~3.77 GB @ batch=1)
+# Per-size batch and gradient accumulation configuration.
+# These values are read by train.py and trainer.py at startup.
+# Add a new entry here for every new size_key used in your dataset.
+#
+#   720_169 (720×405) – 16:9 full frames:  BS=2, accum=4 → eff=8  (~5.14 GB)
+#   540     (540×540) – 1080p crops:       BS=2, accum=3 → eff=6  (~5.15 GB)
+#   720     (720×720) – 4K crops:          BS=1, accum=4 → eff=4  (~6.14 GB, BS=2 = OOM)
+ADAPTIVE_BATCH_CONFIG = {
+    '720_169': {'batch': 2, 'accum': 4},   # eff=8 | ~5.14 GB | Vollbilder 16:9
+    '540':     {'batch': 2, 'accum': 3},   # eff=6 | ~5.15 GB | 1080p Crops
+    '720':     {'batch': 1, 'accum': 4},   # eff=4 | ~6.14 GB | 4K Crops (BS=1 pflicht!)
+}
+
+# Batch size per iteration (single-size fallback)
 BATCH_SIZE = 1
 
-# Gradient accumulation steps
-# Effective batch = BATCH_SIZE * ACCUMULATION_STEPS = 1 * 6 = 6
-# This provides stable gradients without excessive VRAM usage
+# Gradient accumulation steps (single-size fallback)
 ACCUMULATION_STEPS = 6
 
 
@@ -157,6 +167,11 @@ INITIAL_GRAD_CLIP = 1.5
 # Disabled to save VRAM and improve training speed.
 USE_AMP = False
 
+# Enable gradient checkpointing (activation recomputation).
+# Reduces activation memory by ~40% at the cost of ~10-15% compute overhead.
+# Set to False to disable (higher VRAM usage, slightly faster training).
+USE_CHECKPOINTING = True
+
 
 # ============================================================================
 # HELPER FUNCTION
@@ -175,6 +190,7 @@ def get_config():
         # Batch
         'BATCH_SIZE': BATCH_SIZE,
         'ACCUMULATION_STEPS': ACCUMULATION_STEPS,
+        'ADAPTIVE_BATCH_CONFIG': ADAPTIVE_BATCH_CONFIG,
         
         # Learning rate
         'LR_EXPONENT': LR_EXPONENT,
@@ -212,6 +228,7 @@ def get_config():
     
     # Add AMP setting (always include so training code can rely on its presence)
     config['USE_AMP'] = USE_AMP
+    config['USE_CHECKPOINTING'] = USE_CHECKPOINTING
     
     return config
 

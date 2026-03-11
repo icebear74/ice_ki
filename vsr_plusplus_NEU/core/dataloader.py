@@ -41,7 +41,7 @@ class SizeGroupedSampler(Sampler):
         batch_sizes:       Dict mapping size_key to batch size
         shuffle:           Whether to shuffle indices within each size group
         accum_steps:       Dict mapping size_key to gradient accumulation steps
-                           (default: 4 for '720', 6 for all other sizes)
+                           (default: 4 für '720', 4 für '720_169', 3 für '540')
     """
 
     def __init__(self, datasets_dict, size_distribution, batch_sizes, shuffle=True,
@@ -57,11 +57,13 @@ class SizeGroupedSampler(Sampler):
         if not self.active_sizes:
             raise ValueError("No datasets provided")
 
-        # Per-size accumulation steps (default: 4 for '720', 6 for others)
+        # Per-size accumulation steps — fixed values matching ADAPTIVE_BATCH_CONFIG:
+        #   '720_169': 4,  '720': 4,  '540': 3
+        # Any unknown size_key gets a safe default of 4.
         if accum_steps is None:
             accum_steps = {}
         self.accum_steps = {
-            sk: accum_steps.get(sk, 4 if sk == '720' else 6)
+            sk: accum_steps.get(sk, 4)
             for sk in self.active_sizes
         }
 
@@ -225,8 +227,36 @@ class SizeGroupedSampler(Sampler):
                 yield (size_key, indices_per_size[size_key][start_idx:end_idx])
 
     def __len__(self):
-        """Total number of batches across all active size groups."""
+        """Total number of batches (forward passes) across all active size groups."""
         return self.total_batches
+
+    @property
+    def optimizer_steps(self):
+        """Total number of optimizer steps in one epoch.
+
+        Each size group fires an optimizer step every accum_steps[sk] forward
+        passes.  Summing over all active sizes gives the correct per-epoch
+        count instead of dividing total_batches by a single global value.
+        """
+        return sum(
+            self.num_batches_per_size[sk] // self.accum_steps.get(sk, 1)
+            for sk in self.active_sizes
+            if self.num_batches_per_size.get(sk, 0) > 0
+        )
+
+    @property
+    def total_files(self):
+        """Total number of individual training images in one epoch.
+
+        Computed as the sum of (batches × batch_size) per size, which accounts
+        for the fact that different sizes may have different physical batch sizes
+        (e.g. BS=2 for 540/720_169, BS=1 for 720).
+        """
+        return sum(
+            self.num_batches_per_size[sk] * self.batch_sizes.get(sk, 1)
+            for sk in self.active_sizes
+            if self.num_batches_per_size.get(sk, 0) > 0
+        )
 
 
 class MultiSizeDataLoader:
@@ -298,13 +328,13 @@ def create_train_loader(config):
             - 'sizes': Dict with size configs, e.g.:
                 {
                     '720': {'enabled': True, 'distribution': 0.4, 'batch_size': 1, 'accum': 4},
-                    '540': {'enabled': True, 'distribution': 0.4, 'batch_size': 1, 'accum': 6},
-                    '720_169': {'enabled': True, 'distribution': 0.2, 'batch_size': 1, 'accum': 6}
+                    '540': {'enabled': True, 'distribution': 0.4, 'batch_size': 2, 'accum': 3},
+                    '720_169': {'enabled': True, 'distribution': 0.2, 'batch_size': 2, 'accum': 4}
                 }
                 Note: 'distribution' > 0 means "load this size", the value itself
                       is only informational (files on disk determine actual ratio).
                       'accum' sets gradient accumulation steps for this size
-                      (defaults: 4 for '720', 6 for all other sizes).
+                      (defaults: 4 for '720', 4 for '720_169', 3 for '540').
             - 'augment': Whether to use augmentations (default: True)
             - 'shuffle': Whether to shuffle batches (default: True)
     
@@ -356,11 +386,10 @@ def create_train_loader(config):
         
         datasets_dict[size_key] = dataset
         size_distribution[size_key] = distribution
-        batch_sizes[size_key] = size_cfg.get('batch_size', 1)
-        # Extract accumulation steps for this size; fall back to legacy defaults
-        # (4 for '720', 6 for all other sizes)
-        default_accum = 4 if size_key == '720' else 6
-        accum_steps[size_key] = size_cfg.get('accum', default_accum)
+        # batch_size and accum must be explicitly set in sizes_config — they come
+        # from ADAPTIVE_BATCH_CONFIG in config.py (fixed values, no guessing).
+        batch_sizes[size_key] = size_cfg['batch_size']
+        accum_steps[size_key] = size_cfg['accum']
     
     if not datasets_dict:
         raise ValueError("No training datasets could be loaded for any size. Check GT/LR directories and file extensions.")

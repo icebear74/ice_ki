@@ -14,11 +14,12 @@ import time
 import os
 import json
 import torch
-from torch.cuda.amp import autocast
+from torch.amp import autocast
 from ..utils.ui_display import draw_ui, get_activity_data
 from ..utils.keyboard_handler import KeyboardHandler
 from ..utils.ui_terminal import C_GREEN, C_CYAN, C_YELLOW, C_RESET, show_cursor
 from ..core.data_strategy import DataStrategyScheduler
+
 
 
 class VSRTrainer:
@@ -42,8 +43,8 @@ class VSRTrainer:
     """
     
     def __init__(self, model, optimizer, lr_scheduler, train_loader, val_loader, loss_fn,
-                 validator, checkpoint_mgr, train_logger, tb_logger, adaptive_system, 
-                 config, device='cuda', runtime_config=None, scaler=None, use_amp=False):
+                 validator, checkpoint_mgr, train_logger, tb_logger, adaptive_system,
+                 config, device='cuda', scaler=None, use_amp=False):
         self.model = model
         self.optimizer = optimizer
         self.lr_scheduler = lr_scheduler
@@ -57,7 +58,6 @@ class VSRTrainer:
         self.adaptive_system = adaptive_system
         self.config = config
         self.device = device
-        self.runtime_config = runtime_config
         self.scaler = scaler
         self.use_amp = use_amp
         
@@ -95,23 +95,109 @@ class VSRTrainer:
         # Set via trainer.data_strategy_scheduler = DataStrategyScheduler(...)
         self.data_strategy_scheduler = None
         
-        # Keyboard handler
-        self.keyboard = KeyboardHandler()
+        # Per-size VRAM tracker: running EMA of memory_reserved() measured
+        # right after each optimizer step, keyed by size_key.  Sent to the
+        # WebUI so the batch-config table shows live values instead of
+        # hardcoded placeholders.
+        self._vram_per_size: dict = {}
         
-        # Web interface for remote monitoring - COMPLETE data
+        # Keyboard handler for interactive training control
+        self.keyboard = KeyboardHandler()
+
+        # Web interface for remote monitoring
         from ..systems.web_ui import WebMonitoringInterface
-        self.web_monitor = WebMonitoringInterface(port_num=5050, refresh_seconds=5, runtime_config=runtime_config)
+        self.web_monitor = WebMonitoringInterface(port_num=5050, refresh_seconds=5)
+        # Push ADAPTIVE_BATCH_CONFIG from config into the WebUI state so the
+        # batch-config table reflects what is actually configured, not the
+        # hardcoded placeholder that web_ui.py uses as its initial state.
+        adaptive_cfg = self.config.get('ADAPTIVE_BATCH_CONFIG', {})
+        if adaptive_cfg:
+            ui_batch_cfg = {}
+            for sk, v in adaptive_cfg.items():
+                entry = {'batch': v['batch'], 'accum': v['accum'],
+                         'effective': v['batch'] * v['accum']}
+                if 'vram_gb' in v:
+                    entry['vram_gb'] = v['vram_gb']
+                ui_batch_cfg[sk] = entry
+            self.web_monitor.data_store.update_all_metrics(
+                adaptive_batch_config=ui_batch_cfg
+            )
     
     def set_start_step(self, step):
         """Set starting step (for resume)"""
         self.start_step = step
         self.global_step = step
     
+    def _reload_val_datasets_if_needed(self):
+        """
+        Check every validation dataset for file changes and reload immediately if found.
+
+        Called unconditionally before every validation run so that each validation
+        always uses the most current image data — regardless of whether the periodic
+        100-step check has already fired for this step.
+
+        Covers:
+          - multi-size loaders  (self.val_loaders list of (size_key, loader) tuples)
+          - single-size loader  (self.val_loader)
+        """
+        # ── Multi-size validation loaders ────────────────────────────────────
+        val_loaders = getattr(self, 'val_loaders', None)
+        if val_loaders and isinstance(val_loaders, list):
+            for size_key, val_loader in val_loaders:
+                try:
+                    if not hasattr(val_loader, 'dataset'):
+                        continue
+                    val_ds = val_loader.dataset
+                    if not hasattr(val_ds, 'check_for_new_files') or not hasattr(val_ds, 'reload_files'):
+                        continue
+                    val_changes = val_ds.check_for_new_files()
+                    if val_changes['has_new']:
+                        delta = val_changes['new_files']
+                        delta_str = f"+{delta}" if delta >= 0 else str(delta)
+                        print(f"\n📂 Pre-validation check: {size_key} changed ({delta_str} files). Reloading...")
+                        reload_result = val_ds.reload_files()
+                        if reload_result['success']:
+                            print(f"   ✅ {size_key}: {reload_result['files_before']} → {reload_result['files_after']} files")
+                            if hasattr(self, 'train_logger') and self.train_logger:
+                                self.train_logger.log_event(
+                                    f"Pre-val reload {size_key}: {reload_result['files_before']} → {reload_result['files_after']} files"
+                                )
+                        else:
+                            print(f"   ❌ {size_key} reload failed: {reload_result.get('error', 'Unknown error')}")
+                except Exception as e:
+                    print(f"⚠️  Pre-validation reload error for {size_key}: {e}")
+
+        # ── Single validation loader ──────────────────────────────────────────
+        elif hasattr(self, 'val_loader') and hasattr(self.val_loader, 'dataset'):
+            try:
+                val_ds = self.val_loader.dataset
+                if hasattr(val_ds, 'check_for_new_files') and hasattr(val_ds, 'reload_files'):
+                    val_changes = val_ds.check_for_new_files()
+                    if val_changes['has_new']:
+                        delta = val_changes['new_files']
+                        delta_str = f"+{delta}" if delta >= 0 else str(delta)
+                        print(f"\n📂 Pre-validation check: validation dataset changed ({delta_str} files). Reloading...")
+                        reload_result = val_ds.reload_files()
+                        if reload_result['success']:
+                            print(f"   ✅ {reload_result['files_before']} → {reload_result['files_after']} files")
+                            if hasattr(self, 'train_logger') and self.train_logger:
+                                self.train_logger.log_event(
+                                    f"Pre-val reload: {reload_result['files_before']} → {reload_result['files_after']} files"
+                                )
+                        else:
+                            print(f"   ❌ Reload failed: {reload_result.get('error', 'Unknown error')}")
+            except Exception as e:
+                print(f"⚠️  Pre-validation reload error: {e}")
+
     def _run_multi_size_validation(self):
         """
         Run validation on all configured sizes
         Returns combined metrics averaging across all sizes
         """
+        # Always refresh validation datasets before running so every validation
+        # uses the most current images (covers periodic, manual, web-UI and snapshot calls).
+        self._reload_val_datasets_if_needed()
+
         if not hasattr(self, 'val_loaders') or not self.val_loaders:
             # Fallback to single-size validation
             return self.validator.validate(self.global_step)
@@ -200,8 +286,15 @@ class VSRTrainer:
             )
         # ── End graduated data strategy ──────────────────────────────────────
         
-        default_accum_steps = self.config.get('ACCUMULATION_STEPS', 6)
-        steps_per_epoch = len(self.train_loader) // default_accum_steps
+        default_accum_steps = self.config.get('ACCUMULATION_STEPS', 4)
+        # Prefer the sampler's exact optimizer-step count (accounts for per-size
+        # accum_steps).  Fall back to dividing total forward passes by the global
+        # default only when the sampler is unavailable (single-size DataLoader).
+        _sampler = getattr(self.train_loader, 'sampler', None)
+        if _sampler is not None and hasattr(_sampler, 'optimizer_steps'):
+            steps_per_epoch = _sampler.optimizer_steps
+        else:
+            steps_per_epoch = len(self.train_loader) // default_accum_steps
         current_epoch_step = 0
         accum_counter = 0  # Running counter for dynamic accumulation
         prev_size_key = None  # Track size-key changes for clean boundary enforcement
@@ -255,21 +348,9 @@ class VSRTrainer:
                 else:
                     size_key = 'default'
             
-            # Dynamic accumulation steps: priority order —
-            # 1. ADAPTIVE_BATCH_CONFIG from runtime_config (training.adaptive_batch)
-            # 2. ADAPTIVE_BATCH_CONFIG from main config
-            # 3. Hardcoded defaults (4 for '720', 6 for others)
-            adaptive_batch_cfg = None
-            if self.runtime_config is not None:
-                adaptive_batch_cfg = self.runtime_config.get('training.adaptive_batch')
-            if adaptive_batch_cfg is None:
-                adaptive_batch_cfg = self.config.get('ADAPTIVE_BATCH_CONFIG')
-            if adaptive_batch_cfg and size_key in adaptive_batch_cfg:
-                current_accum_steps = adaptive_batch_cfg[size_key].get('accum', default_accum_steps)
-            elif size_key == '720':
-                current_accum_steps = 4
-            else:
-                current_accum_steps = default_accum_steps
+            # Accumulation steps come from ADAPTIVE_BATCH_CONFIG in config.
+            _batch_cfg = self.config.get('ADAPTIVE_BATCH_CONFIG', {}).get(size_key)
+            current_accum_steps = _batch_cfg['accum'] if _batch_cfg is not None else self.config.get('ACCUMULATION_STEPS', 4)
 
             # ── Size-key transition: enforce clean accumulation boundaries ────
             # If the resolution block changes mid-accumulation (e.g. due to a
@@ -290,11 +371,18 @@ class VSRTrainer:
             # Track batch files for WebUI display — always update counters, filenames when available
             if hasattr(self, 'web_monitor') and self.web_monitor:
                 batch_size_val = lr_stack.size(0)
+                # files_used: sum of all images seen so far this epoch across all
+                # forward passes (batch_idx counts forward passes, not optimizer steps)
                 files_used_in_epoch = (batch_idx + 1) * batch_size_val
                 
-                # Get total files in epoch
-                if hasattr(self.train_loader, 'sampler'):
-                    total_files_in_epoch = len(self.train_loader.sampler) * batch_size_val
+                # total_files: use the sampler's exact count when available so that
+                # different physical batch sizes per size are accounted for correctly
+                # (e.g. BS=2 for 540/720_169, BS=1 for 720).
+                _sampler = getattr(self.train_loader, 'sampler', None)
+                if _sampler is not None and hasattr(_sampler, 'total_files'):
+                    total_files_in_epoch = _sampler.total_files
+                elif _sampler is not None:
+                    total_files_in_epoch = len(_sampler) * batch_size_val
                 elif hasattr(self.train_loader, '__len__'):
                     total_files_in_epoch = len(self.train_loader) * batch_size_val
                 else:
@@ -337,7 +425,7 @@ class VSRTrainer:
                 )
             
             # Forward pass with mixed precision
-            with autocast(enabled=self.use_amp):
+            with autocast('cuda', enabled=self.use_amp):
                 output = self.model(lr_stack)
                 
                 # Compute L1 loss for adaptive system
@@ -453,7 +541,19 @@ class VSRTrainer:
                 
                 # Reset loop timer for next iteration
                 loop_start_time = time.time()
-                vram = torch.cuda.max_memory_allocated() / (1024**3)
+                # memory_reserved() = memory that PyTorch's caching allocator holds from
+                # the CUDA driver.  This matches what nvidia-smi reports for the Python
+                # process, unlike memory_allocated() (only live tensors, ~0 between steps)
+                # or mem_get_info() total-free (sums ALL GPU processes, overshoots).
+                vram = torch.cuda.memory_reserved() / (1024**3) if torch.cuda.is_available() else 0.0
+
+                # Update per-size VRAM tracker with EMA (α=0.1) so the WebUI
+                # batch-config table shows a stable measured value per resolution.
+                if vram > 0.0 and size_key not in ('unknown', 'default'):
+                    prev = self._vram_per_size.get(size_key)
+                    self._vram_per_size[size_key] = (
+                        0.9 * prev + 0.1 * vram if prev is not None else vram
+                    )
                 
                 # Track loss history (raw values)
                 raw_total_loss = loss_dict['total'].item() if torch.is_tensor(loss_dict['total']) else loss_dict['total']
@@ -467,11 +567,6 @@ class VSRTrainer:
                 # Increment step
                 self.global_step += 1
                 current_epoch_step += 1
-                
-                # Check for runtime config updates every 10 steps
-                if self.runtime_config is not None and self.global_step % 10 == 0:
-                    if self.runtime_config.check_for_updates():
-                        self._apply_config_changes()
                 
                 # Update GUI with smoothed values
                 self._update_gui(epoch, smoothed_loss_dict, avg_time, steps_per_epoch, current_epoch_step, adam_momentum=adam_momentum)
@@ -834,7 +929,10 @@ class VSRTrainer:
         
         # Update web monitor with COMPLETE training state (ALL data)
         best_quality = self.checkpoint_mgr.best_quality if self.checkpoint_mgr.best_quality > 0 else 0.0
-        gpu_mem = torch.cuda.max_memory_allocated() / (1024**3) if torch.cuda.is_available() else 0.0
+        # memory_reserved() = memory held by PyTorch's caching allocator from the CUDA
+        # driver.  This matches nvidia-smi's per-process column, unlike mem_get_info()
+        # total-free which sums ALL GPU processes and therefore overshoots.
+        gpu_mem = torch.cuda.memory_reserved() / (1024**3) if torch.cuda.is_available() else 0.0
         
         # Konvertiere Layer-Aktivitäten in Dict-Format
         layer_act_dict = {}
@@ -927,6 +1025,9 @@ class VSRTrainer:
                 layer_activity_map=layer_act_dict,
                 layer_activity_peak_value=peak_activity_value,
                 
+                # Batch-Konfiguration mit gemessenen VRAM-Werten
+                adaptive_batch_config=self._build_ui_batch_config(),
+                
                 # Status
                 training_active=not paused,
                 validation_running=False,
@@ -937,7 +1038,30 @@ class VSRTrainer:
             print(f"\n⚠️  Web UI update failed: {e}")
             import traceback
             traceback.print_exc()
-    
+
+    def _build_ui_batch_config(self) -> dict:
+        """Build the adaptive_batch_config dict for the WebUI.
+
+        Merges the static ADAPTIVE_BATCH_CONFIG from self.config with the
+        live per-size VRAM measurements collected in self._vram_per_size.
+        The WebUI table therefore always shows the actual measured values
+        instead of the hardcoded placeholders from web_ui.py.
+        """
+        result = {}
+        for sk, v in self.config.get('ADAPTIVE_BATCH_CONFIG', {}).items():
+            entry = {
+                'batch': v['batch'],
+                'accum': v['accum'],
+                'effective': v['batch'] * v['accum'],
+            }
+            measured = self._vram_per_size.get(sk)
+            if measured is not None:
+                entry['vram_gb'] = round(measured, 2)
+            elif 'vram_gb' in v:
+                entry['vram_gb'] = v['vram_gb']
+            result[sk] = entry
+        return result
+
     def _apply_ema_smoothing(self, loss_dict):
         """
         Apply exponential moving average smoothing to losses for GUI display
@@ -1046,7 +1170,6 @@ class VSRTrainer:
                 self.global_step,
                 metrics,
                 self.train_logger.log_file,
-                self.runtime_config
             )
             self.train_logger.log_event(f"Manual checkpoint saved at step {self.global_step}")
         except Exception as e:
@@ -1242,9 +1365,11 @@ class VSRTrainer:
                                 }
                                 
                                 if val_changes['has_new']:
-                                    print(f"\n📂 New validation files detected for {size_key}: +{val_changes['new_files']} files")
+                                    delta = val_changes['new_files']
+                                    delta_str = f"+{delta}" if delta >= 0 else str(delta)
+                                    print(f"\n📂 Validation dataset changed for {size_key}: {delta_str} files (GT dir: {val_changes['new_gt_count']}, loaded: {val_changes['current_loaded']})")
                                     print(f"   🔄 Reloading {size_key} validation dataset...")
-                                    
+
                                     if hasattr(val_ds, 'reload_files'):
                                         reload_result = val_ds.reload_files()
                                         if reload_result['success']:
@@ -1252,7 +1377,7 @@ class VSRTrainer:
                                             dataset_info['val'][size_key]['count'] = reload_result['files_after']
                                             if hasattr(self, 'train_logger') and self.train_logger:
                                                 self.train_logger.log_event(
-                                                    f"Reloaded {size_key} validation: +{reload_result['new_files_loaded']} files"
+                                                    f"Reloaded {size_key} validation: {reload_result['files_before']} → {reload_result['files_after']} files"
                                                 )
                                         else:
                                             print(f"   ❌ Reload failed: {reload_result.get('error', 'Unknown error')}")
@@ -1285,9 +1410,11 @@ class VSRTrainer:
                         }
                         
                         if val_changes['has_new']:
-                            print(f"\n📂 New validation files detected for {size_key}: +{val_changes['new_files']} files")
+                            delta = val_changes['new_files']
+                            delta_str = f"+{delta}" if delta >= 0 else str(delta)
+                            print(f"\n📂 Validation dataset changed for {size_key}: {delta_str} files (GT dir: {val_changes['new_gt_count']}, loaded: {val_changes['current_loaded']})")
                             print(f"   🔄 Reloading validation dataset...")
-                            
+
                             if hasattr(val_ds, 'reload_files'):
                                 reload_result = val_ds.reload_files()
                                 if reload_result['success']:
@@ -1295,7 +1422,7 @@ class VSRTrainer:
                                     dataset_info['val'][size_key]['count'] = reload_result['files_after']
                                     if hasattr(self, 'train_logger') and self.train_logger:
                                         self.train_logger.log_event(
-                                            f"Reloaded validation: +{reload_result['new_files_loaded']} files"
+                                            f"Reloaded validation: {reload_result['files_before']} → {reload_result['files_after']} files"
                                         )
                                 else:
                                     print(f"   ❌ Reload failed: {reload_result.get('error', 'Unknown error')}")
@@ -1572,59 +1699,7 @@ class VSRTrainer:
         
         print(f"📸 Validation snapshot saved: {filename}")
         return state
-    
-    def _apply_config_changes(self):
-        """Apply runtime config changes to live systems"""
-        if self.runtime_config is None:
-            return
-        
-        # Update Adaptive System
-        new_threshold = self.runtime_config.get('plateau_safety_threshold')
-        if new_threshold is not None and new_threshold != self.adaptive_system.plateau_safety_threshold:
-            old = self.adaptive_system.plateau_safety_threshold
-            self.adaptive_system.plateau_safety_threshold = new_threshold
-            print(f"⚙️  Config Update: plateau_safety_threshold {old} → {new_threshold}")
-            self.tb_logger.log_config_change(self.global_step, 'plateau_safety_threshold', old, new_threshold)
-        
-        new_patience = self.runtime_config.get('plateau_patience')
-        if new_patience is not None and new_patience != self.adaptive_system.plateau_patience:
-            old = self.adaptive_system.plateau_patience
-            self.adaptive_system.plateau_patience = new_patience
-            print(f"⚙️  Config Update: plateau_patience {old} → {new_patience}")
-            self.tb_logger.log_config_change(self.global_step, 'plateau_patience', old, new_patience)
-        
-        new_cooldown = self.runtime_config.get('cooldown_duration')
-        if new_cooldown is not None and new_cooldown != self.adaptive_system.cooldown_duration:
-            old = self.adaptive_system.cooldown_duration
-            self.adaptive_system.cooldown_duration = new_cooldown
-            print(f"⚙️  Config Update: cooldown_duration {old} → {new_cooldown}")
-            self.tb_logger.log_config_change(self.global_step, 'cooldown_duration', old, new_cooldown)
-        
-        # Update LR Scheduler
-        new_max_lr = self.runtime_config.get('max_lr')
-        if new_max_lr is not None and hasattr(self.lr_scheduler, 'max_lr'):
-            if new_max_lr != self.lr_scheduler.max_lr:
-                old = self.lr_scheduler.max_lr
-                self.lr_scheduler.max_lr = new_max_lr
-                print(f"⚙️  Config Update: max_lr {old:.2e} → {new_max_lr:.2e}")
-                self.tb_logger.log_config_change(self.global_step, 'max_lr', old, new_max_lr)
-        
-        new_min_lr = self.runtime_config.get('min_lr')
-        if new_min_lr is not None and hasattr(self.lr_scheduler, 'min_lr'):
-            if new_min_lr != self.lr_scheduler.min_lr:
-                old = self.lr_scheduler.min_lr
-                self.lr_scheduler.min_lr = new_min_lr
-                print(f"⚙️  Config Update: min_lr {old:.2e} → {new_min_lr:.2e}")
-                self.tb_logger.log_config_change(self.global_step, 'min_lr', old, new_min_lr)
-        
-        # Update gradient clipping
-        new_grad_clip = self.runtime_config.get('initial_grad_clip')
-        if new_grad_clip is not None and new_grad_clip != self.adaptive_system.clip_value:
-            old = self.adaptive_system.clip_value
-            self.adaptive_system.clip_value = new_grad_clip
-            print(f"⚙️  Config Update: initial_grad_clip {old:.2f} → {new_grad_clip:.2f}")
-            self.tb_logger.log_config_change(self.global_step, 'initial_grad_clip', old, new_grad_clip)
-    
+
     def run(self):
         """
         Main training loop

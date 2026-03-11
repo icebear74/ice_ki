@@ -3212,24 +3212,23 @@
     "min_sharpness": 30.0,
     "blur_threshold": 100.0,
     "min_variety_std": 8.0,
-    "lr_degrade_prob": 0.6,
+    "lr_degrade_prob": 0.5,
     "lr_dark_boost": true,
     "lr_dark_threshold": 60.0,
-    "lr_dark_boost_prob": 0.7,
+    "lr_dark_boost_prob": 0.65,
     "lr_jpeg_quality_range": [
-      65,
-      85
+      78,
+      92
     ],
     "lr_noise_sigma": [
-      0.3,
-      1.5
+      0.5,
+      2.0
     ],
     "lr_blur_sigma": [
-      0.2,
-      0.6
+      0.1,
+      0.4
     ],
-    "lr_max_stages": 2,
-    "lr_stage_prob": 0.4
+    "lr_stage_prob": 0.25
   },
   "workers": 8,
   "batch_size": 4,

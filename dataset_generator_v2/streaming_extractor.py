@@ -833,34 +833,45 @@ def _sample_degrade_params(
         * ``jpeg_quality``  – JPEG quality integer 1-100 (stage 3).
     """
     # Determine effective probability, optionally boosted for dark scenes.
-    base_prob: float = float(degrade_cfg.get("lr_degrade_prob", 0.6))
+    base_prob: float = float(degrade_cfg.get("lr_degrade_prob", 0.50))
     prob = base_prob
     if degrade_cfg.get("lr_dark_boost", True) and center_frame is not None:
         dark_threshold: float = float(degrade_cfg.get("lr_dark_threshold", 60.0))
         if float(np.mean(center_frame)) < dark_threshold:
-            prob = float(degrade_cfg.get("lr_dark_boost_prob", 0.8))
+            prob = float(degrade_cfg.get("lr_dark_boost_prob", 0.65))
 
     if random.random() >= prob:
         return None  # this scene will not be degraded
 
-    # Select which stages are active (same for the whole scene).
-    max_stages: int = int(degrade_cfg.get("lr_max_stages", 2))
-    stage_prob: float = float(degrade_cfg.get("lr_stage_prob", 0.4))
-    stages = [1, 2, 3]
-    random.shuffle(stages)
-    active_stages = [stages[0]]
-    for s in stages[1:max_stages]:
-        if random.random() < stage_prob:
-            active_stages.append(s)
+    # ── Stage selection — DVD/MPEG-2 realistic ────────────────────────────
+    # Stage 3 (JPEG) is ALWAYS the primary degradation: it directly simulates
+    # MPEG-2 blocking and ringing artefacts present on every compressed DVD.
+    #
+    # Stage 1 (noise) is an *optional* secondary that simulates film grain
+    # which survives MPEG-2 at lower bitrates (25 % chance by default).
+    #
+    # Stage 2 (blur) is intentionally excluded: the 3× INTER_AREA downscale
+    # already reproduces the softness of DVD resolution; real MPEG-2 encoding
+    # does not add Gaussian blur on top of the resolution loss.
+    #
+    # Maximum 2 active stages (JPEG + optional noise).
+    stage_prob: float = float(degrade_cfg.get("lr_stage_prob", 0.25))
+    active_stages = [3]                        # JPEG always
+    if random.random() < stage_prob:
+        active_stages.append(1)                # subtle noise — optional
 
     # Sample scalar parameters once — all frames will use these exact values.
-    noise_range  = _degrade_range(degrade_cfg.get("lr_noise_sigma"),       [1.0, 4.0])
+    # Ranges reflect the real DVD bitrate spectrum:
+    #   • JPEG 78–92: cheap/heavily compressed discs (78) to premium releases (92)
+    #   • noise σ 0.5–2.0: film grain that survived MPEG-2 at lower bitrates
+    #   • blur σ kept in config for backward-compat but never activated above
+    noise_range  = _degrade_range(degrade_cfg.get("lr_noise_sigma"),        [0.5, 2.0])
     noise_sigma: float = random.uniform(float(noise_range[0]), float(noise_range[1]))
 
-    blur_range   = _degrade_range(degrade_cfg.get("lr_blur_sigma"),        [0.3, 1.0])
+    blur_range   = _degrade_range(degrade_cfg.get("lr_blur_sigma"),         [0.1, 0.4])
     blur_sigma: float = random.uniform(float(blur_range[0]), float(blur_range[1]))
 
-    jpeg_range   = _degrade_range(degrade_cfg.get("lr_jpeg_quality_range"), [55, 75])
+    jpeg_range   = _degrade_range(degrade_cfg.get("lr_jpeg_quality_range"), [78, 92])
     jpeg_quality: int = random.randint(int(jpeg_range[0]), int(jpeg_range[1]))
 
     return {
@@ -965,17 +976,22 @@ def degrade_lr_frame(
     lr_dark_threshold       float  Mean brightness 0-255 below which dark boost
                                    applies (default 60).
     lr_dark_boost_prob      float  Probability used instead of lr_degrade_prob
-                                   when the scene is dark (default 0.8).
-    lr_max_stages           int    Maximum number of degradation stages applied
-                                   per activation (1–3, default 2).
-    lr_stage_prob           float  Probability that each additional stage beyond
-                                   the first is included (default 0.4).
-    lr_jpeg_quality_range   [int, int]  Min/max JPEG quality for round-trip
-                                   (default [55, 75]).
-    lr_noise_sigma          [float, float]  Min/max Gaussian noise std-dev added
-                                   per-channel (default [0.5, 2.5]).
-    lr_blur_sigma           [float, float]  Min/max Gaussian blur σ (default
-                                   [0.2, 0.7]).  σ < 0.3 is effectively no-op.
+                                   when the scene is dark (default 0.65).
+    lr_stage_prob           float  Probability that film-grain noise (stage 1)
+                                   is added on top of the mandatory JPEG stage
+                                   (default 0.25).  Stage 2 (blur) is never
+                                   activated — the 3× downscale handles
+                                   softening; MPEG-2 does not add blur.
+    lr_jpeg_quality_range   [int, int]  Min/max JPEG quality for the mandatory
+                                   JPEG round-trip (default [78, 92]).
+                                   Covers cheap discs (78) to premium releases
+                                   (92); maps to real DVD MPEG-2 bitrates.
+    lr_noise_sigma          [float, float]  Min/max Gaussian noise std-dev for
+                                   the optional film-grain stage (default
+                                   [0.5, 2.0]).
+    lr_blur_sigma           [float, float]  Kept for config backward-compat;
+                                   not used (blur stage excluded, default
+                                   [0.1, 0.4]).
 
     Returns:
         Degraded (or original) frame as uint8 numpy array.

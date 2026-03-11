@@ -67,8 +67,19 @@ TEST_CONFIGS = {
     'precision': ['float16', 'float32']
 }
 
-# Accumulation steps to reach effective batch size of 8
-ACCUMULATION_MAP = {1: 8, 2: 4}
+# Accumulation steps matching ADAPTIVE_BATCH_CONFIG in config.active.py:
+#   '540'    (540×540):  BS=2 → accum=3 (eff=6),  BS=1 → accum=4 (eff=4)
+#   '720_169'(720×405):  BS=2 → accum=4 (eff=8),  BS=1 → accum=4 (eff=4)
+#   '720'    (720×720):  BS=1 → accum=4 (eff=4),  BS=2 → OOM (skip)
+# Key: (batch_size, gt_size) → accum_steps
+ACCUMULATION_MAP = {
+    (1, (540, 540)):   4,
+    (2, (540, 540)):   3,
+    (1, (720, 405)):   4,
+    (2, (720, 405)):   4,
+    (1, (720, 720)):   4,
+    (2, (720, 720)):   None,  # OOM – skip
+}
 
 # Dataset path from generator_config.json
 DATASET_PATH = "/mnt/data/training/datasetNeu/master"
@@ -134,7 +145,26 @@ def create_dummy_batch(frames, batch_size, lr_size, gt_size, precision):
 def test_config(frames, batch_size, n_blocks, n_feats, gt_size, precision, logger):
     """Test a single configuration."""
     lr_size = get_lr_size(gt_size)
-    accumulation = ACCUMULATION_MAP[batch_size]
+    accumulation = ACCUMULATION_MAP.get((batch_size, gt_size))
+    
+    # Skip configurations known to be OOM (e.g. BS=2 for 720×720)
+    if accumulation is None:
+        config_name = f"{frames}f | B{batch_size}×A? | {n_blocks}b | {n_feats}f | {gt_size[0]}×{gt_size[1]} | {precision.upper()}"
+        logger.info(f"\nSkipping (expected OOM): {config_name}")
+        return {
+            'success': False,
+            'error': 'Skipped – known OOM for this batch_size/gt_size combination',
+            'config_name': config_name,
+            'frames': frames,
+            'batch_size': batch_size,
+            'accumulation': 0,
+            'n_blocks': n_blocks,
+            'n_feats': n_feats,
+            'gt_size': gt_size,
+            'precision': precision,
+            'vram_gb': 0.0,
+            'time_per_iter': 0.0,
+        }
     
     config_name = f"{frames}f | B{batch_size}×A{accumulation} | {n_blocks}b | {n_feats}f | {gt_size[0]}×{gt_size[1]} | {precision.upper()}"
     

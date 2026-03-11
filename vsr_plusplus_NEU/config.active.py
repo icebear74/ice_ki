@@ -30,17 +30,42 @@ N_BLOCKS = 28
 
 
 # ============================================================================
-# TRAINING BATCH PARAMETERS (Optimized for 7-Frame Model)
+# ADAPTIVE BATCH CONFIGURATION (Per-Size — einzige Wahrheitsquelle!)
 # ============================================================================
+# Diese Werte werden DIREKT im Training verwendet — kein dynamisches Ermitteln,
+# keine Runtime-Überschreibung.  Basierend auf gemessenen VRAM-Werten
+# (7f | 28b | 72f | FP32 - aktive Modellkonfiguration).
+#
+# 720_169 (720×405) - Vollbilder 16:9:
+#   BS=2, A=4 → eff. Batch=8 | VRAM: ~5.14 GB ✅
+#
+# 540 (540×540) - Crops aus 1080p:
+#   BS=2, A=3 → eff. Batch=6 | VRAM: ~5.15 GB ✅
+#
+# 720 (720×720) - 4K Crops (VRAM-kritisch!):
+#   BS=1, A=4 → eff. Batch=4 | VRAM: ~6.14 GB ✅  (BS=2 = OOM!)
+#
+# WICHTIG: Für jede neue size_key hier einen Eintrag anlegen!
+# Training bricht mit klarem Fehler ab, wenn ein size_key fehlt.
 
-# Batch size per iteration
-# Keep at 1 for safety with 7-frame model (VRAM tested: ~3.77 GB @ batch=1)
-BATCH_SIZE = 1
+ADAPTIVE_BATCH_CONFIG = {
+    '720_169': {'batch': 2, 'accum': 4},   # eff=8 | ~5.14 GB | Vollbilder 16:9
+    '540':     {'batch': 2, 'accum': 3},   # eff=6 | ~5.15 GB | 1080p Crops
+    '720':     {'batch': 1, 'accum': 4},   # eff=4 | ~6.14 GB | 4K Crops (BS=1 pflicht!)
+}
 
-# Gradient accumulation steps
-# Effective batch = BATCH_SIZE * ACCUMULATION_STEPS = 1 * 6 = 6
-# This provides stable gradients without excessive VRAM usage
-ACCUMULATION_STEPS = 6
+
+# ============================================================================
+# TRAINING BATCH PARAMETERS (Fallback für single-size Modus)
+# ============================================================================
+# Diese Werte werden NUR im single-size Fallback-Pfad genutzt.
+# Im Multi-Size-Training (Normalfall) gelten ausschließlich ADAPTIVE_BATCH_CONFIG.
+
+# Batch size per iteration (single-size fallback — entspricht 720_169)
+BATCH_SIZE = 2
+
+# Gradient accumulation steps (single-size fallback — entspricht 720_169)
+ACCUMULATION_STEPS = 4
 
 
 # ============================================================================
@@ -120,16 +145,13 @@ PIN_MEMORY = True
 # ============================================================================
 
 # Dataset root directory - base directory for all datasets
-# This matches runtime_config.json "data.root"
 DATASET_ROOT = "/mnt/data/training/datasetNeu"
 
-# Default dataset name (category) - used if runtime_config.json not found
+# Dataset name (category)
 # Options: 'master', 'universal', 'space', 'toon' (lowercase)
 DEFAULT_DATASET_NAME = "master"
 
-# For backward compatibility - will be overridden by runtime_config.json
-# New structure: DATASET_ROOT/dataset_name/patches/{size_key}/GT
-# Old structure (deprecated): DATASET_ROOT/Master/MasterModel/Learn/Patches/GT
+# Derived convenience path
 DATA_ROOT = f"{DATASET_ROOT}/{DEFAULT_DATASET_NAME}"
 
 
@@ -157,6 +179,11 @@ INITIAL_GRAD_CLIP = 1.5
 # Disabled to save VRAM and improve training speed.
 USE_AMP = False
 
+# Enable gradient checkpointing (activation recomputation).
+# Reduces activation memory by ~40% at the cost of ~10-15% compute overhead.
+# Set to False to disable (higher VRAM usage, slightly faster training).
+USE_CHECKPOINTING = True
+
 
 # ============================================================================
 # HELPER FUNCTION
@@ -175,6 +202,7 @@ def get_config():
         # Batch
         'BATCH_SIZE': BATCH_SIZE,
         'ACCUMULATION_STEPS': ACCUMULATION_STEPS,
+        'ADAPTIVE_BATCH_CONFIG': ADAPTIVE_BATCH_CONFIG,
         
         # Learning rate
         'LR_EXPONENT': LR_EXPONENT,
@@ -203,6 +231,7 @@ def get_config():
         # Paths
         'DATA_ROOT': DATA_ROOT,
         'DATASET_ROOT': DATASET_ROOT,
+        'DEFAULT_DATASET_NAME': DEFAULT_DATASET_NAME,
         
         # Adaptive system
         'ADAPTIVE_LOSS_WEIGHTS': ADAPTIVE_LOSS_WEIGHTS,
@@ -212,6 +241,7 @@ def get_config():
     
     # Add AMP setting (always include so training code can rely on its presence)
     config['USE_AMP'] = USE_AMP
+    config['USE_CHECKPOINTING'] = USE_CHECKPOINTING
     
     return config
 
@@ -226,11 +256,14 @@ def print_config():
     print(f"  Features (n_feats):     {N_FEATS}")
     print(f"  Blocks (n_blocks):      {N_BLOCKS}")
     
-    print("\nBATCH SETTINGS (VRAM-Safe):")
-    print(f"  Batch Size:             {BATCH_SIZE}")
-    print(f"  Accumulation Steps:     {ACCUMULATION_STEPS}")
-    print(f"  Effective Batch Size:   {BATCH_SIZE * ACCUMULATION_STEPS}")
-    print(f"  Estimated VRAM:         ~2.2 GB @ batch=1 (with gradient checkpointing)")
+    print("\nBATCH SETTINGS (Per-Size Optimiert):")
+    print(f"  Standard Batch Size:    {BATCH_SIZE}")
+    print(f"  Standard Accum Steps:   {ACCUMULATION_STEPS}")
+    print(f"  Effektive Batch Size:   {BATCH_SIZE * ACCUMULATION_STEPS}")
+    print(f"  Per-Size Konfiguration (gemessene VRAM-Werte):")
+    for size_key, cfg in ADAPTIVE_BATCH_CONFIG.items():
+        eff = cfg['batch'] * cfg['accum']
+        print(f"    {size_key:<10}: BS={cfg['batch']}, A={cfg['accum']} → eff={eff}")
     
     print("\nLEARNING RATE:")
     print(f"  Initial LR:             {10**LR_EXPONENT:.2e} (10^{LR_EXPONENT})")
@@ -259,59 +292,24 @@ def print_config():
     print("\nDATASET PATHS:")
     print(f"  Dataset Root:           {DATASET_ROOT}")
     print(f"  Category (dataset_name): {DEFAULT_DATASET_NAME}")
-    
-    # Try to load runtime_config.json to show actual configuration
-    import os
-    import json
-    runtime_config_file = os.path.join(os.path.dirname(__file__), "runtime_config.json")
-    
-    if os.path.exists(runtime_config_file):
-        try:
-            with open(runtime_config_file, 'r') as f:
-                rt_config = json.load(f)
-            dataset_root = rt_config.get('data', {}).get('root', DATASET_ROOT)
-            dataset_name = rt_config.get('data', {}).get('dataset_name', DEFAULT_DATASET_NAME)
-            
-            print(f"\n  ✓ runtime_config.json found:")
-            print(f"    Root:                 {dataset_root}")
-            print(f"    Dataset Name:         {dataset_name}")
-            
-            # Show expected structure for each size_key
-            size_dist = rt_config.get('size_distribution', {})
-            enabled_sizes = [k for k, v in size_dist.items() if v > 0]
-            
-            if enabled_sizes:
-                print(f"\n  Expected Structure (NEW - size-specific):")
-                for size_key in enabled_sizes:
-                    print(f"    Training {size_key}:")
-                    print(f"      {dataset_root}/{dataset_name}/patches/{size_key}/GT/")
-                    print(f"      {dataset_root}/{dataset_name}/patches/{size_key}/LR_7frames/")
-                
-                # Show validation structure
-                val_sizes = rt_config.get('validation', {}).get('sizes', enabled_sizes)
-                if val_sizes:
-                    print(f"\n    Validation:")
-                    for size_key in val_sizes:
-                        print(f"      {dataset_root}/{dataset_name}/val/{size_key}/GT/")
-                        print(f"      (LR auto-found in patches/{size_key}/LR_7frames/)")
-        except Exception as e:
-            print(f"\n  ⚠ Could not parse runtime_config.json: {e}")
-            print(f"  Using default paths (backward compatible)")
-    else:
-        print(f"\n  ⚠ runtime_config.json not found")
-        print(f"  Expected at: {runtime_config_file}")
-        print(f"  Using default single-size structure:")
-        print(f"    {DATA_ROOT}/patches/540/GT/")
-        print(f"    {DATA_ROOT}/patches/540/LR_7frames/")
-    
+    print(f"  Expected structure:")
+    for size_key in ADAPTIVE_BATCH_CONFIG:
+        print(f"    Training {size_key}:")
+        print(f"      {DATASET_ROOT}/{DEFAULT_DATASET_NAME}/patches/{size_key}/GT/")
+        print(f"      {DATASET_ROOT}/{DEFAULT_DATASET_NAME}/patches/{size_key}/LR_7frames/")
+    print(f"    Validation:")
+    for size_key in ADAPTIVE_BATCH_CONFIG:
+        print(f"      {DATASET_ROOT}/{DEFAULT_DATASET_NAME}/val/{size_key}/GT/")
+
     print("\nADAPTIVE SYSTEM:")
     print(f"  Adaptive Loss Weights:  {ADAPTIVE_LOSS_WEIGHTS}")
     print(f"  Adaptive Grad Clip:     {ADAPTIVE_GRAD_CLIP}")
     print(f"  Initial Grad Clip:      {INITIAL_GRAD_CLIP}")
-    
+
     print("\nPERFORMANCE:")
     print(f"  Mixed Precision (AMP):  {USE_AMP}")
-    
+    print(f"  Gradient Checkpointing: {USE_CHECKPOINTING}")
+
     print("\n" + "="*80)
     print("CONFIGURATION NOTES:")
     print("  - 7-frame model with 72 features and 26 blocks")
@@ -320,10 +318,9 @@ def print_config():
     print("  - Size-specific directories: patches/{size_key}/ and val/{size_key}/")
     print("  - Validation LR files auto-found in patches/{size_key}/LR_7frames/")
     print("  - VGG perceptual loss enabled for quality")
-    print("  - Gradient accumulation for effective batch size 6")
+    print("  - Gradient accumulation for per-size optimized effective batch sizes")
     print("="*80 + "\n")
 
 
 if __name__ == '__main__':
-    # If run directly, print the configuration
     print_config()

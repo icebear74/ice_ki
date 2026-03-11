@@ -71,9 +71,9 @@ DEFAULT_CONFIG = {
     "training": {
         "effective_batch_size": 6,
         "adaptive_batch": {
-            "540": {"batch": 1, "accum": 6},
-            "720_169": {"batch": 1, "accum": 6},
-            "720": {"batch": 1, "accum": 4}
+            "540":     {"batch": 2, "accum": 3},   # eff=6 | ~5.15 GB
+            "720_169": {"batch": 2, "accum": 4},   # eff=8 | ~5.14 GB
+            "720":     {"batch": 1, "accum": 4}    # eff=4 | ~6.14 GB (BS=1 pflicht!)
         }
     },
     "validation": {
