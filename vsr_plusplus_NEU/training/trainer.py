@@ -272,17 +272,23 @@ class VSRTrainer:
             scheduler = self.data_strategy_scheduler
             sampler = getattr(self.train_loader, 'sampler', None)
 
+            # Build crop file count map so Phase 2 is only entered once enough
+            # crop files actually exist on disk (independent of step number).
+            _crop_counts = self._get_crop_file_counts()
+
             if sampler is not None and hasattr(sampler, 'set_distribution'):
                 dist = scheduler.get_distribution(
                     self.global_step,
-                    available_sizes=sampler.active_sizes
+                    available_sizes=sampler.active_sizes,
+                    crop_file_counts=_crop_counts
                 )
                 sampler.set_distribution(dist)
 
             # Log phase transitions
             scheduler.check_phase_transition(
                 self.global_step,
-                log_fn=self.train_logger.log_event
+                log_fn=self.train_logger.log_event,
+                crop_file_counts=_crop_counts
             )
         # ── End graduated data strategy ──────────────────────────────────────
         
@@ -442,9 +448,12 @@ class VSRTrainer:
                 # Phase 1/2: override adaptive weight with the scheduled ramp.
                 # Phase 3: get_perceptual_weight returns None, so the
                 # AdaptiveSystem's dynamic weight is used unchanged.
+                # crop_file_counts is passed so Phase 2 stays locked while
+                # crops don't exist yet (see DataStrategyScheduler.can_introduce_crops).
                 if self.data_strategy_scheduler is not None:
                     scheduled_perceptual_w = self.data_strategy_scheduler.get_perceptual_weight(
-                        self.global_step
+                        self.global_step,
+                        crop_file_counts=self._get_crop_file_counts()
                     )
                     if scheduled_perceptual_w is not None:
                         perceptual_w = scheduled_perceptual_w
@@ -508,16 +517,16 @@ class VSRTrainer:
                     current_lr = self.lr_scheduler.get_current_lr()
                     lr_phase = self.lr_scheduler.get_current_phase()
                 
-                # Update plateau tracker (only meaningful after BOTH warmup phases):
-                # 1. LR Warmup (~2000 Steps) AND
-                # 2. DataStrategy Phase 1 (WARMUP_END = 15000 Steps)
+                # Update plateau tracker.
+                # Only block during the LR warmup ramp (~1000 steps).
+                # The DataStrategy Phase-1 duration (WARMUP_END) is intentionally
+                # NOT included here: the plateau tracker must detect stagnation
+                # on full-frame data so that aggressive_mode can fire well before
+                # crops are introduced.  If we also blocked until WARMUP_END the
+                # tracker would stay frozen until step 10 000 and aggressive mode
+                # could never intervene during Phase 1.
                 _lr_warmup = getattr(self.lr_scheduler, 'warmup_steps', 1000)
-                _data_warmup = (
-                    DataStrategyScheduler.WARMUP_END
-                    if self.data_strategy_scheduler is not None
-                    else 0
-                )
-                _effective_warmup = max(_lr_warmup, _data_warmup)
+                _effective_warmup = _lr_warmup
 
                 self.adaptive_system.update_plateau_tracker(
                     loss_dict['total'].item() if torch.is_tensor(loss_dict['total']) else loss_dict['total'],
@@ -608,7 +617,10 @@ class VSRTrainer:
                     # Log data strategy scheduler info to TensorBoard
                     if self.data_strategy_scheduler is not None:
                         sched = self.data_strategy_scheduler
-                        sched_perc_w = sched.get_perceptual_weight(self.global_step)
+                        _crop_counts_tb = self._get_crop_file_counts()
+                        sched_perc_w = sched.get_perceptual_weight(
+                            self.global_step, crop_file_counts=_crop_counts_tb
+                        )
                         # Only log the scheduled weight during Phase 1/2 (not None)
                         if sched_perc_w is not None:
                             self.tb_logger.writer.add_scalar(
@@ -618,7 +630,8 @@ class VSRTrainer:
                         if sampler is not None:
                             dist = sched.get_distribution(
                                 self.global_step,
-                                available_sizes=getattr(sampler, 'active_sizes', None)
+                                available_sizes=getattr(sampler, 'active_sizes', None),
+                                crop_file_counts=_crop_counts_tb
                             )
                             # dist is None in Phase 3 (natural file-count sampling)
                             if dist is not None:
@@ -1091,6 +1104,22 @@ class VSRTrainer:
             smoothed[key] = self.ema_loss[key]
         
         return smoothed
+
+    def _get_crop_file_counts(self):
+        """
+        Return a dict mapping size_key → number of files currently loaded
+        for that size, derived from the train-loader's sampler.
+
+        Used by DataStrategyScheduler.can_introduce_crops() to gate Phase 2
+        on crop files actually existing on disk (not just on step count).
+
+        Returns:
+            dict or None if the sampler does not expose ``datasets_dict``.
+        """
+        sampler = getattr(self.train_loader, 'sampler', None)
+        if sampler is None or not hasattr(sampler, 'datasets_dict'):
+            return None
+        return {sk: len(sampler.datasets_dict[sk]) for sk in sampler.active_sizes}
     
     def _get_adam_momentum(self):
         """

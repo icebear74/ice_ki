@@ -195,9 +195,11 @@ class AdaptiveSystem:
         
         if not self._warmup_complete:
             self._warmup_steps += 1
-            # Wait until step 16000: 15000 full-frame warmup steps + 1000 crop intro steps
-            # to ensure aggressive mode doesn't fire on the natural loss increase from crop introduction
-            if self._warmup_steps >= 16000:
+            # Allow aggressive mode evaluation after 2000 internal steps.
+            # This is decoupled from the DataStrategy Phase-1 duration so the
+            # system can react to L1-plateau stagnation on full-frame data
+            # well before crops are introduced.
+            if self._warmup_steps >= 2000:
                 self._warmup_complete = True
             # During warmup, don't trigger aggressive mode
             return sharpness_ratio
@@ -219,18 +221,30 @@ class AdaptiveSystem:
             # Start cooldown
             self.is_in_cooldown = True
             self.cooldown_steps = self.cooldown_duration
-            # Smooth boost with momentum - but respect minimum guards
-            target_grad = 0.30
-            target_l1 = 0.55
+            # Boost gradient and perceptual strongly to break L1-dominance and
+            # force the model to learn sharpness/detail instead of copying LR.
+            # grad=0.40 + ms=0.15 + perc=0.15 = 0.70 → l1=0.30 (well above 0.10 floor).
+            # If these targets are ever changed, ensure their sum stays < 0.90
+            # so that l1_weight remains positive after the floor clamp below.
+            target_grad = 0.40
             target_ms = 0.15
+            target_perc = 0.15
+            assert target_grad + target_ms + target_perc < 1.0, (
+                f"Aggressive-mode loss targets sum to "
+                f"{target_grad + target_ms + target_perc:.2f} >= 1.0; "
+                "l1_weight would be zero or negative."
+            )
+            target_l1 = max(0.1, 1.0 - target_grad - target_ms - target_perc)
             self.grad_weight = self._apply_momentum(self.grad_weight, target_grad)
             self.l1_weight = self._apply_momentum(self.l1_weight, target_l1)
             self.ms_weight = self._apply_momentum(self.ms_weight, target_ms)
-            
+            self.perceptual_weight = self._apply_momentum(self.perceptual_weight, target_perc)
+
             # Apply minimum guards even in aggressive mode
             self.ms_weight = max(0.05, self.ms_weight)
             self.grad_weight = max(0.05, self.grad_weight)
-            self.l1_weight = min(0.9, 1.0 - self.ms_weight - self.grad_weight)
+            self.perceptual_weight = max(0.05, self.perceptual_weight)
+            self.l1_weight = min(0.9, 1.0 - self.ms_weight - self.grad_weight - self.perceptual_weight)
         
         return sharpness_ratio
     
