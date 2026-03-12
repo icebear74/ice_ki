@@ -84,6 +84,12 @@ class VSRTrainer:
         # UI state
         self.paused = False
         self.do_manual_val = False
+
+        # Crop-wait state: training is blocked when step >= WARMUP_END but
+        # not enough crop GT images exist yet.  Checked every 5 minutes.
+        self.waiting_for_crops = False
+        self._crop_wait_next_check = 0.0   # monotonic timestamp of next auto-rescan
+        self._crop_wait_current_count = 0  # last known combined 540+720 count
         
         # Pending JSON save tracking (save after validation + N steps)
         self.pending_json_save_step = None
@@ -272,17 +278,23 @@ class VSRTrainer:
             scheduler = self.data_strategy_scheduler
             sampler = getattr(self.train_loader, 'sampler', None)
 
+            # Build crop file count map so Phase 2 is only entered once enough
+            # crop files actually exist on disk (independent of step number).
+            _crop_counts = self._get_crop_file_counts()
+
             if sampler is not None and hasattr(sampler, 'set_distribution'):
                 dist = scheduler.get_distribution(
                     self.global_step,
-                    available_sizes=sampler.active_sizes
+                    available_sizes=sampler.active_sizes,
+                    crop_file_counts=_crop_counts
                 )
                 sampler.set_distribution(dist)
 
             # Log phase transitions
             scheduler.check_phase_transition(
                 self.global_step,
-                log_fn=self.train_logger.log_event
+                log_fn=self.train_logger.log_event,
+                crop_file_counts=_crop_counts
             )
         # ── End graduated data strategy ──────────────────────────────────────
         
@@ -318,6 +330,61 @@ class VSRTrainer:
                 self._update_gui(epoch, {}, 0.1, steps_per_epoch, current_epoch_step, paused=True)
                 time.sleep(0.5)
                 self._check_keyboard_input(epoch, steps_per_epoch, current_epoch_step)
+
+            # ── Crop availability guard ──────────────────────────────────────
+            # When we have reached WARMUP_END the system wants to introduce
+            # 540/720 crops.  Block here until at least MIN_CROP_FILES_TRAINING
+            # combined crop GT images are available.  Rescans every 5 minutes;
+            # the user can also trigger an immediate re-check from the WebGUI.
+            if (self.data_strategy_scheduler is not None
+                    and self.global_step >= DataStrategyScheduler.WARMUP_END):
+                # Fast path: check in-memory counts first (no I/O).
+                if not self._check_crop_readiness(force_rescan=False):
+                    # Trigger an immediate rescan before entering the wait loop.
+                    self._check_crop_readiness(force_rescan=True)
+
+                if self.waiting_for_crops:
+                    needed = DataStrategyScheduler.MIN_CROP_FILES_TRAINING
+                    self.train_logger.log_event(
+                        f"⏳ Crop-Wait: Nur {self._crop_wait_current_count:,}/{needed:,} "
+                        f"Crop-Bilder vorhanden. Training pausiert."
+                    )
+                    # Schedule the first periodic rescan 5 minutes from now.
+                    self._crop_wait_next_check = time.time() + 300.0
+
+                while self.waiting_for_crops:
+                    now = time.time()
+
+                    # Periodic auto-rescan every 5 minutes.
+                    if now >= self._crop_wait_next_check:
+                        self._check_crop_readiness(force_rescan=True)
+                        if not self.waiting_for_crops:
+                            break  # Enough crops found – resume training.
+                        needed = DataStrategyScheduler.MIN_CROP_FILES_TRAINING
+                        self.train_logger.log_event(
+                            f"⏳ Crop-Wait: {self._crop_wait_current_count:,}/{needed:,} "
+                            f"vorhanden. Nächste Prüfung in 5 Minuten."
+                        )
+                        self._crop_wait_next_check = time.time() + 300.0
+
+                    secs_until = max(0, int(self._crop_wait_next_check - time.time()))
+                    needed = DataStrategyScheduler.MIN_CROP_FILES_TRAINING
+                    self.web_monitor.data_store.update_all_metrics(
+                        crop_wait_active=True,
+                        crop_wait_current_count=self._crop_wait_current_count,
+                        crop_wait_needed_count=needed,
+                        crop_wait_next_check_secs=secs_until,
+                        training_paused=True,
+                        training_active=False,
+                    )
+                    self._update_gui(epoch, {}, 0.1, steps_per_epoch, current_epoch_step, paused=True)
+                    time.sleep(0.5)
+                    self._check_keyboard_input(epoch, steps_per_epoch, current_epoch_step)
+
+                # Clear crop-wait banner once resolved.
+                if not self.waiting_for_crops:
+                    self.web_monitor.data_store.update_all_metrics(crop_wait_active=False)
+            # ── End crop availability guard ──────────────────────────────────
             
             # Check keyboard input
             self._check_keyboard_input(epoch, steps_per_epoch, current_epoch_step)
@@ -442,9 +509,12 @@ class VSRTrainer:
                 # Phase 1/2: override adaptive weight with the scheduled ramp.
                 # Phase 3: get_perceptual_weight returns None, so the
                 # AdaptiveSystem's dynamic weight is used unchanged.
+                # crop_file_counts is passed so Phase 2 stays locked while
+                # crops don't exist yet (see DataStrategyScheduler.can_introduce_crops).
                 if self.data_strategy_scheduler is not None:
                     scheduled_perceptual_w = self.data_strategy_scheduler.get_perceptual_weight(
-                        self.global_step
+                        self.global_step,
+                        crop_file_counts=self._get_crop_file_counts()
                     )
                     if scheduled_perceptual_w is not None:
                         perceptual_w = scheduled_perceptual_w
@@ -508,16 +578,16 @@ class VSRTrainer:
                     current_lr = self.lr_scheduler.get_current_lr()
                     lr_phase = self.lr_scheduler.get_current_phase()
                 
-                # Update plateau tracker (only meaningful after BOTH warmup phases):
-                # 1. LR Warmup (~2000 Steps) AND
-                # 2. DataStrategy Phase 1 (WARMUP_END = 15000 Steps)
+                # Update plateau tracker.
+                # Only block during the LR warmup ramp (~1000 steps).
+                # The DataStrategy Phase-1 duration (WARMUP_END) is intentionally
+                # NOT included here: the plateau tracker must detect stagnation
+                # on full-frame data so that aggressive_mode can fire well before
+                # crops are introduced.  If we also blocked until WARMUP_END the
+                # tracker would stay frozen until step 10 000 and aggressive mode
+                # could never intervene during Phase 1.
                 _lr_warmup = getattr(self.lr_scheduler, 'warmup_steps', 1000)
-                _data_warmup = (
-                    DataStrategyScheduler.WARMUP_END
-                    if self.data_strategy_scheduler is not None
-                    else 0
-                )
-                _effective_warmup = max(_lr_warmup, _data_warmup)
+                _effective_warmup = _lr_warmup
 
                 self.adaptive_system.update_plateau_tracker(
                     loss_dict['total'].item() if torch.is_tensor(loss_dict['total']) else loss_dict['total'],
@@ -608,7 +678,10 @@ class VSRTrainer:
                     # Log data strategy scheduler info to TensorBoard
                     if self.data_strategy_scheduler is not None:
                         sched = self.data_strategy_scheduler
-                        sched_perc_w = sched.get_perceptual_weight(self.global_step)
+                        _crop_counts_tb = self._get_crop_file_counts()
+                        sched_perc_w = sched.get_perceptual_weight(
+                            self.global_step, crop_file_counts=_crop_counts_tb
+                        )
                         # Only log the scheduled weight during Phase 1/2 (not None)
                         if sched_perc_w is not None:
                             self.tb_logger.writer.add_scalar(
@@ -618,7 +691,8 @@ class VSRTrainer:
                         if sampler is not None:
                             dist = sched.get_distribution(
                                 self.global_step,
-                                available_sizes=getattr(sampler, 'active_sizes', None)
+                                available_sizes=getattr(sampler, 'active_sizes', None),
+                                crop_file_counts=_crop_counts_tb
                             )
                             # dist is None in Phase 3 (natural file-count sampling)
                             if dist is not None:
@@ -1029,10 +1103,18 @@ class VSRTrainer:
                 # Batch-Konfiguration mit gemessenen VRAM-Werten
                 adaptive_batch_config=self._build_ui_batch_config(),
                 
+                # Crop-wait status (system-level pause waiting for crop images)
+                crop_wait_active=self.waiting_for_crops,
+                crop_wait_current_count=self._crop_wait_current_count,
+                crop_wait_needed_count=DataStrategyScheduler.MIN_CROP_FILES_TRAINING
+                    if self.data_strategy_scheduler is not None else 0,
+                crop_wait_next_check_secs=max(0, int(self._crop_wait_next_check - time.time()))
+                    if self.waiting_for_crops else 0,
+
                 # Status
-                training_active=not paused,
+                training_active=not (paused or self.waiting_for_crops),
                 validation_running=False,
-                training_paused=paused
+                training_paused=paused or self.waiting_for_crops
             )
         except Exception as e:
             # Log error but don't crash training
@@ -1091,6 +1173,64 @@ class VSRTrainer:
             smoothed[key] = self.ema_loss[key]
         
         return smoothed
+
+    def _get_crop_file_counts(self):
+        """
+        Return a dict mapping size_key → number of files currently loaded
+        for that size, derived from the train-loader's sampler.
+
+        Used by DataStrategyScheduler.can_introduce_crops() to gate Phase 2
+        on crop files actually existing on disk (not just on step count).
+
+        Returns:
+            dict or None if the sampler does not expose ``datasets_dict``.
+        """
+        sampler = getattr(self.train_loader, 'sampler', None)
+        if sampler is None or not hasattr(sampler, 'datasets_dict'):
+            return None
+        return {sk: len(sampler.datasets_dict[sk]) for sk in sampler.active_sizes}
+
+    def _check_crop_readiness(self, force_rescan=False):
+        """Check whether enough crop GT images exist to proceed with Phase 2.
+
+        Optionally triggers a full filesystem rescan before the check.
+        Updates ``self.waiting_for_crops`` and ``self._crop_wait_current_count``.
+
+        Args:
+            force_rescan: When True, call ``_check_dataset_files()`` first so
+                          newly generated crop files are detected.
+
+        Returns:
+            True  – enough crops available (or crop check doesn't apply).
+            False – still waiting; ``self.waiting_for_crops`` is set to True.
+        """
+        if self.data_strategy_scheduler is None:
+            self.waiting_for_crops = False
+            return True
+
+        # The crop-wait guard only activates at/past WARMUP_END.
+        if self.global_step < DataStrategyScheduler.WARMUP_END:
+            self.waiting_for_crops = False
+            return True
+
+        if force_rescan:
+            self._check_dataset_files()
+
+        crop_counts = self._get_crop_file_counts()
+        total = DataStrategyScheduler.get_crop_total_count(crop_counts)
+        self._crop_wait_current_count = total
+
+        if DataStrategyScheduler.has_enough_training_crops(crop_counts):
+            if self.waiting_for_crops:
+                self.train_logger.log_event(
+                    f"✅ Crop-Wait beendet: {total:,} Crop-Bilder vorhanden "
+                    f"(Mindest: {DataStrategyScheduler.MIN_CROP_FILES_TRAINING:,})"
+                )
+            self.waiting_for_crops = False
+            return True
+        else:
+            self.waiting_for_crops = True
+            return False
     
     def _get_adam_momentum(self):
         """
@@ -1152,10 +1292,30 @@ class VSRTrainer:
             # Trigger immediate checkpoint save
             self._save_checkpoint()
         elif web_cmd == 'toggle_pause':
-            # Toggle pause state
-            self.paused = not self.paused
-            status = "paused" if self.paused else "resumed"
-            self.train_logger.log_event(f"Training {status} at step {self.global_step}")
+            if self.waiting_for_crops:
+                # User pressed "Resume" while the crop-wait guard is active.
+                # Do an immediate rescan; only lift the wait if crops are ready.
+                ready = self._check_crop_readiness(force_rescan=True)
+                if ready:
+                    self.paused = False
+                    self.train_logger.log_event(
+                        f"✅ Crop-Wait beendet nach manueller Prüfung: "
+                        f"{self._crop_wait_current_count:,} Bilder verfügbar."
+                    )
+                else:
+                    needed = DataStrategyScheduler.MIN_CROP_FILES_TRAINING
+                    self.train_logger.log_event(
+                        f"⚠️ Fortsetzen nicht möglich: nur "
+                        f"{self._crop_wait_current_count:,}/{needed:,} "
+                        f"Crop-Bilder vorhanden."
+                    )
+            else:
+                self.paused = not self.paused
+                status = "paused" if self.paused else "resumed"
+                self.train_logger.log_event(f"Training {status} at step {self.global_step}")
+        elif web_cmd == 'check_crops_now':
+            # Trigger an immediate crop rescan (fired by "Jetzt prüfen" in WebGUI).
+            self._crop_wait_next_check = 0.0  # causes the loop to rescan on next iteration
         elif web_cmd == 'run_video_test':
             # Trigger video inference
             self._run_video_inference()

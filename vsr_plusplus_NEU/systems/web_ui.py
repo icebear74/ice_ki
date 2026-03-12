@@ -161,6 +161,12 @@ class CompleteTrainingDataStore:
             'training_active': True,
             'validation_running': False,
             'training_paused': False,
+
+            # Crop-wait status (system pause waiting for enough crop GT images)
+            'crop_wait_active': False,
+            'crop_wait_current_count': 0,
+            'crop_wait_needed_count': 10000,
+            'crop_wait_next_check_secs': 0,
             
             # Netzwerk
             'local_ip_address': detect_local_ip(),
@@ -269,6 +275,9 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 current_paused = current_state.get('training_paused', False)
                 # Return the expected new state (will be toggled by trainer)
                 response = {'success': True, 'message': 'Pause toggle queued', 'paused': not current_paused}
+            elif action_type == 'check_crops_now':
+                self.action_queue.put('check_crops_now')
+                response = {'success': True, 'message': 'Crop-Check angefordert'}
             elif action_type == 'run_video_test':
                 self.action_queue.put('run_video_test')
                 response = {'success': True, 'message': 'Video test run queued'}
@@ -871,6 +880,72 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 position: static;
             }
         }
+        .status-crop-wait { background: #b8860b; color: #fff; }
+
+        /* Crop-wait banner */
+        .crop-wait-banner {
+            display: none;
+            background: linear-gradient(135deg, #2a1f00, #3d2e00);
+            border: 2px solid var(--accent-orange);
+            border-radius: 8px;
+            padding: 18px 22px;
+            margin: 0 0 16px 0;
+        }
+        .crop-wait-banner.active { display: block; }
+        .crop-wait-title {
+            font-size: 1.15em;
+            font-weight: 700;
+            color: var(--accent-orange);
+            margin-bottom: 10px;
+        }
+        .crop-wait-progress-wrap {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 10px;
+        }
+        .crop-wait-bar-outer {
+            flex: 1;
+            height: 14px;
+            background: #1a1a1a;
+            border-radius: 7px;
+            overflow: hidden;
+        }
+        .crop-wait-bar-inner {
+            height: 100%;
+            background: linear-gradient(90deg, var(--accent-orange), #ffcc44);
+            border-radius: 7px;
+            transition: width 0.4s ease;
+        }
+        .crop-wait-count {
+            white-space: nowrap;
+            font-size: 0.95em;
+            color: var(--text-primary);
+            min-width: 130px;
+        }
+        .crop-wait-footer {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+        .crop-wait-timer {
+            font-size: 0.85em;
+            color: var(--text-secondary);
+        }
+        .btn-check-now {
+            background: var(--accent-orange);
+            color: #000;
+            border: none;
+            border-radius: 5px;
+            padding: 6px 16px;
+            font-size: 0.9em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: opacity 0.2s;
+        }
+        .btn-check-now:hover { opacity: 0.85; }
     </style>
 </head>
 <body>
@@ -912,7 +987,22 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 <div class="header-iter-item">📐 Größe: <span id="hdrSizeKey">–</span></div>
             </div>
         </div>
-        
+
+        <!-- Crop-wait banner: shown when training is blocked waiting for crop images -->
+        <div id="cropWaitBanner" class="crop-wait-banner">
+            <div class="crop-wait-title">⏳ Warte auf Crop-Bilder (540/720)</div>
+            <div class="crop-wait-progress-wrap">
+                <div class="crop-wait-bar-outer">
+                    <div id="cropWaitBarInner" class="crop-wait-bar-inner" style="width:0%"></div>
+                </div>
+                <span id="cropWaitCount" class="crop-wait-count">0 / 10,000</span>
+            </div>
+            <div class="crop-wait-footer">
+                <span id="cropWaitTimer" class="crop-wait-timer">Nächste Prüfung: –</span>
+                <button class="btn-check-now" onclick="checkCropsNow()">🔄 Jetzt prüfen</button>
+            </div>
+        </div>
+
         <!-- TRAINING SCORE - Prominent Performance Indicator -->
         <div id="trainingScoreCard" class="training-score-card excellent" title="Gesamtbewertung des Trainingsfortschritts basierend auf Verlust-Trend, Qualität und Stabilität">
             <div class="score-title">⭐ TRAININGS-BEWERTUNG</div>
@@ -1593,12 +1683,31 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             if (data.validation_running) {
                 badge.textContent = 'Validierung';
                 badge.className = 'status-indicator status-validating';
+            } else if (data.crop_wait_active) {
+                badge.textContent = 'Warte auf Crops';
+                badge.className = 'status-indicator status-crop-wait';
             } else if (data.training_paused) {
                 badge.textContent = 'Pausiert';
                 badge.className = 'status-indicator status-paused';
             } else if (data.training_active) {
                 badge.textContent = 'Training';
                 badge.className = 'status-indicator status-training';
+            }
+
+            // Crop-wait banner
+            updateCropWaitBanner(data);
+
+            // Pause button text
+            const pauseBtn = document.getElementById('pauseBtn');
+            if (data.crop_wait_active) {
+                pauseBtn.textContent = '🔄 Crops prüfen & fortsetzen';
+                pauseBtn.className = 'btn btn-primary';
+            } else if (data.training_paused) {
+                pauseBtn.textContent = '▶️ Training fortsetzen';
+                pauseBtn.className = 'btn btn-success';
+            } else {
+                pauseBtn.textContent = '⏸️ Training pausieren';
+                pauseBtn.className = 'btn btn-primary';
             }
             
             // Layer activities with grouping
@@ -2271,6 +2380,44 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             });
         }
         
+        function updateCropWaitBanner(data) {
+            const banner = document.getElementById('cropWaitBanner');
+            if (!banner) return;
+            const active = data.crop_wait_active || false;
+            if (active) {
+                banner.classList.add('active');
+            } else {
+                banner.classList.remove('active');
+                return;
+            }
+            const current = data.crop_wait_current_count || 0;
+            const needed  = data.crop_wait_needed_count  || 10000;
+            const pct = needed > 0 ? Math.min(100, (current / needed) * 100) : 0;
+            document.getElementById('cropWaitBarInner').style.width = pct.toFixed(1) + '%';
+            document.getElementById('cropWaitCount').textContent =
+                current.toLocaleString('de-DE') + ' / ' + needed.toLocaleString('de-DE');
+            const secs = data.crop_wait_next_check_secs || 0;
+            const mins = Math.floor(secs / 60);
+            const s    = secs % 60;
+            document.getElementById('cropWaitTimer').textContent =
+                'Nächste Prüfung in: ' + mins + ':' + String(s).padStart(2, '0') + ' min';
+        }
+
+        function checkCropsNow() {
+            fetch('/monitoring/command', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: 'check_crops_now' })
+            })
+            .then(response => response.json())
+            .then(result => {
+                if (!result.success) {
+                    console.warn('check_crops_now failed:', result.message);
+                }
+            })
+            .catch(error => console.error('Error requesting crop check:', error));
+        }
+
         function togglePause() {
             // Send command to pause/resume training
             fetch('/monitoring/command', {
