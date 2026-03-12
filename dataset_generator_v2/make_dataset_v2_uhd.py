@@ -37,7 +37,8 @@ from utils.format_definitions import (
 from streaming_extractor import (
     build_assignments_per_category,
     extract_and_save_streaming_distributed,
-    extract_and_save_streaming_dual,
+    STREAM_4K_WIDTH,
+    STREAM_4K_HEIGHT,
     create_patch_pair,
     is_black_frame as _streaming_is_black_frame,
     is_hdr_transfer,
@@ -1255,7 +1256,7 @@ class DatasetGeneratorV2UHD:
             # Throttled redraw (respects self.update_interval)
             self._update_terminal_ui()
 
-        streaming_result = extract_and_save_streaming_dual(
+        streaming_result = extract_and_save_streaming_distributed(
             video_path=video_path,
             assignments=assignments,
             n_frames=n_frames,
@@ -1271,6 +1272,8 @@ class DatasetGeneratorV2UHD:
             is_hdr=is_hdr,
             degrade_cfg=self.config.get('quality'),
             center_snap_seconds=self.config.get('processing', {}).get('center_snap_seconds', 1.0),
+            stream_width=STREAM_4K_WIDTH,
+            stream_height=STREAM_4K_HEIGHT,
         )
 
         # Merge final result into patches_created.
