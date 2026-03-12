@@ -43,7 +43,7 @@ from typing import Dict, List, Optional, Any
 logger = logging.getLogger(__name__)
 
 PLAN_VERSION = "3.2"
-PHASE_NAME = "phase_1"
+_DEFAULT_PHASE_NAME = "phase_1"
 
 
 class GenerationPlan:
@@ -53,6 +53,11 @@ class GenerationPlan:
     Tracks which videos have been successfully processed using their file
     *paths* as identifiers.  This is more robust than an integer index
     because it survives changes to video ordering or the video list itself.
+
+    The plan file stores video entries under the phase key named by
+    ``current_phase``.  When an existing plan is loaded the phase key is
+    read from the file so that plans with any phase name (e.g. ``phase_169``)
+    are handled correctly.
 
     Usage
     -----
@@ -78,6 +83,8 @@ class GenerationPlan:
     def __init__(self, plan_file: str) -> None:
         self.plan_file = plan_file
         self.plan: Dict[str, Any] = self._load_or_create()
+        # Effective phase key — read from the plan so we handle any phase name.
+        self._phase_name: str = self.plan.get("current_phase", _DEFAULT_PHASE_NAME)
         # Fast path → entry lookup (rebuilt from plan on every load/save)
         self._index: Dict[str, Dict[str, Any]] = {}
         self._rebuild_index()
@@ -95,7 +102,8 @@ class GenerationPlan:
                 # Accept any 3.x plan (path-indexed)
                 if isinstance(data, dict) and str(data.get("version", "")).split(".")[0] == "3":
                     logger.info(
-                        f"Loaded generation plan ({data.get('version')}) "
+                        f"Loaded generation plan (version {data.get('version')}, "
+                        f"phase {data.get('current_phase')!r}) "
                         f"from {self.plan_file}"
                     )
                     return data
@@ -106,8 +114,8 @@ class GenerationPlan:
         return {
             "version": PLAN_VERSION,
             "plan_created_at": datetime.now().isoformat(),
-            "current_phase": PHASE_NAME,
-            PHASE_NAME: {
+            "current_phase": _DEFAULT_PHASE_NAME,
+            _DEFAULT_PHASE_NAME: {
                 "description": "Dataset generation",
                 "status": "in_progress",
                 "videos": [],
@@ -117,7 +125,7 @@ class GenerationPlan:
     def _rebuild_index(self) -> None:
         """Rebuild the in-memory path → entry lookup from the stored list."""
         self._index = {}
-        phase = self.plan.get(PHASE_NAME, {})
+        phase = self.plan.get(self._phase_name, {})
         for entry in phase.get("videos", []):
             path = entry.get("path")
             if path:
@@ -125,7 +133,7 @@ class GenerationPlan:
 
     def _phase(self) -> Dict[str, Any]:
         return self.plan.setdefault(
-            PHASE_NAME,
+            self._phase_name,
             {
                 "description": "Dataset generation",
                 "status": "in_progress",

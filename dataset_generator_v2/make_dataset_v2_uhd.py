@@ -131,10 +131,13 @@ class DatasetGeneratorV2UHD:
         self.tracker.update_progress(total_videos=len(self.videos))
         self.tracker.initialize_categories(self.category_targets)
 
-        # Initialize generation plan (path-based resume — more robust than index)
-        plan_file = os.path.join(
-            os.path.dirname(self.status_file),
-            ".generation_plan.json",
+        # Initialize generation plan (path-based resume — more robust than index).
+        # Priority order for the plan file:
+        #   1. Explicit "plan_file" key in base_settings
+        #   2. Default: {root_path}/extraction_plan.json
+        plan_file = self.settings.get(
+            "plan_file",
+            os.path.join(self.base_dir, "extraction_plan.json"),
         )
         self.plan = GenerationPlan(plan_file)
         
