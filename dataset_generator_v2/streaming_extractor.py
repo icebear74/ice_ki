@@ -2032,6 +2032,33 @@ def extract_and_save_streaming_dual(
         )
 
     # ------------------------------------------------------------------
+    # Fallback: no 4K-format assignments -> single 1080p pass is sufficient
+    # ------------------------------------------------------------------
+    _assigned_formats = {fmt for _, _, fmt in assignments}
+    if not (_assigned_formats & FORMATS_4K_STREAM):
+        _log(
+            f"No 4K formats in assignments (only {sorted(_assigned_formats)}), "
+            f"falling back to 1080p streaming pass"
+        )
+        return extract_and_save_streaming_distributed(
+            video_path=video_path,
+            assignments=assignments,
+            n_frames=n_frames,
+            format_config=format_config,
+            base_dir=base_dir,
+            fps=fps,
+            logger=logger,
+            is_interesting_fn=is_interesting_fn,
+            is_black_frame_fn=is_black_frame_fn,
+            progress_fn=progress_fn,
+            use_cuda=use_cuda,
+            nice_level=nice_level,
+            is_hdr=is_hdr,
+            degrade_cfg=degrade_cfg,
+            center_snap_seconds=center_snap_seconds,
+        )
+
+    # ------------------------------------------------------------------
     # Common setup (mirrors extract_and_save_streaming_distributed)
     # ------------------------------------------------------------------
     _black_fn: Callable[[np.ndarray], bool] = (
@@ -2186,13 +2213,15 @@ def extract_and_save_streaming_dual(
         f"({_select_pct:.1f}% of {last_needed + 1} decoded) "
         f"in {len(_select_ranges)} ranges"
     )
+    _active_4k_fmts = sorted({fmt for _, _, fmt in sorted_asgn if fmt in FORMATS_4K_STREAM})
+    _active_hd_fmts = sorted({fmt for _, _, fmt in sorted_asgn if fmt in FORMATS_HD_STREAM})
     _log(
         f"  4K buffer ({STREAM_4K_WIDTH}x{STREAM_4K_HEIGHT}) "
-        f"-> formats {sorted(FORMATS_4K_STREAM)}"
+        f"-> formats {_active_4k_fmts}"
     )
     _log(
         f"  HD buffer (Python LANCZOS4 {STREAM_4K_WIDTH}x{STREAM_4K_HEIGHT}"
-        f" -> {STREAM_HD_WIDTH}x{STREAM_HD_HEIGHT}) -> formats {sorted(FORMATS_HD_STREAM)}"
+        f" -> {STREAM_HD_WIDTH}x{STREAM_HD_HEIGHT}) -> formats {_active_hd_fmts}"
     )
 
     # ------------------------------------------------------------------
