@@ -1220,22 +1220,37 @@ def save_patch_pair(
         return False, None, None
 
 
-def is_black_frame(gt: np.ndarray, brightness_threshold: float = 20.0) -> bool:
-    """Return True when *gt* is predominantly black/dark.
+def is_black_frame(gt: np.ndarray, unique_ratio_threshold: float = 0.07) -> bool:
+    """Return True when *gt* is a near-uniform frame (black, white, solid colour).
 
-    A mean pixel brightness below *brightness_threshold* (0–255) is used as
-    the criterion.  The default of 20 catches solid-black frames and the
-    typical fade-in/out darkness at video start/end without affecting normal
-    content.
+    Converts the frame to grayscale and counts the number of distinct intensity
+    levels that appear.  When fewer than *unique_ratio_threshold* × 256 distinct
+    levels are present (default → fewer than ~18 out of 256 possible values) the
+    frame is considered non-informative and is skipped.
+
+    This criterion catches solid-black, solid-white, colour-bars, and any
+    near-uniform frame regardless of its average brightness — unlike the
+    previous mean-brightness check which only caught dark frames.
+
+    Performance note: ``np.bincount`` on the uint8 grayscale ravel is O(n) and
+    avoids the O(n log n) sort inside ``np.unique``, keeping the hot-path cheap.
+    The grayscale approximation uses a simple channel mean rather than the
+    luminosity formula (0.299R + 0.587G + 0.114B) because the uniqueness count
+    is insensitive to the exact weighting — any near-uniform frame will show
+    very few distinct values regardless of the conversion method used.
 
     Args:
-        gt:                   Center-frame array (BGR numpy array).
-        brightness_threshold: Maximum mean brightness to consider black (default 20).
+        gt:                     Center-frame BGR numpy array.
+        unique_ratio_threshold: Fraction of 256 grey levels that must be present
+                                for the frame to be kept (default 0.07 → at least
+                                ~18 distinct grey levels required).
 
     Returns:
-        ``True`` when the patch is too dark to be useful.
+        ``True`` when the frame has too few unique intensity levels to be useful.
     """
-    return float(np.mean(gt)) < brightness_threshold
+    gray = np.mean(gt, axis=2).astype(np.uint8)
+    unique_count = int(np.count_nonzero(np.bincount(gray.ravel(), minlength=256)))
+    return unique_count < unique_ratio_threshold * 256
 
 
 def _get_video_dimensions(video_path: str) -> Tuple[int, int]:
@@ -1356,11 +1371,11 @@ def extract_and_save_streaming_distributed(
                              returns ``True`` the entire video position (all its
                              category/format pairs) is skipped without saving.
                              Defaults to :func:`is_black_frame` when ``None`` is
-                             passed (i.e. black frames are always filtered unless you
+                             passed (i.e. near-uniform frames are always filtered unless you
                              explicitly pass ``lambda _: False``).
-                             Note: the ``is_black_frame`` default filter (mean < 20)
-                             partially overlaps with the variety-std check inside
-                             ``create_patch_pair`` (std < 15).  Set
+                             Note: the ``is_black_frame`` default filter (unique grey
+                             levels < 7% of 256) partially overlaps with the variety-std
+                             check inside ``create_patch_pair`` (std < 15).  Set
                              ``is_black_frame_fn=lambda _: False`` to disable the
                              pre-filter entirely if you rely solely on the variety
                              check via ``min_variety_std`` in the quality config.
@@ -1488,6 +1503,38 @@ def extract_and_save_streaming_distributed(
         100.0 * len(_all_needed) / (last_needed + 1) if last_needed >= 0 else 100.0
     )
 
+    # --- Seek-mode decision -----------------------------------------------
+    # Streaming decodes every frame up to the last needed one even though the
+    # select filter skips the expensive scale/tonemap stages for most frames.
+    # For sparse assignment sets the raw decode cost dominates.  Seeking to
+    # each cluster of nearby ranges is cheaper when:
+    #
+    #   N_ranges × assumed_GOP_size  <  last_needed_frame
+    #
+    # i.e. the total frames decoded by seeking to each cluster is less than
+    # the total frames decoded by a single streaming pass.
+    # GOP estimate of 150 frames (≈6 s at 24 fps) is conservative for modern
+    # H.265 HDR encodes; the actual value only affects the crossover threshold.
+    _SEEK_GOP_ESTIMATE: int = 150
+    _use_seek_mode: bool = (
+        bool(_select_ranges)
+        and len(_select_ranges) * _SEEK_GOP_ESTIMATE < last_needed + 1
+    )
+    if _use_seek_mode:
+        # Group consecutive ranges into seek clusters so one -ss call covers
+        # several nearby assignments without extra keyframe-seek overhead.
+        _seek_clusters: List[List[Tuple[int, int]]] = []
+        _cur_cl: List[Tuple[int, int]] = [_select_ranges[0]]
+        for _sr in _select_ranges[1:]:
+            if _sr[0] - _cur_cl[-1][1] <= _SEEK_GOP_ESTIMATE:
+                _cur_cl.append(_sr)
+            else:
+                _seek_clusters.append(_cur_cl)
+                _cur_cl = [_sr]
+        _seek_clusters.append(_cur_cl)
+    else:
+        _seek_clusters = []
+
     # --- Pre-compute per-video constants ----------------------------------
     # video_stem and output dir paths are the same for every patch in this
     # video — compute them once to avoid Path() and os.makedirs overhead in
@@ -1558,6 +1605,9 @@ def extract_and_save_streaming_distributed(
     # (unavoidable for H.264/H.265 inter-frame prediction) but bypass the
     # expensive scale/tonemap/zscale stages entirely.
     #
+    # In seek mode this injection is skipped: each cluster subprocess already
+    # starts at the right position, so every decoded frame is a needed one.
+    #
     # Placement depends on the pipeline tier:
     #   CPU path        → select goes at the very start of the filter chain.
     #   Hybrid GPU/CPU  → GPU scale runs first (cheap, already on GPU);
@@ -1565,7 +1615,7 @@ def extract_and_save_streaming_distributed(
     #                     expensive CPU tonemap only runs on needed frames.
     #   Full-GPU        → all stages are on GPU; select is placed after the
     #                     final hwdownload to cut pipe bandwidth.
-    if _select_expr:
+    if _select_expr and not _use_seek_mode:
         if _full_gpu:
             # Full-GPU: insert select right before the final format=bgr24
             # (after hwdownload+scale=iw:ih+format=yuv420p — all GPU work
@@ -1622,11 +1672,15 @@ def extract_and_save_streaming_distributed(
         f"stream={stream_width}×{stream_height}, "
         f"pipeline={pipeline_label}, nice={nice_level}"
     )
+    _mode_label = (
+        f"seek ({len(_seek_clusters)} clusters)"
+        if _use_seek_mode
+        else "stream (select filter)"
+    )
     _log(
         f"🎯 Frame selection: {len(_all_needed)} frames needed "
         f"({_select_pct:.1f}% of {last_needed + 1} decoded) "
-        f"in {len(_select_ranges)} ranges — "
-        f"filter-chain CPU reduced proportionally"
+        f"in {len(_select_ranges)} ranges — mode={_mode_label}"
     )
 
     # Write the filter chain to a temp file so that a long _select_expr
@@ -1691,64 +1745,20 @@ def extract_and_save_streaming_distributed(
             else ["-vsync", "0"]
         )
 
-        cmd = [
-            "ffmpeg",
-            "-threads", "0",
-            "-filter_threads", "0",
-            "-loglevel", "warning",
-            *hw_args,
-            "-probesize", "100M",
-            "-analyzeduration", "100M",
-            "-i", video_path,
-            *_fc_args,
-            "-map", "[vout]",
-            "-f", "rawvideo",
-            "-pix_fmt", "bgr24",
-            *_vsync_args,
-            "pipe:1",
-        ]
-
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        _set_nice(process.pid)
-
-        # Drain stderr in a background thread so the pipe never blocks the writer.
-        # The collected lines are logged if FFmpeg produces no frames (crash/error).
+        # Drain stderr helper: shared by stream mode and each seek-mode cluster.
         def drain_stderr(pipe: "subprocess.IO[bytes]") -> None:
-            for raw in pipe:
-                stderr_lines.append(raw.decode(errors="replace").rstrip())
+            for line in pipe:
+                stderr_lines.append(line.decode(errors="replace").rstrip())
             pipe.close()
 
-        stderr_thread = threading.Thread(
-            target=drain_stderr, args=(process.stderr,), daemon=True
-        )
-        stderr_thread.start()
-        # `selected_idx` tracks our position in `_all_needed`.  FFmpeg (via the
-        # `select` filter) only outputs the frames in that list, in sorted order,
-        # so each pipe read maps directly to `_all_needed[selected_idx]`.
+        # ------------------------------------------------------------------
+        # Inner helper: receive one decoded BGR frame, fill the rolling buffer,
+        # and satisfy any pending assignments whose window is now complete.
+        # Shared by both stream mode and seek mode to avoid code duplication.
+        # ------------------------------------------------------------------
+        def _consume_raw_frame(raw: bytes, actual_frame: int) -> None:
+            nonlocal pending_idx, frames_examined, selected_idx
 
-        while pending_idx < len(pending_centers):
-            raw = process.stdout.read(frame_bytes)
-            if len(raw) < frame_bytes:
-                _log("⚠️  Video stream ended before all selected frames were received")
-                break
-
-            # Start the clock on the very first frame so FFmpeg startup time
-            # (device init, demux, codec open) is excluded from the FPS figure.
-            if _t_start is None:
-                _t_start = time.monotonic()
-
-            # Guard against FFmpeg producing more frames than the select
-            # expression requested (shouldn't happen, but avoids IndexError).
-            if selected_idx >= len(_all_needed):
-                _log("⚠️  FFmpeg produced more frames than selected — stopping")
-                break
-
-            # Map this pipe read to its actual video frame index.
-            actual_frame: int = _all_needed[selected_idx]
             selected_idx += 1
 
             frame = np.frombuffer(raw, dtype=np.uint8).reshape(
@@ -1756,19 +1766,17 @@ def extract_and_save_streaming_distributed(
             ).copy()
             buffer[actual_frame] = frame
 
-            # Evict frames that are no longer needed by any pending assignment.
-            # The earliest window we still need starts at pending_center - half.
+            # Evict frames no longer needed by any pending assignment.
             min_keep = max(0, pending_centers[pending_idx] - half)
             for old_idx in [k for k in buffer if k < min_keep]:
                 del buffer[old_idx]
 
-            # Satisfy pending assignments whose full window is now in the buffer
+            # Satisfy pending assignments whose full window is now in the buffer.
             while pending_idx < len(pending_centers):
                 center = pending_centers[pending_idx]
                 if actual_frame < center + half:
                     break  # Need more frames
 
-                # Build the n_frames window; clamp negative indices to 0
                 window: List[np.ndarray] = []
                 for fi in range(center - half, center + half + 1):
                     frm = buffer.get(max(0, fi))
@@ -1826,26 +1834,170 @@ def extract_and_save_streaming_distributed(
                                 )
 
                     if progress_fn is not None:
-                        # 3rd arg = actual video frame index (same semantics as
-                        # the previous raw_frames_read / current_frame counter —
-                        # monotonically increasing video frame number).
+                        # 3rd arg = actual video frame index (monotonically
+                        # increasing video frame number).
                         progress_fn(frames_examined, dict(patches_created), actual_frame)
 
                 pending_idx += 1
 
-            # Periodic throughput log.
-            # SPS = scene-sets completed per second (assignments processed / s).
-            # sel/s = selected frames per second (frames FFmpeg actually piped).
-            if _t_start is not None and selected_idx % _log_interval == 0:
-                _elapsed = time.monotonic() - _t_start
-                if _elapsed > 0:
-                    _sel_fps = selected_idx / _elapsed
-                    _sps_actual = frames_examined / _elapsed
-                    _log(
-                        f"  📊 sel {selected_idx:>5}/{len(_all_needed)}  "
-                        f"sel/s {_sel_fps:>6.1f}  SPS {_sps_actual:>6.2f}  "
-                        f"(scenes: {frames_examined})"
-                    )
+        # ------------------------------------------------------------------
+        if _use_seek_mode:
+            # --- SEEK MODE ------------------------------------------------
+            # One short FFmpeg subprocess per cluster of nearby ranges.
+            # Each subprocess seeks (accurately, -ss after -i) to the cluster
+            # start and reads exactly the frames in that cluster window.
+            # Avoids decoding the entire video for sparse assignment sets.
+            for _cl_idx, _cluster in enumerate(_seek_clusters):
+                if pending_idx >= len(pending_centers):
+                    break
+
+                _cl_seek_frame = _cluster[0][0]
+                _cl_end_frame  = _cluster[-1][1]
+                _cl_n_read     = _cl_end_frame - _cl_seek_frame + 1
+                _cl_seek_sec   = _cl_seek_frame / fps
+
+                _cl_cmd = [
+                    "ffmpeg",
+                    "-threads", "0",
+                    "-filter_threads", "0",
+                    "-loglevel", "warning",
+                    *hw_args,
+                    "-probesize", "100M",
+                    "-analyzeduration", "100M",
+                    "-i", video_path,
+                    "-ss", f"{_cl_seek_sec:.6f}",   # accurate seek (after -i)
+                    "-frames:v", str(_cl_n_read),
+                    *_fc_args,
+                    "-map", "[vout]",
+                    "-f", "rawvideo",
+                    "-pix_fmt", "bgr24",
+                    *_vsync_args,
+                    "pipe:1",
+                ]
+
+                _cl_proc = subprocess.Popen(
+                    _cl_cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                process = _cl_proc   # expose for finally-block kill on exception
+                _set_nice(_cl_proc.pid)
+
+                _cl_stderr_t = threading.Thread(
+                    target=drain_stderr, args=(_cl_proc.stderr,), daemon=True
+                )
+                _cl_stderr_t.start()
+
+                for _cl_i in range(_cl_n_read):
+                    if pending_idx >= len(pending_centers):
+                        break
+
+                    raw = _cl_proc.stdout.read(frame_bytes)
+                    if len(raw) < frame_bytes:
+                        break  # cluster extends past video end — stop gracefully
+
+                    if _t_start is None:
+                        _t_start = time.monotonic()
+
+                    _consume_raw_frame(raw, _cl_seek_frame + _cl_i)
+
+                    # Periodic throughput log (every _log_interval frames).
+                    if _t_start is not None and selected_idx % _log_interval == 0:
+                        _elapsed = time.monotonic() - _t_start
+                        if _elapsed > 0:
+                            _sel_fps = selected_idx / _elapsed
+                            _sps_actual = frames_examined / _elapsed
+                            _log(
+                                f"  📊 cluster {_cl_idx + 1}/{len(_seek_clusters)}  "
+                                f"sel {selected_idx:>5}/{len(_all_needed)}  "
+                                f"sel/s {_sel_fps:>6.1f}  SPS {_sps_actual:>6.2f}  "
+                                f"(scenes: {frames_examined})"
+                            )
+
+                # Clean up this cluster's process before starting the next.
+                # Keep process pointing to _cl_proc until after successful reap
+                # so the finally block can kill it if an exception interrupts us.
+                try:
+                    _cl_proc.stdout.close()
+                except Exception:
+                    pass
+                try:
+                    _cl_proc.kill()
+                    _cl_proc.wait()
+                except Exception:
+                    pass
+                _cl_stderr_t.join(timeout=2)
+                process = None  # disarm finally block only after successful reap
+
+        else:
+            # --- STREAM MODE (single FFmpeg pass with select filter) ------
+            cmd = [
+                "ffmpeg",
+                "-threads", "0",
+                "-filter_threads", "0",
+                "-loglevel", "warning",
+                *hw_args,
+                "-probesize", "100M",
+                "-analyzeduration", "100M",
+                "-i", video_path,
+                *_fc_args,
+                "-map", "[vout]",
+                "-f", "rawvideo",
+                "-pix_fmt", "bgr24",
+                *_vsync_args,
+                "pipe:1",
+            ]
+
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            _set_nice(process.pid)
+
+            stderr_thread = threading.Thread(
+                target=drain_stderr, args=(process.stderr,), daemon=True
+            )
+            stderr_thread.start()
+            # `selected_idx` tracks our position in `_all_needed`.  FFmpeg (via the
+            # `select` filter) only outputs the frames in that list, in sorted order,
+            # so each pipe read maps directly to `_all_needed[selected_idx]`.
+
+            while pending_idx < len(pending_centers):
+                raw = process.stdout.read(frame_bytes)
+                if len(raw) < frame_bytes:
+                    _log("⚠️  Video stream ended before all selected frames were received")
+                    break
+
+                # Start the clock on the very first frame so FFmpeg startup time
+                # (device init, demux, codec open) is excluded from the FPS figure.
+                if _t_start is None:
+                    _t_start = time.monotonic()
+
+                # Guard against FFmpeg producing more frames than the select
+                # expression requested (shouldn't happen, but avoids IndexError).
+                if selected_idx >= len(_all_needed):
+                    _log("⚠️  FFmpeg produced more frames than selected — stopping")
+                    break
+
+                # Map this pipe read to its actual video frame index.
+                actual_frame: int = _all_needed[selected_idx]
+
+                _consume_raw_frame(raw, actual_frame)
+
+                # Periodic throughput log.
+                # SPS = scene-sets completed per second (assignments processed / s).
+                # sel/s = selected frames per second (frames FFmpeg actually piped).
+                if _t_start is not None and selected_idx % _log_interval == 0:
+                    _elapsed = time.monotonic() - _t_start
+                    if _elapsed > 0:
+                        _sel_fps = selected_idx / _elapsed
+                        _sps_actual = frames_examined / _elapsed
+                        _log(
+                            f"  📊 sel {selected_idx:>5}/{len(_all_needed)}  "
+                            f"sel/s {_sel_fps:>6.1f}  SPS {_sps_actual:>6.2f}  "
+                            f"(scenes: {frames_examined})"
+                        )
 
     finally:
         if process is not None:
