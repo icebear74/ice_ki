@@ -61,15 +61,17 @@ class ProgressTracker:
     def save(self):
         """Save current status to file."""
         self.status["last_update"] = datetime.now().isoformat()
-        os.makedirs(os.path.dirname(self.status_file), exist_ok=True)
-        with open(self.status_file, 'w') as f:
+        status_dir = os.path.dirname(self.status_file)
+        if status_dir:
+            os.makedirs(status_dir, exist_ok=True)
+        # Write atomically via a temp file so a crash never leaves a partial JSON.
+        # No fsync: on ZFS (and most modern filesystems) writes are transactionally
+        # safe without an explicit fsync, and skipping it keeps writes async so
+        # they flow through the ZFS ARC / page-cache write-back path.
+        tmp = self.status_file + ".tmp"
+        with open(tmp, 'w') as f:
             json.dump(self.status, f, indent=2)
-            # Flush to ensure write completes
-            f.flush()
-            try:
-                os.fsync(f.fileno())
-            except:
-                pass  # Some systems don't support fsync
+        os.replace(tmp, self.status_file)
     
     def initialize_categories(self, category_targets: Dict[str, int]):
         """Initialize category stats from config."""

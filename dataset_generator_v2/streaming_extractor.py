@@ -1525,7 +1525,7 @@ def extract_and_save_streaming_distributed(
                     logger.warning(f"[write_worker] Failed to write patch: {_exc!r}")
             _write_queue.task_done()
 
-    _n_write_threads = 2
+    _n_write_threads = 4
     _write_threads = [
         threading.Thread(target=_write_worker, daemon=True)
         for _ in range(_n_write_threads)
@@ -2119,7 +2119,7 @@ def extract_and_save_streaming_dual(
                     logger.warning(f"[write_worker] Failed to write patch: {_exc!r}")
             _write_queue.task_done()
 
-    _n_write_threads = 2
+    _n_write_threads = 4
     _write_threads = [
         threading.Thread(target=_write_worker, daemon=True)
         for _ in range(_n_write_threads)
