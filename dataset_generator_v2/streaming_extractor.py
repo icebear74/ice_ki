@@ -1091,7 +1091,7 @@ def create_patch_pair(
 
         # Variety check: silently discard near-uniform GT (black/white/flat)
         gray = cv2.cvtColor(gt, cv2.COLOR_BGR2GRAY)
-        if float(gray.std()) < 15.0:
+        if float(gray.std()) < 7.0:
             return None, None
 
         # LR: INTER_AREA = DVD-realistic quality, then optional degradation.
@@ -1147,7 +1147,7 @@ def create_patch_pair(
 
         # Variety check: silently discard near-uniform GT (black/white/flat)
         gray = cv2.cvtColor(gt, cv2.COLOR_BGR2GRAY)
-        if float(gray.std()) < 15.0:
+        if float(gray.std()) < 7.0:
             return None, None
 
         center_raw = frames[center_idx]
