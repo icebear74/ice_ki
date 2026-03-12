@@ -63,6 +63,11 @@ class DataStrategyScheduler:
     # Phase 2 sampling is allowed to include that size.
     MIN_CROP_FILES = 50
 
+    # Total combined GT images (540 + 720) required before training is
+    # allowed to proceed past the full-frame Phase 1.  Training is paused
+    # automatically and checks every 5 minutes until this is met.
+    MIN_CROP_FILES_TRAINING = 10000
+
     # End-point of the Phase 2 interpolation.
     # This approximates the natural file ratio on disk (50 % 540, 25 % 720,
     # 25 % 720_169).  It is used ONLY during Phase 2; Phase 3 uses None
@@ -117,6 +122,36 @@ class DataStrategyScheduler:
             crop_file_counts.get(sk, 0) >= cls.MIN_CROP_FILES
             for sk in crop_sizes
         )
+
+    @classmethod
+    def get_crop_total_count(cls, crop_file_counts):
+        """Return the combined file count for all crop sizes (540 + 720).
+
+        Args:
+            crop_file_counts: dict mapping size_key → int, or None.
+
+        Returns:
+            int – total number of crop GT images known to be on disk.
+        """
+        if not crop_file_counts:
+            return 0
+        return sum(crop_file_counts.get(sk, 0) for sk in ('540', '720'))
+
+    @classmethod
+    def has_enough_training_crops(cls, crop_file_counts):
+        """Return True when combined 540+720 GT images >= MIN_CROP_FILES_TRAINING.
+
+        This is the *training-pause* guard: training is blocked at WARMUP_END
+        until this stricter threshold is satisfied, ensuring Phase 2 has
+        sufficient crop diversity before it starts.
+
+        Args:
+            crop_file_counts: dict mapping size_key → int, or None.
+
+        Returns:
+            bool
+        """
+        return cls.get_crop_total_count(crop_file_counts) >= cls.MIN_CROP_FILES_TRAINING
 
     # ------------------------------------------------------------------
     # Phase helpers
