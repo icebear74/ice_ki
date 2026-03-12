@@ -2380,6 +2380,44 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             });
         }
         
+        function updateCropWaitBanner(data) {
+            const banner = document.getElementById('cropWaitBanner');
+            if (!banner) return;
+            const active = data.crop_wait_active || false;
+            if (active) {
+                banner.classList.add('active');
+            } else {
+                banner.classList.remove('active');
+                return;
+            }
+            const current = data.crop_wait_current_count || 0;
+            const needed  = data.crop_wait_needed_count  || 10000;
+            const pct = needed > 0 ? Math.min(100, (current / needed) * 100) : 0;
+            document.getElementById('cropWaitBarInner').style.width = pct.toFixed(1) + '%';
+            document.getElementById('cropWaitCount').textContent =
+                current.toLocaleString('de-DE') + ' / ' + needed.toLocaleString('de-DE');
+            const secs = data.crop_wait_next_check_secs || 0;
+            const mins = Math.floor(secs / 60);
+            const s    = secs % 60;
+            document.getElementById('cropWaitTimer').textContent =
+                'Nächste Prüfung in: ' + mins + ':' + String(s).padStart(2, '0') + ' min';
+        }
+
+        function checkCropsNow() {
+            fetch('/monitoring/command', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: 'check_crops_now' })
+            })
+            .then(response => response.json())
+            .then(result => {
+                if (!result.success) {
+                    console.warn('check_crops_now failed:', result.message);
+                }
+            })
+            .catch(error => console.error('Error requesting crop check:', error));
+        }
+
         function togglePause() {
             // Send command to pause/resume training
             fetch('/monitoring/command', {
