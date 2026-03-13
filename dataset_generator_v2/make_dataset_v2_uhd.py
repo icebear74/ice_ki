@@ -37,13 +37,15 @@ from utils.format_definitions import (
 from streaming_extractor import (
     build_assignments_per_category,
     extract_and_save_streaming_distributed,
-    extract_and_save_streaming_dual,
+    STREAM_4K_WIDTH,
+    STREAM_4K_HEIGHT,
     create_patch_pair,
     is_black_frame as _streaming_is_black_frame,
     is_hdr_transfer,
     build_vf_filter,
 )
 from utils.progress_tracker import ProgressTracker
+from generation_plan import GenerationPlan
 from utils.dataset_display import draw_dataset_ui
 from utils.terminal_ui import hide_cursor, show_cursor, clear_screen
 from utils.config_normalizer import normalize_config
@@ -129,6 +131,16 @@ class DatasetGeneratorV2UHD:
         self.tracker = ProgressTracker(self.status_file)
         self.tracker.update_progress(total_videos=len(self.videos))
         self.tracker.initialize_categories(self.category_targets)
+
+        # Initialize generation plan (path-based resume — more robust than index).
+        # Priority order for the plan file:
+        #   1. Explicit "plan_file" key in base_settings
+        #   2. Default: {root_path}/extraction_plan.json
+        plan_file = self.settings.get(
+            "plan_file",
+            os.path.join(self.base_dir, "extraction_plan.json"),
+        )
+        self.plan = GenerationPlan(plan_file)
         
         # Runtime state
         self.workers = self.config.get('workers', 6)
@@ -1244,7 +1256,7 @@ class DatasetGeneratorV2UHD:
             # Throttled redraw (respects self.update_interval)
             self._update_terminal_ui()
 
-        streaming_result = extract_and_save_streaming_dual(
+        streaming_result = extract_and_save_streaming_distributed(
             video_path=video_path,
             assignments=assignments,
             n_frames=n_frames,
@@ -1260,6 +1272,8 @@ class DatasetGeneratorV2UHD:
             is_hdr=is_hdr,
             degrade_cfg=self.config.get('quality'),
             center_snap_seconds=self.config.get('processing', {}).get('center_snap_seconds', 1.0),
+            stream_width=STREAM_4K_WIDTH,
+            stream_height=STREAM_4K_HEIGHT,
         )
 
         # Merge final result into patches_created.
@@ -1920,10 +1934,37 @@ class DatasetGeneratorV2UHD:
                     f"⚡ Forced-frame videos promoted to front of queue: {forced_count} / {len(self.videos)}"
                 )
 
-            # Get resume point
-            start_idx = self.tracker.status['progress']['current_video_index']
+            # Populate the plan with all videos in the (possibly re-sorted)
+            # order.  Videos already tracked — including those marked "done" —
+            # are left untouched so that previous progress is preserved.
+            self.plan.initialize(self.videos)
+            done_count = self.plan.count_done()
+            if done_count > 0:
+                self.logger.info(
+                    f"▶️  Resuming: {done_count}/{self.plan.count_total()} video(s) "
+                    f"already done (skipped via plan)"
+                )
+
+            # Get resume point (index-based, for a fast forward through the list).
+            # When the plan already has done videos, find the index of the first
+            # video that has NOT been done yet — this skips the leading done-prefix
+            # in O(N) rather than re-checking every video from 0 each restart.
+            raw_start_idx = self.tracker.status['progress']['current_video_index']
+            if done_count > 0:
+                # Locate the first video not yet done in the plan.
+                start_idx = 0
+                for _i, _v in enumerate(self.videos):
+                    if not self.plan.is_video_done(_v['path']):
+                        start_idx = _i
+                        break
+                else:
+                    # All videos are done — start past the end to exit immediately.
+                    start_idx = len(self.videos)
+            else:
+                # Index-based resume (no plan progress yet): fast-forward.
+                start_idx = raw_start_idx
             
-            if start_idx > 0:
+            if 0 < start_idx < len(self.videos):
                 self.logger.info(f"Resuming from video {start_idx + 1}/{len(self.videos)}")
             
             # Sequential processing: One video at a time, fully complete before moving to next
@@ -1939,6 +1980,21 @@ class DatasetGeneratorV2UHD:
                 video = self.videos[idx]
                 video_path = video['path']
                 video_name = video.get('name', os.path.basename(video_path))
+
+                # Skip videos already marked done in the generation plan.
+                # This check uses the video's *path* as the identifier which
+                # makes it robust against reordering, additions, or removals
+                # in the video list between runs.
+                if self.plan.is_video_done(video_path):
+                    self.logger.info(
+                        f"\n⏭️  Skipping video {idx + 1}/{len(self.videos)}: "
+                        f"{video_name} (already done)"
+                    )
+                    # Keep the index-based tracker in sync so a fresh restart
+                    # can still fast-forward through the done prefix.
+                    self.tracker.update_progress(current_video_index=idx + 1)
+                    continue
+
                 video_cat_targets = distribution.get(video_path, {})
                 
                 # Calculate total patches for this video (sum across all categories)
@@ -2008,17 +2064,25 @@ class DatasetGeneratorV2UHD:
                             current_video_index=idx + 1,
                             patches_created=0
                         )
+                        # A skipped video won't be retried — treat as done in plan
+                        self.plan.mark_video_done(video_path, {})
                     else:
-                        # Update patches count; advance index only when patches
-                        # were actually created so a failed extraction is retried.
-                        patches_created = stats.get('patches_created', 0)
+                        # process_video() returns {category: count, …}.
+                        # Sum all integer values to get the total patch count.
+                        patches_created = sum(
+                            v for v in stats.values() if isinstance(v, int)
+                        )
                         if patches_created > 0:
                             self.tracker.update_progress(
                                 current_video_index=idx + 1,
                                 patches_created=patches_created
                             )
+                            # Mark as done in the plan so a restart skips it
+                            self.plan.mark_video_done(video_path, stats)
                         else:
                             self.tracker.update_progress(patches_created=0)
+                            # Leave as pending in the plan — will be retried
+                            self.plan.mark_video_pending(video_path)
                             self.logger.warning(
                                 f"⚠️  {video_name}: 0 patches created — "
                                 f"video will be retried on next run"
