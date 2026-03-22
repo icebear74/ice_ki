@@ -285,7 +285,9 @@ async def chat_completion(
     router_result = intent_router.classify(last_message) if intent_router else None
     intent_str = router_result.intent if router_result else "general"
 
-    # 2. Phase 1: no RAG / memory lookup – proceed directly to main LLM
+    # 2. Memory recall – load known facts and inject into system prompt
+    from db.memory import load_memories_for_prompt  # noqa: PLC0415
+    memory_section = load_memories_for_prompt(user_id) if user_id != "default" else ""
 
     # 3. Main LLM response (P100)
     if not llm_manager.is_ready("main"):
@@ -326,14 +328,19 @@ async def chat_completion(
         f"Aktuelle Uhrzeit: {now_str}. "
         f"Begrüße den Benutzer passend zur Tageszeit mit \"{greeting}\"."
     )
+    # Build the system prompt additions: time note + memory section
+    system_additions = time_note
+    if memory_section:
+        system_additions = f"{system_additions}\n\n{memory_section}"
+
     messages = list(request.messages)
     if messages and messages[0].role == "system":
         messages[0] = ChatMessage(
             role="system",
-            content=f"{messages[0].content}\n\n{time_note}",
+            content=f"{messages[0].content}\n\n{system_additions}",
         )
     else:
-        messages.insert(0, ChatMessage(role="system", content=time_note))
+        messages.insert(0, ChatMessage(role="system", content=system_additions))
 
     try:
         assistant_text = llm_manager.chat_completion(
@@ -349,7 +356,12 @@ async def chat_completion(
             content={"error": f"LLM inference failed: {exc}"},
         )
 
-    # 4. Phase 1: no async memory extraction
+    # 4. Async memory extraction (background task, zero user latency)
+    if user_id != "default" and last_message.strip():
+        from db.memory import extract_memories_sync  # noqa: PLC0415
+        background_tasks.add_task(
+            extract_memories_sync, user_id, last_message, llm_manager
+        )
 
     # 5. Log conversation to DB (fire-and-forget)
     background_tasks.add_task(
