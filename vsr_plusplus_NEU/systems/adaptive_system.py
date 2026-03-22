@@ -54,7 +54,7 @@ class AdaptiveSystem:
         self.is_in_cooldown = False
         
         # Gradient clipping
-        self.clip_value = 1.5
+        self.clip_value = 3.0
         self.grad_norms = []
         
         # Sharpness tracking
@@ -493,8 +493,9 @@ class AdaptiveSystem:
         # Update clip value after warmup
         if len(self.grad_norms) >= 100:
             new_clip = np.percentile(self.grad_norms, 95)
-            # Smooth update
-            self.clip_value = 0.9 * self.clip_value + 0.1 * new_clip
+            # Smooth update with minimum floor to prevent feedback-loop collapse
+            MIN_CLIP_VALUE = 0.5
+            self.clip_value = max(MIN_CLIP_VALUE, 0.9 * self.clip_value + 0.1 * new_clip)
         
         # Clip gradients
         torch.nn.utils.clip_grad_norm_(model.parameters(), self.clip_value)

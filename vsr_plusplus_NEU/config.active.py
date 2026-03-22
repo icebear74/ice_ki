@@ -141,16 +141,16 @@ HIST_STEP_EVERY = 500
 
 # Number of batches to keep ready in the raw (disk-loaded) queue.
 # Higher = more RAM used (~5 MB per batch at BS=4), but smoother GPU feeding.
-PREFETCH_BATCHES = 10      # raw_queue capacity  (Stage 1 buffer)
+PREFETCH_BATCHES = 20      # raw_queue capacity  (Stage 1 buffer)
 
 # Parallel disk-loading threads (Stage 1 producers).
-# 1 is usually sufficient on SSD/NVMe; increase to 2 on spinning HDDs.
-PREFETCH_WORKERS = 1       # producer threads
+# 3 threads for parallel loading on SSD/NVMe.
+PREFETCH_WORKERS = 3       # producer threads
 
 # Pinning threads (Stage 2).  Each thread calls .pin_memory() on a batch
 # so the GPU DMA transfer can proceed without involving the CPU.
 # Set to 0 to skip pinning (CPU-only or debugging).
-PREFETCH_PIN_WORKERS = 1   # pinner threads
+PREFETCH_PIN_WORKERS = 2   # pinner threads
 
 
 # ============================================================================
@@ -178,8 +178,8 @@ ADAPTIVE_LOSS_WEIGHTS = True
 # Enable adaptive gradient clipping
 ADAPTIVE_GRAD_CLIP = True
 
-# Initial gradient clip value
-INITIAL_GRAD_CLIP = 1.5
+# Initial gradient clip value (raised from 1.5 to 3.0 to avoid feedback-loop collapse)
+INITIAL_GRAD_CLIP = 3.0
 
 
 # ============================================================================

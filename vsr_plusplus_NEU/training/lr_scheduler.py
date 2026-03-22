@@ -37,6 +37,17 @@ class AdaptiveLRScheduler:
         else:
             self.initial_lr = initial_lr
         
+        # Store per-group LR ratios relative to group 0 so that different
+        # learning rates (e.g. 20× for final fusion, 5× for align/fuse) are
+        # preserved on every scheduler update.
+        base_lr = optimizer.param_groups[0]['lr']
+        if base_lr == 0:
+            raise ValueError(
+                "AdaptiveLRScheduler: param_groups[0]['lr'] must be > 0 "
+                "so that per-group LR ratios can be computed."
+            )
+        self.lr_ratios = [pg['lr'] / base_lr for pg in optimizer.param_groups]
+        
         self.current_phase = 'warmup'
         self.plateau_reductions = 0
         
@@ -67,9 +78,9 @@ class AdaptiveLRScheduler:
             # Reduce LR by ×0.5 (floored at min_lr) and hold for 200 steps
             new_lr = max(old_lr * 0.5, self.min_lr)
             
-            # Apply to optimizer
-            for param_group in self.optimizer.param_groups:
-                param_group['lr'] = new_lr
+            # Apply to optimizer (preserve per-group LR ratios)
+            for i, param_group in enumerate(self.optimizer.param_groups):
+                param_group['lr'] = new_lr * self.lr_ratios[i]
             
             current_lr = new_lr
             
@@ -95,8 +106,8 @@ class AdaptiveLRScheduler:
         # Hold the reduced LR until the hold period expires
         if self.boost_hold_lr is not None:
             if global_step < self.boost_hold_until:
-                for param_group in self.optimizer.param_groups:
-                    param_group['lr'] = self.boost_hold_lr
+                for i, param_group in enumerate(self.optimizer.param_groups):
+                    param_group['lr'] = self.boost_hold_lr * self.lr_ratios[i]
                 return self.boost_hold_lr, 'plateau_hold'
             else:
                 # Hold period expired, resume normal schedule
@@ -118,9 +129,9 @@ class AdaptiveLRScheduler:
             lr = self.min_lr + (self.max_lr - self.min_lr) * 0.5 * (1 + math.cos(math.pi * progress))
             self.current_phase = 'cosine'
         
-        # Update optimizer
-        for param_group in self.optimizer.param_groups:
-            param_group['lr'] = lr
+        # Update optimizer (preserve per-group LR ratios)
+        for i, param_group in enumerate(self.optimizer.param_groups):
+            param_group['lr'] = lr * self.lr_ratios[i]
         
         return lr, self.current_phase
     

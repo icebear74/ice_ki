@@ -303,17 +303,31 @@ def main():
     # Give Final Fusion layer 20x higher learning rate to strongly activate it
     lr = 10 ** config['LR_EXPONENT']
     
-    # Separate Final Fusion parameters from other parameters
-    # 7-frame model uses FusionBlock with conv3x3 and conv1x1
+    # Separate parameters into 3 groups with different learning rates:
+    # - final_fusion_params (20×): all fusion.* (GatedFusionBlock incl. gate)
+    # - align_fuse_params (5×): per-frame alignment + fusion branches
+    # - other_params (1×): everything else
     final_fusion_params = []
+    align_fuse_params = []
     other_params = []
     
     for name, param in model.named_parameters():
-        # Final fusion layer: conv3x3, conv1x1 UND skip (neu in FusionBlock v2)
-        if 'fusion.conv3x3' in name or 'fusion.conv1x1' in name or 'fusion.skip' in name:
+        if name.startswith('fusion.'):
+            # Final GatedFusionBlock — all parameters including gate
             final_fusion_params.append(param)
+        elif any(name.startswith(prefix) for prefix in [
+            'backward_align.', 'forward_align.',
+            'backward_fuse.', 'forward_fuse.'
+        ]):
+            # Per-frame alignment and fusion — moderate boost
+            align_fuse_params.append(param)
         else:
             other_params.append(param)
+    
+    print(f"  Parameter groups:")
+    print(f"    other_params:        {sum(p.numel() for p in other_params)/1e6:.2f}M params  (lr×1)")
+    print(f"    final_fusion_params: {sum(p.numel() for p in final_fusion_params)/1e6:.2f}M params  (lr×20)")
+    print(f"    align_fuse_params:   {sum(p.numel() for p in align_fuse_params)/1e6:.2f}M params  (lr×5)")
     
     # Create parameter groups with different learning rates
     param_groups = [
@@ -324,9 +338,14 @@ def main():
         },
         {
             'params': final_fusion_params,
-            'lr': lr * 20,  # 20x higher for Final Fusion (increased from 10x)
-            'weight_decay': 0.0  # No weight decay for final fusion to maximize learning
-        }
+            'lr': lr * 20,  # 20× for Final GatedFusionBlock (incl. gate)
+            'weight_decay': 0.0  # No weight decay for final fusion
+        },
+        {
+            'params': align_fuse_params,
+            'lr': lr * 5,   # 5× for per-frame alignment + fusion
+            'weight_decay': config['WEIGHT_DECAY']
+        },
     ]
     
     optimizer = optim.AdamW(param_groups)
