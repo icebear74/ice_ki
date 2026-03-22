@@ -91,6 +91,10 @@
     }
     .card button:hover { background: var(--accent-dim); }
 
+    /* .card sets display:flex which has same specificity as .hidden – this rule
+       wins (higher specificity 0,2,0) so hidden cards are always invisible. */
+    .card.hidden { display: none; }
+
     #overlay-error {
       font-size: 0.82rem;
       color: #f87171;
