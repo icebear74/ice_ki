@@ -23,7 +23,6 @@ logger = logging.getLogger(__name__)
 
 # Tables that schema.sql creates – used to decide whether to run it.
 _EXPECTED_TABLES = {
-    "users",
     "user_memory",
     "global_memory",
     "wiki_chunks",
