@@ -1958,4 +1958,10 @@ class VSRTrainer:
             # Restore terminal mode
             self.keyboard.restore_normal_mode()
             self.tb_logger.close()
+            # Stop the web-monitoring HTTP server so its thread doesn't keep
+            # the process alive (or trigger std::terminate during teardown).
+            try:
+                self.web_monitor.terminate()
+            except Exception:
+                pass
 

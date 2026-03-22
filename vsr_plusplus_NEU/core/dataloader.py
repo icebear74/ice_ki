@@ -385,13 +385,16 @@ class MultiSizeDataLoader:
         _SENTINEL = object()  # unique end-of-stream marker
         _use_pin  = self.pin_workers > 0 and torch.cuda.is_available()
 
+        # ---- Stop event: set by consumer to unblock stuck threads ----
+        # Threads must check this flag on every queue.put() so they do not
+        # block forever when the consumer exits early (GeneratorExit or break).
+        _stop = threading.Event()
+
         # ---- Stage 1: raw queue (disk I/O) ---------------------------
         raw_queue: queue.Queue = queue.Queue(maxsize=self.prefetch_count)
         self._raw_queue = raw_queue
 
         # ---- Stage 2: ready queue (pinned) ---------------------------
-        # Small buffer: just enough for the pinner(s) to stay ahead of the
-        # consumer without wasting much memory on extra pinned copies.
         ready_max = max(2, self.pin_workers * 2) if _use_pin else 0
         if _use_pin:
             ready_queue: queue.Queue = queue.Queue(maxsize=ready_max)
@@ -399,6 +402,17 @@ class MultiSizeDataLoader:
             ready_queue = raw_queue   # bypass – ready == raw
         self._ready_queue     = ready_queue
         self._ready_queue_max = ready_max
+
+        # ---- Helper: put with stop-event check -----------------------
+        def _put(q: queue.Queue, item, timeout: float = 0.05):
+            """Put item into q; return False if _stop was set before success."""
+            while not _stop.is_set():
+                try:
+                    q.put(item, timeout=timeout)
+                    return True
+                except queue.Full:
+                    pass
+            return False  # stop signal received, item dropped
 
         # ---- Producer thread(s) (disk → CPU tensor) ------------------
         work_queue: queue.Queue = queue.Queue()
@@ -419,18 +433,21 @@ class MultiSizeDataLoader:
                         finished_producers[0] += 1
                         if finished_producers[0] == self.prefetch_workers:
                             # Last producer finished: emit one sentinel per pinner
-                            # so each pinner thread gets exactly one stop signal.
+                            # (or one directly to ready_queue when no pinners).
                             sentinels = self.pin_workers if _use_pin else 1
                             for _ in range(sentinels):
-                                raw_queue.put(_SENTINEL)
+                                _put(raw_queue, _SENTINEL)
+                    return
+                if _stop.is_set():
                     return
                 size_key, batch_indices = item
                 try:
                     batch = self._load_batch(size_key, batch_indices)
-                    raw_queue.put(batch)
+                    if not _put(raw_queue, batch):
+                        return  # consumer is gone
                 except Exception as exc:
-                    raw_queue.put(exc)
-                    return  # stop this producer on error
+                    _put(raw_queue, exc)
+                    return
 
         producer_threads = [
             threading.Thread(target=producer, daemon=True,
@@ -446,25 +463,32 @@ class MultiSizeDataLoader:
 
             def pinner():
                 while True:
-                    item = raw_queue.get()
+                    try:
+                        item = raw_queue.get(timeout=0.05)
+                    except queue.Empty:
+                        if _stop.is_set():
+                            return
+                        continue
                     if item is _SENTINEL:
                         with finished_pinner_lock:
                             finished_pinners[0] += 1
                             if finished_pinners[0] == self.pin_workers:
-                                ready_queue.put(_SENTINEL)
+                                _put(ready_queue, _SENTINEL)
                         return
                     if isinstance(item, Exception):
-                        ready_queue.put(item)
+                        _put(ready_queue, item)
+                        return
+                    if _stop.is_set():
                         return
                     try:
-                        ready_queue.put({
+                        _put(ready_queue, {
                             'lr':        item['lr'].pin_memory(),
                             'gt':        item['gt'].pin_memory(),
                             'size_key':  item['size_key'],
                             'filenames': item['filenames'],
                         })
                     except Exception as exc:
-                        ready_queue.put(exc)
+                        _put(ready_queue, exc)
                         return
 
             pinner_threads = [
@@ -489,13 +513,28 @@ class MultiSizeDataLoader:
                     raise item
                 yield item
         finally:
+            # Signal all worker threads to stop (handles GeneratorExit, break,
+            # exceptions – any exit path from the consumer).
+            _stop.set()
+
+            # Drain both queues so any thread blocked on put() can unblock,
+            # notice _stop, and exit its loop.
+            for q in ([raw_queue, ready_queue] if _use_pin else [raw_queue]):
+                while True:
+                    try:
+                        q.get_nowait()
+                    except queue.Empty:
+                        break
+
+            # Join with a generous timeout; daemon=True ensures process exit
+            # is not blocked if a thread hangs unexpectedly.
+            for t in producer_threads + pinner_threads:
+                t.join(timeout=5.0)
+
             # Clear queue references so prefetch_stats shows zeros
             self._raw_queue   = None
             self._ready_queue = None
             self._ready_queue_max = 0
-
-        for t in producer_threads + pinner_threads:
-            t.join()
 
     def __len__(self):
         """Total number of batches"""
