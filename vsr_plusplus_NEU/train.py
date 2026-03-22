@@ -76,6 +76,49 @@ _DEFAULT_BATCH_CONFIG = {
 FIXED_BATCH_CONFIG = _DEFAULT_BATCH_CONFIG  # backward-compat alias; prefer batch_config in main()
 
 
+def select_gpu() -> torch.device:
+    """Fragt beim Start, welche GPU verwendet werden soll, wenn mehrere vorhanden sind.
+
+    Returns:
+        torch.device: Ausgewähltes Gerät (z.B. 'cuda:0', 'cuda:1', 'cpu').
+    """
+    if not torch.cuda.is_available():
+        print(f"{C_YELLOW}⚠ Kein CUDA-fähiges Gerät gefunden – Training läuft auf CPU.{C_RESET}")
+        return torch.device('cpu')
+
+    gpu_count = torch.cuda.device_count()
+
+    if gpu_count == 1:
+        name = torch.cuda.get_device_name(0)
+        mem_total = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+        print(f"{C_GREEN}✓ GPU erkannt: {name} ({mem_total:.1f} GB){C_RESET}")
+        return torch.device('cuda:0')
+
+    # Mehrere GPUs – Auswahl anbieten
+    print(f"\n{C_CYAN}{'='*60}{C_RESET}")
+    print(f"{C_CYAN}  Mehrere GPUs gefunden – bitte wähle eine aus:{C_RESET}")
+    print(f"{C_CYAN}{'='*60}{C_RESET}")
+    for i in range(gpu_count):
+        props = torch.cuda.get_device_properties(i)
+        mem_total = props.total_memory / (1024 ** 3)
+        mem_free = (props.total_memory - torch.cuda.memory_allocated(i)) / (1024 ** 3)
+        print(f"  [{i}] {props.name}  –  {mem_total:.1f} GB gesamt, ~{mem_free:.1f} GB frei")
+    print(f"{C_CYAN}{'='*60}{C_RESET}")
+
+    while True:
+        try:
+            raw = input(f"GPU-Index wählen [0–{gpu_count - 1}]: ").strip()
+            idx = int(raw)
+            if 0 <= idx < gpu_count:
+                name = torch.cuda.get_device_name(idx)
+                print(f"{C_GREEN}✓ Verwende GPU {idx}: {name}{C_RESET}\n")
+                return torch.device(f'cuda:{idx}')
+            else:
+                print(f"{C_RED}Ungültige Eingabe. Bitte eine Zahl zwischen 0 und {gpu_count - 1} eingeben.{C_RESET}")
+        except ValueError:
+            print(f"{C_RED}Ungültige Eingabe. Bitte eine Ganzzahl eingeben.{C_RESET}")
+
+
 def is_tensorboard_running(port=6006):
     """Check if TensorBoard is already running on the specified port"""
     try:
@@ -219,7 +262,7 @@ def main():
     
     # Create model - USING 7-FRAME MODEL (as intended by dataset_generator_v2)
     print("Creating 7-frame model...")
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = select_gpu()
     use_checkpointing = config.get('USE_CHECKPOINTING', True)
     model = VSRBidirectional_7frames_3x(
         n_feats=n_feats, 
