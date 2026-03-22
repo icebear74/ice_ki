@@ -8,7 +8,7 @@
 CREATE TABLE IF NOT EXISTS users (
     user_id       VARCHAR(64)  NOT NULL PRIMARY KEY,
     username      VARCHAR(64)  NOT NULL UNIQUE,
-    password_hash VARCHAR(255) NOT NULL,
+    password_hash VARCHAR(255) NULL,          -- NULL = Erst-Login, Passwort noch nicht gesetzt
     role          ENUM('admin', 'user') NOT NULL DEFAULT 'user',
     created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

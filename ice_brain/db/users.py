@@ -1,7 +1,10 @@
 """
 Per-user settings and account management.
 
-- User accounts are stored in the `users` table (user_id, username, password_hash, role).
+- User accounts are stored in the `users` table
+  (user_id, username, password_hash, role).
+  password_hash = NULL means the account was just created and the user
+  must set a password on first login.
 - Per-user preferences (e.g. timezone) are stored in `user_memory`
   with category='timezone' and importance=1.0.
 """
@@ -9,8 +12,6 @@ Per-user settings and account management.
 from __future__ import annotations
 
 import logging
-import secrets
-import string
 
 import bcrypt
 
@@ -37,27 +38,22 @@ def verify_password(plain: str, hashed: str) -> bool:
     return bcrypt.checkpw(plain.encode(), hashed.encode())
 
 
-def _random_password(length: int = 16) -> str:
-    alphabet = string.ascii_letters + string.digits + "!@#$%^&*"
-    return "".join(secrets.choice(alphabet) for _ in range(length))
-
-
 # ---------------------------------------------------------------------------
 # Account helpers
 # ---------------------------------------------------------------------------
 
-def create_user(username: str, password: str, role: str = "user") -> str:
-    """Create a new user account.  Returns the new user_id.
+def create_user(username: str, role: str = "user") -> str:
+    """Create a new user account with no password set (first-login state).
 
+    Returns the new user_id.
     Raises an IntegrityError (mysql-connector) if the username already exists.
     """
     user_id = username.lower().replace(" ", "_")
-    pw_hash = hash_password(password)
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO users (user_id, username, password_hash, role) VALUES (%s, %s, %s, %s)",
-            (user_id, username, pw_hash, role),
+            "INSERT INTO users (user_id, username, role) VALUES (%s, %s, %s)",
+            (user_id, username, role),
         )
         conn.commit()
         cursor.close()
@@ -78,11 +74,66 @@ def user_exists(user_id: str) -> bool:
         return False
 
 
+def is_first_login(user_id: str) -> bool:
+    """Return True when the user has not yet set a password (password_hash IS NULL)."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT password_hash FROM users WHERE user_id = %s", (user_id,)
+        )
+        row = cursor.fetchone()
+        cursor.close()
+    return row is not None and row[0] is None
+
+
+def set_password(user_id: str, plain: str) -> None:
+    """Hash *plain* and store it for *user_id*."""
+    pw_hash = hash_password(plain)
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE users SET password_hash = %s WHERE user_id = %s",
+            (pw_hash, user_id),
+        )
+        conn.commit()
+        cursor.close()
+
+
+def authenticate(username: str, password: str) -> "tuple[str, bool] | None":
+    """Check credentials.  Returns (user_id, first_login) or None if invalid.
+
+    - Returns (user_id, True)  when password_hash IS NULL (first login – set password).
+    - Returns (user_id, False) when password matches stored hash.
+    - Returns None when the username doesn't exist or the password is wrong.
+    """
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT user_id, password_hash FROM users WHERE username = %s",
+                (username,),
+            )
+            row = cursor.fetchone()
+            cursor.close()
+        if row is None:
+            return None
+        user_id, pw_hash = row
+        if pw_hash is None:
+            # First login: no password set yet – allow through so UI can set one.
+            return (user_id, True)
+        if verify_password(password, pw_hash):
+            return (user_id, False)
+        return None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Authentication error for %r: %s", username, exc)
+        return None
+
+
 def ensure_admin_user(admin_username: str = "admin") -> None:
-    """Create the admin user if no admin account exists yet.
+    """Create the admin user (without a password) if no admin account exists yet.
 
     Called once at server startup.  Idempotent – safe to call on every restart.
-    If a new admin is created the generated password is printed once to the log.
+    The admin must set their password on first login.
     """
     try:
         with get_connection() as conn:
@@ -93,14 +144,11 @@ def ensure_admin_user(admin_username: str = "admin") -> None:
         if row:
             logger.info("Admin user already present: %r", row[0])
             return
-        password = _random_password()
-        create_user(admin_username, password, role="admin")
-        logger.info("=" * 60)
-        logger.info("ADMIN USER CREATED")
-        logger.info("  Username : %s", admin_username)
-        logger.info("  Password : %s", password)
-        logger.info("  Bitte das Passwort sofort sichern und ändern!")
-        logger.info("=" * 60)
+        create_user(admin_username, role="admin")
+        logger.info(
+            "Admin user %r created.  Passwort wird beim ersten Login gesetzt.",
+            admin_username,
+        )
     except Exception as exc:  # noqa: BLE001
         logger.error("Could not ensure admin user: %s", exc)
 
