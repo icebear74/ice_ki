@@ -82,12 +82,15 @@ if [ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -gt 11 ]; then
   echo -e "${YELLOW}  Empfehlung: --python /usr/bin/python3.11 für maximale Kompatibilität.${RESET}"
 fi
 
-# Check if we have pip
-if ! command -v pip3 &>/dev/null; then
-    echo -e "${RED}✗ pip3 ist nicht installiert!${RESET}"
+# Check if we have pip (use the selected Python's pip module — avoids issues when
+# pip3 binary is absent but python -m pip works, e.g. deadsnakes PPA installs)
+if ! "$PY_BIN" -m pip --version &>/dev/null; then
+    echo -e "${RED}✗ pip ist nicht verfügbar für '$PY_BIN'!${RESET}"
+    echo -e "${YELLOW}  Tipp (Debian/Ubuntu): sudo apt install python3.11-venv python3-pip${RESET}"
+    echo -e "${YELLOW}  Tipp (macOS):         brew install python@3.11${RESET}"
     exit 1
 fi
-echo -e "${GREEN}✓ pip3 gefunden${RESET}"
+echo -e "${GREEN}✓ pip verfügbar ($(\"$PY_BIN\" -m pip --version 2>&1 | head -1))${RESET}"
 
 # ============================================================
 # 2. CUDA detection (improved)
