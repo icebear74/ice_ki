@@ -17,8 +17,9 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 # Ensure the ice_brain directory itself is on sys.path so sibling imports work
 # when running as `python server.py` from any directory.
@@ -58,6 +59,7 @@ app = FastAPI(title="ice_brain", version="0.1.0")
 # Globals – populated during startup
 llm_manager: LLMManager = LLMManager()
 intent_router: IntentRouter | None = None
+_server_tz: ZoneInfo = ZoneInfo("Europe/Berlin")  # overridden from config at startup
 
 
 # ---------------------------------------------------------------------------
@@ -66,10 +68,16 @@ intent_router: IntentRouter | None = None
 
 @app.on_event("startup")
 async def startup() -> None:
+    global _server_tz  # noqa: PLW0603
     # 1. Load config
     try:
         import config  # noqa: PLC0415
         models_cfg = config.MODELS
+        tz_name = getattr(config, "TIMEZONE", "Europe/Berlin")
+        try:
+            _server_tz = ZoneInfo(tz_name)
+        except ZoneInfoNotFoundError:
+            logger.warning("Unknown TIMEZONE %r in config – falling back to Europe/Berlin.", tz_name)
     except ImportError:
         logger.error(
             "config.py not found!  Run:  cp config.py.example config.py  "
