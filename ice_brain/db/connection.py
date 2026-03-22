@@ -75,13 +75,11 @@ def _create_pool(cfg: dict) -> mysql.connector.pooling.MySQLConnectionPool:
     )
 
 
-def _tables_exist(pool: mysql.connector.pooling.MySQLConnectionPool, db_name: str) -> bool:
+def _missing_tables(pool: mysql.connector.pooling.MySQLConnectionPool, db_name: str) -> set[str]:
+    """Return the subset of _EXPECTED_TABLES that are not yet present in the DB."""
     conn = pool.get_connection()
     try:
         cursor = conn.cursor()
-        # Use a parameterised query for db_name; table names come from the
-        # hardcoded _EXPECTED_TABLES constant and are validated against an
-        # allowlist before being included in the IN clause.
         allowed = {t for t in _EXPECTED_TABLES if t.replace("_", "").isalnum()}
         placeholders = ", ".join(["%s"] * len(allowed))
         cursor.execute(
@@ -91,7 +89,7 @@ def _tables_exist(pool: mysql.connector.pooling.MySQLConnectionPool, db_name: st
         )
         found = {row[0] for row in cursor.fetchall()}
         cursor.close()
-        return allowed.issubset(found)
+        return allowed - found
     finally:
         conn.close()
 
@@ -115,14 +113,17 @@ def _run_schema(pool: mysql.connector.pooling.MySQLConnectionPool) -> None:
 def init_db() -> None:
     """Initialise the global connection pool and run schema if needed.
 
-    Called once at server startup.
+    Called once at server startup.  Each missing table is created individually
+    so that newly added tables are picked up on existing databases without
+    requiring a full schema reset.
     """
     global _pool  # noqa: PLW0603
     cfg = _get_mysql_cfg()
     _ensure_database(cfg)
     _pool = _create_pool(cfg)
-    if not _tables_exist(_pool, cfg["database"]):
-        logger.info("Tables missing – running schema.sql …")
+    missing = _missing_tables(_pool, cfg["database"])
+    if missing:
+        logger.info("Missing tables %s – running schema.sql …", missing)
         _run_schema(_pool)
     else:
         logger.info("All tables present.")
