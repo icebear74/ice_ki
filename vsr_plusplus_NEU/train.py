@@ -466,15 +466,15 @@ def main():
             print(f"{C_CYAN}{'━'*56}{C_RESET}\n")
 
             loader_config = {
-                'data_root':    data_root,
-                'dataset_name': dataset_name,
-                'sizes':        sizes_config,
-                'augment':      True,
-                'shuffle':      True,
-                'paths':        None,  # use default path patterns
-                'prefetch_count':  config.get('PREFETCH_BATCHES', 10),
-                'prefetch_workers': config.get('PREFETCH_WORKERS', 2),
-                'pin_workers':  config.get('PREFETCH_PIN_WORKERS', 1),
+                'data_root':        data_root,
+                'dataset_name':     dataset_name,
+                'sizes':            sizes_config,
+                'augment':          True,
+                'shuffle':          True,
+                'paths':            None,  # use default path patterns
+                'prefetch_count':   config.get('PREFETCH_BATCHES',     10),
+                'prefetch_workers': config.get('PREFETCH_WORKERS',      1),
+                'pin_workers':      config.get('PREFETCH_PIN_WORKERS',  1),
             }
             train_loader = create_train_loader(loader_config)
 

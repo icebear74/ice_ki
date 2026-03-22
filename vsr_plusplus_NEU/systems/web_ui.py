@@ -168,9 +168,8 @@ class CompleteTrainingDataStore:
             'crop_wait_needed_count': 10000,
             'crop_wait_next_check_secs': 0,
 
-            # Sample-cache statistics (per dataset size_key)
-            # Each entry: {size_key: {size, max, fill_pct, hits, misses}}
-            'cache_stats': {},
+            # Prefetch pipeline queue statistics
+            'prefetch_stats': {'enabled': False},
             
             # Netzwerk
             'local_ip_address': detect_local_ip(),
@@ -951,69 +950,69 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         }
         .btn-check-now:hover { opacity: 0.85; }
 
-        /* Sample Cache Status Widget */
-        .cache-status-widget {
-            background: linear-gradient(135deg, #0d1f0d, #0d1117);
-            border: 2px solid #3fb950;
+        /* ── Prefetch Pipeline Widget ───────────────────────────────── */
+        .prefetch-widget {
+            background: linear-gradient(135deg, #0d1a2a, #0d1117);
+            border: 2px solid #38bdf8;
             border-radius: 8px;
             padding: 16px 20px;
             margin-bottom: 16px;
         }
-        .cache-status-title {
+        .prefetch-title {
             font-size: 1.1em;
             font-weight: 700;
-            color: #3fb950;
+            color: #38bdf8;
             margin-bottom: 12px;
             display: flex;
             align-items: center;
             gap: 8px;
         }
-        .cache-row {
+        .prefetch-row {
             display: flex;
             align-items: center;
             gap: 10px;
-            margin-bottom: 8px;
+            margin-bottom: 9px;
         }
-        .cache-row-label {
-            min-width: 80px;
-            font-size: 0.88em;
+        .prefetch-row-label {
+            min-width: 110px;
+            font-size: 0.87em;
             color: var(--text-secondary);
             font-weight: 600;
         }
-        .cache-bar-outer {
+        .prefetch-bar-outer {
             flex: 1;
-            height: 18px;
+            height: 22px;
             background: rgba(255,255,255,0.05);
-            border-radius: 9px;
+            border-radius: 11px;
             overflow: hidden;
             border: 1px solid var(--border-color);
             position: relative;
         }
-        .cache-bar-inner {
+        .prefetch-bar-inner {
             height: 100%;
-            border-radius: 9px;
-            transition: width 0.6s ease, background 0.4s ease;
+            border-radius: 11px;
+            transition: width 0.5s ease, background 0.4s ease;
         }
-        .cache-bar-text {
+        .prefetch-bar-text {
             position: absolute;
             top: 50%;
             left: 50%;
             transform: translate(-50%, -50%);
-            font-size: 0.75em;
+            font-size: 0.78em;
             font-weight: 700;
             color: var(--text-primary);
             text-shadow: 0 1px 2px rgba(0,0,0,0.9);
             white-space: nowrap;
         }
-        .cache-meta {
-            min-width: 140px;
+        .prefetch-meta {
+            min-width: 90px;
             text-align: right;
             font-size: 0.82em;
             color: var(--text-secondary);
             font-family: 'Courier New', monospace;
             white-space: nowrap;
         }
-        .cache-stats-row {
+        .prefetch-footer {
             display: flex;
             gap: 20px;
             margin-top: 10px;
@@ -1021,14 +1020,19 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             border-top: 1px solid var(--border-color);
             flex-wrap: wrap;
         }
-        .cache-stat-item {
+        .prefetch-stat {
             font-size: 0.85em;
             color: var(--text-secondary);
         }
-        .cache-stat-item span {
-            color: var(--accent-blue);
+        .prefetch-stat span {
+            color: #38bdf8;
             font-weight: 600;
             font-family: 'Courier New', monospace;
+        }
+        .prefetch-disabled {
+            color: var(--text-secondary);
+            font-size: 0.9em;
+            font-style: italic;
         }
     </style>
 </head>
@@ -1087,22 +1091,24 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             </div>
         </div>
 
-        <!-- SAMPLE CACHE STATUS – shown prominently right after crop-wait banner -->
-        <div id="cacheStatusWidget" class="cache-status-widget">
-            <div class="cache-status-title">
-                🗄️ Sample-Cache (LRU In-Memory)
+        <!-- PREFETCH PIPELINE STATUS – shown prominently right after crop-wait banner -->
+        <div id="prefetchWidget" class="prefetch-widget">
+            <div class="prefetch-title">
+                ⚡ Prefetch-Pipeline
                 <span style="font-size:0.78em; font-weight:400; color:var(--text-secondary);">
-                    — kein Disk-I/O für gecachte Samples
+                    — Stage 1: Disk→CPU &nbsp;|&nbsp; Stage 2: pin_memory→GPU-ready
                 </span>
             </div>
-            <div id="cacheRowsContainer">
-                <div style="color: var(--text-secondary); font-size:0.9em;">Warte auf Daten…</div>
+            <!-- Stage bars injected by JS -->
+            <div id="prefetchBarsContainer">
+                <div class="prefetch-disabled">Warte auf Daten…</div>
             </div>
-            <div class="cache-stats-row" id="cacheTotalStats">
-                <div class="cache-stat-item">Gesamt gecacht: <span id="cacheTotalCached">0</span></div>
-                <div class="cache-stat-item">Cache-Hits: <span id="cacheTotalHits">0</span></div>
-                <div class="cache-stat-item">Cache-Misses: <span id="cacheTotalMisses">0</span></div>
-                <div class="cache-stat-item">Hit-Rate: <span id="cacheHitRate">0.0%</span></div>
+            <!-- Summary row -->
+            <div class="prefetch-footer" id="prefetchFooter">
+                <div class="prefetch-stat">Gesamt im Buffer: <span id="pfTotal">0 / 0</span></div>
+                <div class="prefetch-stat">Auslastung: <span id="pfFillPct">0.0%</span></div>
+                <div class="prefetch-stat">Stage 1 (Disk): <span id="pfRaw">0 / 0</span></div>
+                <div class="prefetch-stat">Stage 2 (GPU-ready): <span id="pfReady">0 / 0</span></div>
             </div>
         </div>
 
@@ -1828,8 +1834,8 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             // Adaptive batch config (static display)
             updateAdaptiveBatchConfig(data.adaptive_batch_config);
 
-            // Sample cache status
-            updateCacheStatus(data.cache_stats || {});
+            // Prefetch pipeline status
+            updatePrefetchStatus(data.prefetch_stats || {});
             
             // TensorBoard link
             const tbLink = document.getElementById('tensorboardLink');
@@ -1840,62 +1846,61 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             document.getElementById('lastUpdate').textContent = updateTime.toLocaleTimeString('de-DE');
         }
         
-        function updateCacheStatus(cacheStats) {
-            const container = document.getElementById('cacheRowsContainer');
-            if (!cacheStats || Object.keys(cacheStats).length === 0) {
-                container.innerHTML = '<div style="color: var(--text-secondary); font-size:0.9em;">Warte auf Daten…</div>';
+        function updatePrefetchStatus(stats) {
+            const container = document.getElementById('prefetchBarsContainer');
+
+            if (!stats || !stats.enabled) {
+                container.innerHTML = '<div class="prefetch-disabled">Prefetch deaktiviert (synchroner Modus)</div>';
+                document.getElementById('pfTotal').textContent   = '–';
+                document.getElementById('pfFillPct').textContent = '–';
+                document.getElementById('pfRaw').textContent     = '–';
+                document.getElementById('pfReady').textContent   = '–';
                 return;
             }
 
-            const sizeOrder = ['720_169', '540', '720'];
-            const sizeLabels = {'720_169': '720×405 (16:9)', '540': '540×540', '720': '720×720'};
-            let html = '';
-            let totalCached = 0, totalMax = 0, totalHits = 0, totalMisses = 0;
+            function barColor(pct) {
+                if (pct >= 80) return 'linear-gradient(90deg, #22c55e, #16a34a)';
+                if (pct >= 50) return 'linear-gradient(90deg, #38bdf8, #0284c7)';
+                if (pct >= 25) return 'linear-gradient(90deg, #f59e0b, #d97706)';
+                return 'linear-gradient(90deg, #ef4444, #dc2626)';
+            }
 
-            for (const sk of sizeOrder) {
-                if (!(sk in cacheStats)) continue;
-                const s = cacheStats[sk];
-                const pct = s.fill_pct || 0;
-                const cached = s.size || 0;
-                const max = s.max || 0;
-                const hits = s.hits || 0;
-                const misses = s.misses || 0;
-
-                totalCached += cached;
-                totalMax += max;
-                totalHits += hits;
-                totalMisses += misses;
-
-                // Color: green → yellow → red based on fill level
-                let barColor;
-                if (pct >= 95)       barColor = 'linear-gradient(90deg, #22c55e, #16a34a)';
-                else if (pct >= 60)  barColor = 'linear-gradient(90deg, #3fb950, #22c55e)';
-                else if (pct >= 30)  barColor = 'linear-gradient(90deg, #f59e0b, #d97706)';
-                else                 barColor = 'linear-gradient(90deg, #ef4444, #dc2626)';
-
-                const hitTotal = hits + misses;
-                const hitRate = hitTotal > 0 ? (hits / hitTotal * 100).toFixed(1) : '0.0';
-                const label = sizeLabels[sk] || sk;
-
-                html += `
-                <div class="cache-row">
-                    <div class="cache-row-label">${label}</div>
-                    <div class="cache-bar-outer">
-                        <div class="cache-bar-inner" style="width:${pct.toFixed(1)}%; background:${barColor};"></div>
-                        <div class="cache-bar-text">${pct.toFixed(1)}% (${cached.toLocaleString('de-DE')} / ${max.toLocaleString('de-DE')})</div>
+            function buildBar(label, current, max) {
+                if (max <= 0) return '';
+                const pct     = Math.min(100, current / max * 100);
+                const color   = barColor(pct);
+                const tooltip = `${current} batches von max. ${max} belegt`;
+                return `
+                <div class="prefetch-row" title="${tooltip}">
+                    <div class="prefetch-row-label">${label}</div>
+                    <div class="prefetch-bar-outer">
+                        <div class="prefetch-bar-inner" style="width:${pct.toFixed(1)}%; background:${color};"></div>
+                        <div class="prefetch-bar-text">${pct.toFixed(1)}%&nbsp;(${current}&thinsp;/&thinsp;${max} Batches)</div>
                     </div>
-                    <div class="cache-meta">Hit: ${hitRate}% &nbsp;(${hits.toLocaleString('de-DE')}✓ / ${misses.toLocaleString('de-DE')}✗)</div>
+                    <div class="prefetch-meta">${current}&thinsp;/&thinsp;${max}</div>
                 </div>`;
             }
-            container.innerHTML = html || '<div style="color: var(--text-secondary);">Keine Cache-Daten</div>';
 
-            // Summary row
-            const totalHitTotal = totalHits + totalMisses;
-            const totalHitRate = totalHitTotal > 0 ? (totalHits / totalHitTotal * 100).toFixed(1) : '0.0';
-            document.getElementById('cacheTotalCached').textContent = totalCached.toLocaleString('de-DE');
-            document.getElementById('cacheTotalHits').textContent = totalHits.toLocaleString('de-DE');
-            document.getElementById('cacheTotalMisses').textContent = totalMisses.toLocaleString('de-DE');
-            document.getElementById('cacheHitRate').textContent = totalHitRate + '%';
+            const rawCurrent   = stats.raw_current   || 0;
+            const rawMax       = stats.raw_max        || 0;
+            const readyCurrent = stats.ready_current  || 0;
+            const readyMax     = stats.ready_max      || 0;
+
+            let html = '';
+            if (rawMax > 0)   html += buildBar('📀 Disk→CPU',       rawCurrent,   rawMax);
+            if (readyMax > 0) html += buildBar('🟢 GPU-ready',       readyCurrent, readyMax);
+            container.innerHTML = html || '<div class="prefetch-disabled">Keine Queue-Daten</div>';
+
+            // Footer summary
+            const total    = stats.total_current || 0;
+            const totalMax = stats.total_max     || 0;
+            const fillPct  = stats.fill_pct      || 0;
+
+            document.getElementById('pfTotal').textContent   = `${total} / ${totalMax}`;
+            document.getElementById('pfFillPct').textContent = `${fillPct.toFixed(1)}%`;
+            document.getElementById('pfRaw').textContent     = `${rawCurrent} / ${rawMax}`;
+            document.getElementById('pfReady').textContent   = readyMax > 0
+                ? `${readyCurrent} / ${readyMax}` : '(kein Pinner)';
         }
 
         function updateStackedBars(data) {

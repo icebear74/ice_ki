@@ -1103,8 +1103,8 @@ class VSRTrainer:
                 # Batch-Konfiguration mit gemessenen VRAM-Werten
                 adaptive_batch_config=self._build_ui_batch_config(),
                 
-                # Sample-cache statistics (per size_key)
-                cache_stats=self._collect_cache_stats(),
+                # Prefetch pipeline queue statistics
+                prefetch_stats=self._collect_prefetch_stats(),
 
                 # Crop-wait status (system-level pause waiting for crop images)
                 crop_wait_active=self.waiting_for_crops,
@@ -1148,30 +1148,19 @@ class VSRTrainer:
             result[sk] = entry
         return result
 
-    def _collect_cache_stats(self) -> dict:
-        """Collect LRU cache statistics from all training datasets.
+    def _collect_prefetch_stats(self) -> dict:
+        """Return the current prefetch pipeline queue fill levels.
 
-        Returns a dict mapping size_key → cache info dict with keys:
-            size       – number of items currently in cache
-            max        – maximum capacity (0 = disabled)
-            fill_pct   – fill level 0–100
-            hits       – cumulative cache hits
-            misses     – cumulative cache misses
+        Reads ``MultiSizeDataLoader.prefetch_stats`` and returns a dict ready
+        for the WebUI.  Returns a disabled-state dict when the loader is not
+        yet initialised or prefetch is turned off.
         """
-        datasets_dict = getattr(self.train_loader, 'datasets_dict', None)
-        if not datasets_dict:
-            return {}
-        result = {}
-        for sk, ds in datasets_dict.items():
-            if hasattr(ds, 'cache_size'):
-                result[sk] = {
-                    'size':     ds.cache_size,
-                    'max':      ds.cache_max,
-                    'fill_pct': ds.cache_fill_pct,
-                    'hits':     ds.cache_hits,
-                    'misses':   ds.cache_misses,
-                }
-        return result
+        if self.train_loader is None:
+            return {'enabled': False}
+        stats = getattr(self.train_loader, 'prefetch_stats', None)
+        if stats is None:
+            return {'enabled': False}
+        return stats
 
     def _apply_ema_smoothing(self, loss_dict):
         """

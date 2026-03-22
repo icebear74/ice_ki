@@ -36,36 +36,26 @@ class VSRDataset(Dataset):
         dataset_name: Dataset name (e.g., 'master')
         size_key: Size variant ('720', '540', or '720_169')
         mode: 'train' or 'val'
-        augment: Ignored – augmentation is permanently disabled to enable deterministic
-                 LRU caching. With 350k+ scenes the variance gain is negligible while
-                 the copy overhead (~5-15 ms/sample) and cache-prevention cost are real.
+        augment: Ignored – augmentation is permanently disabled.
+                 With 350k+ diverse scenes the variance gain is negligible
+                 while the copy overhead (~5-15 ms/sample) is real.
         paths_config: Optional dict with path patterns:
             - train_gt: Pattern for training GT (default: 'patches/{size_key}/GT')
             - train_lr: Pattern for training LR (default: 'patches/{size_key}/LR_7frames')
             - val_gt: Pattern for validation GT (default: 'val/{size_key}/GT')
             - val_lr: Pattern for validation LR (default: 'patches/{size_key}/LR_7frames')
-        cache_max_items: Max number of fully-processed samples to hold in the LRU
-                         in-memory cache (0 = disabled). Defaults to 3000.
     """
     
     def __init__(self, root, dataset_name='master', size_key='720', mode='train', augment=True,
-                 paths_config=None, validate_upfront=False, cache_max_items=3000):
+                 paths_config=None, validate_upfront=False):
         self.root = root
         self.dataset_name = dataset_name
         self.size_key = size_key
         self.mode = mode
-        # Augmentation permanently disabled: deterministic output is required for
-        # effective LRU caching. With 350k+ diverse scenes augmentation provides
-        # negligible regularisation benefit but prevents any sample reuse.
+        # Augmentation permanently disabled: with 350k+ diverse scenes the
+        # regularisation gain is negligible while the copy overhead is real.
         self.augment = False
         self.validate_upfront = validate_upfront
-        
-        # LRU in-memory sample cache (stores finished tensors: lr_stack, gt, filename)
-        self._cache_max = max(0, int(cache_max_items))
-        self._cache: collections.OrderedDict = collections.OrderedDict()
-        self._cache_lock = threading.Lock()
-        self._cache_hits = 0
-        self._cache_misses = 0
         
         # Thread lock for safe reloading during training
         self.reload_lock = threading.Lock()
@@ -486,59 +476,6 @@ class VSRDataset(Dataset):
     def __len__(self):
         return len(self.gt_files)
     
-    # ------------------------------------------------------------------
-    # LRU sample-cache helpers & properties
-    # ------------------------------------------------------------------
-
-    @property
-    def cache_size(self) -> int:
-        """Number of samples currently held in the LRU cache."""
-        with self._cache_lock:
-            return len(self._cache)
-
-    @property
-    def cache_max(self) -> int:
-        """Maximum allowed number of cached samples (0 = cache disabled)."""
-        return self._cache_max
-
-    @property
-    def cache_fill_pct(self) -> float:
-        """Cache fill level as a percentage (0.0 – 100.0)."""
-        if self._cache_max <= 0:
-            return 0.0
-        return min(100.0, len(self._cache) / self._cache_max * 100.0)
-
-    @property
-    def cache_hits(self) -> int:
-        return self._cache_hits
-
-    @property
-    def cache_misses(self) -> int:
-        return self._cache_misses
-
-    def _cache_get(self, key):
-        """Return cached item and move it to MRU position, or None on miss."""
-        with self._cache_lock:
-            if key in self._cache:
-                self._cache.move_to_end(key)
-                self._cache_hits += 1
-                return self._cache[key]
-            self._cache_misses += 1
-            return None
-
-    def _cache_put(self, key, value):
-        """Insert item into cache; evict LRU entry when capacity is reached."""
-        if self._cache_max <= 0:
-            return
-        with self._cache_lock:
-            if key in self._cache:
-                self._cache.move_to_end(key)
-                self._cache[key] = value
-            else:
-                if len(self._cache) >= self._cache_max:
-                    self._cache.popitem(last=False)  # evict oldest
-                self._cache[key] = value
-    
     def get_file_info(self):
         """
         Get information about dataset files
@@ -689,10 +626,6 @@ class VSRDataset(Dataset):
                 self.gt_files = new_gt_files
                 self.lr_paths = new_lr_paths
                 
-                # Invalidate sample cache: file list changed, old indices may be stale
-                with self._cache_lock:
-                    self._cache.clear()
-                
                 # Persist updated index; also write mtime-based invalidation
                 self._save_index(self.gt_files, self.lr_paths)
                 
@@ -719,21 +652,10 @@ class VSRDataset(Dataset):
         """
         Load and process a single sample.
 
-        Cache lookup happens first: if the finished tensors for this index are
-        already in the LRU cache they are returned immediately without any I/O.
-        Augmentation is permanently disabled, so the result is deterministic and
-        safe to cache across calls.
-
         Returns:
             lr_stack: [7, 3, H, W] - 7 LR frames
             gt: [3, H*3, W*3] - GT frame (3x upscale)
         """
-        # Fast path: LRU cache hit
-        cached = self._cache_get(idx)
-        if cached is not None:
-            return cached
-
-        # Slow path: load from disk
         # Try to load the current index, but handle errors gracefully
         max_attempts = 3  # Try current index, then 2 random fallbacks
         
@@ -786,8 +708,7 @@ class VSRDataset(Dataset):
                     lr_frames.append(frame)
                 
                 # Augmentation is permanently disabled (self.augment is always False).
-                # With 350k+ diverse scenes the regularisation gain is negligible, while
-                # the copy overhead and cache-prevention cost are both real.
+                # With 350k+ diverse scenes the regularisation gain is negligible.
                 
                 # Convert to tensors and normalize to [0, 1]
                 gt = torch.from_numpy(gt).permute(2, 0, 1).float() / 255.0
@@ -796,14 +717,7 @@ class VSRDataset(Dataset):
                     for f in lr_frames
                 ])
                 
-                result = (lr_stack, gt, gt_file)
-                
-                # Store in LRU cache only for the original idx (not random fallbacks,
-                # which map a different gt_file to this slot).
-                if attempt == 0:
-                    self._cache_put(idx, result)
-                
-                return result
+                return lr_stack, gt, gt_file
                 
             except Exception as e:
                 # Log the error but try to recover

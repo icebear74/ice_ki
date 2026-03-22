@@ -130,27 +130,27 @@ HIST_STEP_EVERY = 500
 
 
 # ============================================================================
-# DATA LOADING
+# DATA LOADING  –  2-Stage Prefetch Pipeline
 # ============================================================================
+# Stage 1 (Producer):  disk → cv2.imread → CPU tensor → raw_queue
+# Stage 2 (Pinner):    raw_queue → .pin_memory() → ready_queue
+# Consumer:            ready_queue → .to(device, non_blocking=True) → GPU
+#
+# The queues are bounded; producers block when the consumer is slow so RAM
+# stays bounded.  Set PREFETCH_BATCHES=0 to fall back to synchronous loading.
 
-# Number of worker threads for data loading
-# NOTE: MultiSizeDataLoader bypasses PyTorch's DataLoader worker mechanism;
-# actual parallelism is controlled by PREFETCH_WORKERS below.
-NUM_WORKERS = 5
+# Number of batches to keep ready in the raw (disk-loaded) queue.
+# Higher = more RAM used (~5 MB per batch at BS=4), but smoother GPU feeding.
+PREFETCH_BATCHES = 10      # raw_queue capacity  (Stage 1 buffer)
 
-# Pin memory for faster GPU transfer
-PIN_MEMORY = True
+# Parallel disk-loading threads (Stage 1 producers).
+# 1 is usually sufficient on SSD/NVMe; increase to 2 on spinning HDDs.
+PREFETCH_WORKERS = 1       # producer threads
 
-# Prefetch settings for faster data loading
-# Background threads load the next N batches while the GPU processes the current one.
-PREFETCH_BATCHES = 8       # Number of batches to buffer ahead in background
-PREFETCH_WORKERS = 2       # Reserved for future multi-worker expansion; currently
-                           # the implementation uses a single producer thread.
-
-# In-memory LRU sample cache (effective because augmentation is off → deterministic output)
-# Caches finished tensors (lr_stack, gt, filename) so repeated access skips cv2.imread.
-# Memory footprint: ~5 MB/sample → 3000 samples ≈ 14.6 GB  (tune to available RAM)
-CACHE_MAX_SAMPLES = 3000   # Max cached samples per dataset (0 = disabled)
+# Pinning threads (Stage 2).  Each thread calls .pin_memory() on a batch
+# so the GPU DMA transfer can proceed without involving the CPU.
+# Set to 0 to skip pinning (CPU-only or debugging).
+PREFETCH_PIN_WORKERS = 1   # pinner threads
 
 
 # ============================================================================
@@ -236,12 +236,10 @@ def get_config():
         'LOG_TBOARD_EVERY': LOG_TBOARD_EVERY,
         'HIST_STEP_EVERY': HIST_STEP_EVERY,
         
-        # Data loading
-        'NUM_WORKERS': NUM_WORKERS,
-        'PIN_MEMORY': PIN_MEMORY,
-        'PREFETCH_BATCHES': PREFETCH_BATCHES,
-        'PREFETCH_WORKERS': PREFETCH_WORKERS,
-        'CACHE_MAX_SAMPLES': CACHE_MAX_SAMPLES,
+        # Data loading pipeline
+        'PREFETCH_BATCHES':      PREFETCH_BATCHES,
+        'PREFETCH_WORKERS':      PREFETCH_WORKERS,
+        'PREFETCH_PIN_WORKERS':  PREFETCH_PIN_WORKERS,
         
         # Paths
         'DATA_ROOT': DATA_ROOT,
@@ -300,12 +298,10 @@ def print_config():
     print(f"  Save Checkpoint Every:  {SAVE_STEP_EVERY:,} steps")
     print(f"  TensorBoard Log Every:  {LOG_TBOARD_EVERY:,} steps")
     
-    print("\nDATA LOADING:")
-    print(f"  Workers:                {NUM_WORKERS}")
-    print(f"  Pin Memory:             {PIN_MEMORY}")
-    print(f"  Prefetch Batches:       {PREFETCH_BATCHES}")
-    print(f"  Prefetch Workers:       {PREFETCH_WORKERS}")
-    print(f"  Cache Max Samples:      {CACHE_MAX_SAMPLES}")
+    print("\nDATA LOADING PIPELINE:")
+    print(f"  Prefetch Batches (raw queue):  {PREFETCH_BATCHES}")
+    print(f"  Producer Threads (disk I/O):   {PREFETCH_WORKERS}")
+    print(f"  Pinner  Threads  (pin_memory): {PREFETCH_PIN_WORKERS}")
     
     print("\nDATASET PATHS:")
     print(f"  Dataset Root:           {DATASET_ROOT}")
