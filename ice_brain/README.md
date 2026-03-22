@@ -88,7 +88,7 @@ pip install -r ice_brain/requirements.txt
 `llama-cpp-python` mit CUDA-Support:
 
 ```bash
-CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python --upgrade --force-reinstall
+CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python --upgrade --force-reinstall --no-binary llama-cpp-python
 ```
 
 ### 5 – Server starten
