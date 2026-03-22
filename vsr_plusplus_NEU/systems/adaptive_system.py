@@ -45,8 +45,9 @@ class AdaptiveSystem:
         self.ema_window = 50
         self.ema_alpha = 2.0 / (self.ema_window + 1)
         
-        # Momentum: maximum change per step (1% = 0.01)
-        self.max_weight_change = 0.01
+        # Momentum: maximum change per step (0.3% = 0.003, was 1% = 0.01)
+        # Reduced to prevent wild oscillation (max ~15% drift over 500 steps).
+        self.max_weight_change = 0.003
         
         # Cooldown mechanism
         self.cooldown_steps = 0
@@ -54,7 +55,8 @@ class AdaptiveSystem:
         self.is_in_cooldown = False
         
         # Gradient clipping
-        self.clip_value = 3.0
+        # Start closer to the config INITIAL_GRAD_CLIP value instead of 3.0
+        self.clip_value = 1.5
         self.grad_norms = []
         
         # Sharpness tracking
@@ -77,9 +79,9 @@ class AdaptiveSystem:
         self.l1_stable_threshold = 0.025  # L1 below this is "stable and good" (realistischer für Phase 3)
         self.l1_unstable_threshold = 0.045  # L1 above this is "unstable"
         
-        # Update frequencies
-        self.aggressive_update_frequency = 10
-        self.normal_update_frequency = 50
+        # Update frequencies — increased to reduce oscillation frequency
+        self.aggressive_update_frequency = 25  # was 10
+        self.normal_update_frequency = 100     # was 50
         
         # Plateau detection
         self.best_loss = float('inf')
@@ -109,6 +111,13 @@ class AdaptiveSystem:
         self.history_settling_steps = 100
         self.history_steps_collected = 0
         self.history_settling_complete = False
+
+        # Validation-based plateau tracking (Bug 5 fix)
+        # Tracks validation loss trend to detect overfitting independent of train loss.
+        self.best_val_loss = float('inf')
+        self.ema_val_loss = None
+        self.val_no_improve_count = 0
+        self.val_plateau_patience = 5  # After 5 consecutive validations without improvement
 
         # Cached mode — updated by update_loss_weights so get_status() always
         # returns the true current mode (Warmup / Settling / Stable / Aggressive)
@@ -493,8 +502,9 @@ class AdaptiveSystem:
         # Update clip value after warmup
         if len(self.grad_norms) >= 100:
             new_clip = np.percentile(self.grad_norms, 95)
-            # Smooth update with minimum floor to prevent feedback-loop collapse
-            MIN_CLIP_VALUE = 0.5
+            # Smooth update with minimum floor to prevent feedback-loop collapse.
+            # 1.0 floor (was 0.5) ensures deep layers keep receiving gradient signal.
+            MIN_CLIP_VALUE = 1.0
             self.clip_value = max(MIN_CLIP_VALUE, 0.9 * self.clip_value + 0.1 * new_clip)
         
         # Clip gradients
@@ -601,6 +611,44 @@ class AdaptiveSystem:
         """Return True if training has plateaued"""
         return self.plateau_counter >= self.plateau_patience
     
+    def update_validation_tracker(self, val_loss, val_quality=None):
+        """
+        Track validation loss trend to detect overfitting.
+
+        Called after every validation run.  Uses EMA smoothing to filter
+        noise, then checks whether the smoothed val loss improved by at
+        least 0.5%.  If not, the no-improvement counter is incremented.
+        Once it reaches val_plateau_patience, is_val_plateau() returns True.
+
+        Args:
+            val_loss:    Current validation loss (float).  Ignored if None or <= 0.
+            val_quality: Optional KI quality metric (float in [0,1]).  Reserved
+                         for future use; not currently used in the decision.
+        """
+        if val_loss is None or val_loss <= 0:
+            return
+
+        # Initialise on first valid call
+        if self.ema_val_loss is None:
+            self.ema_val_loss = val_loss
+            self.best_val_loss = val_loss
+            return
+
+        # EMA smoothing: α=0.3 for the new observation, 0.7 for the running mean.
+        # Equivalent to a window of ~3 validations.
+        self.ema_val_loss = 0.3 * val_loss + 0.7 * self.ema_val_loss
+
+        # Improvement check: require at least 0.5% reduction
+        if self.ema_val_loss < self.best_val_loss * 0.995:
+            self.best_val_loss = self.ema_val_loss
+            self.val_no_improve_count = 0
+        else:
+            self.val_no_improve_count += 1
+
+    def is_val_plateau(self):
+        """Return True if validation loss has plateaued (no improvement for val_plateau_patience runs)."""
+        return self.val_no_improve_count >= self.val_plateau_patience
+
     def get_plateau_info(self):
         """Get detailed plateau status for logging/UI"""
         return {
@@ -612,7 +660,12 @@ class AdaptiveSystem:
             'ema_loss': self.ema_loss,
             'ema_quality': getattr(self, 'ema_quality', None),
             'is_plateau': self.is_plateau(),
-            'steps_until_reset': max(0, self.plateau_safety_threshold - int(self.plateau_counter))
+            'steps_until_reset': max(0, self.plateau_safety_threshold - int(self.plateau_counter)),
+            'val_no_improve_count': self.val_no_improve_count,
+            'val_plateau_patience': self.val_plateau_patience,
+            'best_val_loss': self.best_val_loss if self.best_val_loss != float('inf') else None,
+            'ema_val_loss': self.ema_val_loss,
+            'is_val_plateau': self.is_val_plateau(),
         }
     
     def get_status(self):
@@ -635,5 +688,10 @@ class AdaptiveSystem:
             'plateau_counter': self.plateau_counter,
             'plateau_patience': self.plateau_patience,
             'best_loss': self.best_loss,
-            'ema_l1_loss': self.ema_l1_loss if self.ema_l1_loss is not None else 0.0
+            'ema_l1_loss': self.ema_l1_loss if self.ema_l1_loss is not None else 0.0,
+            'val_no_improve_count': self.val_no_improve_count,
+            'val_plateau_patience': self.val_plateau_patience,
+            'best_val_loss': self.best_val_loss if self.best_val_loss != float('inf') else None,
+            'ema_val_loss': self.ema_val_loss,
+            'is_val_plateau': self.is_val_plateau(),
         }

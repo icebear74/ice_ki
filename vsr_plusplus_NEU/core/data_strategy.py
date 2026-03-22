@@ -89,6 +89,12 @@ class DataStrategyScheduler:
     # Perceptual weight at end of Phase 2 / throughout Phase 3
     TARGET_PERCEPTUAL_WEIGHT = 0.08
 
+    # Maximum perceptual weight at the end of Phase 1 (late warmup).
+    # Steps 0–2000: no perceptual (let basic structure stabilize).
+    # Steps 2000–WARMUP_END: gentle linear ramp 0.0 → PHASE1_MAX_PERCEPTUAL.
+    # Phase 2 then continues the ramp PHASE1_MAX_PERCEPTUAL → TARGET_PERCEPTUAL_WEIGHT.
+    PHASE1_MAX_PERCEPTUAL = 0.03
+
     def __init__(self, all_size_keys=None):
         self._all_size_keys = all_size_keys or list(self.CROP_INTRO_END_DISTRIBUTION.keys())
         self._last_phase = None
@@ -257,12 +263,21 @@ class DataStrategyScheduler:
         phase = self.get_phase(step, crop_file_counts=crop_file_counts)
 
         if phase == self.PHASE_WARMUP:
-            return 0.0
+            # Early warmup (steps 0–2000): no perceptual — let structure stabilize first.
+            if step < 2000:
+                return 0.0
+            # Late warmup (steps 2000–WARMUP_END): gentle ramp 0.0 → PHASE1_MAX_PERCEPTUAL
+            # so the model gets early perceptual feedback without destabilising structure.
+            t = (step - 2000) / (self.WARMUP_END - 2000)
+            t = max(0.0, min(1.0, t))
+            return t * self.PHASE1_MAX_PERCEPTUAL
 
         if phase == self.PHASE_CROP_INTRO:
             t = (step - self.WARMUP_END) / (self.CROP_INTRO_END - self.WARMUP_END)
             t = max(0.0, min(1.0, t))
-            return t * self.TARGET_PERCEPTUAL_WEIGHT
+            # Ramp from PHASE1_MAX_PERCEPTUAL → TARGET_PERCEPTUAL_WEIGHT for a smooth
+            # transition (Phase 1 ends at PHASE1_MAX_PERCEPTUAL, not at 0.0).
+            return self.PHASE1_MAX_PERCEPTUAL + t * (self.TARGET_PERCEPTUAL_WEIGHT - self.PHASE1_MAX_PERCEPTUAL)
 
         # PHASE_STABLE – return None so the AdaptiveSystem controls the weight.
         return None

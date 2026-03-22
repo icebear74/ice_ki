@@ -561,8 +561,15 @@ class VSRTrainer:
                 # Update LR scheduler (every LR_UPDATE_EVERY steps)
                 lr_update_every = self.config.get('LR_UPDATE_EVERY', 10)
                 if self.global_step % lr_update_every == 0:
+                    # Bug 5 fix: combine train-plateau and val-plateau signals.
+                    # Val-plateau uses a gentler ×0.7 LR reduction (vs ×0.5 for train-plateau).
                     plateau_detected = self.adaptive_system.is_plateau()
-                    current_lr, lr_phase = self.lr_scheduler.step(self.global_step, plateau_detected)
+                    val_plateau_detected = self.adaptive_system.is_val_plateau()
+                    current_lr, lr_phase = self.lr_scheduler.step(
+                        self.global_step,
+                        plateau_detected=plateau_detected,
+                        val_plateau_detected=val_plateau_detected,
+                    )
                     
                     # Log LR Boost events
                     lr_status = self.lr_scheduler.get_status()
@@ -573,6 +580,8 @@ class VSRTrainer:
                             f"LR boosted at step {self.global_step}"
                         )
                         self.train_logger.log_event(f"⚡ LR BOOST triggered at step {self.global_step}")
+                    elif lr_phase == 'val_plateau_hold':
+                        self.train_logger.log_event(f"🔽 LR reduced (val plateau) at step {self.global_step}")
                 else:
                     # Keep current LR
                     current_lr = self.lr_scheduler.get_current_lr()
@@ -744,6 +753,16 @@ class VSRTrainer:
                     
                     metrics = self._run_multi_size_validation()
                     self.last_metrics = metrics
+
+                    # Bug 1 fix: keep last_validation_quality in sync so the plateau
+                    # tracker receives the real quality on every update_plateau_tracker call.
+                    self.last_validation_quality = metrics.get('ki_quality', None)
+
+                    # Bug 5 fix: feed validation loss into the validation plateau tracker.
+                    self.adaptive_system.update_validation_tracker(
+                        metrics.get('val_loss'),
+                        metrics.get('ki_quality')
+                    )
                     
                     # Pass improvement to adaptive system for logging
                     adaptive_status = self.adaptive_system.get_status()
@@ -1073,6 +1092,12 @@ class VSRTrainer:
                 adaptive_plateau_patience=adaptive_status.get('plateau_patience', 100),
                 adaptive_lr_boost_available=adaptive_status.get('lr_boost_available', False),
                 adaptive_perceptual_trend=_perceptual_trend,
+                # Validation plateau tracking (Bug 5 fix)
+                adaptive_val_no_improve_count=adaptive_status.get('val_no_improve_count', 0),
+                adaptive_val_plateau_patience=adaptive_status.get('val_plateau_patience', 5),
+                adaptive_best_val_loss=adaptive_status.get('best_val_loss', None),
+                adaptive_ema_val_loss=adaptive_status.get('ema_val_loss', None),
+                adaptive_is_val_plateau=adaptive_status.get('is_val_plateau', False),
                 
                 # Lernrate
                 learning_rate_value=current_lr,
@@ -1358,6 +1383,15 @@ class VSRTrainer:
         self.train_logger.log_event(f"Manual validation triggered at step {self.global_step}")
         
         metrics = self._run_multi_size_validation()
+
+        # Bug 1 fix: update last_validation_quality so the plateau tracker uses it.
+        self.last_validation_quality = metrics.get('ki_quality', None)
+
+        # Bug 5 fix: feed validation loss into the validation plateau tracker.
+        self.adaptive_system.update_validation_tracker(
+            metrics.get('val_loss'),
+            metrics.get('ki_quality')
+        )
         
         # Log to TensorBoard
         self.tb_logger.log_quality(self.global_step, metrics)
