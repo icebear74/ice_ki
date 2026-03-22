@@ -270,13 +270,15 @@ def main():
         use_checkpointing=use_checkpointing
     ).to(device)
 
-    # Verify FP32: Tesla P4 has no native FP16 hardware, so we must stay in float32.
-    # Explicitly cast to float32 in case any sub-module initialised differently.
+    # Verify FP32: ensure model parameters are in the expected dtype.
+    # With AMP enabled the master weights remain FP32 while forward/backward
+    # passes run in FP16 on the P100's native FP16 hardware.
     model = model.float()
     param_dtypes = set(p.dtype for p in model.parameters())
     if param_dtypes != {torch.float32}:
         raise RuntimeError(f"Model parameters are NOT float32! Found: {param_dtypes}")
-    print(f"{C_GREEN}✅ Model dtype: float32 (FP32) confirmed — AMP/FP16 is OFF{C_RESET}")
+    amp_status = "ON (P100 native FP16)" if use_amp else "OFF"
+    print(f"{C_GREEN}✅ Model dtype: float32 (FP32 master weights) — AMP/FP16 is {amp_status}{C_RESET}")
     
     if use_checkpointing:
         print("✅ Gradient checkpointing ENABLED - saves ~40% activation memory")
@@ -366,9 +368,9 @@ def main():
     scaler = GradScaler('cuda') if use_amp else None
     
     if use_amp:
-        print(f"{C_GREEN}✅ Mixed Precision (AMP) enabled - reduced VRAM usage{C_RESET}\n")
+        print(f"{C_GREEN}✅ Mixed Precision (AMP) enabled - Tesla P100 native FP16 hardware active{C_RESET}\n")
     else:
-        print(f"{C_GREEN}✅ Mixed Precision (AMP) disabled - no AMP overhead (recommended for Tesla P4){C_RESET}\n")
+        print(f"{C_GREEN}✅ Mixed Precision (AMP) disabled - training in pure FP32{C_RESET}\n")
     
     # Create datasets
     print("Loading datasets...")
@@ -469,6 +471,9 @@ def main():
                 'augment':      True,
                 'shuffle':      True,
                 'paths':        None,  # use default path patterns
+                'cache_max_items': config.get('CACHE_MAX_SAMPLES', 3000),
+                'prefetch_count':  config.get('PREFETCH_BATCHES', 8),
+                'prefetch_workers': config.get('PREFETCH_WORKERS', 2),
             }
             train_loader = create_train_loader(loader_config)
 

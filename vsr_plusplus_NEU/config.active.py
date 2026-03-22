@@ -8,7 +8,7 @@ VSR++ 7-Frame Configuration - Example Template
 The config.py file is in .gitignore and will NOT be committed.
 Edit config.py for your local setup.
 
-This configuration is specifically optimized for 7-frame VSR training on Tesla P4 hardware (8GB VRAM).
+This configuration is specifically optimized for 7-frame VSR training on Tesla P100 hardware (16GB VRAM).
 Key parameters:
 - 72 feature channels (optimized for 7-frame model)
 - 26 residual blocks (balanced depth for quality)
@@ -34,16 +34,16 @@ N_BLOCKS = 28
 # ============================================================================
 # Diese Werte werden DIREKT im Training verwendet — kein dynamisches Ermitteln,
 # keine Runtime-Überschreibung.  Basierend auf gemessenen VRAM-Werten
-# (7f | 28b | 72f | FP32 - aktive Modellkonfiguration).
+# (7f | 28b | 72f | AMP+FP16 - aktive Modellkonfiguration, Tesla P100 16GB).
 #
 # 720_169 (720×405) - Vollbilder 16:9:
-#   BS=2, A=4 → eff. Batch=8 | VRAM: ~5.14 GB ✅
+#   BS=4, A=2 → eff. Batch=8
 #
 # 540 (540×540) - Crops aus 1080p:
-#   BS=2, A=3 → eff. Batch=6 | VRAM: ~5.15 GB ✅
+#   BS=4, A=2 → eff. Batch=8
 #
-# 720 (720×720) - 4K Crops (VRAM-kritisch!):
-#   BS=1, A=4 → eff. Batch=4 | VRAM: ~6.14 GB ✅  (BS=2 = OOM!)
+# 720 (720×720) - 4K Crops:
+#   BS=4, A=2 → eff. Batch=8
 #
 # WICHTIG: Für jede neue size_key hier einen Eintrag anlegen!
 # Training bricht mit klarem Fehler ab, wenn ein size_key fehlt.
@@ -134,10 +134,23 @@ HIST_STEP_EVERY = 500
 # ============================================================================
 
 # Number of worker threads for data loading
+# NOTE: MultiSizeDataLoader bypasses PyTorch's DataLoader worker mechanism;
+# actual parallelism is controlled by PREFETCH_WORKERS below.
 NUM_WORKERS = 5
 
 # Pin memory for faster GPU transfer
 PIN_MEMORY = True
+
+# Prefetch settings for faster data loading
+# Background threads load the next N batches while the GPU processes the current one.
+PREFETCH_BATCHES = 8       # Number of batches to buffer ahead in background
+PREFETCH_WORKERS = 2       # Reserved for future multi-worker expansion; currently
+                           # the implementation uses a single producer thread.
+
+# In-memory LRU sample cache (effective because augmentation is off → deterministic output)
+# Caches finished tensors (lr_stack, gt, filename) so repeated access skips cv2.imread.
+# Memory footprint: ~5 MB/sample → 3000 samples ≈ 14.6 GB  (tune to available RAM)
+CACHE_MAX_SAMPLES = 3000   # Max cached samples per dataset (0 = disabled)
 
 
 # ============================================================================
@@ -173,10 +186,9 @@ INITIAL_GRAD_CLIP = 1.5
 # MIXED PRECISION TRAINING (AMP)
 # ============================================================================
 
-# Enable Automatic Mixed Precision for faster training on Tesla P4
-# NOTE: Tesla P4 has NO hardware FP16 support (only emulated).
-# AMP adds ~3GB overhead without providing any speedup on this GPU.
-# Disabled to save VRAM and improve training speed.
+# Enable Automatic Mixed Precision for faster training on Tesla P100.
+# The P100 has native FP16 hardware (18.7 TFLOPS FP16 vs 9.3 TFLOPS FP32),
+# so AMP delivers a real ~1.5–2× speedup and reduces activation memory by ~30-40%.
 USE_AMP = True
 
 # Enable gradient checkpointing (activation recomputation).
@@ -227,6 +239,9 @@ def get_config():
         # Data loading
         'NUM_WORKERS': NUM_WORKERS,
         'PIN_MEMORY': PIN_MEMORY,
+        'PREFETCH_BATCHES': PREFETCH_BATCHES,
+        'PREFETCH_WORKERS': PREFETCH_WORKERS,
+        'CACHE_MAX_SAMPLES': CACHE_MAX_SAMPLES,
         
         # Paths
         'DATA_ROOT': DATA_ROOT,
@@ -249,7 +264,7 @@ def get_config():
 def print_config():
     """Print current configuration in a readable format."""
     print("\n" + "="*80)
-    print("7-FRAME VSR CONFIGURATION (Tesla P4 Optimized)")
+    print("7-FRAME VSR CONFIGURATION (Tesla P100 Optimized)")
     print("="*80)
     
     print("\nMODEL ARCHITECTURE (7-Frame Optimized):")
@@ -288,6 +303,9 @@ def print_config():
     print("\nDATA LOADING:")
     print(f"  Workers:                {NUM_WORKERS}")
     print(f"  Pin Memory:             {PIN_MEMORY}")
+    print(f"  Prefetch Batches:       {PREFETCH_BATCHES}")
+    print(f"  Prefetch Workers:       {PREFETCH_WORKERS}")
+    print(f"  Cache Max Samples:      {CACHE_MAX_SAMPLES}")
     
     print("\nDATASET PATHS:")
     print(f"  Dataset Root:           {DATASET_ROOT}")

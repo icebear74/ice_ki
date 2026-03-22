@@ -1103,6 +1103,9 @@ class VSRTrainer:
                 # Batch-Konfiguration mit gemessenen VRAM-Werten
                 adaptive_batch_config=self._build_ui_batch_config(),
                 
+                # Sample-cache statistics (per size_key)
+                cache_stats=self._collect_cache_stats(),
+
                 # Crop-wait status (system-level pause waiting for crop images)
                 crop_wait_active=self.waiting_for_crops,
                 crop_wait_current_count=self._crop_wait_current_count,
@@ -1143,6 +1146,31 @@ class VSRTrainer:
             elif 'vram_gb' in v:
                 entry['vram_gb'] = v['vram_gb']
             result[sk] = entry
+        return result
+
+    def _collect_cache_stats(self) -> dict:
+        """Collect LRU cache statistics from all training datasets.
+
+        Returns a dict mapping size_key → cache info dict with keys:
+            size       – number of items currently in cache
+            max        – maximum capacity (0 = disabled)
+            fill_pct   – fill level 0–100
+            hits       – cumulative cache hits
+            misses     – cumulative cache misses
+        """
+        datasets_dict = getattr(self.train_loader, 'datasets_dict', None)
+        if not datasets_dict:
+            return {}
+        result = {}
+        for sk, ds in datasets_dict.items():
+            if hasattr(ds, 'cache_size'):
+                result[sk] = {
+                    'size':     ds.cache_size,
+                    'max':      ds.cache_max,
+                    'fill_pct': ds.cache_fill_pct,
+                    'hits':     ds.cache_hits,
+                    'misses':   ds.cache_misses,
+                }
         return result
 
     def _apply_ema_smoothing(self, loss_dict):

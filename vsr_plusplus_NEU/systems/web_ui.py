@@ -167,6 +167,10 @@ class CompleteTrainingDataStore:
             'crop_wait_current_count': 0,
             'crop_wait_needed_count': 10000,
             'crop_wait_next_check_secs': 0,
+
+            # Sample-cache statistics (per dataset size_key)
+            # Each entry: {size_key: {size, max, fill_pct, hits, misses}}
+            'cache_stats': {},
             
             # Netzwerk
             'local_ip_address': detect_local_ip(),
@@ -946,6 +950,86 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             transition: opacity 0.2s;
         }
         .btn-check-now:hover { opacity: 0.85; }
+
+        /* Sample Cache Status Widget */
+        .cache-status-widget {
+            background: linear-gradient(135deg, #0d1f0d, #0d1117);
+            border: 2px solid #3fb950;
+            border-radius: 8px;
+            padding: 16px 20px;
+            margin-bottom: 16px;
+        }
+        .cache-status-title {
+            font-size: 1.1em;
+            font-weight: 700;
+            color: #3fb950;
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .cache-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 8px;
+        }
+        .cache-row-label {
+            min-width: 80px;
+            font-size: 0.88em;
+            color: var(--text-secondary);
+            font-weight: 600;
+        }
+        .cache-bar-outer {
+            flex: 1;
+            height: 18px;
+            background: rgba(255,255,255,0.05);
+            border-radius: 9px;
+            overflow: hidden;
+            border: 1px solid var(--border-color);
+            position: relative;
+        }
+        .cache-bar-inner {
+            height: 100%;
+            border-radius: 9px;
+            transition: width 0.6s ease, background 0.4s ease;
+        }
+        .cache-bar-text {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 0.75em;
+            font-weight: 700;
+            color: var(--text-primary);
+            text-shadow: 0 1px 2px rgba(0,0,0,0.9);
+            white-space: nowrap;
+        }
+        .cache-meta {
+            min-width: 140px;
+            text-align: right;
+            font-size: 0.82em;
+            color: var(--text-secondary);
+            font-family: 'Courier New', monospace;
+            white-space: nowrap;
+        }
+        .cache-stats-row {
+            display: flex;
+            gap: 20px;
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid var(--border-color);
+            flex-wrap: wrap;
+        }
+        .cache-stat-item {
+            font-size: 0.85em;
+            color: var(--text-secondary);
+        }
+        .cache-stat-item span {
+            color: var(--accent-blue);
+            font-weight: 600;
+            font-family: 'Courier New', monospace;
+        }
     </style>
 </head>
 <body>
@@ -1000,6 +1084,25 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             <div class="crop-wait-footer">
                 <span id="cropWaitTimer" class="crop-wait-timer">Nächste Prüfung: –</span>
                 <button class="btn-check-now" onclick="checkCropsNow()">🔄 Jetzt prüfen</button>
+            </div>
+        </div>
+
+        <!-- SAMPLE CACHE STATUS – shown prominently right after crop-wait banner -->
+        <div id="cacheStatusWidget" class="cache-status-widget">
+            <div class="cache-status-title">
+                🗄️ Sample-Cache (LRU In-Memory)
+                <span style="font-size:0.78em; font-weight:400; color:var(--text-secondary);">
+                    — kein Disk-I/O für gecachte Samples
+                </span>
+            </div>
+            <div id="cacheRowsContainer">
+                <div style="color: var(--text-secondary); font-size:0.9em;">Warte auf Daten…</div>
+            </div>
+            <div class="cache-stats-row" id="cacheTotalStats">
+                <div class="cache-stat-item">Gesamt gecacht: <span id="cacheTotalCached">0</span></div>
+                <div class="cache-stat-item">Cache-Hits: <span id="cacheTotalHits">0</span></div>
+                <div class="cache-stat-item">Cache-Misses: <span id="cacheTotalMisses">0</span></div>
+                <div class="cache-stat-item">Hit-Rate: <span id="cacheHitRate">0.0%</span></div>
             </div>
         </div>
 
@@ -1724,6 +1827,9 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             
             // Adaptive batch config (static display)
             updateAdaptiveBatchConfig(data.adaptive_batch_config);
+
+            // Sample cache status
+            updateCacheStatus(data.cache_stats || {});
             
             // TensorBoard link
             const tbLink = document.getElementById('tensorboardLink');
@@ -1734,6 +1840,64 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             document.getElementById('lastUpdate').textContent = updateTime.toLocaleTimeString('de-DE');
         }
         
+        function updateCacheStatus(cacheStats) {
+            const container = document.getElementById('cacheRowsContainer');
+            if (!cacheStats || Object.keys(cacheStats).length === 0) {
+                container.innerHTML = '<div style="color: var(--text-secondary); font-size:0.9em;">Warte auf Daten…</div>';
+                return;
+            }
+
+            const sizeOrder = ['720_169', '540', '720'];
+            const sizeLabels = {'720_169': '720×405 (16:9)', '540': '540×540', '720': '720×720'};
+            let html = '';
+            let totalCached = 0, totalMax = 0, totalHits = 0, totalMisses = 0;
+
+            for (const sk of sizeOrder) {
+                if (!(sk in cacheStats)) continue;
+                const s = cacheStats[sk];
+                const pct = s.fill_pct || 0;
+                const cached = s.size || 0;
+                const max = s.max || 0;
+                const hits = s.hits || 0;
+                const misses = s.misses || 0;
+
+                totalCached += cached;
+                totalMax += max;
+                totalHits += hits;
+                totalMisses += misses;
+
+                // Color: green → yellow → red based on fill level
+                let barColor;
+                if (pct >= 95)       barColor = 'linear-gradient(90deg, #22c55e, #16a34a)';
+                else if (pct >= 60)  barColor = 'linear-gradient(90deg, #3fb950, #22c55e)';
+                else if (pct >= 30)  barColor = 'linear-gradient(90deg, #f59e0b, #d97706)';
+                else                 barColor = 'linear-gradient(90deg, #ef4444, #dc2626)';
+
+                const hitTotal = hits + misses;
+                const hitRate = hitTotal > 0 ? (hits / hitTotal * 100).toFixed(1) : '0.0';
+                const label = sizeLabels[sk] || sk;
+
+                html += `
+                <div class="cache-row">
+                    <div class="cache-row-label">${label}</div>
+                    <div class="cache-bar-outer">
+                        <div class="cache-bar-inner" style="width:${pct.toFixed(1)}%; background:${barColor};"></div>
+                        <div class="cache-bar-text">${pct.toFixed(1)}% (${cached.toLocaleString('de-DE')} / ${max.toLocaleString('de-DE')})</div>
+                    </div>
+                    <div class="cache-meta">Hit: ${hitRate}% &nbsp;(${hits.toLocaleString('de-DE')}✓ / ${misses.toLocaleString('de-DE')}✗)</div>
+                </div>`;
+            }
+            container.innerHTML = html || '<div style="color: var(--text-secondary);">Keine Cache-Daten</div>';
+
+            // Summary row
+            const totalHitTotal = totalHits + totalMisses;
+            const totalHitRate = totalHitTotal > 0 ? (totalHits / totalHitTotal * 100).toFixed(1) : '0.0';
+            document.getElementById('cacheTotalCached').textContent = totalCached.toLocaleString('de-DE');
+            document.getElementById('cacheTotalHits').textContent = totalHits.toLocaleString('de-DE');
+            document.getElementById('cacheTotalMisses').textContent = totalMisses.toLocaleString('de-DE');
+            document.getElementById('cacheHitRate').textContent = totalHitRate + '%';
+        }
+
         function updateStackedBars(data) {
             // Get loss values
             const l1Loss = data.l1_loss_value || 0;

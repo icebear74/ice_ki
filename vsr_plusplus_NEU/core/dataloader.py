@@ -5,8 +5,12 @@ Enables training on multiple resolution variants simultaneously:
 - Samples from different resolution datasets based on distribution weights
 - Groups samples by size to maintain batch consistency
 - Supports custom batch sizes per resolution
+- Background prefetch queue: loads the next N batches while the GPU processes
+  the current one, hiding disk I/O latency.
 """
 
+import queue
+import threading
 import torch
 from torch.utils.data import Sampler
 import random
@@ -265,16 +269,44 @@ class MultiSizeDataLoader:
     
     Iterates over batches from different resolution datasets, yielding
     batches with their corresponding size key and metadata.
+
+    Background prefetch threads load the next ``prefetch_count`` batches
+    while the training loop processes the current one, eliminating disk I/O
+    from the critical path.
     
     Args:
         datasets_dict: Dict mapping size_key to VSRDataset instance
         sampler: SizeGroupedSampler instance
+        prefetch_count: Number of batches to buffer ahead (0 = no prefetch)
+        prefetch_workers: Number of background loader threads
     """
     
-    def __init__(self, datasets_dict, sampler):
+    def __init__(self, datasets_dict, sampler, prefetch_count=8, prefetch_workers=2):
         self.datasets_dict = datasets_dict
         self.sampler = sampler
+        self.prefetch_count = max(0, int(prefetch_count))
+        self.prefetch_workers = max(1, int(prefetch_workers))
     
+    def _load_batch(self, size_key, batch_indices):
+        """Load a single batch and return the packed dict."""
+        dataset = self.datasets_dict[size_key]
+        lr_list = []
+        gt_list = []
+        filename_list = []
+        for idx in batch_indices:
+            lr, gt, filename = dataset[idx]
+            lr_list.append(lr)
+            gt_list.append(gt)
+            filename_list.append(filename)
+        lr_batch = torch.stack(lr_list, dim=0)   # [B, 7, 3, H, W]
+        gt_batch = torch.stack(gt_list, dim=0)   # [B, 3, H, W]
+        return {
+            'lr': lr_batch,
+            'gt': gt_batch,
+            'size_key': size_key,
+            'filenames': filename_list
+        }
+
     def __iter__(self):
         """
         Yields batches containing:
@@ -282,31 +314,43 @@ class MultiSizeDataLoader:
         - 'gt': [B, 3, H*3, W*3] - GT frames tensor
         - 'size_key': str - Size identifier
         - 'filenames': List[str] - Filenames for this batch
+
+        When prefetch_count > 0 a pool of daemon threads pre-loads batches
+        into a bounded queue so that GPU compute and disk I/O overlap.
+        Exceptions raised in worker threads are re-raised in the main thread.
         """
-        for size_key, batch_indices in self.sampler:
-            dataset = self.datasets_dict[size_key]
-            
-            # Load samples for this batch
-            lr_list = []
-            gt_list = []
-            filename_list = []
-            
-            for idx in batch_indices:
-                lr, gt, filename = dataset[idx]
-                lr_list.append(lr)
-                gt_list.append(gt)
-                filename_list.append(filename)
-            
-            # Stack into batch tensors
-            lr_batch = torch.stack(lr_list, dim=0)  # [B, 7, 3, H, W]
-            gt_batch = torch.stack(gt_list, dim=0)  # [B, 3, H, W]
-            
-            yield {
-                'lr': lr_batch,
-                'gt': gt_batch,
-                'size_key': size_key,
-                'filenames': filename_list
-            }
+        if self.prefetch_count <= 0:
+            # Simple synchronous path (no prefetch)
+            for size_key, batch_indices in self.sampler:
+                yield self._load_batch(size_key, batch_indices)
+            return
+
+        # --- Asynchronous prefetch path ---
+        result_queue: queue.Queue = queue.Queue(maxsize=self.prefetch_count)
+        _SENTINEL = object()  # unique end-of-stream marker
+
+        def producer():
+            try:
+                for size_key, batch_indices in self.sampler:
+                    batch = self._load_batch(size_key, batch_indices)
+                    result_queue.put(batch)
+                result_queue.put(_SENTINEL)
+            except Exception as exc:
+                result_queue.put(exc)
+
+        thread = threading.Thread(target=producer, daemon=True,
+                                  name="vsr-prefetch-producer")
+        thread.start()
+
+        while True:
+            item = result_queue.get()
+            if item is _SENTINEL:
+                break
+            if isinstance(item, Exception):
+                raise item
+            yield item
+
+        thread.join()
     
     def __len__(self):
         """Total number of batches"""
@@ -335,8 +379,12 @@ def create_train_loader(config):
                       is only informational (files on disk determine actual ratio).
                       'accum' sets gradient accumulation steps for this size
                       (defaults: 4 for '720', 4 for '720_169', 3 for '540').
-            - 'augment': Whether to use augmentations (default: True)
+            - 'augment': Ignored – augmentation is permanently disabled.
             - 'shuffle': Whether to shuffle batches (default: True)
+            - 'cache_max_items': LRU cache size per dataset (default: 3000, 0=disabled)
+            - 'prefetch_count': Batches to buffer ahead in background (default: 8)
+            - 'prefetch_workers': Background loader threads (default: 2, currently
+                                   the implementation uses a single producer thread)
     
     Returns:
         MultiSizeDataLoader instance
@@ -348,7 +396,10 @@ def create_train_loader(config):
     sizes_config = config.get('sizes', {})
     augment = config.get('augment', True)
     shuffle = config.get('shuffle', True)
-    paths_config = config.get('paths', None)  # NEW: Get paths config
+    paths_config = config.get('paths', None)
+    cache_max_items = int(config.get('cache_max_items', 3000))
+    prefetch_count = int(config.get('prefetch_count', 8))
+    prefetch_workers = int(config.get('prefetch_workers', 2))
     
     if not data_root:
         raise ValueError("config must contain 'data_root'")
@@ -375,7 +426,8 @@ def create_train_loader(config):
                 size_key=size_key,
                 mode='train',
                 augment=augment,
-                paths_config=paths_config  # NEW: Pass paths config
+                paths_config=paths_config,
+                cache_max_items=cache_max_items,
             )
         except Exception as e:
             import traceback as _tb
@@ -403,10 +455,12 @@ def create_train_loader(config):
         accum_steps=accum_steps
     )
     
-    # Create dataloader
+    # Create dataloader with prefetch queue
     loader = MultiSizeDataLoader(
         datasets_dict=datasets_dict,
-        sampler=sampler
+        sampler=sampler,
+        prefetch_count=prefetch_count,
+        prefetch_workers=prefetch_workers,
     )
     
     return loader
