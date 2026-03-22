@@ -39,6 +39,7 @@
       z-index: 100;
     }
     #overlay.hidden { display: none; }
+    .hidden { display: none; }
 
     .card {
       background: var(--surface);
@@ -402,6 +403,7 @@
 
   /* ── Set password ── */
   document.getElementById('setpw-btn').addEventListener('click', async () => {
+    if (!firstLoginUserId) { setpwErr.textContent = 'Sitzungsfehler – bitte neu anmelden.'; showLogin(); return; }
     const pw1 = document.getElementById('new-pw1').value;
     const pw2 = document.getElementById('new-pw2').value;
     if (pw1.length < 8) { setpwErr.textContent = 'Passwort muss mindestens 8 Zeichen haben.'; return; }
@@ -415,7 +417,7 @@
         body: JSON.stringify({ user_id: firstLoginUserId, new_password: pw1 }),
       });
       const data = await res.json();
-      if (!res.ok) { setpwErr.textContent = data.error || 'Fehler.'; return; }
+      if (!res.ok) { setpwErr.textContent = data.error || 'Fehler beim Speichern.'; return; }
       hideOverlay({ token: data.token, user_id: data.user_id, username: data.username, role: data.role });
     } catch (e) {
       setpwErr.textContent = 'Netzwerkfehler: ' + e.message;

@@ -3,17 +3,20 @@ Per-user settings and account management.
 
 - User accounts are stored in the `users` table
   (user_id, username, password_hash, role).
-  password_hash = NULL means the account was just created and the user
-  must set a password on first login.
+  password_hash = NULL means first-login – password not yet set.
 - Per-user preferences (e.g. timezone) are stored in `user_memory`
   with category='timezone' and importance=1.0.
+
+Password hashing uses PBKDF2-HMAC-SHA256 (Python stdlib, no external deps).
+Format stored in DB:  pbkdf2:sha256:<iterations>:<hex-salt>:<hex-digest>
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
-
-import bcrypt
+import os
 
 from db.connection import get_connection
 
@@ -22,20 +25,31 @@ logger = logging.getLogger(__name__)
 _FALLBACK_TIMEZONE = "Europe/Berlin"
 _TZ_CATEGORY = "timezone"
 _TZ_IMPORTANCE = 1.0
+_PBKDF2_ITERATIONS = 260_000
 
 
 # ---------------------------------------------------------------------------
-# Password helpers
+# Password helpers (stdlib only – no bcrypt dependency)
 # ---------------------------------------------------------------------------
 
 def hash_password(plain: str) -> str:
-    """Return a bcrypt hash of *plain*."""
-    return bcrypt.hashpw(plain.encode(), bcrypt.gensalt()).decode()
+    """Return a PBKDF2-HMAC-SHA256 hash string for *plain*."""
+    salt = os.urandom(16)
+    digest = hashlib.pbkdf2_hmac("sha256", plain.encode(), salt, _PBKDF2_ITERATIONS)
+    return f"pbkdf2:sha256:{_PBKDF2_ITERATIONS}:{salt.hex()}:{digest.hex()}"
 
 
-def verify_password(plain: str, hashed: str) -> bool:
-    """Return True if *plain* matches *hashed*."""
-    return bcrypt.checkpw(plain.encode(), hashed.encode())
+def verify_password(plain: str, stored: str) -> bool:
+    """Return True if *plain* matches the stored PBKDF2 hash."""
+    try:
+        _scheme, _alg, iterations_s, salt_hex, digest_hex = stored.split(":")
+        salt = bytes.fromhex(salt_hex)
+        iterations = int(iterations_s)
+        expected = bytes.fromhex(digest_hex)
+        actual = hashlib.pbkdf2_hmac("sha256", plain.encode(), salt, iterations)
+        return hmac.compare_digest(actual, expected)
+    except Exception:  # noqa: BLE001
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +116,7 @@ def set_password(user_id: str, plain: str) -> None:
 def authenticate(username: str, password: str) -> "tuple[str, bool] | None":
     """Check credentials.  Returns (user_id, first_login) or None if invalid.
 
-    - Returns (user_id, True)  when password_hash IS NULL (first login – set password).
+    - Returns (user_id, True)  when password_hash IS NULL (first login).
     - Returns (user_id, False) when password matches stored hash.
     - Returns None when the username doesn't exist or the password is wrong.
     """
@@ -119,7 +133,6 @@ def authenticate(username: str, password: str) -> "tuple[str, bool] | None":
             return None
         user_id, pw_hash = row
         if pw_hash is None:
-            # First login: no password set yet – allow through so UI can set one.
             return (user_id, True)
         if verify_password(password, pw_hash):
             return (user_id, False)
@@ -130,10 +143,9 @@ def authenticate(username: str, password: str) -> "tuple[str, bool] | None":
 
 
 def ensure_admin_user(admin_username: str = "admin") -> None:
-    """Create the admin user (without a password) if no admin account exists yet.
+    """Create the admin user (without password) if no admin account exists yet.
 
     Called once at server startup.  Idempotent – safe to call on every restart.
-    The admin must set their password on first login.
     """
     try:
         with get_connection() as conn:
