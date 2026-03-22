@@ -5,6 +5,13 @@
 -- MySQL 8.4 Vektor-Support variiert je nach Installation.
 -- Die Spalten werden per ALTER TABLE ergänzt sobald das Embedding-Modell steht.
 
+CREATE TABLE IF NOT EXISTS users (
+    user_id     VARCHAR(64) NOT NULL PRIMARY KEY,
+    username    VARCHAR(64) NOT NULL UNIQUE,
+    role        ENUM('admin', 'user') NOT NULL DEFAULT 'user',
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 CREATE TABLE IF NOT EXISTS user_memory (
     id          BIGINT AUTO_INCREMENT PRIMARY KEY,
     user_id     VARCHAR(64) NOT NULL,

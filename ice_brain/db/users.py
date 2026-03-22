@@ -1,13 +1,15 @@
 """
-Per-user settings stored as rows in the `user_memory` table.
+Per-user settings and account management.
 
-Timezone is stored with category='timezone' and importance=1.0 so it is
-treated as a high-priority permanent preference.
+- User accounts are stored in the `users` table (user_id, username, role).
+- Per-user preferences (e.g. timezone) are stored in `user_memory`
+  with category='timezone' and importance=1.0.
 """
 
 from __future__ import annotations
 
 import logging
+import uuid
 
 from db.connection import get_connection
 
@@ -17,6 +19,66 @@ _FALLBACK_TIMEZONE = "Europe/Berlin"
 _TZ_CATEGORY = "timezone"
 _TZ_IMPORTANCE = 1.0
 
+
+# ---------------------------------------------------------------------------
+# Account helpers
+# ---------------------------------------------------------------------------
+
+def create_user(username: str, role: str = "user") -> str:
+    """Create a new user account.  Returns the new user_id.
+
+    Raises ValueError if the username already exists.
+    """
+    user_id = username.lower().replace(" ", "_")
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO users (user_id, username, role) VALUES (%s, %s, %s)",
+            (user_id, username, role),
+        )
+        conn.commit()
+        cursor.close()
+    return user_id
+
+
+def user_exists(user_id: str) -> bool:
+    """Return True if *user_id* has a row in the users table."""
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1 FROM users WHERE user_id = %s", (user_id,))
+            found = cursor.fetchone() is not None
+            cursor.close()
+            return found
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not check user existence for %r: %s", user_id, exc)
+        return False
+
+
+def ensure_admin_user(admin_username: str = "admin") -> None:
+    """Create the admin user if no admin account exists yet.
+
+    Called once at server startup.  Idempotent – safe to call on every restart.
+    """
+    try:
+        admin_id = admin_username.lower().replace(" ", "_")
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT user_id FROM users WHERE role = 'admin' LIMIT 1")
+            row = cursor.fetchone()
+            cursor.close()
+        if row:
+            logger.info("Admin user already present: %r", row[0])
+            return
+        create_user(admin_username, role="admin")
+        logger.info("Admin user created: %r (user_id=%r)", admin_username, admin_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Could not ensure admin user: %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# Timezone helpers  (stored in user_memory, category='timezone')
+# ---------------------------------------------------------------------------
 
 def get_user_timezone(user_id: str) -> str:
     """Return the stored timezone for *user_id*, or the fallback if none is set."""

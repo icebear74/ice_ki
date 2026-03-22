@@ -97,6 +97,14 @@ async def startup() -> None:
             "The server will run without database support until MySQL is reachable."
         )
 
+    # 5. Ensure admin user exists
+    try:
+        from db.users import ensure_admin_user  # noqa: PLC0415
+        admin_username = getattr(config, "ADMIN_USER", "admin") if "config" in sys.modules else "admin"
+        ensure_admin_user(admin_username)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Could not ensure admin user: %s", exc)
+
     logger.info("ice_brain ready.  Model status: %s", llm_manager.get_status())
 
 

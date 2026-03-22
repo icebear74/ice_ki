@@ -34,6 +34,9 @@ MYSQL = {
 HOST = '0.0.0.0'
 PORT = 8000
 
+# Admin-Benutzername, der beim Systemstart automatisch angelegt wird (falls noch kein Admin existiert)
+ADMIN_USER = 'admin'
+
 # Embedding-Modell (für spätere Vektorsuche — Phase 2+)
 EMBEDDING_MODEL = {
     'path': '/models/nomic-embed-text-v1.5.Q4_K_M.gguf',
