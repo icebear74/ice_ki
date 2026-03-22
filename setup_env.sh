@@ -263,7 +263,7 @@ echo -e "${CYAN}   (fehlende Pakete werden automatisch installiert)${RESET}"
 STDLIB_PACKAGES="os sys re json math time argparse subprocess threading logging \
   pathlib typing collections itertools functools hashlib tempfile signal shutil \
   glob atexit errno queue random select traceback socket datetime tty termios \
-  curses http concurrent atexit io abc copy struct weakref dataclasses enum \
+  curses http concurrent io abc copy struct weakref dataclasses enum \
   contextlib warnings gc platform uuid"
 
 # Mapping: Python import name → pip package name (when they differ)
