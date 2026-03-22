@@ -1,10 +1,10 @@
 -- ICE BRAIN Database Schema
 -- Wird automatisch von connection.py ausgeführt wenn die Tabellen fehlen.
 --
--- Voraussetzung: MySQL 8.4+
--- VECTOR(768)-Spalten werden direkt angelegt.  VECTOR INDEX (HNSW) wird separat
--- durch _ensure_vector_indexes() erstellt, damit ein Fehler dort die Tabellen-
--- Erstellung nicht abbricht.
+-- Hinweis: MySQL 8.4 (LTS) besitzt keinen nativen VECTOR-Datentyp.
+-- Embeddings werden daher als MEDIUMBLOB (packed float32, 768*4 = 3072 Bytes) gespeichert.
+-- Aehnlichkeitssuche erfolgt anwendungsseitig.  Upgrade auf MySQL 9.0+ ermoeglicht
+-- spaeter den Wechsel zu nativem VECTOR-Typ und HNSW-Index.
 
 CREATE TABLE IF NOT EXISTS users (
     user_id       VARCHAR(64)  NOT NULL PRIMARY KEY,
@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS wiki_chunks (
     chunk_idx   SMALLINT NOT NULL,
     content     TEXT NOT NULL,
     lang        CHAR(2) DEFAULT 'de',
-    embedding   VECTOR(768) NULL COMMENT 'Text-Embedding 768-dim; NULL bis verarbeitet',
+    embedding   MEDIUMBLOB NULL COMMENT 'Packed float32 embedding 768-dim (3072 Bytes)',
     updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_title (title(100)),
     INDEX idx_article (article_id)
@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS knowledge_entries (
     content     TEXT NOT NULL,
     metadata    JSON,
     source      VARCHAR(128),
-    embedding   VECTOR(768) NULL COMMENT 'Text-Embedding 768-dim; NULL bis verarbeitet',
+    embedding   MEDIUMBLOB NULL COMMENT 'Packed float32 embedding 768-dim (3072 Bytes)',
     created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_domain (domain)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

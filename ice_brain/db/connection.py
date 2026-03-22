@@ -97,7 +97,16 @@ def _missing_tables(pool: mysql.connector.pooling.MySQLConnectionPool, db_name: 
 def _run_schema(pool: mysql.connector.pooling.MySQLConnectionPool) -> None:
     sql = _SCHEMA_FILE.read_text(encoding="utf-8")
     # Split on semicolons to execute statement by statement.
-    statements = [s.strip() for s in sql.split(";") if s.strip() and not s.strip().startswith("--")]
+    # Strip leading comment lines from each chunk before deciding whether to run it,
+    # so that the file-header comment attached to the first CREATE TABLE is not
+    # accidentally treated as a pure-comment block.
+    raw_statements = sql.split(";")
+    statements = []
+    for s in raw_statements:
+        # Remove comment-only lines, then check if DDL content remains.
+        content_lines = [ln for ln in s.splitlines() if ln.strip() and not ln.strip().startswith("--")]
+        if content_lines:
+            statements.append(s.strip())
     conn = pool.get_connection()
     try:
         cursor = conn.cursor()
@@ -114,18 +123,16 @@ def _run_schema(pool: mysql.connector.pooling.MySQLConnectionPool) -> None:
 
 
 # ---------------------------------------------------------------------------
-# MySQL 8.4 VECTOR column + index migrations
+# Embedding column migration (MEDIUMBLOB for MySQL 8.4 compatibility)
 # ---------------------------------------------------------------------------
 
-_VECTOR_COLUMNS: list[tuple[str, str]] = [
+# MySQL 8.4 (LTS) has no native VECTOR type – that was added in MySQL 9.0.
+# Embeddings are stored as MEDIUMBLOB (packed float32, 768*4 = 3072 bytes).
+# Application-side cosine similarity is used for nearest-neighbour search.
+
+_EMBEDDING_COLUMNS: list[tuple[str, str]] = [
     ("wiki_chunks",       "embedding"),
     ("knowledge_entries", "embedding"),
-]
-
-_VECTOR_INDEXES: list[tuple[str, str, str]] = [
-    # (index_name, table_name, column_name)
-    ("idx_wiki_embedding",       "wiki_chunks",       "embedding"),
-    ("idx_knowledge_embedding",  "knowledge_entries", "embedding"),
 ]
 
 
@@ -138,64 +145,21 @@ def _column_exists(cursor: mysql.connector.cursor.MySQLCursor, db_name: str, tab
     return cursor.fetchone() is not None
 
 
-def _index_exists(cursor: mysql.connector.cursor.MySQLCursor, db_name: str, table: str, index: str) -> bool:
-    cursor.execute(
-        "SELECT 1 FROM information_schema.STATISTICS "
-        "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s AND INDEX_NAME = %s",
-        (db_name, table, index),
-    )
-    return cursor.fetchone() is not None
-
-
-def _ensure_vector_columns(pool: mysql.connector.pooling.MySQLConnectionPool, db_name: str) -> None:
-    """ADD COLUMN embedding VECTOR(768) to tables that are missing it (existing installs)."""
+def _ensure_embedding_columns(pool: mysql.connector.pooling.MySQLConnectionPool, db_name: str) -> None:
+    """ADD COLUMN embedding MEDIUMBLOB to tables that are missing it (migration for existing installs)."""
     conn = pool.get_connection()
     try:
         cursor = conn.cursor()
-        for table, column in _VECTOR_COLUMNS:
+        for table, column in _EMBEDDING_COLUMNS:
             if not _column_exists(cursor, db_name, table, column):
                 try:
                     cursor.execute(
-                        f"ALTER TABLE `{table}` ADD COLUMN `{column}` VECTOR(768) NULL "
-                        f"COMMENT 'Text-Embedding 768-dim; NULL bis verarbeitet'"
+                        f"ALTER TABLE `{table}` ADD COLUMN `{column}` MEDIUMBLOB NULL "
+                        f"COMMENT 'Packed float32 embedding 768-dim (3072 Bytes)'"
                     )
-                    logger.info("VECTOR column %s.%s added.", table, column)
+                    logger.info("Embedding column %s.%s added.", table, column)
                 except mysql.connector.Error as exc:
-                    logger.warning("Could not add VECTOR column %s.%s: %s", table, column, exc)
-        cursor.close()
-    finally:
-        conn.close()
-
-
-def _ensure_vector_indexes(pool: mysql.connector.pooling.MySQLConnectionPool, db_name: str) -> None:
-    """CREATE VECTOR INDEX (HNSW) where missing.  Requires MySQL 8.4+.
-
-    Each index creation is attempted independently so a single failure does not
-    block the others.  Indexes on columns with only NULL values will fail –
-    they will be retried on the next startup once embeddings are populated.
-    """
-    conn = pool.get_connection()
-    try:
-        cursor = conn.cursor()
-        for idx_name, table, column in _VECTOR_INDEXES:
-            if _index_exists(cursor, db_name, table, idx_name):
-                continue
-            # Only attempt if the column has at least one non-NULL value.
-            cursor.execute(
-                f"SELECT 1 FROM `{table}` WHERE `{column}` IS NOT NULL LIMIT 1"
-            )
-            if cursor.fetchone() is None:
-                logger.debug("Skipping VECTOR INDEX %s – no embeddings yet.", idx_name)
-                continue
-            try:
-                cursor.execute(
-                    f"CREATE VECTOR INDEX `{idx_name}` ON `{table}`(`{column}`) USING HNSW"
-                )
-                logger.info("VECTOR INDEX %s created on %s.%s.", idx_name, table, column)
-            except mysql.connector.Error as exc:
-                logger.warning(
-                    "Could not create VECTOR INDEX %s (MySQL 8.4+ required): %s", idx_name, exc
-                )
+                    logger.warning("Could not add embedding column %s.%s: %s", table, column, exc)
         cursor.close()
     finally:
         conn.close()
@@ -208,9 +172,8 @@ def init_db() -> None:
     so that newly added tables are picked up on existing databases without
     requiring a full schema reset.
 
-    After schema init:
-    - _ensure_vector_columns: adds VECTOR columns to existing tables (migration).
-    - _ensure_vector_indexes: creates HNSW indexes once embeddings are present.
+    After schema init, _ensure_embedding_columns() is run (idempotent migration)
+    to add MEDIUMBLOB embedding columns to existing installations.
     """
     global _pool  # noqa: PLW0603
     cfg = _get_mysql_cfg()
@@ -222,10 +185,8 @@ def init_db() -> None:
         _run_schema(_pool)
     else:
         logger.info("All tables present.")
-    # Always run migrations (idempotent) – adds VECTOR columns to existing tables.
-    _ensure_vector_columns(_pool, cfg["database"])
-    # Create HNSW indexes where embeddings are already populated.
-    _ensure_vector_indexes(_pool, cfg["database"])
+    # Always run migration (idempotent) – adds embedding columns to existing tables.
+    _ensure_embedding_columns(_pool, cfg["database"])
 
 
 @contextmanager
