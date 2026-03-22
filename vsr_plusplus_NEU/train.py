@@ -264,6 +264,7 @@ def main():
     print("Creating 7-frame model...")
     device = select_gpu()
     use_checkpointing = config.get('USE_CHECKPOINTING', True)
+    use_amp = config.get('USE_AMP', False)
     model = VSRBidirectional_7frames_3x(
         n_feats=n_feats, 
         n_blocks=n_blocks,
@@ -364,7 +365,7 @@ def main():
         )
     
     # Create GradScaler for mixed precision training if enabled
-    use_amp = config.get('USE_AMP', False)
+    # (use_amp was already read from config above, alongside use_checkpointing)
     scaler = GradScaler('cuda') if use_amp else None
     
     if use_amp:
@@ -471,9 +472,9 @@ def main():
                 'augment':      True,
                 'shuffle':      True,
                 'paths':        None,  # use default path patterns
-                'cache_max_items': config.get('CACHE_MAX_SAMPLES', 3000),
-                'prefetch_count':  config.get('PREFETCH_BATCHES', 8),
+                'prefetch_count':  config.get('PREFETCH_BATCHES', 10),
                 'prefetch_workers': config.get('PREFETCH_WORKERS', 2),
+                'pin_workers':  config.get('PREFETCH_PIN_WORKERS', 1),
             }
             train_loader = create_train_loader(loader_config)
 

@@ -17,7 +17,6 @@ import torch
 import random
 import numpy as np
 import threading
-import collections
 from torch.utils.data import Dataset
 
 # Index cache schema version — bump this whenever the stored format changes
