@@ -83,8 +83,11 @@ Rules:
 - Distinguish between SHORT-TERM facts (what is happening RIGHT NOW or very soon) \
 and LONG-TERM facts (permanent preferences, relationships, habits).
 - Short-term facts get a ttl (e.g. "2h"); long-term facts get ttl: null.
+- IMPORTANT: Also extract facts from INDIRECT or QUESTION-FORM statements. \
+If the user says "did you know I like coffee?" or "wusstest du dass ich Kaffee mag?", \
+this still reveals the fact "Likes coffee" – extract it!
 - If the message contains NO extractable personal facts (e.g. "ok", "thanks", \
-simple questions about the weather), output an empty array: []
+"what is the weather?"), output an empty array: []
 - ONLY output the JSON array – no prose, no markdown fences.
 
 Valid categories: preference, personal, relationship, hobby, experience, \
@@ -106,6 +109,18 @@ Output:
 [
   {"content": "Trinkt gerade Kaffee", "category": "activity", "importance": 0.3, "ttl": "2h"},
   {"content": "Trinkt Kaffee / mag Kaffee", "category": "preference", "importance": 0.6, "ttl": null}
+]
+
+Message: "wusstest du dass ich kaffee mag?"
+Output:
+[
+  {"content": "Mag Kaffee", "category": "preference", "importance": 0.6, "ttl": null}
+]
+
+Message: "did you know I love hiking?"
+Output:
+[
+  {"content": "Loves hiking", "category": "hobby", "importance": 0.7, "ttl": null}
 ]
 
 Message: "Ich war im August im Urlaub"
@@ -160,10 +175,10 @@ def _parse_facts(raw: str) -> list[dict]:
             try:
                 data = json.loads(raw[start : end + 1])
             except json.JSONDecodeError:
-                logger.debug("Memory extraction: could not parse JSON from %r", raw[:200])
+                logger.warning("Memory extraction: could not parse JSON from model output: %r", raw[:200])
                 return []
         else:
-            logger.debug("Memory extraction: no JSON array found in %r", raw[:200])
+            logger.warning("Memory extraction: no JSON array found in model output: %r", raw[:200])
             return []
 
     if not isinstance(data, list):
@@ -299,7 +314,7 @@ def extract_memories_sync(user_id: str, user_message: str, llm_manager: "LLMMana
 
     try:
         if not llm_manager.is_ready("router"):
-            logger.debug("Memory extraction skipped – router model not loaded.")
+            logger.info("Memory extraction skipped – router model not loaded.")
             return
 
         from models import ChatMessage  # noqa: PLC0415
@@ -318,7 +333,11 @@ def extract_memories_sync(user_id: str, user_message: str, llm_manager: "LLMMana
 
         facts_raw = _parse_facts(raw)
         if not facts_raw:
-            logger.debug("Memory extraction: no facts found in message.")
+            logger.info(
+                "Memory extraction: no facts extracted for user %r. "
+                "Model output: %r",
+                user_id, raw[:200],
+            )
             return
 
         facts = [_normalise_fact(f) for f in facts_raw]
