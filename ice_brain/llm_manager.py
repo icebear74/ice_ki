@@ -4,11 +4,22 @@ a thread-safe chat_completion() interface.
 
 GPU assignment
 --------------
-Each model config contains a 'gpu' index.  Before loading a model
-CUDA_VISIBLE_DEVICES is NOT modified globally (that would break the other
-model).  Instead we pass the device index directly to Llama via the
-tensor_split mechanism: a tensor_split list with 1.0 on the target GPU
-and 0.0 on all others routes all layers to that GPU.
+Each model config contains a 'gpu' index (0-based CUDA device index).
+We pass it directly as `main_gpu` to Llama together with `n_gpu_layers=-1`
+so that all transformer layers are offloaded to that specific GPU.
+
+`tensor_split` is intentionally NOT used here: that parameter splits a
+single model across multiple GPUs, which is the opposite of what we want
+(two separate models, each on its own GPU).
+
+CUDA build requirement
+----------------------
+llama-cpp-python must be compiled with CUDA support, otherwise `n_gpu_layers`
+is silently ignored and everything runs on CPU:
+
+    CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python --upgrade --force-reinstall
+
+The manager detects CPU-only builds at startup and logs a prominent warning.
 
 Thread-safety
 -------------
@@ -20,7 +31,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +42,28 @@ except ImportError:
     Llama = None  # type: ignore[assignment,misc]
     _LLAMA_AVAILABLE = False
     logger.warning("llama-cpp-python not installed – LLM features disabled.")
+
+
+def _check_cuda_build() -> bool:
+    """Return True if llama-cpp-python was compiled with CUDA support."""
+    if not _LLAMA_AVAILABLE:
+        return False
+    try:
+        import llama_cpp  # noqa: PLC0415
+        # llama_cpp exposes the list of supported GGML backends since ~0.2.x
+        support = getattr(llama_cpp, "llama_supports_gpu_offload", None)
+        if support is not None:
+            return bool(support())
+        # Fallback: inspect the compiled-in backend list when available
+        backend_list = getattr(llama_cpp, "_llama_backend_list", None)
+        if backend_list is not None:
+            return any("cuda" in str(b).lower() or "cublas" in str(b).lower() for b in backend_list)
+        # Last resort: try to load a tiny dummy model on GPU and see if any
+        # GPU memory is allocated – we skip this to avoid side effects and
+        # instead rely on the log line llama.cpp always prints at load time.
+        return False
+    except Exception:  # noqa: BLE001
+        return False
 
 
 class _ModelHandle:
@@ -47,6 +80,24 @@ class LLMManager:
 
     def __init__(self) -> None:
         self._models: Dict[str, _ModelHandle] = {}
+        self._cuda_available = _check_cuda_build()
+        if not self._cuda_available and _LLAMA_AVAILABLE:
+            logger.warning(
+                "=" * 70
+            )
+            logger.warning(
+                "WARNING: llama-cpp-python has NO CUDA support – models run on CPU!"
+            )
+            logger.warning(
+                "Reinstall with CUDA enabled:"
+            )
+            logger.warning(
+                '  CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python '
+                "--upgrade --force-reinstall"
+            )
+            logger.warning(
+                "=" * 70
+            )
 
     # ------------------------------------------------------------------
     # Loading
@@ -66,24 +117,38 @@ class LLMManager:
         n_ctx = cfg.get("n_ctx", 4096)
         n_gpu_layers = cfg.get("n_gpu_layers", -1)
 
-        logger.info("Loading model '%s' from %s on GPU %d …", name, path, gpu_index)
-        try:
-            # Build a tensor_split that routes everything to the target GPU.
-            # We need to know the total GPU count; default to 2 (P100 + P4).
-            # llama-cpp-python ignores extra entries, so passing [0,1,0,...] is safe.
-            n_gpus = 2
-            tensor_split = [0.0] * n_gpus
-            tensor_split[gpu_index] = 1.0
+        if not self._cuda_available:
+            logger.warning(
+                "Loading model '%s' on CPU (CUDA build missing). "
+                "n_gpu_layers ignored.",
+                name,
+            )
+            effective_gpu_layers = 0
+        else:
+            effective_gpu_layers = n_gpu_layers
 
+        logger.info(
+            "Loading model '%s' from %s  →  GPU %d, n_gpu_layers=%s …",
+            name, path, gpu_index,
+            "all" if effective_gpu_layers == -1 else effective_gpu_layers,
+        )
+        try:
             llm = Llama(
                 model_path=path,
                 n_ctx=n_ctx,
-                n_gpu_layers=n_gpu_layers,
-                tensor_split=tensor_split,
+                n_gpu_layers=effective_gpu_layers,
+                # main_gpu selects which CUDA device receives the model.
+                # This is the correct parameter for single-GPU assignment;
+                # tensor_split is only for splitting ONE model across GPUs.
+                main_gpu=gpu_index,
                 verbose=False,
             )
             self._models[name] = _ModelHandle(name, llm)
-            logger.info("Model '%s' loaded successfully.", name)
+            logger.info(
+                "Model '%s' loaded.  GPU offload: %s",
+                name,
+                "yes (GPU %d)" % gpu_index if effective_gpu_layers != 0 else "no (CPU)",
+            )
             return True
         except Exception as exc:  # noqa: BLE001
             logger.error(
@@ -139,11 +204,13 @@ class LLMManager:
         """Return which models are loaded and basic metadata."""
         status: Dict[str, Any] = {}
         for name, handle in self._models.items():
+            llm = handle.llm
             status[name] = {
                 "loaded": True,
-                "model_path": getattr(handle.llm, "model_path", "unknown"),
+                "model_path": getattr(llm, "model_path", "unknown"),
+                "gpu_offload": self._cuda_available,
+                "n_gpu_layers": getattr(llm, "n_gpu_layers", "unknown"),
             }
-        # List models that were never loaded (not in _models but in config).
         return status
 
     def is_ready(self, model_name: str) -> bool:
