@@ -5,8 +5,12 @@ Enables training on multiple resolution variants simultaneously:
 - Samples from different resolution datasets based on distribution weights
 - Groups samples by size to maintain batch consistency
 - Supports custom batch sizes per resolution
+- Background prefetch queue: loads the next N batches while the GPU processes
+  the current one, hiding disk I/O latency.
 """
 
+import queue
+import threading
 import torch
 from torch.utils.data import Sampler
 import random
@@ -262,52 +266,276 @@ class SizeGroupedSampler(Sampler):
 class MultiSizeDataLoader:
     """
     DataLoader that handles multiple dataset sizes with grouped sampling.
-    
-    Iterates over batches from different resolution datasets, yielding
-    batches with their corresponding size key and metadata.
-    
+
+    Implements a **two-stage asynchronous pipeline** to hide disk I/O latency:
+
+      Stage 1 – Producer  (``prefetch_workers`` threads)
+          Disk  →  cv2.imread / tensor conversion  →  *raw_queue*
+
+      Stage 2 – Pinner  (``pin_workers`` threads)
+          *raw_queue*  →  ``.pin_memory()``  →  *ready_queue*
+
+      Consumer  (training loop)
+          *ready_queue*  →  ``.to(device, non_blocking=True)``  →  GPU
+
+    The queues are bounded, so producers block whenever the consumer is slow
+    and the buffer is full, preventing unbounded RAM growth.
+
+    The live fill-levels of both queues are exposed via :attr:`prefetch_stats`
+    and are pushed to the WebUI on every training step.
+
     Args:
-        datasets_dict: Dict mapping size_key to VSRDataset instance
-        sampler: SizeGroupedSampler instance
+        datasets_dict:    Dict mapping size_key to VSRDataset instance.
+        sampler:          SizeGroupedSampler instance.
+        prefetch_count:   Capacity of the raw (disk) queue in batches.
+                          0 disables async prefetch entirely.
+        prefetch_workers: Number of parallel disk-loading threads (Stage 1).
+        pin_workers:      Number of pin_memory threads (Stage 2).
+                          Set to 0 to skip pinning (useful without CUDA).
     """
-    
-    def __init__(self, datasets_dict, sampler):
+
+    def __init__(self, datasets_dict, sampler,
+                 prefetch_count: int = 10,
+                 prefetch_workers: int = 1,
+                 pin_workers: int = 1):
         self.datasets_dict = datasets_dict
         self.sampler = sampler
-    
+        self.prefetch_count  = max(0, int(prefetch_count))
+        self.prefetch_workers = max(1, int(prefetch_workers))
+        self.pin_workers     = max(0, int(pin_workers))
+
+        # Queue references – set during __iter__, None between epochs
+        self._raw_queue: 'queue.Queue | None'   = None
+        self._ready_queue: 'queue.Queue | None' = None
+        self._ready_queue_max: int = 0
+
+    # ------------------------------------------------------------------
+    # Public stats property (readable from trainer / WebUI at any time)
+    # ------------------------------------------------------------------
+
+    @property
+    def prefetch_stats(self) -> dict:
+        """Return a snapshot of both pipeline queue fill levels.
+
+        Safe to call from any thread at any time (no locking needed because
+        ``queue.Queue.qsize()`` is atomic on CPython / Linux).
+        """
+        raw_q   = self._raw_queue
+        ready_q = self._ready_queue
+
+        raw_current   = raw_q.qsize()   if raw_q   is not None else 0
+        ready_current = ready_q.qsize() if ready_q is not None else 0
+        raw_max       = self.prefetch_count
+        ready_max     = self._ready_queue_max
+
+        total_current = raw_current + ready_current
+        total_max     = raw_max + ready_max
+        fill_pct      = (total_current / total_max * 100.0) if total_max > 0 else 0.0
+
+        return {
+            'enabled':       self.prefetch_count > 0,
+            'raw_current':   raw_current,
+            'raw_max':       raw_max,
+            'ready_current': ready_current,
+            'ready_max':     ready_max,
+            'total_current': total_current,
+            'total_max':     total_max,
+            'fill_pct':      round(fill_pct, 1),
+        }
+
+    # ------------------------------------------------------------------
+    # Internal batch loader (called from producer threads)
+    # ------------------------------------------------------------------
+
+    def _load_batch(self, size_key, batch_indices):
+        """Load a single batch and return the packed dict."""
+        dataset = self.datasets_dict[size_key]
+        lr_list, gt_list, filename_list = [], [], []
+        for idx in batch_indices:
+            lr, gt, filename = dataset[idx]
+            lr_list.append(lr)
+            gt_list.append(gt)
+            filename_list.append(filename)
+        return {
+            'lr':        torch.stack(lr_list, dim=0),   # [B, 7, 3, H, W]
+            'gt':        torch.stack(gt_list, dim=0),   # [B, 3, H, W]
+            'size_key':  size_key,
+            'filenames': filename_list,
+        }
+
+    # ------------------------------------------------------------------
+    # Iterator
+    # ------------------------------------------------------------------
+
     def __iter__(self):
         """
-        Yields batches containing:
-        - 'lr': [B, 7, 3, H, W] - LR frames tensor
-        - 'gt': [B, 3, H*3, W*3] - GT frames tensor
-        - 'size_key': str - Size identifier
-        - 'filenames': List[str] - Filenames for this batch
+        Yields batches with keys: ``lr``, ``gt``, ``size_key``, ``filenames``.
+
+        When ``prefetch_count > 0`` the two-stage async pipeline is active.
+        Workers are daemon threads that are killed automatically if the main
+        process exits.  Exceptions in any worker thread are re-raised in the
+        consumer (training loop).
         """
-        for size_key, batch_indices in self.sampler:
-            dataset = self.datasets_dict[size_key]
-            
-            # Load samples for this batch
-            lr_list = []
-            gt_list = []
-            filename_list = []
-            
-            for idx in batch_indices:
-                lr, gt, filename = dataset[idx]
-                lr_list.append(lr)
-                gt_list.append(gt)
-                filename_list.append(filename)
-            
-            # Stack into batch tensors
-            lr_batch = torch.stack(lr_list, dim=0)  # [B, 7, 3, H, W]
-            gt_batch = torch.stack(gt_list, dim=0)  # [B, 3, H, W]
-            
-            yield {
-                'lr': lr_batch,
-                'gt': gt_batch,
-                'size_key': size_key,
-                'filenames': filename_list
-            }
-    
+        if self.prefetch_count <= 0:
+            # Synchronous fallback – useful for debugging
+            for size_key, batch_indices in self.sampler:
+                yield self._load_batch(size_key, batch_indices)
+            return
+
+        _SENTINEL = object()  # unique end-of-stream marker
+        _use_pin  = self.pin_workers > 0 and torch.cuda.is_available()
+
+        # ---- Stop event: set by consumer to unblock stuck threads ----
+        # Threads must check this flag on every queue.put() so they do not
+        # block forever when the consumer exits early (GeneratorExit or break).
+        _stop = threading.Event()
+
+        # ---- Stage 1: raw queue (disk I/O) ---------------------------
+        raw_queue: queue.Queue = queue.Queue(maxsize=self.prefetch_count)
+        self._raw_queue = raw_queue
+
+        # ---- Stage 2: ready queue (pinned) ---------------------------
+        ready_max = max(2, self.pin_workers * 2) if _use_pin else 0
+        if _use_pin:
+            ready_queue: queue.Queue = queue.Queue(maxsize=ready_max)
+        else:
+            ready_queue = raw_queue   # bypass – ready == raw
+        self._ready_queue     = ready_queue
+        self._ready_queue_max = ready_max
+
+        # ---- Helper: put with stop-event check -----------------------
+        def _put(q: queue.Queue, item, timeout: float = 0.05):
+            """Put item into q; return False if _stop was set before success."""
+            while not _stop.is_set():
+                try:
+                    q.put(item, timeout=timeout)
+                    return True
+                except queue.Full:
+                    pass
+            return False  # stop signal received, item dropped
+
+        # ---- Producer thread(s) (disk → CPU tensor) ------------------
+        work_queue: queue.Queue = queue.Queue()
+        for item in self.sampler:
+            work_queue.put(item)
+        # One sentinel per producer so each knows when work is exhausted
+        for _ in range(self.prefetch_workers):
+            work_queue.put(_SENTINEL)
+
+        finished_producers = [0]
+        finished_lock = threading.Lock()
+
+        def producer():
+            while True:
+                item = work_queue.get()
+                if item is _SENTINEL:
+                    with finished_lock:
+                        finished_producers[0] += 1
+                        if finished_producers[0] == self.prefetch_workers:
+                            # Last producer finished: emit one sentinel per pinner
+                            # (or one directly to ready_queue when no pinners).
+                            sentinels = self.pin_workers if _use_pin else 1
+                            for _ in range(sentinels):
+                                _put(raw_queue, _SENTINEL)
+                    return
+                if _stop.is_set():
+                    return
+                size_key, batch_indices = item
+                try:
+                    batch = self._load_batch(size_key, batch_indices)
+                    if not _put(raw_queue, batch):
+                        return  # consumer is gone
+                except Exception as exc:
+                    _put(raw_queue, exc)
+                    return
+
+        producer_threads = [
+            threading.Thread(target=producer, daemon=True,
+                             name=f"vsr-producer-{i}")
+            for i in range(self.prefetch_workers)
+        ]
+
+        # ---- Pinner thread(s) (CPU tensor → pinned) ------------------
+        pinner_threads = []
+        if _use_pin:
+            finished_pinners = [0]
+            finished_pinner_lock = threading.Lock()
+
+            def pinner():
+                while True:
+                    try:
+                        item = raw_queue.get(timeout=0.05)
+                    except queue.Empty:
+                        if _stop.is_set():
+                            return
+                        continue
+                    if item is _SENTINEL:
+                        with finished_pinner_lock:
+                            finished_pinners[0] += 1
+                            if finished_pinners[0] == self.pin_workers:
+                                _put(ready_queue, _SENTINEL)
+                        return
+                    if isinstance(item, Exception):
+                        _put(ready_queue, item)
+                        return
+                    if _stop.is_set():
+                        return
+                    try:
+                        _put(ready_queue, {
+                            'lr':        item['lr'].pin_memory(),
+                            'gt':        item['gt'].pin_memory(),
+                            'size_key':  item['size_key'],
+                            'filenames': item['filenames'],
+                        })
+                    except Exception as exc:
+                        _put(ready_queue, exc)
+                        return
+
+            pinner_threads = [
+                threading.Thread(target=pinner, daemon=True,
+                                 name=f"vsr-pinner-{i}")
+                for i in range(self.pin_workers)
+            ]
+
+        # ---- Start all threads ---------------------------------------
+        for t in producer_threads:
+            t.start()
+        for t in pinner_threads:
+            t.start()
+
+        # ---- Consume -------------------------------------------------
+        try:
+            while True:
+                item = ready_queue.get()
+                if item is _SENTINEL:
+                    break
+                if isinstance(item, Exception):
+                    raise item
+                yield item
+        finally:
+            # Signal all worker threads to stop (handles GeneratorExit, break,
+            # exceptions – any exit path from the consumer).
+            _stop.set()
+
+            # Drain both queues so any thread blocked on put() can unblock,
+            # notice _stop, and exit its loop.
+            for q in ([raw_queue, ready_queue] if _use_pin else [raw_queue]):
+                while True:
+                    try:
+                        q.get_nowait()
+                    except queue.Empty:
+                        break
+
+            # Join with a generous timeout; daemon=True ensures process exit
+            # is not blocked if a thread hangs unexpectedly.
+            for t in producer_threads + pinner_threads:
+                t.join(timeout=5.0)
+
+            # Clear queue references so prefetch_stats shows zeros
+            self._raw_queue   = None
+            self._ready_queue = None
+            self._ready_queue_max = 0
+
     def __len__(self):
         """Total number of batches"""
         return len(self.sampler)
@@ -317,47 +545,42 @@ def create_train_loader(config):
     """
     Create multi-size training dataloader from config.
     
-    IMPORTANT: Dataset files are pre-weighted during extraction!
-    The 'distribution' values are ONLY used to determine which sizes to load.
-    Actual training samples ALL files proportionally (no additional weighting).
-    
     Args:
         config: Dict containing:
             - 'data_root': Root directory for datasets
             - 'dataset_name': Name of dataset (default: 'master')
-            - 'sizes': Dict with size configs, e.g.:
-                {
-                    '720': {'enabled': True, 'distribution': 0.4, 'batch_size': 1, 'accum': 4},
-                    '540': {'enabled': True, 'distribution': 0.4, 'batch_size': 2, 'accum': 3},
-                    '720_169': {'enabled': True, 'distribution': 0.2, 'batch_size': 2, 'accum': 4}
-                }
-                Note: 'distribution' > 0 means "load this size", the value itself
-                      is only informational (files on disk determine actual ratio).
-                      'accum' sets gradient accumulation steps for this size
-                      (defaults: 4 for '720', 4 for '720_169', 3 for '540').
-            - 'augment': Whether to use augmentations (default: True)
+            - 'sizes': Dict with size configs
+            - 'augment': Ignored – augmentation is permanently disabled.
             - 'shuffle': Whether to shuffle batches (default: True)
+            - 'prefetch_count':  Raw-queue capacity in batches (default: 10).
+                                 0 = synchronous / no prefetch.
+            - 'prefetch_workers': Parallel disk-loading threads (default: 1).
+            - 'pin_workers':     pin_memory threads for GPU-ready queue (default: 1).
+                                 0 = skip pinning (e.g. CPU-only machine).
     
     Returns:
         MultiSizeDataLoader instance
     """
     from .dataset import VSRDataset
     
-    data_root = config.get('data_root')
-    dataset_name = config.get('dataset_name', 'master')
-    sizes_config = config.get('sizes', {})
-    augment = config.get('augment', True)
-    shuffle = config.get('shuffle', True)
-    paths_config = config.get('paths', None)  # NEW: Get paths config
+    data_root        = config.get('data_root')
+    dataset_name     = config.get('dataset_name', 'master')
+    sizes_config     = config.get('sizes', {})
+    augment          = config.get('augment', True)
+    shuffle          = config.get('shuffle', True)
+    paths_config     = config.get('paths', None)
+    prefetch_count   = int(config.get('prefetch_count',   10))
+    prefetch_workers = int(config.get('prefetch_workers',  1))
+    pin_workers      = int(config.get('pin_workers',       1))
     
     if not data_root:
         raise ValueError("config must contain 'data_root'")
     
     # Create datasets for enabled sizes
-    datasets_dict = {}
+    datasets_dict    = {}
     size_distribution = {}
-    batch_sizes = {}
-    accum_steps = {}
+    batch_sizes      = {}
+    accum_steps      = {}
     
     for size_key, size_cfg in sizes_config.items():
         if not size_cfg.get('enabled', False):
@@ -375,7 +598,7 @@ def create_train_loader(config):
                 size_key=size_key,
                 mode='train',
                 augment=augment,
-                paths_config=paths_config  # NEW: Pass paths config
+                paths_config=paths_config,
             )
         except Exception as e:
             import traceback as _tb
@@ -384,15 +607,14 @@ def create_train_loader(config):
             print(f"   Skipping size '{size_key}' — check GT/LR directories and file extensions.")
             continue
         
-        datasets_dict[size_key] = dataset
+        datasets_dict[size_key]    = dataset
         size_distribution[size_key] = distribution
-        # batch_size and accum must be explicitly set in sizes_config — they come
-        # from ADAPTIVE_BATCH_CONFIG in config.py (fixed values, no guessing).
-        batch_sizes[size_key] = size_cfg['batch_size']
-        accum_steps[size_key] = size_cfg['accum']
+        batch_sizes[size_key]      = size_cfg['batch_size']
+        accum_steps[size_key]      = size_cfg['accum']
     
     if not datasets_dict:
-        raise ValueError("No training datasets could be loaded for any size. Check GT/LR directories and file extensions.")
+        raise ValueError("No training datasets could be loaded for any size. "
+                         "Check GT/LR directories and file extensions.")
     
     # Create sampler
     sampler = SizeGroupedSampler(
@@ -400,13 +622,16 @@ def create_train_loader(config):
         size_distribution=size_distribution,
         batch_sizes=batch_sizes,
         shuffle=shuffle,
-        accum_steps=accum_steps
+        accum_steps=accum_steps,
     )
     
-    # Create dataloader
+    # Create dataloader with 2-stage prefetch pipeline
     loader = MultiSizeDataLoader(
         datasets_dict=datasets_dict,
-        sampler=sampler
+        sampler=sampler,
+        prefetch_count=prefetch_count,
+        prefetch_workers=prefetch_workers,
+        pin_workers=pin_workers,
     )
     
     return loader

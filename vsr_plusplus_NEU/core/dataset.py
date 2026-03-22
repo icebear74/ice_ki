@@ -36,7 +36,9 @@ class VSRDataset(Dataset):
         dataset_name: Dataset name (e.g., 'master')
         size_key: Size variant ('720', '540', or '720_169')
         mode: 'train' or 'val'
-        augment: Whether to apply augmentations (flip, rotate)
+        augment: Ignored – augmentation is permanently disabled.
+                 With 350k+ diverse scenes the variance gain is negligible
+                 while the copy overhead (~5-15 ms/sample) is real.
         paths_config: Optional dict with path patterns:
             - train_gt: Pattern for training GT (default: 'patches/{size_key}/GT')
             - train_lr: Pattern for training LR (default: 'patches/{size_key}/LR_7frames')
@@ -44,12 +46,15 @@ class VSRDataset(Dataset):
             - val_lr: Pattern for validation LR (default: 'patches/{size_key}/LR_7frames')
     """
     
-    def __init__(self, root, dataset_name='master', size_key='720', mode='train', augment=True, paths_config=None, validate_upfront=False):
+    def __init__(self, root, dataset_name='master', size_key='720', mode='train', augment=True,
+                 paths_config=None, validate_upfront=False):
         self.root = root
         self.dataset_name = dataset_name
         self.size_key = size_key
         self.mode = mode
-        self.augment = augment and (mode == 'train')
+        # Augmentation permanently disabled: with 350k+ diverse scenes the
+        # regularisation gain is negligible while the copy overhead is real.
+        self.augment = False
         self.validate_upfront = validate_upfront
         
         # Thread lock for safe reloading during training
@@ -645,8 +650,8 @@ class VSRDataset(Dataset):
     
     def __getitem__(self, idx):
         """
-        Load and process a single sample
-        
+        Load and process a single sample.
+
         Returns:
             lr_stack: [7, 3, H, W] - 7 LR frames
             gt: [3, H*3, W*3] - GT frame (3x upscale)
@@ -694,7 +699,6 @@ class VSRDataset(Dataset):
                 
                 # Split LR into 7 frames (stacked vertically: H_total = H_frame * 7)
                 lr_height_total = lr.shape[0]
-                lr_width = lr.shape[1]
                 lr_height_per_frame = lr_height_total // 7
                 
                 lr_frames = []
@@ -703,28 +707,8 @@ class VSRDataset(Dataset):
                     frame = lr[i*lr_height_per_frame:(i+1)*lr_height_per_frame, :, :]
                     lr_frames.append(frame)
                 
-                # Apply augmentations (only for training)
-                if self.augment:
-                    # Random horizontal flip
-                    if random.random() > 0.5:
-                        gt = np.flip(gt, axis=1).copy()
-                        lr_frames = [np.flip(f, axis=1).copy() for f in lr_frames]
-                    
-                    # Random vertical flip
-                    if random.random() > 0.5:
-                        gt = np.flip(gt, axis=0).copy()
-                        lr_frames = [np.flip(f, axis=0).copy() for f in lr_frames]
-                    
-                    # Random rotation (0, 90, 180, 270)
-                    # For non-square patches (e.g. 720_169), 90°/270° would swap H and W,
-                    # making tensors in the same batch unstackable. Limit to 0°/180°.
-                    if gt.shape[0] == gt.shape[1]:
-                        k = random.randint(0, 3)
-                    else:
-                        k = random.choice([0, 2])
-                    if k > 0:
-                        gt = np.rot90(gt, k).copy()
-                        lr_frames = [np.rot90(f, k).copy() for f in lr_frames]
+                # Augmentation is permanently disabled (self.augment is always False).
+                # With 350k+ diverse scenes the regularisation gain is negligible.
                 
                 # Convert to tensors and normalize to [0, 1]
                 gt = torch.from_numpy(gt).permute(2, 0, 1).float() / 255.0

@@ -1103,6 +1103,9 @@ class VSRTrainer:
                 # Batch-Konfiguration mit gemessenen VRAM-Werten
                 adaptive_batch_config=self._build_ui_batch_config(),
                 
+                # Prefetch pipeline queue statistics
+                prefetch_stats=self._collect_prefetch_stats(),
+
                 # Crop-wait status (system-level pause waiting for crop images)
                 crop_wait_active=self.waiting_for_crops,
                 crop_wait_current_count=self._crop_wait_current_count,
@@ -1144,6 +1147,20 @@ class VSRTrainer:
                 entry['vram_gb'] = v['vram_gb']
             result[sk] = entry
         return result
+
+    def _collect_prefetch_stats(self) -> dict:
+        """Return the current prefetch pipeline queue fill levels.
+
+        Reads ``MultiSizeDataLoader.prefetch_stats`` and returns a dict ready
+        for the WebUI.  Returns a disabled-state dict when the loader is not
+        yet initialised or prefetch is turned off.
+        """
+        if self.train_loader is None:
+            return {'enabled': False}
+        stats = getattr(self.train_loader, 'prefetch_stats', None)
+        if stats is None:
+            return {'enabled': False}
+        return stats
 
     def _apply_ema_smoothing(self, loss_dict):
         """
@@ -1941,4 +1958,10 @@ class VSRTrainer:
             # Restore terminal mode
             self.keyboard.restore_normal_mode()
             self.tb_logger.close()
+            # Stop the web-monitoring HTTP server so its thread doesn't keep
+            # the process alive (or trigger std::terminate during teardown).
+            try:
+                self.web_monitor.terminate()
+            except Exception:
+                pass
 
