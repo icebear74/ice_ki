@@ -49,9 +49,9 @@ N_BLOCKS = 28
 # Training bricht mit klarem Fehler ab, wenn ein size_key fehlt.
 
 ADAPTIVE_BATCH_CONFIG = {
-    '720_169': {'batch': 2, 'accum': 4},   # eff=8 | ~5.14 GB | Vollbilder 16:9
-    '540':     {'batch': 2, 'accum': 3},   # eff=6 | ~5.15 GB | 1080p Crops
-    '720':     {'batch': 1, 'accum': 4},   # eff=4 | ~6.14 GB | 4K Crops (BS=1 pflicht!)
+    '720_169': {'batch': 4, 'accum': 2},   # eff=8 | ~5.14 GB | Vollbilder 16:9
+    '540':     {'batch': 4, 'accum': 2},   # eff=6 | ~5.15 GB | 1080p Crops
+    '720':     {'batch': 4, 'accum': 2},   # eff=4 | ~6.14 GB | 4K Crops (BS=1 pflicht!)
 }
 
 
@@ -145,7 +145,7 @@ PIN_MEMORY = True
 # ============================================================================
 
 # Dataset root directory - base directory for all datasets
-DATASET_ROOT = "/mnt/data/training/datasetNeu"
+DATASET_ROOT = "/mnt/data/training/datasetNeu4kNeu"
 
 # Dataset name (category)
 # Options: 'master', 'universal', 'space', 'toon' (lowercase)
@@ -177,7 +177,7 @@ INITIAL_GRAD_CLIP = 1.5
 # NOTE: Tesla P4 has NO hardware FP16 support (only emulated).
 # AMP adds ~3GB overhead without providing any speedup on this GPU.
 # Disabled to save VRAM and improve training speed.
-USE_AMP = False
+USE_AMP = True
 
 # Enable gradient checkpointing (activation recomputation).
 # Reduces activation memory by ~40% at the cost of ~10-15% compute overhead.
