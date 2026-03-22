@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 # Ensure the ice_brain directory itself is on sys.path so sibling imports work
@@ -154,10 +155,23 @@ async def chat_completion(
             content={"error": "Main LLM is not loaded yet. Check server logs."},
         )
 
+    # Inject current date/time into the system prompt so the model can greet
+    # the user correctly (e.g. "Guten Morgen" vs "Guten Abend").
+    now_str = datetime.now().strftime("%A, %d. %B %Y, %H:%M Uhr")
+    time_note = f"Aktuelle Uhrzeit: {now_str}."
+    messages = list(request.messages)
+    if messages and messages[0].role == "system":
+        messages[0] = ChatMessage(
+            role="system",
+            content=f"{messages[0].content}\n\n{time_note}",
+        )
+    else:
+        messages.insert(0, ChatMessage(role="system", content=time_note))
+
     try:
         assistant_text = llm_manager.chat_completion(
             model_name="main",
-            messages=request.messages,
+            messages=messages,
             temperature=request.temperature,
             max_tokens=request.max_tokens,
         )
