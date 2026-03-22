@@ -6,10 +6,11 @@
 -- Die Spalten werden per ALTER TABLE ergänzt sobald das Embedding-Modell steht.
 
 CREATE TABLE IF NOT EXISTS users (
-    user_id     VARCHAR(64) NOT NULL PRIMARY KEY,
-    username    VARCHAR(64) NOT NULL UNIQUE,
-    role        ENUM('admin', 'user') NOT NULL DEFAULT 'user',
-    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    user_id       VARCHAR(64)  NOT NULL PRIMARY KEY,
+    username      VARCHAR(64)  NOT NULL UNIQUE,
+    password_hash VARCHAR(255) NOT NULL,
+    role          ENUM('admin', 'user') NOT NULL DEFAULT 'user',
+    created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS user_memory (
