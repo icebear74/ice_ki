@@ -49,9 +49,9 @@ N_BLOCKS = 28
 # Training bricht mit klarem Fehler ab, wenn ein size_key fehlt.
 
 ADAPTIVE_BATCH_CONFIG = {
-    '720_169': {'batch': 4, 'accum': 2},   # eff=8 | ~5.14 GB | Vollbilder 16:9
-    '540':     {'batch': 4, 'accum': 2},   # eff=6 | ~5.15 GB | 1080p Crops
-    '720':     {'batch': 4, 'accum': 2},   # eff=4 | ~6.14 GB | 4K Crops (BS=1 pflicht!)
+    '720_169': {'batch': 8, 'accum': 1},   # eff=8 | ~5.14 GB | Vollbilder 16:9
+    '540':     {'batch': 8, 'accum': 2},   # eff=6 | ~5.15 GB | 1080p Crops
+    '720':     {'batch': 6, 'accum': 1},   # eff=4 | ~6.14 GB | 4K Crops (BS=1 pflicht!)
 }
 
 
