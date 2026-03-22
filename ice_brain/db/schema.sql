@@ -1,9 +1,10 @@
 -- ICE BRAIN Database Schema
 -- Wird automatisch von connection.py ausgeführt wenn die Tabellen fehlen.
 --
--- Hinweis: VECTOR-Spalten (für Embedding-Suche) werden NICHT in Phase 1 angelegt.
--- MySQL 8.4 Vektor-Support variiert je nach Installation.
--- Die Spalten werden per ALTER TABLE ergänzt sobald das Embedding-Modell steht.
+-- Voraussetzung: MySQL 8.4+
+-- VECTOR(768)-Spalten werden direkt angelegt.  VECTOR INDEX (HNSW) wird separat
+-- durch _ensure_vector_indexes() erstellt, damit ein Fehler dort die Tabellen-
+-- Erstellung nicht abbricht.
 
 CREATE TABLE IF NOT EXISTS users (
     user_id       VARCHAR(64)  NOT NULL PRIMARY KEY,
@@ -43,6 +44,7 @@ CREATE TABLE IF NOT EXISTS wiki_chunks (
     chunk_idx   SMALLINT NOT NULL,
     content     TEXT NOT NULL,
     lang        CHAR(2) DEFAULT 'de',
+    embedding   VECTOR(768) NULL COMMENT 'Text-Embedding 768-dim; NULL bis verarbeitet',
     updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_title (title(100)),
     INDEX idx_article (article_id)
@@ -55,6 +57,7 @@ CREATE TABLE IF NOT EXISTS knowledge_entries (
     content     TEXT NOT NULL,
     metadata    JSON,
     source      VARCHAR(128),
+    embedding   VECTOR(768) NULL COMMENT 'Text-Embedding 768-dim; NULL bis verarbeitet',
     created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_domain (domain)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
