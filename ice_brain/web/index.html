@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ice_brain – Chat</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:         #0f1117;
+      --surface:    #1a1d27;
+      --surface2:   #242736;
+      --accent:     #5b6cf9;
+      --accent-dim: #3d4db3;
+      --text:       #e2e4f0;
+      --text-muted: #8b8fa8;
+      --user-bg:    #2e3a6e;
+      --bot-bg:     #1e2233;
+      --radius:     12px;
+      --font:       'Segoe UI', system-ui, -apple-system, sans-serif;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    /* ── Overlay ── */
+    #overlay {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,.75);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 100;
+    }
+    #overlay.hidden { display: none; }
+    .hidden { display: none; }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--surface2);
+      border-radius: var(--radius);
+      padding: 32px 28px;
+      width: 340px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .card h2 {
+      font-size: 1.1rem;
+      color: var(--accent);
+      text-align: center;
+    }
+
+    .card label {
+      font-size: 0.82rem;
+      color: var(--text-muted);
+      display: block;
+      margin-bottom: 4px;
+    }
+
+    .card input[type=text],
+    .card input[type=password] {
+      width: 100%;
+      background: var(--surface2);
+      border: 1px solid #333650;
+      border-radius: 6px;
+      color: var(--text);
+      font-size: 0.93rem;
+      padding: 8px 10px;
+      outline: none;
+    }
+    .card input:focus { border-color: var(--accent); }
+
+    .card button {
+      background: var(--accent);
+      border: none;
+      border-radius: 8px;
+      color: #fff;
+      cursor: pointer;
+      font-size: 0.95rem;
+      padding: 10px;
+      transition: background 0.15s;
+      margin-top: 4px;
+    }
+    .card button:hover { background: var(--accent-dim); }
+
+    /* .card sets display:flex which has same specificity as .hidden – this rule
+       wins (higher specificity 0,2,0) so hidden cards are always invisible. */
+    .card.hidden { display: none; }
+
+    #overlay-error {
+      font-size: 0.82rem;
+      color: #f87171;
+      text-align: center;
+      min-height: 1.2em;
+    }
+
+    /* ── Header ── */
+    header {
+      width: 100%;
+      max-width: 800px;
+      padding: 14px 20px 10px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      border-bottom: 1px solid var(--surface2);
+    }
+
+    header h1 {
+      font-size: 1.15rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      color: var(--accent);
+      flex: 1;
+    }
+
+    #user-info {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    #logout-btn {
+      background: none;
+      border: 1px solid var(--surface2);
+      border-radius: 6px;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 0.75rem;
+      padding: 3px 8px;
+    }
+    #logout-btn:hover { color: var(--text); border-color: var(--accent); }
+
+    #model-status {
+      font-size: 0.75rem;
+      padding: 3px 8px;
+      border-radius: 20px;
+      background: var(--surface2);
+      color: var(--text-muted);
+    }
+
+    /* ── Chat area ── */
+    #chat {
+      flex: 1;
+      width: 100%;
+      max-width: 800px;
+      overflow-y: auto;
+      padding: 20px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      scroll-behavior: smooth;
+    }
+
+    .msg-wrap {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .msg-wrap.user  { align-items: flex-end; }
+    .msg-wrap.bot   { align-items: flex-start; }
+
+    .bubble {
+      max-width: 72%;
+      padding: 10px 14px;
+      border-radius: var(--radius);
+      font-size: 0.93rem;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .user .bubble { background: var(--user-bg); border-bottom-right-radius: 4px; }
+    .bot  .bubble { background: var(--bot-bg);  border-bottom-left-radius: 4px; }
+
+    .intent-badge {
+      font-size: 0.7rem;
+      color: var(--text-muted);
+      padding: 1px 6px;
+      border: 1px solid var(--surface2);
+      border-radius: 20px;
+      align-self: flex-start;
+    }
+
+    /* typing indicator */
+    .typing .bubble {
+      display: flex;
+      gap: 5px;
+      align-items: center;
+      padding: 12px 16px;
+    }
+
+    .dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--accent);
+      animation: bounce 1.1s infinite ease-in-out;
+    }
+    .dot:nth-child(2) { animation-delay: 0.18s; }
+    .dot:nth-child(3) { animation-delay: 0.36s; }
+
+    @keyframes bounce {
+      0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
+      40%            { transform: scale(1.0); opacity: 1.0; }
+    }
+
+    /* ── Input bar ── */
+    #input-bar {
+      width: 100%;
+      max-width: 800px;
+      padding: 12px 16px 18px;
+      display: flex;
+      gap: 10px;
+      border-top: 1px solid var(--surface2);
+    }
+
+    #msg-input {
+      flex: 1;
+      background: var(--surface);
+      border: 1px solid #333650;
+      border-radius: 8px;
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 0.93rem;
+      padding: 10px 14px;
+      resize: none;
+      outline: none;
+      min-height: 42px;
+      max-height: 160px;
+    }
+
+    #msg-input:focus { border-color: var(--accent); }
+
+    #send-btn {
+      background: var(--accent);
+      border: none;
+      border-radius: 8px;
+      color: #fff;
+      cursor: pointer;
+      font-size: 0.93rem;
+      padding: 0 20px;
+      transition: background 0.15s;
+      align-self: flex-end;
+      height: 42px;
+    }
+
+    #send-btn:hover:not(:disabled) { background: var(--accent-dim); }
+    #send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    @media (max-width: 600px) {
+      .bubble { max-width: 88%; }
+      header  { padding: 10px 12px 8px; }
+      #chat   { padding: 14px 10px; }
+      #input-bar { padding: 8px 10px 14px; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ── Login / First-login overlay ── -->
+<div id="overlay">
+  <!-- Step 1: Login -->
+  <div class="card" id="card-login">
+    <h2>🧊 ice_brain – Anmelden</h2>
+    <div>
+      <label for="login-username">Benutzername</label>
+      <input id="login-username" type="text" autocomplete="username" spellcheck="false" placeholder="z. B. admin" />
+    </div>
+    <div>
+      <label for="login-password">Passwort <span id="login-pw-hint" style="font-size:0.75rem;">(leer lassen beim Erst-Login)</span></label>
+      <input id="login-password" type="password" autocomplete="current-password" placeholder="Passwort" />
+    </div>
+    <div id="overlay-error"></div>
+    <button id="login-btn">Anmelden</button>
+  </div>
+
+  <!-- Step 2: Set password (first login) -->
+  <div class="card hidden" id="card-setpw">
+    <h2>🔐 Passwort festlegen</h2>
+    <p style="font-size:0.83rem;color:var(--text-muted);text-align:center;">
+      Willkommen! Bitte lege jetzt dein Passwort fest.
+    </p>
+    <div>
+      <label for="new-pw1">Neues Passwort (min. 8 Zeichen)</label>
+      <input id="new-pw1" type="password" autocomplete="new-password" placeholder="Neues Passwort" />
+    </div>
+    <div>
+      <label for="new-pw2">Passwort wiederholen</label>
+      <input id="new-pw2" type="password" autocomplete="new-password" placeholder="Wiederholen" />
+    </div>
+    <div id="setpw-error"></div>
+    <button id="setpw-btn">Passwort speichern</button>
+  </div>
+</div>
+
+<header>
+  <h1>🧊 ice_brain</h1>
+  <div id="user-info">
+    <span id="user-label">–</span>
+    <button id="logout-btn">Abmelden</button>
+  </div>
+  <span id="model-status">Verbindet…</span>
+</header>
+
+<div id="chat" role="log" aria-live="polite" aria-label="Chatverlauf"></div>
+
+<div id="input-bar">
+  <textarea id="msg-input" rows="1" placeholder="Nachricht eingeben…" aria-label="Nachricht"></textarea>
+  <button id="send-btn" aria-label="Senden">Senden</button>
+</div>
+
+<script>
+  const API_URL      = '/v1/chat/completions';
+  const HEALTH_URL   = '/health';
+  const LOGIN_URL    = '/auth/login';
+  const SETPW_URL    = '/auth/set-password';
+
+  /* ── Session state ── */
+  let session = (() => {
+    try { return JSON.parse(localStorage.getItem('ice_session') || 'null'); } catch { return null; }
+  })();
+  let firstLoginUserId = null;   // held between step 1 and step 2
+
+  const history = [];
+
+  /* ── DOM refs ── */
+  const overlay      = document.getElementById('overlay');
+  const cardLogin    = document.getElementById('card-login');
+  const cardSetpw    = document.getElementById('card-setpw');
+  const loginErr     = document.getElementById('overlay-error');
+  const setpwErr     = document.getElementById('setpw-error');
+  const chat         = document.getElementById('chat');
+  const input        = document.getElementById('msg-input');
+  const sendBtn      = document.getElementById('send-btn');
+  const statusEl     = document.getElementById('model-status');
+  const userLabel    = document.getElementById('user-label');
+  const logoutBtn    = document.getElementById('logout-btn');
+
+  /* ── Overlay helpers ── */
+  function showLogin() {
+    cardLogin.classList.remove('hidden');
+    cardSetpw.classList.add('hidden');
+    loginErr.textContent = '';
+    overlay.classList.remove('hidden');
+  }
+
+  function showSetPw() {
+    cardLogin.classList.add('hidden');
+    cardSetpw.classList.remove('hidden');
+    setpwErr.textContent = '';
+    overlay.classList.remove('hidden');
+  }
+
+  function hideOverlay(s) {
+    session = s;
+    localStorage.setItem('ice_session', JSON.stringify(s));
+    overlay.classList.add('hidden');
+    userLabel.textContent = s.username + (s.role === 'admin' ? ' ★' : '');
+  }
+
+  /* ── Init: check saved session ── */
+  if (session && session.token) {
+    hideOverlay(session);
+  } else {
+    showLogin();
+  }
+
+  /* ── Login ── */
+  document.getElementById('login-btn').addEventListener('click', async () => {
+    const username = document.getElementById('login-username').value.trim();
+    const password = document.getElementById('login-password').value;
+    if (!username) { loginErr.textContent = 'Benutzername eingeben.'; return; }
+
+    loginErr.textContent = '';
+    try {
+      const res = await fetch(LOGIN_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      });
+      const data = await res.json();
+      if (!res.ok) { loginErr.textContent = data.error || 'Fehler beim Anmelden.'; return; }
+      if (data.first_login) {
+        firstLoginUserId = data.user_id;
+        showSetPw();
+      } else {
+        hideOverlay({ token: data.token, user_id: data.user_id, username: data.username, role: data.role });
+      }
+    } catch (e) {
+      loginErr.textContent = 'Netzwerkfehler: ' + e.message;
+    }
+  });
+
+  document.getElementById('login-password').addEventListener('keydown', e => {
+    if (e.key === 'Enter') document.getElementById('login-btn').click();
+  });
+
+  /* ── Set password ── */
+  document.getElementById('setpw-btn').addEventListener('click', async () => {
+    if (!firstLoginUserId) { setpwErr.textContent = 'Sitzungsfehler – bitte neu anmelden.'; showLogin(); return; }
+    const pw1 = document.getElementById('new-pw1').value;
+    const pw2 = document.getElementById('new-pw2').value;
+    if (pw1.length < 8) { setpwErr.textContent = 'Passwort muss mindestens 8 Zeichen haben.'; return; }
+    if (pw1 !== pw2)    { setpwErr.textContent = 'Passwörter stimmen nicht überein.'; return; }
+
+    setpwErr.textContent = '';
+    try {
+      const res = await fetch(SETPW_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: firstLoginUserId, new_password: pw1 }),
+      });
+      const data = await res.json();
+      if (!res.ok) { setpwErr.textContent = data.error || 'Fehler beim Speichern.'; return; }
+      hideOverlay({ token: data.token, user_id: data.user_id, username: data.username, role: data.role });
+    } catch (e) {
+      setpwErr.textContent = 'Netzwerkfehler: ' + e.message;
+    }
+  });
+
+  /* ── Logout ── */
+  logoutBtn.addEventListener('click', () => {
+    localStorage.removeItem('ice_session');
+    session = null;
+    history.length = 0;
+    chat.innerHTML = '';
+    document.getElementById('login-username').value = '';
+    document.getElementById('login-password').value = '';
+    showLogin();
+  });
+
+  /* ── Status check ── */
+  async function checkStatus() {
+    try {
+      const res = await fetch(HEALTH_URL);
+      const data = await res.json();
+      const models = data.models || {};
+      const loaded = Object.keys(models).filter(k => models[k].loaded);
+      statusEl.textContent = loaded.length ? '● ' + loaded.join(', ') : '⚠ Kein Modell geladen';
+      statusEl.style.color = loaded.length ? '#6ee7b7' : '#f87171';
+    } catch {
+      statusEl.textContent = '⚠ Server nicht erreichbar';
+      statusEl.style.color = '#f87171';
+    }
+  }
+  checkStatus();
+  setInterval(checkStatus, 15000);
+
+  /* ── Message rendering ── */
+  function appendMessage(role, text, intent) {
+    const wrap = document.createElement('div');
+    wrap.className = `msg-wrap ${role === 'user' ? 'user' : 'bot'}`;
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    bubble.textContent = text;
+    wrap.appendChild(bubble);
+    if (intent && intent !== 'admin_command' && role !== 'user') {
+      const badge = document.createElement('span');
+      badge.className = 'intent-badge';
+      badge.textContent = `intent: ${intent}`;
+      wrap.appendChild(badge);
+    }
+    chat.appendChild(wrap);
+    chat.scrollTop = chat.scrollHeight;
+    return wrap;
+  }
+
+  function showTyping() {
+    const wrap = document.createElement('div');
+    wrap.className = 'msg-wrap bot typing';
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble';
+    for (let i = 0; i < 3; i++) {
+      const d = document.createElement('span');
+      d.className = 'dot';
+      bubble.appendChild(d);
+    }
+    wrap.appendChild(bubble);
+    chat.appendChild(wrap);
+    chat.scrollTop = chat.scrollHeight;
+    return wrap;
+  }
+
+  /* ── Send ── */
+  async function send() {
+    if (!session || !session.token) { showLogin(); return; }
+    const text = input.value.trim();
+    if (!text) return;
+
+    input.value = '';
+    input.style.height = '';
+    sendBtn.disabled = true;
+
+    appendMessage('user', text);
+    history.push({ role: 'user', content: text });
+
+    const typingEl = showTyping();
+
+    try {
+      const res = await fetch(API_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: 'main',
+          messages: history,
+          temperature: 0.7,
+          max_tokens: 1024,
+          user: session.user_id,
+          session_token: session.token,
+        }),
+      });
+
+      typingEl.remove();
+
+      if (res.status === 401) {
+        localStorage.removeItem('ice_session');
+        session = null;
+        appendMessage('bot', '⚠ Sitzung abgelaufen. Bitte erneut anmelden.');
+        showLogin();
+        return;
+      }
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: res.statusText }));
+        appendMessage('bot', `⚠ Fehler: ${err.error || res.statusText}`);
+        history.pop();
+        return;
+      }
+
+      const data = await res.json();
+      const reply = data.choices?.[0]?.message?.content ?? '(keine Antwort)';
+      const intent = data.router_intent ?? null;
+
+      appendMessage('bot', reply, intent);
+      history.push({ role: 'assistant', content: reply });
+
+    } catch (e) {
+      typingEl.remove();
+      appendMessage('bot', `⚠ Netzwerkfehler: ${e.message}`);
+      history.pop();
+    } finally {
+      sendBtn.disabled = false;
+      input.focus();
+    }
+  }
+
+  sendBtn.addEventListener('click', send);
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+  input.addEventListener('input', () => {
+    input.style.height = '';
+    input.style.height = Math.min(input.scrollHeight, 160) + 'px';
+  });
+</script>
+</body>
+</html>
