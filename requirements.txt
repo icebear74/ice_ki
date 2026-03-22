@@ -1,0 +1,26 @@
+# VSR++ Project Requirements
+# ============================================================
+# Install via:
+#   pip install -r requirements.txt
+#
+# torch and torchvision are NOT listed here because the correct
+# wheel depends on your CUDA version. Install them separately:
+#   GPU (CUDA 11.8):  pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+#   GPU (CUDA 12.1):  pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+#   CPU only:         pip install torch torchvision
+#
+# Or use setup_env.sh for automatic detection (torch is installed by default).
+# ============================================================
+
+# Core numerics / image processing
+numpy
+opencv-python
+Pillow
+
+# Training utilities
+tensorboard
+tqdm
+
+# System / monitoring
+psutil
+rich

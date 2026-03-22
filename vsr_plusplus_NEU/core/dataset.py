@@ -11,11 +11,20 @@ Loads VSR training data with new dataset structure:
 
 import os
 import cv2
+import json
+import time
 import torch
 import random
 import numpy as np
 import threading
 from torch.utils.data import Dataset
+
+# Index cache schema version — bump this whenever the stored format changes
+_INDEX_CACHE_VERSION = 1
+
+# Tolerance (seconds) for directory mtime comparison.
+# FAT32/SMB shares round mtime to 2 s; 1.0 s covers most local filesystems.
+_MTIME_TOLERANCE_SEC = 1.0
 
 
 class VSRDataset(Dataset):
@@ -85,6 +94,25 @@ class VSRDataset(Dataset):
         if not all_gt_files:
             raise ValueError(f"No PNG files found in {self.gt_dir}")
         
+        # ------------------------------------------------------------------
+        # Fast path: try to restore the file index from the on-disk cache.
+        # The cache is skipped when validate_upfront=True because image-level
+        # validation results cannot be reliably reproduced from mtime alone.
+        # ------------------------------------------------------------------
+        _loaded_from_cache = False
+        if not self.validate_upfront:
+            cached = self._load_index()
+            if cached is not None:
+                self.gt_files, self.lr_paths = cached
+                _loaded_from_cache = True
+                print(f"\n⚡ Index-Cache geladen: {len(self.gt_files)} Dateien für {mode} ({size_key})")
+                # Still run the quick sample validation even on cache hit
+                self._validate_samples()
+                return
+
+        # ------------------------------------------------------------------
+        # Slow path: full directory scan (result is cached for next time)
+        # ------------------------------------------------------------------
         # Filter to only keep GT files that have corresponding LR files
         # For Val mode, check both Val/LR and Patches/LR (like original)
         self.gt_files = []
@@ -222,6 +250,10 @@ class VSRDataset(Dataset):
             print(f"\n💡 Upfront validation SKIPPED for faster startup (runtime validation active)")
             print(f"   Loaded {len(self.gt_files)} files for {mode} ({size_key})\n")
         
+        # Persist the index so the next startup can skip this scan
+        if not self.validate_upfront:
+            self._save_index(self.gt_files, self.lr_paths)
+
         # Validate a few samples
         self._validate_samples()
     
@@ -341,6 +373,101 @@ class VSRDataset(Dataset):
                 print(f"  - {issue}")
             print()
     
+    # ------------------------------------------------------------------
+    # Index cache helpers
+    # ------------------------------------------------------------------
+
+    def _get_index_path(self):
+        """Return the path of the JSON index cache file for this dataset."""
+        cache_dir = os.path.join(self.root, self.dataset_name, '.vsr_index')
+        os.makedirs(cache_dir, exist_ok=True)
+        return os.path.join(cache_dir, f'{self.mode}_{self.size_key}.json')
+
+    def _load_index(self):
+        """
+        Try to load a previously cached file index.
+
+        The cache is considered valid when **both** the GT and LR directory
+        mtimes match the values stored at write-time.  Any change to either
+        directory (file added / removed) automatically invalidates it.
+
+        Returns:
+            (gt_files, lr_paths) tuple on cache hit, or None on miss/error.
+        """
+        index_path = self._get_index_path()
+        if not os.path.exists(index_path):
+            return None
+        try:
+            with open(index_path, 'r', encoding='utf-8') as fh:
+                data = json.load(fh)
+
+            if data.get('version') != _INDEX_CACHE_VERSION:
+                return None
+
+            # Check gt_dir mtime
+            gt_mtime_cached = data.get('gt_dir_mtime')
+            if gt_mtime_cached is None:
+                return None
+            if not os.path.isdir(self.gt_dir):
+                return None
+            if abs(os.path.getmtime(self.gt_dir) - gt_mtime_cached) > _MTIME_TOLERANCE_SEC:
+                return None  # directory changed
+
+            # Check lr_dir mtime (use whichever dir is active for this mode)
+            active_lr_dir = self.lr_dir if self.lr_dir else self.patch_lr_dir
+            lr_mtime_cached = data.get('lr_dir_mtime')
+            if active_lr_dir and os.path.isdir(active_lr_dir):
+                if lr_mtime_cached is None:
+                    return None
+                if abs(os.path.getmtime(active_lr_dir) - lr_mtime_cached) > _MTIME_TOLERANCE_SEC:
+                    return None  # directory changed
+
+            gt_files = data['gt_files']
+            lr_paths = data['lr_paths']
+            return gt_files, lr_paths
+
+        except Exception:
+            # Any read/parse error → treat as cache miss
+            return None
+
+    def _save_index(self, gt_files, lr_paths):
+        """
+        Persist the current file index to disk so the next startup is instant.
+
+        Not called when ``validate_upfront=True`` because the stored result
+        would then be filtered by image-level validation which is not
+        reproducible purely from directory mtimes.
+        """
+        try:
+            index_path = self._get_index_path()
+            active_lr_dir = self.lr_dir if self.lr_dir else self.patch_lr_dir
+            data = {
+                'version': _INDEX_CACHE_VERSION,
+                'gt_dir': self.gt_dir,
+                'lr_dir': active_lr_dir,
+                'gt_dir_mtime': os.path.getmtime(self.gt_dir) if os.path.isdir(self.gt_dir) else None,
+                'lr_dir_mtime': os.path.getmtime(active_lr_dir) if active_lr_dir and os.path.isdir(active_lr_dir) else None,
+                'created_at': time.strftime('%Y-%m-%dT%H:%M:%S'),
+                'gt_files': gt_files,
+                'lr_paths': lr_paths,
+            }
+            with open(index_path, 'w', encoding='utf-8') as fh:
+                json.dump(data, fh)
+        except Exception:
+            # Writing the cache is best-effort; never crash training
+            pass
+
+    def _invalidate_index(self):
+        """Delete the on-disk index so the next startup triggers a fresh scan."""
+        try:
+            index_path = self._get_index_path()
+            if os.path.exists(index_path):
+                os.remove(index_path)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+
     def __len__(self):
         return len(self.gt_files)
     
@@ -493,6 +620,9 @@ class VSRDataset(Dataset):
                 # Update the dataset atomically
                 self.gt_files = new_gt_files
                 self.lr_paths = new_lr_paths
+                
+                # Persist updated index; also write mtime-based invalidation
+                self._save_index(self.gt_files, self.lr_paths)
                 
                 files_after = len(self.gt_files)
                 new_files_loaded = files_after - files_before
