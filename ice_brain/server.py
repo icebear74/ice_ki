@@ -157,8 +157,21 @@ async def chat_completion(
 
     # Inject current date/time into the system prompt so the model can greet
     # the user correctly (e.g. "Guten Morgen" vs "Guten Abend").
-    now_str = datetime.now().strftime("%A, %d. %B %Y, %H:%M Uhr")
-    time_note = f"Aktuelle Uhrzeit: {now_str}."
+    now = datetime.now()
+    now_str = now.strftime("%A, %d. %B %Y, %H:%M Uhr")
+    hour = now.hour
+    if 5 <= hour < 12:
+        greeting = "Guten Morgen"
+    elif 12 <= hour < 18:
+        greeting = "Guten Tag"
+    elif 18 <= hour < 22:
+        greeting = "Guten Abend"
+    else:
+        greeting = "Hallo"
+    time_note = (
+        f"Aktuelle Uhrzeit: {now_str}. "
+        f"Begrüße den Benutzer passend zur Tageszeit mit \"{greeting}\"."
+    )
     messages = list(request.messages)
     if messages and messages[0].role == "system":
         messages[0] = ChatMessage(
