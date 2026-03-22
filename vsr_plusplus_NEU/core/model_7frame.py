@@ -102,9 +102,23 @@ class TemporalAlignBlock(nn.Module):
         # Step 2: Predict offset field (2 channels = dx, dy)
         self.offset_conv = nn.Conv2d(n_feats // 2, 2, 3, 1, 1)
 
-        # Initialize offset_conv to zero → identity warp at start of training
-        nn.init.zeros_(self.offset_conv.weight)
+        # Bug 6 fix: use small Kaiming init instead of zero init.
+        # Zero init causes near-zero gradients through grid_sample near the
+        # identity mapping, so offsets never learn.  A small but non-zero
+        # initialisation gives the gradient a path to grow from.
+        nn.init.kaiming_normal_(self.offset_conv.weight, a=0.1, mode='fan_in', nonlinearity='leaky_relu')
         nn.init.zeros_(self.offset_conv.bias)
+        # Scale weights down so offsets start near-identity but remain learnable.
+        with torch.no_grad():
+            self.offset_conv.weight.mul_(0.01)
+
+        # Bug 6 fix: explicit Kaiming init for correlation layers to ensure
+        # good gradient flow into the offset prediction head.
+        for m in self.corr_conv.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, a=0.1, mode='fan_in', nonlinearity='leaky_relu')
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
 
         # WebUI tracking
         self.last_flow_magnitude = 0.0

@@ -60,14 +60,16 @@ class AdaptiveLRScheduler:
         # to cosine annealing, to prevent an immediate spike-then-drop.
         self.boost_hold_lr = None
         self.boost_hold_until = 0
+        self.boost_hold_phase = None  # Set to 'plateau_hold' or 'val_plateau_hold' when active
     
-    def step(self, global_step, plateau_detected=False):
+    def step(self, global_step, plateau_detected=False, val_plateau_detected=False):
         """
         Update learning rate
         
         Args:
-            global_step: Current training step
-            plateau_detected: Whether plateau was detected
+            global_step:           Current training step
+            plateau_detected:      Whether a training-loss plateau was detected
+            val_plateau_detected:  Whether a validation-loss plateau was detected
             
         Returns:
             Tuple of (current_lr, phase_name)
@@ -87,6 +89,7 @@ class AdaptiveLRScheduler:
             # Hold the reduced LR for 200 steps before returning to cosine
             self.boost_hold_lr = new_lr
             self.boost_hold_until = global_step + 200
+            self.boost_hold_phase = 'plateau_hold'
             
             # Disable plateau action for next 1000 steps (prevent spam)
             # Note: variable is named plateau_boost_available for historical reasons; it now guards LR reduction
@@ -98,6 +101,25 @@ class AdaptiveLRScheduler:
             print(f"   {old_lr:.2e} -> {new_lr:.2e} (×0.5), held for 200 steps")
             
             return current_lr, 'plateau_hold'
+
+        # Validation plateau: gentler ×0.7 reduction, longer 300-step hold
+        elif val_plateau_detected and self.plateau_boost_available:
+            old_lr = self.optimizer.param_groups[0]['lr']
+            new_lr = max(old_lr * 0.7, self.min_lr)
+
+            for i, param_group in enumerate(self.optimizer.param_groups):
+                param_group['lr'] = new_lr * self.lr_ratios[i]
+
+            self.boost_hold_lr = new_lr
+            self.boost_hold_until = global_step + 300  # longer hold for val plateau
+            self.boost_hold_phase = 'val_plateau_hold'
+            self.plateau_boost_available = False
+            self.last_boost_step = global_step
+
+            print(f"\n🔽 LR REDUCED (val plateau) at step {global_step}")
+            print(f"   {old_lr:.2e} -> {new_lr:.2e} (×0.7), held for 300 steps")
+
+            return new_lr, 'val_plateau_hold'
         
         # Re-enable reduction after cooldown
         if global_step - self.last_boost_step > self.boost_cooldown:
@@ -108,10 +130,11 @@ class AdaptiveLRScheduler:
             if global_step < self.boost_hold_until:
                 for i, param_group in enumerate(self.optimizer.param_groups):
                     param_group['lr'] = self.boost_hold_lr * self.lr_ratios[i]
-                return self.boost_hold_lr, 'plateau_hold'
+                return self.boost_hold_lr, self.boost_hold_phase or 'plateau_hold'
             else:
                 # Hold period expired, resume normal schedule
                 self.boost_hold_lr = None
+                self.boost_hold_phase = None
         
         # Phase 1: Warmup
         if global_step < self.warmup_steps:
