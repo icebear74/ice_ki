@@ -34,10 +34,6 @@ MYSQL = {
 HOST = '0.0.0.0'
 PORT = 8000
 
-# Zeitzone des Servers (IANA-Name, z.B. "Europe/Berlin", "UTC")
-# Wird für zeitabhängige Begrüßungen verwendet.
-TIMEZONE = 'Europe/Berlin'
-
 # Embedding-Modell (für spätere Vektorsuche — Phase 2+)
 EMBEDDING_MODEL = {
     'path': '/models/nomic-embed-text-v1.5.Q4_K_M.gguf',

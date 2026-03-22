@@ -59,7 +59,6 @@ app = FastAPI(title="ice_brain", version="0.1.0")
 # Globals – populated during startup
 llm_manager: LLMManager = LLMManager()
 intent_router: IntentRouter | None = None
-_server_tz: ZoneInfo = ZoneInfo("Europe/Berlin")  # overridden from config at startup
 
 
 # ---------------------------------------------------------------------------
@@ -68,16 +67,10 @@ _server_tz: ZoneInfo = ZoneInfo("Europe/Berlin")  # overridden from config at st
 
 @app.on_event("startup")
 async def startup() -> None:
-    global _server_tz  # noqa: PLW0603
     # 1. Load config
     try:
         import config  # noqa: PLC0415
         models_cfg = config.MODELS
-        tz_name = getattr(config, "TIMEZONE", "Europe/Berlin")
-        try:
-            _server_tz = ZoneInfo(tz_name)
-        except ZoneInfoNotFoundError:
-            logger.warning("Unknown TIMEZONE %r in config – falling back to Europe/Berlin.", tz_name)
     except ImportError:
         logger.error(
             "config.py not found!  Run:  cp config.py.example config.py  "
@@ -163,9 +156,24 @@ async def chat_completion(
             content={"error": "Main LLM is not loaded yet. Check server logs."},
         )
 
-    # Inject current date/time into the system prompt so the model can greet
-    # the user correctly (e.g. "Guten Morgen" vs "Guten Abend").
-    now = datetime.now()
+    # Resolve user timezone: save to DB when provided, then always read from DB.
+    from db.users import get_user_timezone, upsert_user_timezone  # noqa: PLC0415
+    if request.timezone:
+        try:
+            ZoneInfo(request.timezone)  # validate before persisting
+            upsert_user_timezone(user_id, request.timezone)
+        except ZoneInfoNotFoundError:
+            logger.warning("Client sent unknown timezone %r for user %r – ignored.", request.timezone, user_id)
+    tz_name = get_user_timezone(user_id)
+    try:
+        user_tz = ZoneInfo(tz_name)
+    except ZoneInfoNotFoundError:
+        logger.warning("Stored timezone %r for user %r is invalid – using Europe/Berlin.", tz_name, user_id)
+        user_tz = ZoneInfo("Europe/Berlin")
+
+    # Inject current date/time (in user's timezone) into the system prompt so
+    # the model can greet the user correctly (e.g. "Guten Morgen" vs "Guten Abend").
+    now = datetime.now(tz=user_tz)
     now_str = now.strftime("%A, %d. %B %Y, %H:%M Uhr")
     hour = now.hour
     if 5 <= hour < 12:
