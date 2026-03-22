@@ -31,6 +31,72 @@
       align-items: center;
     }
 
+    /* ── Overlay ── */
+    #overlay {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,.75);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 100;
+    }
+    #overlay.hidden { display: none; }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--surface2);
+      border-radius: var(--radius);
+      padding: 32px 28px;
+      width: 340px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .card h2 {
+      font-size: 1.1rem;
+      color: var(--accent);
+      text-align: center;
+    }
+
+    .card label {
+      font-size: 0.82rem;
+      color: var(--text-muted);
+      display: block;
+      margin-bottom: 4px;
+    }
+
+    .card input[type=text],
+    .card input[type=password] {
+      width: 100%;
+      background: var(--surface2);
+      border: 1px solid #333650;
+      border-radius: 6px;
+      color: var(--text);
+      font-size: 0.93rem;
+      padding: 8px 10px;
+      outline: none;
+    }
+    .card input:focus { border-color: var(--accent); }
+
+    .card button {
+      background: var(--accent);
+      border: none;
+      border-radius: 8px;
+      color: #fff;
+      cursor: pointer;
+      font-size: 0.95rem;
+      padding: 10px;
+      transition: background 0.15s;
+      margin-top: 4px;
+    }
+    .card button:hover { background: var(--accent-dim); }
+
+    #overlay-error {
+      font-size: 0.82rem;
+      color: #f87171;
+      text-align: center;
+      min-height: 1.2em;
+    }
+
     /* ── Header ── */
     header {
       width: 100%;
@@ -50,26 +116,24 @@
       flex: 1;
     }
 
-    #user-id-wrap {
-      display: flex;
-      align-items: center;
-      gap: 6px;
+    #user-info {
       font-size: 0.8rem;
       color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      gap: 8px;
     }
 
-    #user-id-input {
-      background: var(--surface2);
-      border: 1px solid #333650;
-      color: var(--text);
+    #logout-btn {
+      background: none;
+      border: 1px solid var(--surface2);
       border-radius: 6px;
-      padding: 4px 8px;
-      font-size: 0.8rem;
-      width: 120px;
-      outline: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 0.75rem;
+      padding: 3px 8px;
     }
-
-    #user-id-input:focus { border-color: var(--accent); }
+    #logout-btn:hover { color: var(--text); border-color: var(--accent); }
 
     #model-status {
       font-size: 0.75rem;
@@ -188,7 +252,6 @@
     #send-btn:hover:not(:disabled) { background: var(--accent-dim); }
     #send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
-    /* ── Responsive ── */
     @media (max-width: 600px) {
       .bubble { max-width: 88%; }
       header  { padding: 10px 12px 8px; }
@@ -199,11 +262,47 @@
 </head>
 <body>
 
+<!-- ── Login / First-login overlay ── -->
+<div id="overlay">
+  <!-- Step 1: Login -->
+  <div class="card" id="card-login">
+    <h2>🧊 ice_brain – Anmelden</h2>
+    <div>
+      <label for="login-username">Benutzername</label>
+      <input id="login-username" type="text" autocomplete="username" spellcheck="false" placeholder="z. B. admin" />
+    </div>
+    <div>
+      <label for="login-password">Passwort <span id="login-pw-hint" style="font-size:0.75rem;">(leer lassen beim Erst-Login)</span></label>
+      <input id="login-password" type="password" autocomplete="current-password" placeholder="Passwort" />
+    </div>
+    <div id="overlay-error"></div>
+    <button id="login-btn">Anmelden</button>
+  </div>
+
+  <!-- Step 2: Set password (first login) -->
+  <div class="card hidden" id="card-setpw">
+    <h2>🔐 Passwort festlegen</h2>
+    <p style="font-size:0.83rem;color:var(--text-muted);text-align:center;">
+      Willkommen! Bitte lege jetzt dein Passwort fest.
+    </p>
+    <div>
+      <label for="new-pw1">Neues Passwort (min. 8 Zeichen)</label>
+      <input id="new-pw1" type="password" autocomplete="new-password" placeholder="Neues Passwort" />
+    </div>
+    <div>
+      <label for="new-pw2">Passwort wiederholen</label>
+      <input id="new-pw2" type="password" autocomplete="new-password" placeholder="Wiederholen" />
+    </div>
+    <div id="setpw-error"></div>
+    <button id="setpw-btn">Passwort speichern</button>
+  </div>
+</div>
+
 <header>
   <h1>🧊 ice_brain</h1>
-  <div id="user-id-wrap">
-    <label for="user-id-input">User-ID:</label>
-    <input id="user-id-input" type="text" value="default" autocomplete="off" spellcheck="false" />
+  <div id="user-info">
+    <span id="user-label">–</span>
+    <button id="logout-btn">Abmelden</button>
   </div>
   <span id="model-status">Verbindet…</span>
 </header>
@@ -211,29 +310,128 @@
 <div id="chat" role="log" aria-live="polite" aria-label="Chatverlauf"></div>
 
 <div id="input-bar">
-  <textarea
-    id="msg-input"
-    rows="1"
-    placeholder="Nachricht eingeben…"
-    aria-label="Nachricht"
-  ></textarea>
+  <textarea id="msg-input" rows="1" placeholder="Nachricht eingeben…" aria-label="Nachricht"></textarea>
   <button id="send-btn" aria-label="Senden">Senden</button>
 </div>
 
 <script>
-  /* ── Config ── */
-  const API_URL = '/v1/chat/completions';
-  const HEALTH_URL = '/health';
+  const API_URL      = '/v1/chat/completions';
+  const HEALTH_URL   = '/health';
+  const LOGIN_URL    = '/auth/login';
+  const SETPW_URL    = '/auth/set-password';
 
-  /* ── State ── */
-  const history = [];   // {role, content} objects kept for multi-turn context
+  /* ── Session state ── */
+  let session = (() => {
+    try { return JSON.parse(localStorage.getItem('ice_session') || 'null'); } catch { return null; }
+  })();
+  let firstLoginUserId = null;   // held between step 1 and step 2
+
+  const history = [];
 
   /* ── DOM refs ── */
-  const chat      = document.getElementById('chat');
-  const input     = document.getElementById('msg-input');
-  const sendBtn   = document.getElementById('send-btn');
-  const statusEl  = document.getElementById('model-status');
-  const userIdEl  = document.getElementById('user-id-input');
+  const overlay      = document.getElementById('overlay');
+  const cardLogin    = document.getElementById('card-login');
+  const cardSetpw    = document.getElementById('card-setpw');
+  const loginErr     = document.getElementById('overlay-error');
+  const setpwErr     = document.getElementById('setpw-error');
+  const chat         = document.getElementById('chat');
+  const input        = document.getElementById('msg-input');
+  const sendBtn      = document.getElementById('send-btn');
+  const statusEl     = document.getElementById('model-status');
+  const userLabel    = document.getElementById('user-label');
+  const logoutBtn    = document.getElementById('logout-btn');
+
+  /* ── Overlay helpers ── */
+  function showLogin() {
+    cardLogin.classList.remove('hidden');
+    cardSetpw.classList.add('hidden');
+    loginErr.textContent = '';
+    overlay.classList.remove('hidden');
+  }
+
+  function showSetPw() {
+    cardLogin.classList.add('hidden');
+    cardSetpw.classList.remove('hidden');
+    setpwErr.textContent = '';
+    overlay.classList.remove('hidden');
+  }
+
+  function hideOverlay(s) {
+    session = s;
+    localStorage.setItem('ice_session', JSON.stringify(s));
+    overlay.classList.add('hidden');
+    userLabel.textContent = s.username + (s.role === 'admin' ? ' ★' : '');
+  }
+
+  /* ── Init: check saved session ── */
+  if (session && session.token) {
+    hideOverlay(session);
+  } else {
+    showLogin();
+  }
+
+  /* ── Login ── */
+  document.getElementById('login-btn').addEventListener('click', async () => {
+    const username = document.getElementById('login-username').value.trim();
+    const password = document.getElementById('login-password').value;
+    if (!username) { loginErr.textContent = 'Benutzername eingeben.'; return; }
+
+    loginErr.textContent = '';
+    try {
+      const res = await fetch(LOGIN_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      });
+      const data = await res.json();
+      if (!res.ok) { loginErr.textContent = data.error || 'Fehler beim Anmelden.'; return; }
+      if (data.first_login) {
+        firstLoginUserId = data.user_id;
+        showSetPw();
+      } else {
+        hideOverlay({ token: data.token, user_id: data.user_id, username: data.username, role: data.role });
+      }
+    } catch (e) {
+      loginErr.textContent = 'Netzwerkfehler: ' + e.message;
+    }
+  });
+
+  document.getElementById('login-password').addEventListener('keydown', e => {
+    if (e.key === 'Enter') document.getElementById('login-btn').click();
+  });
+
+  /* ── Set password ── */
+  document.getElementById('setpw-btn').addEventListener('click', async () => {
+    const pw1 = document.getElementById('new-pw1').value;
+    const pw2 = document.getElementById('new-pw2').value;
+    if (pw1.length < 8) { setpwErr.textContent = 'Passwort muss mindestens 8 Zeichen haben.'; return; }
+    if (pw1 !== pw2)    { setpwErr.textContent = 'Passwörter stimmen nicht überein.'; return; }
+
+    setpwErr.textContent = '';
+    try {
+      const res = await fetch(SETPW_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: firstLoginUserId, new_password: pw1 }),
+      });
+      const data = await res.json();
+      if (!res.ok) { setpwErr.textContent = data.error || 'Fehler.'; return; }
+      hideOverlay({ token: data.token, user_id: data.user_id, username: data.username, role: data.role });
+    } catch (e) {
+      setpwErr.textContent = 'Netzwerkfehler: ' + e.message;
+    }
+  });
+
+  /* ── Logout ── */
+  logoutBtn.addEventListener('click', () => {
+    localStorage.removeItem('ice_session');
+    session = null;
+    history.length = 0;
+    chat.innerHTML = '';
+    document.getElementById('login-username').value = '';
+    document.getElementById('login-password').value = '';
+    showLogin();
+  });
 
   /* ── Status check ── */
   async function checkStatus() {
@@ -242,16 +440,13 @@
       const data = await res.json();
       const models = data.models || {};
       const loaded = Object.keys(models).filter(k => models[k].loaded);
-      statusEl.textContent = loaded.length
-        ? '● ' + loaded.join(', ')
-        : '⚠ Kein Modell geladen';
+      statusEl.textContent = loaded.length ? '● ' + loaded.join(', ') : '⚠ Kein Modell geladen';
       statusEl.style.color = loaded.length ? '#6ee7b7' : '#f87171';
     } catch {
       statusEl.textContent = '⚠ Server nicht erreichbar';
       statusEl.style.color = '#f87171';
     }
   }
-
   checkStatus();
   setInterval(checkStatus, 15000);
 
@@ -259,19 +454,16 @@
   function appendMessage(role, text, intent) {
     const wrap = document.createElement('div');
     wrap.className = `msg-wrap ${role === 'user' ? 'user' : 'bot'}`;
-
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
     bubble.textContent = text;
     wrap.appendChild(bubble);
-
-    if (intent && role !== 'user') {
+    if (intent && intent !== 'admin_command' && role !== 'user') {
       const badge = document.createElement('span');
       badge.className = 'intent-badge';
       badge.textContent = `intent: ${intent}`;
       wrap.appendChild(badge);
     }
-
     chat.appendChild(wrap);
     chat.scrollTop = chat.scrollHeight;
     return wrap;
@@ -295,6 +487,7 @@
 
   /* ── Send ── */
   async function send() {
+    if (!session || !session.token) { showLogin(); return; }
     const text = input.value.trim();
     if (!text) return;
 
@@ -316,16 +509,25 @@
           messages: history,
           temperature: 0.7,
           max_tokens: 1024,
-          user: userIdEl.value.trim() || 'default',
+          user: session.user_id,
+          session_token: session.token,
         }),
       });
 
       typingEl.remove();
 
+      if (res.status === 401) {
+        localStorage.removeItem('ice_session');
+        session = null;
+        appendMessage('bot', '⚠ Sitzung abgelaufen. Bitte erneut anmelden.');
+        showLogin();
+        return;
+      }
+
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: res.statusText }));
         appendMessage('bot', `⚠ Fehler: ${err.error || res.statusText}`);
-        history.pop();  // remove user message on error
+        history.pop();
         return;
       }
 
@@ -346,17 +548,10 @@
     }
   }
 
-  /* ── Events ── */
   sendBtn.addEventListener('click', send);
-
   input.addEventListener('keydown', e => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      send();
-    }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
   });
-
-  // Auto-resize textarea
   input.addEventListener('input', () => {
     input.style.height = '';
     input.style.height = Math.min(input.scrollHeight, 160) + 'px';

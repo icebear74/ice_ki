@@ -27,6 +27,9 @@ _HERE = Path(__file__).parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
+import re
+import secrets
+
 from fastapi import BackgroundTasks, FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -38,6 +41,9 @@ from models import (
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChatMessage,
+    LoginRequest,
+    LoginResponse,
+    SetPasswordRequest,
     UsageInfo,
 )
 from router import IntentRouter
@@ -52,13 +58,43 @@ logging.basicConfig(
 logger = logging.getLogger("ice_brain")
 
 # ---------------------------------------------------------------------------
-# App
+# App + session store
 # ---------------------------------------------------------------------------
 app = FastAPI(title="ice_brain", version="0.1.0")
+
+# token → user_id  (in-memory; cleared on restart)
+_sessions: dict[str, str] = {}
 
 # Globals – populated during startup
 llm_manager: LLMManager = LLMManager()
 intent_router: IntentRouter | None = None
+
+
+def _new_token(user_id: str) -> str:
+    token = secrets.token_hex(32)
+    _sessions[token] = user_id
+    return token
+
+
+def _resolve_token(token: str | None) -> str | None:
+    """Return user_id for *token*, or None if invalid/missing."""
+    if not token:
+        return None
+    return _sessions.get(token)
+
+
+def _get_user_role(user_id: str) -> str:
+    """Return the role of *user_id* from DB, default 'user'."""
+    try:
+        from db.connection import get_connection  # noqa: PLC0415
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT role FROM users WHERE user_id = %s", (user_id,))
+            row = cursor.fetchone()
+            cursor.close()
+        return row[0] if row else "user"
+    except Exception:  # noqa: BLE001
+        return "user"
 
 
 # ---------------------------------------------------------------------------
@@ -143,13 +179,107 @@ async def health() -> dict:
     return {"status": "ok", "models": llm_manager.get_status()}
 
 
+# ---------------------------------------------------------------------------
+# Auth routes
+# ---------------------------------------------------------------------------
+
+@app.post("/auth/login", response_model=LoginResponse)
+async def auth_login(req: LoginRequest) -> LoginResponse:
+    from db.users import authenticate  # noqa: PLC0415
+    from db.connection import get_connection  # noqa: PLC0415
+
+    result = authenticate(req.username, req.password)
+    if result is None:
+        return JSONResponse(status_code=401, content={"error": "Ungültiger Benutzername oder Passwort."})
+
+    user_id, first_login = result
+
+    # Fetch role for response
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT role FROM users WHERE user_id = %s", (user_id,))
+            row = cursor.fetchone()
+            cursor.close()
+        role = row[0] if row else "user"
+    except Exception:  # noqa: BLE001
+        role = "user"
+
+    token = None if first_login else _new_token(user_id)
+    return LoginResponse(
+        user_id=user_id,
+        username=req.username,
+        role=role,
+        first_login=first_login,
+        token=token,
+    )
+
+
+@app.post("/auth/set-password")
+async def auth_set_password(req: SetPasswordRequest) -> dict:
+    from db.users import is_first_login, set_password  # noqa: PLC0415
+    from db.connection import get_connection  # noqa: PLC0415
+
+    if not req.new_password or len(req.new_password) < 8:
+        return JSONResponse(status_code=400, content={"error": "Passwort muss mindestens 8 Zeichen haben."})
+
+    try:
+        if not is_first_login(req.user_id):
+            return JSONResponse(status_code=403, content={"error": "Passwort bereits gesetzt."})
+        set_password(req.user_id, req.new_password)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("set-password error: %s", exc)
+        return JSONResponse(status_code=500, content={"error": str(exc)})
+
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT username, role FROM users WHERE user_id = %s", (req.user_id,))
+            row = cursor.fetchone()
+            cursor.close()
+        username = row[0] if row else req.user_id
+        role = row[1] if row else "user"
+    except Exception:  # noqa: BLE001
+        username, role = req.user_id, "user"
+
+    token = _new_token(req.user_id)
+    return {"ok": True, "user_id": req.user_id, "username": username, "role": role, "token": token}
+
+
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
 async def chat_completion(
     request: ChatCompletionRequest,
     background_tasks: BackgroundTasks,
 ) -> ChatCompletionResponse:
-    user_id = request.user or "default"
+    # Resolve authenticated user from session token (preferred) or fallback field.
+    authed_user_id = _resolve_token(request.session_token)
+    user_id = authed_user_id or request.user or "default"
     last_message = request.messages[-1].content if request.messages else ""
+
+    # ── Admin command: "lege benutzer an: <Name>" ─────────────────────────
+    _cmd = re.match(r"^\s*lege\s+benutzer\s+an\s*:\s*(.+)$", last_message, re.IGNORECASE)
+    if _cmd:
+        if not authed_user_id or _get_user_role(authed_user_id) != "admin":
+            reply = "⛔ Nur Administratoren können Benutzer anlegen."
+        else:
+            new_username = _cmd.group(1).strip()
+            try:
+                from db.users import create_user  # noqa: PLC0415
+                new_id = create_user(new_username)
+                logger.info("Admin %r created user %r (id=%r)", authed_user_id, new_username, new_id)
+                reply = f'\u2705 Benutzer "{new_username}" wurde angelegt. Beim ersten Login wird ein Passwort gesetzt.'
+            except Exception as exc:  # noqa: BLE001
+                if "Duplicate entry" in str(exc) or "1062" in str(exc):
+                    reply = f'\u26a0 Benutzer "{new_username}" existiert bereits.'
+                else:
+                    logger.error("create_user error: %s", exc)
+                    reply = f'\u26a0 Fehler beim Anlegen: {exc}'
+        return ChatCompletionResponse(
+            model=request.model,
+            choices=[ChatCompletionChoice(message=ChatMessage(role="assistant", content=reply))],
+            router_intent="admin_command",
+        )
+    # ──────────────────────────────────────────────────────────────────────
 
     # 1. Intent classification (router LLM on P4, Phase 1: log only)
     router_result = intent_router.classify(last_message) if intent_router else None

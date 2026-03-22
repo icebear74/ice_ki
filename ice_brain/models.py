@@ -13,6 +13,28 @@ from pydantic import BaseModel, Field
 
 
 # ---------------------------------------------------------------------------
+# Auth models
+# ---------------------------------------------------------------------------
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str = ""   # empty string is valid for first-login check
+
+
+class LoginResponse(BaseModel):
+    user_id: str
+    username: str
+    role: str
+    first_login: bool
+    token: Optional[str] = None  # None when first_login=True (must set password first)
+
+
+class SetPasswordRequest(BaseModel):
+    user_id: str
+    new_password: str
+
+
+# ---------------------------------------------------------------------------
 # OpenAI-compatible request models
 # ---------------------------------------------------------------------------
 
@@ -29,6 +51,8 @@ class ChatCompletionRequest(BaseModel):
     stream: bool = False
     # Optional user-id extension (not part of standard OpenAI spec)
     user: Optional[str] = "default"
+    # Session token issued by /auth/login
+    session_token: Optional[str] = None
     # Optional IANA timezone name sent by the client (e.g. "Europe/Berlin").
     # Used to show the correct local time in the system prompt.
     timezone: Optional[str] = None
