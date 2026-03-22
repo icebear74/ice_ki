@@ -17,7 +17,7 @@ CUDA build requirement
 llama-cpp-python must be compiled with CUDA support, otherwise `n_gpu_layers`
 is silently ignored and everything runs on CPU:
 
-    CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python --upgrade --force-reinstall --no-binary llama-cpp-python
+    CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python --upgrade --force-reinstall --no-binary llama-cpp-python --no-cache-dir
 
 The manager detects CPU-only builds at startup and logs a prominent warning.
 
@@ -93,7 +93,7 @@ class LLMManager:
             )
             logger.warning(
                 '  CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python '
-                "--upgrade --force-reinstall --no-binary llama-cpp-python"
+                "--upgrade --force-reinstall --no-binary llama-cpp-python --no-cache-dir"
             )
             logger.warning(
                 "=" * 70
