@@ -7,7 +7,8 @@
 #   ./setup_env.sh
 #   ./setup_env.sh --python /usr/bin/python3.11
 #   PYTHON_EXECUTABLE=/usr/bin/python3.11 ./setup_env.sh
-#   ./setup_env.sh --install-torch   (install torch/torchvision after other deps)
+#   ./setup_env.sh --no-torch        (skip torch/torchvision installation)
+#   ./setup_env.sh --install-torch   (explicit opt-in, now the default)
 # ============================================================
 
 set -euo pipefail
@@ -22,7 +23,7 @@ RESET='\033[0m'
 
 # ---- Defaults ----
 VENV_DIR="venv"
-INSTALL_TORCH=false
+INSTALL_TORCH=true   # torch is installed by default; use --no-torch to skip
 # Allow PYTHON_EXECUTABLE env variable as override; CLI --python overrides that
 PY_BIN="${PYTHON_EXECUTABLE:-}"
 
@@ -30,9 +31,10 @@ PY_BIN="${PYTHON_EXECUTABLE:-}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --python) PY_BIN="$2"; shift 2;;
-    --install-torch) INSTALL_TORCH=true; shift;;
+    --install-torch) INSTALL_TORCH=true; shift;;   # explicit opt-in (already the default)
+    --no-torch) INSTALL_TORCH=false; shift;;        # opt-out: skip torch installation
     -h|--help)
-      echo "Usage: $0 [--python /path/to/python3.11] [--install-torch]"
+      echo "Usage: $0 [--python /path/to/python3.11] [--no-torch]"
       exit 0;;
     *) echo -e "${RED}Unbekannte Option: $1${RESET}"; exit 2;;
   esac
@@ -225,7 +227,7 @@ if [ "$INSTALL_TORCH" = true ]; then
     python -c "import torch; print(f'   GPU:             {torch.cuda.get_device_name(0)}')"
   fi
 else
-  echo -e "\n${YELLOW}ℹ PyTorch nicht installiert (füge --install-torch hinzu, um es jetzt zu installieren).${RESET}"
+  echo -e "\n${YELLOW}ℹ PyTorch wird übersprungen (--no-torch angegeben).${RESET}"
   echo -e "${YELLOW}  Manuell (GPU cu118):  pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118${RESET}"
   echo -e "${YELLOW}  Manuell (CPU only):   pip install torch torchvision${RESET}"
 fi
@@ -253,16 +255,33 @@ for pkg in "${CORE_PACKAGES[@]}"; do
 done
 
 # ============================================================
-# 9. Import-Report: scan .py files for used third-party packages
+# 9. Import-Analyse und automatische Installation fehlender Pakete
 # ============================================================
 echo -e "\n${CYAN}🔎 Schritt 9: Import-Analyse der Python-Quelldateien...${RESET}"
-echo -e "${CYAN}   (Report — keine automatische Installation)${RESET}"
+echo -e "${CYAN}   (fehlende Pakete werden automatisch installiert)${RESET}"
 
 STDLIB_PACKAGES="os sys re json math time argparse subprocess threading logging \
   pathlib typing collections itertools functools hashlib tempfile signal shutil \
   glob atexit errno queue random select traceback socket datetime tty termios \
   curses http concurrent atexit io abc copy struct weakref dataclasses enum \
   contextlib warnings gc platform uuid"
+
+# Mapping: Python import name → pip package name (when they differ)
+declare -A PIP_NAME_MAP=(
+  ["cv2"]="opencv-python"
+  ["PIL"]="Pillow"
+  ["sklearn"]="scikit-learn"
+  ["skimage"]="scikit-image"
+  ["yaml"]="PyYAML"
+  ["attr"]="attrs"
+  ["bs4"]="beautifulsoup4"
+  ["gi"]="PyGObject"
+  ["wx"]="wxPython"
+  ["usb"]="pyusb"
+)
+
+# Packages that require special/manual installation (warn only, do not pip install blindly)
+SKIP_AUTO_INSTALL=("torch2trt" "tensorrt" "pycuda" "onnxruntime_gpu" "onnxruntime-gpu")
 
 MISSING_PKGS=()
 FOUND_IMPORTS=$(find . -name "*.py" 2>/dev/null \
@@ -274,30 +293,46 @@ FOUND_IMPORTS=$(find . -name "*.py" 2>/dev/null \
 echo -e "  Gefundene Top-Level-Importe:"
 while IFS= read -r pkg; do
   [[ -z "$pkg" ]] && continue
-  # skip stdlib and local/relative
+  # Skip stdlib
   is_std=false
   for std in $STDLIB_PACKAGES; do
     if [[ "$pkg" == "$std" ]]; then is_std=true; break; fi
   done
   $is_std && continue
-  # skip known local packages
+  # Skip known local packages
   [[ "$pkg" =~ ^(vsr_plusplus_NEU|dataset_generator_v2|config|category_utils|generation_plan|interactive_selector|streaming_extractor|video_manager|utils|core)$ ]] && continue
 
   if python -c "import $pkg" 2>/dev/null; then
     VERSION=$(python -c "import $pkg; print(getattr($pkg, '__version__', 'ok'))" 2>/dev/null || echo "ok")
     echo -e "    ${GREEN}✓ $pkg ($VERSION)${RESET}"
   else
-    echo -e "    ${RED}✗ $pkg — NICHT installiert${RESET}"
+    echo -e "    ${YELLOW}⚠ $pkg — nicht installiert${RESET}"
     MISSING_PKGS+=("$pkg")
   fi
 done <<< "$FOUND_IMPORTS"
 
 if [ ${#MISSING_PKGS[@]} -gt 0 ]; then
-  echo -e "\n${YELLOW}⚠ Fehlende Pakete (Vorschlag, manuell prüfen):${RESET}"
+  echo -e "\n${CYAN}📦 Installiere fehlende Pakete automatisch...${RESET}"
   for mp in "${MISSING_PKGS[@]}"; do
-    echo -e "    ${YELLOW}pip install $mp${RESET}"
+    # Check skip list (platform-specific / needs special setup)
+    is_skip=false
+    for skip_pkg in "${SKIP_AUTO_INSTALL[@]}"; do
+      if [[ "$mp" == "$skip_pkg" ]]; then is_skip=true; break; fi
+    done
+    if $is_skip; then
+      echo -e "    ${YELLOW}⚠ $mp — übersprungen (manuelle Installation erforderlich)${RESET}"
+      continue
+    fi
+    # Resolve pip package name
+    pip_pkg="${PIP_NAME_MAP[$mp]:-$mp}"
+    echo -e "    ${CYAN}→ pip install $pip_pkg${RESET}"
+    if pip install "$pip_pkg" --quiet; then
+      echo -e "    ${GREEN}✓ $pip_pkg installiert${RESET}"
+    else
+      echo -e "    ${RED}✗ $pip_pkg konnte nicht installiert werden!${RESET}"
+      ALL_OK=false
+    fi
   done
-  echo -e "${YELLOW}  TODO: Confirm optional packages (onnx, onnxruntime-gpu, torch2trt, ffmpeg system-dep) with maintainer.${RESET}"
 fi
 
 # ============================================================
