@@ -26,6 +26,8 @@ _EXPECTED_TABLES = {
     "users",
     "user_memory",
     "global_memory",
+    "wiki_cache",
+    "memory_knowledge_link",
     "wiki_chunks",
     "knowledge_entries",
     "conversation_log",
@@ -135,6 +137,21 @@ _EMBEDDING_COLUMNS: list[tuple[str, str]] = [
     ("knowledge_entries", "embedding"),
 ]
 
+# Extra nullable columns added after initial schema release – migrated idempotently.
+# Each entry: (table, column, column_definition)
+_EXTRA_COLUMNS: list[tuple[str, str, str]] = [
+    (
+        "wiki_cache",
+        "source_memory_id",
+        "BIGINT NULL COMMENT 'user_memory.id das diesen Abruf ausgelöst hat (erste Anreicherung)'",
+    ),
+    (
+        "wiki_cache",
+        "full_text",
+        "MEDIUMTEXT NULL COMMENT 'Volltext des Wikipedia-Artikels (plain text)'",
+    ),
+]
+
 
 def _column_exists(cursor: mysql.connector.cursor.MySQLCursor, db_name: str, table: str, column: str) -> bool:
     cursor.execute(
@@ -165,6 +182,26 @@ def _ensure_embedding_columns(pool: mysql.connector.pooling.MySQLConnectionPool,
         conn.close()
 
 
+def _ensure_extra_columns(pool: mysql.connector.pooling.MySQLConnectionPool, db_name: str) -> None:
+    """ADD extra nullable columns to existing tables (idempotent schema migration)."""
+    conn = pool.get_connection()
+    try:
+        cursor = conn.cursor()
+        for table, column, definition in _EXTRA_COLUMNS:
+            if not _column_exists(cursor, db_name, table, column):
+                try:
+                    cursor.execute(
+                        f"ALTER TABLE `{table}` ADD COLUMN `{column}` {definition}"
+                    )
+                    conn.commit()
+                    logger.info("Column %s.%s added.", table, column)
+                except mysql.connector.Error as exc:
+                    logger.warning("Could not add column %s.%s: %s", table, column, exc)
+        cursor.close()
+    finally:
+        conn.close()
+
+
 def init_db() -> None:
     """Initialise the global connection pool and run schema if needed.
 
@@ -172,8 +209,8 @@ def init_db() -> None:
     so that newly added tables are picked up on existing databases without
     requiring a full schema reset.
 
-    After schema init, _ensure_embedding_columns() is run (idempotent migration)
-    to add MEDIUMBLOB embedding columns to existing installations.
+    After schema init, _ensure_embedding_columns() and _ensure_extra_columns() are run
+    (idempotent migrations) to add missing columns to existing installations.
     """
     global _pool  # noqa: PLW0603
     cfg = _get_mysql_cfg()
@@ -185,15 +222,28 @@ def init_db() -> None:
         _run_schema(_pool)
     else:
         logger.info("All tables present.")
-    # Always run migration (idempotent) – adds embedding columns to existing tables.
+    # Always run migrations (idempotent) – adds missing columns to existing tables.
     _ensure_embedding_columns(_pool, cfg["database"])
+    _ensure_extra_columns(_pool, cfg["database"])
 
 
 @contextmanager
 def get_connection() -> Generator[mysql.connector.MySQLConnection, None, None]:
-    """Context manager that yields a pooled connection and returns it on exit."""
+    """Context manager that yields a pooled connection and returns it on exit.
+
+    If init_db() was not called yet (or failed at startup because MySQL was
+    temporarily unavailable), a single lazy re-initialisation attempt is made
+    so the application self-heals once the database becomes reachable.
+    """
+    global _pool  # noqa: PLW0603
     if _pool is None:
-        raise RuntimeError("DB pool not initialised. Call init_db() first.")
+        logger.info("DB pool not yet initialised – attempting lazy init_db() …")
+        try:
+            init_db()
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(
+                f"DB pool not initialised and lazy init failed: {exc}"
+            ) from exc
     conn = _pool.get_connection()
     try:
         yield conn

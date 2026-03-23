@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import TYPE_CHECKING
 
 from models import RouterResult
@@ -66,7 +67,10 @@ class IntentRouter:
 
         messages = [
             ChatMessage(role="system", content=_SYSTEM_PROMPT),
-            ChatMessage(role="user", content=user_message),
+            # /no_think suppresses Qwen3's extended <think>…</think> block so the
+            # model outputs the JSON intent object directly without burning tokens
+            # on chain-of-thought reasoning.
+            ChatMessage(role="user", content=f"{user_message}\n/no_think"),
         ]
 
         try:
@@ -74,18 +78,31 @@ class IntentRouter:
                 model_name=self._model_name,
                 messages=messages,
                 temperature=0.0,
-                max_tokens=128,
+                max_tokens=1024,
             )
+            logger.debug("Router input: %r", user_message)
+            logger.debug("Router raw LLM output: %r", raw)
             # Strip markdown code fences if present.
             raw = raw.strip()
             if raw.startswith("```"):
                 raw = raw.split("```")[1]
                 if raw.startswith("json"):
                     raw = raw[4:]
+            # Strip <think>…</think> reasoning blocks emitted by some models.
+            # Also handles unclosed blocks (output truncated before </think>).
+            raw = re.sub(r"<think>.*?(?:</think>|$)", "", raw, flags=re.DOTALL)
+            raw = raw.strip()
+            if not raw:
+                logger.warning("Router model returned empty response – defaulting to 'general'.")
+                return RouterResult(intent="general", confidence=0.0)
+            logger.debug("Router raw response: %r", raw)
             data = json.loads(raw)
             result = RouterResult(**data)
             logger.info("Intent classified: %s (%.2f)", result.intent, result.confidence)
             return result
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Intent classification failed (%s) – defaulting to 'general'.", exc)
+            logger.warning(
+                "Intent classification failed (%s) – raw response: %r – defaulting to 'general'.",
+                exc, raw if "raw" in dir() else "<not captured>",
+            )
             return RouterResult(intent="general", confidence=0.0)

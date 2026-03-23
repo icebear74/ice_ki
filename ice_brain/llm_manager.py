@@ -29,9 +29,14 @@ threading.Lock that must be held during inference.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import threading
-from typing import Any, Dict, List
+import time
+import uuid
+from pathlib import Path
+from typing import Any, Dict, Iterator, List
 
 logger = logging.getLogger(__name__)
 
@@ -45,23 +50,34 @@ except ImportError:
 
 
 def _check_cuda_build() -> bool:
-    """Return True if llama-cpp-python was compiled with CUDA support."""
+    """Return True if llama-cpp-python was compiled with CUDA support.
+
+    Uses the best available detection method.  When no detection API is
+    present (older llama-cpp-python releases), we optimistically return True
+    so that models are loaded with ``n_gpu_layers=-1`` and llama.cpp logs
+    the actual backend at load time.  If the build really has no CUDA the
+    layer count is silently ignored and the model runs on CPU – no harm done.
+    """
     if not _LLAMA_AVAILABLE:
         return False
     try:
         import llama_cpp  # noqa: PLC0415
-        # llama_cpp exposes the list of supported GGML backends since ~0.2.x
+        # Preferred: llama_cpp exposes this helper since ~0.2.x
         support = getattr(llama_cpp, "llama_supports_gpu_offload", None)
         if support is not None:
             return bool(support())
-        # Fallback: inspect the compiled-in backend list when available
+        # Fallback: compiled-in backend list (some builds expose this)
         backend_list = getattr(llama_cpp, "_llama_backend_list", None)
         if backend_list is not None:
             return any("cuda" in str(b).lower() or "cublas" in str(b).lower() for b in backend_list)
-        # Last resort: try to load a tiny dummy model on GPU and see if any
-        # GPU memory is allocated – we skip this to avoid side effects and
-        # instead rely on the log line llama.cpp always prints at load time.
-        return False
+        # No detection API available – assume CUDA is present and let llama.cpp
+        # decide at load time.  This avoids silently falling back to CPU-only
+        # when the detection helper is simply missing from an older build.
+        logger.debug(
+            "llama_cpp has no GPU-detection API; assuming CUDA build. "
+            "llama.cpp will log the actual backend when loading models."
+        )
+        return True
     except Exception:  # noqa: BLE001
         return False
 
@@ -106,6 +122,10 @@ class LLMManager:
     def load_model(self, name: str, cfg: dict) -> bool:
         """Load a GGUF model onto the configured GPU.
 
+        If the file at *path* does not exist and *hf_repo* + *hf_file* are
+        configured, the model is downloaded automatically from HuggingFace
+        before loading.
+
         Returns True on success, False on failure (server continues).
         """
         if not _LLAMA_AVAILABLE:
@@ -114,8 +134,24 @@ class LLMManager:
 
         path = cfg.get("path", "")
         gpu_index = cfg.get("gpu", 0)
-        n_ctx = cfg.get("n_ctx", 4096)
+        n_ctx = cfg.get("n_ctx", 8192)
         n_gpu_layers = cfg.get("n_gpu_layers", -1)
+
+        # Auto-download from HuggingFace if the file is missing
+        if path and not Path(path).exists():
+            hf_repo = cfg.get("hf_repo", "")
+            hf_file = cfg.get("hf_file", "")
+            if hf_repo and hf_file:
+                path = self._download_from_hf(name, path, hf_repo, hf_file)
+                if path is None:
+                    return False
+            else:
+                logger.error(
+                    "Cannot load model '%s': file not found at '%s' and no "
+                    "hf_repo/hf_file configured for auto-download.",
+                    name, path,
+                )
+                return False
 
         if not self._cuda_available:
             logger.warning(
@@ -158,6 +194,60 @@ class LLMManager:
             )
             return False
 
+    def _download_from_hf(self, name: str, path: str, hf_repo: str, hf_file: str) -> str | None:
+        """Download *hf_file* from *hf_repo* into the directory of *path*.
+
+        Returns the local file path on success, None on failure.
+        """
+        try:
+            from huggingface_hub import hf_hub_download  # noqa: PLC0415
+        except ImportError:
+            logger.error(
+                "Cannot auto-download model '%s': huggingface-hub is not installed. "
+                "Run: pip install huggingface-hub",
+                name,
+            )
+            return None
+
+        target_dir = str(Path(path).parent)
+        os.makedirs(target_dir, exist_ok=True)
+        logger.info(
+            "Model '%s' not found at '%s' – downloading from HuggingFace: %s / %s …",
+            name, path, hf_repo, hf_file,
+        )
+        hf_token = os.getenv("HF_TOKEN") or None
+        if not hf_token:
+            logger.warning(
+                "HF_TOKEN is not set. Downloads may fail for gated or rate-limited "
+                "repositories. Set HF_TOKEN in config.py or as an environment variable."
+            )
+        try:
+            local_path = hf_hub_download(
+                repo_id=hf_repo,
+                filename=hf_file,
+                local_dir=target_dir,
+                token=hf_token,
+            )
+            logger.info("Model '%s' downloaded to '%s'.", name, local_path)
+            return local_path
+        except Exception as exc:  # noqa: BLE001
+            exc_str = str(exc)
+            if "404" in exc_str or "Entry Not Found" in exc_str:
+                logger.error(
+                    "Failed to download model '%s' from HuggingFace (%s/%s): %s\n"
+                    "  → Verify the repo and filename are correct at "
+                    "https://huggingface.co/%s\n"
+                    "  → If the repo is gated, set HF_TOKEN in config.py after "
+                    "accepting the model terms at https://huggingface.co/%s",
+                    name, hf_repo, hf_file, exc, hf_repo, hf_repo,
+                )
+            else:
+                logger.error(
+                    "Failed to download model '%s' from HuggingFace (%s/%s): %s",
+                    name, hf_repo, hf_file, exc,
+                )
+            return None
+
     def load_all(self, models_cfg: dict) -> None:
         """Load all models defined in the MODELS config dict."""
         for name, cfg in models_cfg.items():
@@ -172,7 +262,7 @@ class LLMManager:
         model_name: str,
         messages: List[Any],
         temperature: float = 0.7,
-        max_tokens: int = 512,
+        max_tokens: int = 2048,
     ) -> str:
         """Generate a response and return the assistant content string.
 
@@ -196,8 +286,54 @@ class LLMManager:
 
         return result["choices"][0]["message"]["content"]
 
+    def chat_completion_stream(
+        self,
+        model_name: str,
+        messages: List[Any],
+        temperature: float = 0.7,
+        max_tokens: int = 2048,
+    ) -> Iterator[str]:
+        """Generate a streaming response, yielding SSE data lines.
+
+        Each yielded string is a complete SSE event line of the form
+        ``data: {…}\\n\\n``.  The final line is ``data: [DONE]\\n\\n``.
+
+        The per-model threading.Lock is held for the **entire** iteration, so
+        callers MUST drive this iterator from a background thread – never
+        directly from the asyncio event loop.
+        """
+        if model_name not in self._models:
+            raise RuntimeError(
+                f"Model '{model_name}' is not loaded. "
+                f"Available models: {list(self._models)}"
+            )
+
+        handle = self._models[model_name]
+        msg_dicts = [{"role": m.role, "content": m.content} for m in messages]
+        resp_id = f"chatcmpl-{uuid.uuid4().hex}"
+        created = int(time.time())
+
+        with handle.lock:
+            for chunk in handle.llm.create_chat_completion(
+                messages=msg_dicts,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=True,
+            ):
+                delta = chunk["choices"][0].get("delta", {})
+                finish = chunk["choices"][0].get("finish_reason")
+                payload = {
+                    "id": resp_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model_name,
+                    "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+                }
+                yield f"data: {json.dumps(payload)}\n\n"
+
+        yield "data: [DONE]\n\n"
+
     # ------------------------------------------------------------------
-    # Status
     # ------------------------------------------------------------------
 
     def get_status(self) -> Dict[str, Any]:

@@ -47,7 +47,7 @@ class ChatCompletionRequest(BaseModel):
     model: str = "main"
     messages: List[ChatMessage]
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
-    max_tokens: int = Field(default=512, ge=1, le=32768)
+    max_tokens: int = Field(default=4096, ge=1, le=32768)
     stream: bool = False
     # Optional user-id extension (not part of standard OpenAI spec)
     user: Optional[str] = "default"
@@ -56,6 +56,9 @@ class ChatCompletionRequest(BaseModel):
     # Optional IANA timezone name sent by the client (e.g. "Europe/Berlin").
     # Used to show the correct local time in the system prompt.
     timezone: Optional[str] = None
+    # When True (default), <think>…</think> blocks are stripped from the
+    # assistant response before it is returned to the client.
+    strip_thinking: bool = True
 
 
 # ---------------------------------------------------------------------------

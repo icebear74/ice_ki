@@ -8,8 +8,8 @@ Two memory tiers
                 relationship, hobby, experience)
 
 Extraction runs as a BACKGROUND TASK after every assistant response so the
-user sees zero added latency.  The router model (3B, P4) is used for
-extraction, not the main model.
+user sees zero added latency.  The main model (8B) is used for extraction
+to ensure high-quality fact parsing.
 
 Public API
 ----------
@@ -24,8 +24,10 @@ load_memories_for_prompt(user_id) -> str
 
 from __future__ import annotations
 
+import difflib
 import json
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
@@ -59,6 +61,24 @@ _MAX_MEMORIES_FOR_PROMPT = 20       # memories injected into system prompt
 _MAX_SIMILARITY_SEARCH_ROWS = 50    # rows scanned for deduplication per category
 _MIN_WORD_LENGTH_FOR_SIMILARITY = 4 # minimum word length used for similarity matching
 _MIN_MESSAGE_LENGTH = 4             # messages shorter than this are not extracted
+
+# Generic high-frequency words that appear as the first word in many memory entries
+# and must NOT be used alone as a similarity key (they would cause false duplicates).
+# Example: "Möchte mit 'Sir' angesprochen werden" vs.
+#          "Möchte wie ein ungehobelter Mensch angesprochen werden"
+# both start with "Möchte" – without this guard they would incorrectly be treated
+# as duplicates and the second would overwrite the first.
+_SIMILARITY_STOP_WORDS: frozenset[str] = frozenset({
+    # German verbs / modal / auxiliary commonly used as memory entry prefixes
+    "möchte", "mag", "magst", "will", "will,", "muss", "kann", "soll",
+    "hat", "hatte", "haben", "ist", "war", "sind", "waren",
+    "wird", "wurde", "wäre", "geht", "fährt", "macht", "trinkt",
+    "isst", "spielt", "liebt", "hasst", "kennt", "wohnt", "lebt",
+    "arbeitet", "schläft", "liest", "hört", "sieht", "sucht",
+    # English equivalents (in case mixed-language entries occur)
+    "likes", "loves", "hates", "wants", "needs", "has", "have",
+    "is", "was", "are", "were", "does", "will", "would", "prefers",
+})
 
 _TTL_MAP: dict[str, int] = {
     "1h": 1,
@@ -234,6 +254,134 @@ Output:
   {"content": "Besitzt eine Jahreskarte für den Moviepark", "category": "personal", "importance": 0.8, "ttl": null}
 ]
 
+HEALTH / MEDICAL CONDITIONS – always extract as permanent personal fact:
+When the user mentions having a medical condition, illness, diagnosis, disability,
+or chronic health issue (e.g. "Ich habe [Krankheit]", "I have [condition]",
+"I was diagnosed with X", "ich leide an X", "ich bin krank an X"), this is a
+permanent personal fact – even if the statement is embedded in a question.
+  → Extract as category=personal, ttl=null.
+  → Content: "Hat [Erkrankung/Zustand]" (German) or "Has [condition]" (English).
+  → The question part ("kannst du mir etwas darüber sagen?", "can you tell me about it?")
+    is directed at the AI and must NOT prevent extraction of the personal disclosure.
+
+Message: "Ich habe Radio Ulnae Synostose .. kannst du mir etwas darüber sagen ?"
+→ "Ich habe Radio Ulnae Synostose" → HEALTH/MEDICAL disclosure → permanent personal fact.
+→ "kannst du mir etwas darüber sagen?" → question to the AI → ignore for extraction.
+Output:
+[
+  {"content": "Hat Radio Ulnae Synostose", "category": "personal", "importance": 0.9, "ttl": null}
+]
+
+Message: "I have diabetes, can you explain what I should eat?"
+Output:
+[
+  {"content": "Has diabetes", "category": "personal", "importance": 0.9, "ttl": null}
+]
+
+INTERACTION INSTRUCTIONS – always extract as preference:
+When the user gives an explicit instruction about HOW they want to be addressed,
+spoken to, or interacted with (e.g. "call me Sir", "use formal language",
+"always address me as Herr X", "rede mich mit Sir an", "sprich mich immer als X an"),
+this is a permanent PREFERENCE about communication style.
+  → Extract as category=preference, ttl=null.
+  → Content: describe the instruction in third person, clearly.
+  Example: "Rede mich ab sofort bitte immer mit Sir an"
+  → "Möchte mit 'Sir' angesprochen werden"
+
+Message: "Rede mich ab sofort bitte immer mit Sir an"
+Output:
+[
+  {"content": "Möchte mit 'Sir' angesprochen werden", "category": "preference", "importance": 0.9, "ttl": null}
+]
+
+Message: "Bitte sprich mich immer förmlich an"
+Output:
+[
+  {"content": "Möchte förmlich (Sie) angesprochen werden", "category": "preference", "importance": 0.9, "ttl": null}
+]
+
+THIRD PARTIES – NEVER attribute their states or actions to the user:
+When the user mentions another person's health, mood, activity, or state (e.g.
+"Susanne ist erkältet", "mein Freund hat Grippe", "meine Mutter schläft",
+"Lisa ist traurig"), those facts describe the THIRD PERSON, not the user.
+  → Do NOT extract them as the user's mood, activity, or any other personal fact.
+  → The ONLY extractable fact may be a relationship (e.g. "Hat eine Freundin namens
+    Susanne"), but ONLY if the relationship itself is mentioned in the message.
+  → Rhetorical questions aimed at the AI ("Willst du Espresso trinken?",
+    "Soll ich dir was mitbringen?") do NOT reveal a personal fact about the user.
+
+AI CORRECTION MESSAGES – when the user corrects the AI about a third party:
+Messages that correct the AI's wrong answer about a person/thing (e.g. "Er ist
+gestorben", "Das steht im Wiki", "Das stimmt nicht, sie ist längst tot",
+"Du liegst falsch, er hat aufgehört") are corrections aimed AT THE AI about
+a THIRD PARTY.  They do NOT reveal a personal fact about the user.
+  → Apply the THIRD PARTIES rule: output [].
+  → Do NOT store "Hat einen Verstorbenen", "Weiß dass X gestorben ist", or any
+    similar derived fact – none of these describe the user.
+
+Message: "Mann, die Susanne ist jetzt in die Kiste gestiegen, weil sie erkältet ist."
+→ "Susanne" is a THIRD PARTY – her illness is NOT the user's mood or state.
+→ No relationship mentioned → no relationship fact either.
+Output:
+[]
+
+Message: "Er ist gestorben. Das steht auch so im Wiki."
+→ User is correcting the AI about a third party (e.g. Chuck Norris).
+→ The death is a THIRD PARTY fact, not a personal fact about the user.
+Output:
+[]
+
+Message: "Tja .. Das wichtigste hast du vergessen .. Er ist gestorben .."
+→ User corrects the AI about a third party's death. No personal fact about the user.
+Output:
+[]
+
+SEARCH / INFORMATION REQUESTS – only low importance when NO personal disclosure:
+When the message is PURELY asking the AI for information about a topic, person,
+film, or event with NO possessive or personal disclosure
+(e.g. "Was kannst du mir über X erzählen?", "Suche Filme mit X",
+"Was weißt du über X?", "Zeig mir etwas über X", "Erzähl mir über X"), this is
+a SEARCH QUERY or information request.
+  → If the message reveals NO personal fact about the user, output [].
+  → "Sucht Filme mit X" or "Hat einen Verstorbenen" are NOT meaningful personal facts
+    – output [].
+
+EXCEPTION – POSSESSIVES reveal real personal facts and MUST be extracted:
+When the message contains possessives that describe the user's own preferences,
+interests, or belongings (e.g. "meine Lieblingsserien", "mein Lieblingsfilm",
+"meine Hobbys", "mein Lieblingsessen", "my favorite", "meine …", "my …"),
+those ARE genuine personal facts – extract them normally, regardless of whether
+the message is phrased as a question.
+  → The question structure ("Was kannst du mir … erzählen?") is directed at the AI.
+    The CONTENT ("meine Lieblingsserien von Star Trek") reveals a personal preference.
+  → Extract: category=preference or hobby, importance according to the normal rules,
+    ttl=null.
+
+Message: "Was kannst du mir über Martin Schindler erzählen?"
+→ Pure information request – no possessive, no personal fact about the user.
+Output:
+[]
+
+Message: "Suche mal Filme mit Chuck Norris"
+→ Information request / search query – not a personal fact about the user.
+Output:
+[]
+
+Message: "was kannst du mir über meine lieblingsserien von Star Trek erzählen?"
+→ "meine lieblingsserien" is a POSSESSIVE → reveals the user's permanent preference.
+→ "Star Trek" is identified as the user's favorite series.
+Output:
+[
+  {"content": "Hat Star Trek als Lieblingsserie", "category": "preference", "importance": 0.7, "ttl": null}
+]
+
+Message: "what can you tell me about my favorite sci-fi movies?"
+→ "my favorite" is a POSSESSIVE → extract the preference.
+Output:
+[
+  {"content": "Likes sci-fi movies", "category": "preference", "importance": 0.6, "ttl": null}
+]
+
 Message: "ok"
 Output:
 []
@@ -246,6 +394,10 @@ Output:
 
 def _parse_facts(raw: str) -> list[dict]:
     """Parse the JSON array from the LLM response.  Returns [] on failure."""
+    raw = raw.strip()
+    # Strip <think>…</think> reasoning blocks emitted by some models.
+    # Also handles unclosed blocks (output truncated before </think>).
+    raw = re.sub(r"<think>.*?(?:</think>|$)", "", raw, flags=re.DOTALL)
     raw = raw.strip()
     # Strip markdown fences if present
     if raw.startswith("```"):
@@ -320,9 +472,11 @@ def _normalise_fact(fact: dict) -> dict | None:
 def _find_similar(cursor, user_id: str, category: str, content: str) -> int | None:
     """Return the id of an existing row that is similar to *content*, or None.
 
-    "Similar" means: the stored content contains one of the first two words of
-    the new content, or the new content contains one of the first two words of
-    the stored content.  Simple substring matching is sufficient for Phase 1.
+    Two-stage matching:
+    1. Fast word-based substring check: the stored content contains one of the
+       first two meaningful words (≥4 chars) of the new content.
+    2. Fuzzy fallback via difflib.SequenceMatcher: ratio() ≥ 0.75 counts as a
+       match so that typos like "Phantasieland" vs "Phantasialand" are caught.
     """
     cursor.execute(
         "SELECT id, content FROM user_memory "
@@ -335,16 +489,33 @@ def _find_similar(cursor, user_id: str, category: str, content: str) -> int | No
     if not rows:
         return None
 
-    # Use first meaningful word (>= 4 chars) of new content as key
-    words = [w.lower() for w in content.split() if len(w) >= _MIN_WORD_LENGTH_FOR_SIMILARITY]
-    if not words:
-        return None
+    # Use first two meaningful words (>= 4 chars, not generic stop-words) as keys.
+    # Stop-words like "Möchte", "Hat", "Trinkt" are intentionally excluded: they
+    # appear as the first word in many entries of the same category and would cause
+    # unrelated facts (e.g. two distinct preferences) to be falsely deduplicated.
+    words = [
+        w.lower()
+        for w in content.split()
+        if len(w) >= _MIN_WORD_LENGTH_FOR_SIMILARITY
+        and w.lower().rstrip(",.;:!?") not in _SIMILARITY_STOP_WORDS
+    ]
+
+    content_lower = content.lower()
 
     for row_id, row_content in rows:
         row_lower = row_content.lower()
-        for word in words[:2]:
-            if word in row_lower:
-                return row_id
+
+        # Stage 1: fast word-based substring matching
+        if words:
+            for word in words[:2]:
+                if word in row_lower:
+                    return row_id
+
+        # Stage 2: fuzzy full-content comparison
+        ratio = difflib.SequenceMatcher(None, content_lower, row_lower).ratio()
+        if ratio >= 0.75:
+            return row_id
+
     return None
 
 
@@ -387,6 +558,83 @@ def _upsert_fact(cursor, user_id: str, fact: dict) -> None:
 # Public: extraction (runs in background thread)
 # ---------------------------------------------------------------------------
 
+def delete_memory(memory_id: int, user_id: str | None = None) -> bool:
+    """Delete a user_memory row and clean up exclusively linked wiki knowledge.
+
+    If *user_id* is given the deletion is scoped to that user (ownership check).
+
+    Cascade behaviour:
+    - wiki_cache entries linked *only* to this memory (not to any other) are
+      deleted together with their wiki_chunks rows.
+    - memory_knowledge_link rows are cleaned up automatically via FK CASCADE.
+
+    Returns True on success, False when the row was not found or not owned.
+    """
+    try:
+        from db.connection import get_connection  # noqa: PLC0415
+        with get_connection() as conn:
+            cursor = conn.cursor()
+
+            # Verify the row exists (and belongs to user_id when given)
+            if user_id is not None:
+                cursor.execute(
+                    "SELECT id FROM user_memory WHERE id = %s AND user_id = %s",
+                    (memory_id, user_id),
+                )
+            else:
+                cursor.execute(
+                    "SELECT id FROM user_memory WHERE id = %s",
+                    (memory_id,),
+                )
+            if cursor.fetchone() is None:
+                cursor.close()
+                logger.info("delete_memory: id=%d not found (or wrong user).", memory_id)
+                return False
+
+            # Find wiki_cache IDs that are exclusively linked to this memory
+            # (i.e., not linked to any other memory row).
+            cursor.execute(
+                "SELECT mkl.cache_id "
+                "FROM memory_knowledge_link mkl "
+                "WHERE mkl.memory_id = %s "
+                "AND NOT EXISTS ("
+                "    SELECT 1 FROM memory_knowledge_link mkl2 "
+                "    WHERE mkl2.cache_id = mkl.cache_id AND mkl2.memory_id != %s"
+                ")",
+                (memory_id, memory_id),
+            )
+            orphan_cache_ids = [row[0] for row in cursor.fetchall()]
+
+            # Delete wiki_chunks and wiki_cache for orphaned articles
+            if orphan_cache_ids:
+                placeholders = ",".join(["%s"] * len(orphan_cache_ids))
+                cursor.execute(
+                    f"DELETE FROM wiki_chunks WHERE article_id IN ({placeholders})",  # noqa: S608
+                    orphan_cache_ids,
+                )
+                cursor.execute(
+                    f"DELETE FROM wiki_cache WHERE id IN ({placeholders})",  # noqa: S608
+                    orphan_cache_ids,
+                )
+                logger.info(
+                    "delete_memory: removed %d orphaned wiki_cache entr%s for memory id=%d.",
+                    len(orphan_cache_ids),
+                    "y" if len(orphan_cache_ids) == 1 else "ies",
+                    memory_id,
+                )
+
+            # Delete the memory row (memory_knowledge_link CASCADE-deleted by FK)
+            cursor.execute("DELETE FROM user_memory WHERE id = %s", (memory_id,))
+            conn.commit()
+            cursor.close()
+
+        logger.info("delete_memory: memory id=%d deleted.", memory_id)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.error("delete_memory error for id=%d: %s", memory_id, exc)
+        return False
+
+
 def extract_memories_sync(user_id: str, user_message: str, llm_manager: "LLMManager") -> None:
     """Extract facts from *user_message* and persist them for *user_id*.
 
@@ -402,22 +650,25 @@ def extract_memories_sync(user_id: str, user_message: str, llm_manager: "LLMMana
         return
 
     try:
-        if not llm_manager.is_ready("router"):
-            logger.info("Memory extraction skipped – router model not loaded.")
+        if not llm_manager.is_ready("main"):
+            logger.info("Memory extraction skipped – main model not loaded.")
             return
 
         from models import ChatMessage  # noqa: PLC0415
 
+        # Append /no_think to suppress Qwen3's extended reasoning block.
+        # Without this, Qwen3 may exhaust all available tokens on a <think>…</think>
+        # block before producing the required JSON array.
         messages = [
             ChatMessage(role="system", content=_EXTRACTION_SYSTEM_PROMPT),
-            ChatMessage(role="user", content=user_message),
+            ChatMessage(role="user", content=f"{user_message}\n/no_think"),
         ]
 
         raw = llm_manager.chat_completion(
-            model_name="router",
+            model_name="main",
             messages=messages,
             temperature=0.0,
-            max_tokens=512,
+            max_tokens=4096,
         )
 
         facts_raw = _parse_facts(raw)
@@ -439,16 +690,18 @@ def extract_memories_sync(user_id: str, user_message: str, llm_manager: "LLMMana
 
         with get_connection() as conn:
             cursor = conn.cursor()
+            stored = 0
             for fact in facts:
                 try:
                     _upsert_fact(cursor, user_id, fact)
+                    stored += 1
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Could not upsert memory fact: %s", exc)
             conn.commit()
             cursor.close()
 
         logger.info(
-            "Memory extraction: %d fact(s) stored for user %r.", len(facts), user_id
+            "Memory extraction: %d fact(s) stored for user %r.", stored, user_id
         )
 
     except Exception as exc:  # noqa: BLE001

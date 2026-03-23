@@ -1,6 +1,6 @@
 # ice_brain
 
-Lokaler AI-Assistent mit RAG, Memory und Multi-Modell-Routing – Phase 1 Grundgerüst.
+Lokaler AI-Assistent mit RAG, Memory, Wikipedia-Cache und Multi-Modell-Routing.
 
 ## Architektur
 
@@ -9,45 +9,55 @@ Frontends (WebUI, curl, Telegram, …)
     │
     ▼  OpenAI-kompatible API  POST /v1/chat/completions
     │
-┌───────────────────────────────────────────┐
-│  FastAPI Orchestrator  (server.py)         │
-│  1. User-Memory laden       (MySQL)        │
-│  2. Intent-Klassifikation   (Router, P4)   │
-│  3. Tool-Calls ausführen    (vorbereitet)  │
-│  4. RAG-Context aufbauen    (vorbereitet)  │
-│  5. Haupt-LLM antworten     (P100)         │
-│  6. Memory-Extraktion       (async, still) │
-└───────────────────────────────────────────┘
+┌───────────────────────────────────────────────────┐
+│  FastAPI Orchestrator  (server.py)                 │
+│  1. User-Memory laden         (MariaDB)            │
+│  2. Intent-Klassifikation     (Router, P4)         │
+│  3. Wikipedia-Tool            (Cache + Live-API)   │
+│  4. RAG-Context aufbauen      (vorbereitet)        │
+│  5. Haupt-LLM antworten       (P100)               │
+│  6. Memory-Extraktion         (async, still)       │
+│  7. Enrichment-Loop           (async, alle 30 Min) │
+└───────────────────────────────────────────────────┘
        │                │               │
        ▼                ▼               ▼
-    P4 GPU          P100 GPU        MySQL 8.4
-    Router-LLM      Main-LLM       Vektoren + Memory
-    (3 B, GGUF)     (14 B, GGUF)
+    P4 GPU          P100 GPU        MariaDB 11.8 LTS
+    Router-LLM      Main-LLM       VECTOR + Memory
+    Qwen3-4B        Qwen3-8B
 ```
 
-### Phase 1 – was aktiv ist
+### Feature-Status
 
 | Feature | Status |
 |---|---|
 | OpenAI-kompatibler Endpunkt | ✅ aktiv |
-| Haupt-LLM (P100) | ✅ aktiv |
-| Intent-Router (P4) | ✅ klassifiziert + loggt |
-| MySQL-Tabellen Auto-Init | ✅ aktiv |
+| Haupt-LLM (P100) – Qwen3-8B | ✅ aktiv |
+| Intent-Router (P4) – Qwen3-4B | ✅ aktiv |
+| Auto-Download von GGUF-Modellen | ✅ aktiv |
+| MariaDB 11.8 LTS + VECTOR-Typ | ✅ aktiv |
+| User-Memory (Extraktion + Recall) | ✅ aktiv |
+| Fuzzy-Deduplizierung (difflib) | ✅ aktiv |
+| Wikipedia-Tool mit Cache | ✅ aktiv |
+| Enrichment-Loop (Background) | ✅ aktiv |
 | Conversation-Log (DB) | ✅ aktiv |
 | Test-WebUI | ✅ aktiv |
 | RAG / Vektorsuche | 🔲 Phase 2 |
-| Memory lesen/schreiben | 🔲 Phase 3 |
-| Tool-Calls | 🔲 Phase 5 |
-| Embeddings | 🔲 Phase 2 |
+| Tool-Calls (Wetter, Kalender) | 🔲 Phase 5 |
 
 ---
 
 ## Setup
 
-### 1 – MySQL User und Datenbank vorbereiten
+### Voraussetzungen
+
+- **MariaDB 11.8 LTS** (Mindestvoraussetzung – nativer VECTOR-Datentyp + HNSW-Index)
+- Python 3.11+
+- NVIDIA GPU(s) mit CUDA-Support
+
+### 1 – MariaDB User und Datenbank vorbereiten
 
 ```sql
--- Als MySQL-Root ausführen:
+-- Als MariaDB-Root ausführen:
 CREATE USER 'ice_brain'@'localhost' IDENTIFIED BY 'DEIN_PASSWORT';
 GRANT ALL PRIVILEGES ON ice_brain.* TO 'ice_brain'@'localhost';
 FLUSH PRIVILEGES;
@@ -60,23 +70,35 @@ Der Server legt die Datenbank und alle Tabellen **automatisch** beim ersten Star
 ```bash
 cd ice_brain/
 cp config.py.example config.py
-# Modell-Pfade, MySQL-Passwort und ggf. Port anpassen
+# Modell-Pfade, MariaDB-Passwort und ggf. Port anpassen
 ```
 
-### 3 – GGUF-Modelle herunterladen
+### 3 – GGUF-Modelle
 
-| Rolle | Empfehlung | Link |
+| Rolle | Modell | GPU |
 |---|---|---|
-| Router (P4, 8 GB) | Qwen2.5-3B-Instruct Q4_K_M | [HuggingFace](https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF) |
-| Main-LLM (P100, 16 GB) | DeepSeek-R1-Distill-Qwen-14B Q4_K_M | [HuggingFace](https://huggingface.co/bartowski/DeepSeek-R1-Distill-Qwen-14B-GGUF) |
+| Router | Qwen3-4B Q4_K_M | P4 (GPU 1) |
+| Main-LLM | Qwen3-8B Q4_K_M | P100 (GPU 0) |
 
+**Auto-Download:** Wenn `hf_repo` und `hf_file` in der `config.py` gesetzt sind und die GGUF-Datei unter `path` nicht existiert, lädt der Server die Modelle beim ersten Start **automatisch** von HuggingFace herunter:
+
+```python
+# Auszug aus config.py.example:
+MODELS = {
+    'router': {
+        'path': '/models/Qwen3-4B-Q4_K_M.gguf',
+        'hf_repo': 'Qwen/Qwen3-4B-GGUF',
+        'hf_file': 'Qwen3-4B-Q4_K_M.gguf',
+        ...
+    },
+    ...
+}
+```
+
+Manuell mit `huggingface-cli`:
 ```bash
-# Beispiel mit huggingface-cli:
-pip install huggingface-hub
-huggingface-cli download Qwen/Qwen2.5-3B-Instruct-GGUF \
-    qwen2.5-3b-instruct-q4_k_m.gguf --local-dir /models
-huggingface-cli download bartowski/DeepSeek-R1-Distill-Qwen-14B-GGUF \
-    DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf --local-dir /models
+huggingface-cli download Qwen/Qwen3-4B-GGUF Qwen3-4B-Q4_K_M.gguf --local-dir /models
+huggingface-cli download Qwen/Qwen3-8B-GGUF Qwen3-8B-Q4_K_M.gguf --local-dir /models
 ```
 
 ### 4 – Requirements installieren
@@ -104,6 +126,43 @@ Browser öffnen: **http://localhost:8000**
 
 ---
 
+## Features
+
+### Auto-Download von Modellen
+
+Wenn die GGUF-Datei unter `path` nicht vorhanden ist und `hf_repo` + `hf_file` in der Config gesetzt sind, wird die Datei automatisch von HuggingFace heruntergeladen. Benötigt `huggingface-hub` (ist in `requirements.txt`).
+
+### Wikipedia-Tool mit Cache
+
+Das Modul `tools/wikipedia.py` fragt die deutsche Wikipedia REST API ab und speichert Ergebnisse in der MariaDB-Tabelle `wiki_cache`.
+
+- `wiki_search(query, limit=3)` – Suche + Zusammenfassungen
+- `wiki_summary(title)` – Einzelartikel
+- `wiki_refresh(title)` – Cache-Eintrag invalidieren und neu laden
+
+Die `keywords`-Spalte in `wiki_cache` enthält lesbare Stichpunkte (z. B. "Espresso, Kaffee, Zubereitung, Crema"), damit Einträge manuell in der DB gefunden und bei Bedarf gelöscht werden können.
+
+### Enrichment-Loop (Background)
+
+Der Worker `workers/enrichment.py` läuft alle 30 Minuten als asyncio-Background-Task und reichert unveranreicherte User-Memory-Einträge (Kategorien: preference, hobby, personal, experience) mit Wikipedia-Wissen an:
+
+1. Main-LLM generiert passende Suchbegriffe
+2. `wiki_search()` wird pro Begriff aufgerufen (nutzt den Cache)
+3. Treffer werden in `memory_knowledge_link` verknüpft
+4. Keywords werden vom Main-LLM extrahiert und in `wiki_cache.keywords` gespeichert
+
+Der Loop überspringt den Lauf wenn das Main-LLM gerade für Nutzergespräche belegt ist.
+
+### Fuzzy-Deduplizierung
+
+`_find_similar()` in `db/memory.py` verwendet jetzt zweistufiges Matching:
+1. Schnelles Wort-Matching (wie bisher)
+2. Fuzzy-Vergleich via `difflib.SequenceMatcher` (Schwellwert 0.75)
+
+Das verhindert doppelte Einträge bei Tippfehlern (z. B. "Phantasieland" → wird als "Phantasialand" erkannt und aktualisiert statt neu eingefügt).
+
+---
+
 ## API
 
 ### Chat
@@ -117,45 +176,11 @@ curl http://localhost:8000/v1/chat/completions \
   }'
 ```
 
-Antwort (OpenAI-kompatibel):
-
-```json
-{
-  "id": "chatcmpl-...",
-  "object": "chat.completion",
-  "created": 1710000000,
-  "model": "main",
-  "choices": [{
-    "index": 0,
-    "message": {"role": "assistant", "content": "Hallo! Wie kann ich helfen?"},
-    "finish_reason": "stop"
-  }],
-  "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-  "router_intent": "general"
-}
-```
-
-Das Feld `router_intent` ist eine ice_brain-Erweiterung und zeigt den erkannten Intent an.
-
 ### Health
 
 ```bash
 curl http://localhost:8000/health
 ```
-
----
-
-## Roadmap
-
-| Phase | Feature |
-|---|---|
-| **1** | ✅ Grundgerüst: FastAPI, llama-cpp-python, MySQL Auto-Init, WebUI |
-| **2** | RAG: Embedding-Modell, Vektorspalten, Wikipedia-Import |
-| **3** | User-Memory: Extraktion nach jedem Turn, Recall bei relevanten Fragen |
-| **4** | Global-Memory: Kuratierter Wissensspeicher, Promotion aus User-Memory |
-| **5** | Tool-Calls: Wetter, Suche, Kalender, Home-Automation |
-| **6** | Telegram-Frontend, Multi-User-Support |
-| **7** | Fine-Tuning-Pipeline auf eigenen Conversations |
 
 ---
 
@@ -167,16 +192,21 @@ ice_brain/
 ├── requirements.txt
 ├── config.py.example        ← Template; als config.py kopieren
 ├── server.py                ← FastAPI Entry Point
-├── llm_manager.py           ← GGUF-Modelle laden + Inference
+├── llm_manager.py           ← GGUF-Modelle laden + Auto-Download
 ├── router.py                ← Intent-Klassifikation
 ├── models.py                ← Pydantic-Schemas
 ├── db/
 │   ├── __init__.py
-│   ├── connection.py        ← MySQL Pool + Auto-Init
-│   └── schema.sql           ← Tabellen-Definitionen
+│   ├── connection.py        ← MariaDB Pool + Auto-Init
+│   ├── memory.py            ← User-Memory (Fuzzy-Dedup, Extraktion via Main-LLM)
+│   └── schema.sql           ← Tabellen (MariaDB 11.8, VECTOR(768))
 ├── tools/
-│   ├── __init__.py          ← Tool-Registry
-│   └── dummy_weather.py     ← Beispiel-Tool (Dummy)
+│   ├── __init__.py
+│   ├── dummy_weather.py     ← Beispiel-Tool (Dummy)
+│   └── wikipedia.py         ← Wikipedia REST API + MariaDB-Cache
+├── workers/
+│   ├── __init__.py
+│   └── enrichment.py        ← Background Knowledge Enrichment Loop
 └── web/
     └── index.html           ← Test-WebUI (kein Framework)
 ```
