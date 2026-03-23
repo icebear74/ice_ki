@@ -201,19 +201,37 @@ class LLMManager:
             "Model '%s' not found at '%s' – downloading from HuggingFace: %s / %s …",
             name, path, hf_repo, hf_file,
         )
+        hf_token = os.getenv("HF_TOKEN") or None
+        if not hf_token:
+            logger.warning(
+                "HF_TOKEN is not set. Downloads may fail for gated or rate-limited "
+                "repositories. Set HF_TOKEN in config.py or as an environment variable."
+            )
         try:
             local_path = hf_hub_download(
                 repo_id=hf_repo,
                 filename=hf_file,
                 local_dir=target_dir,
+                token=hf_token,
             )
             logger.info("Model '%s' downloaded to '%s'.", name, local_path)
             return local_path
         except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "Failed to download model '%s' from HuggingFace (%s/%s): %s",
-                name, hf_repo, hf_file, exc,
-            )
+            exc_str = str(exc)
+            if "404" in exc_str or "Entry Not Found" in exc_str:
+                logger.error(
+                    "Failed to download model '%s' from HuggingFace (%s/%s): %s\n"
+                    "  → Verify the repo and filename are correct at "
+                    "https://huggingface.co/%s\n"
+                    "  → If the repo is gated, set HF_TOKEN in config.py after "
+                    "accepting the model terms at https://huggingface.co/%s",
+                    name, hf_repo, hf_file, exc, hf_repo, hf_repo,
+                )
+            else:
+                logger.error(
+                    "Failed to download model '%s' from HuggingFace (%s/%s): %s",
+                    name, hf_repo, hf_file, exc,
+                )
             return None
 
     def load_all(self, models_cfg: dict) -> None:

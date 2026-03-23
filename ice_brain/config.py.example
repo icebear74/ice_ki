@@ -10,7 +10,7 @@
 MODELS = {
     'router': {
         'path': '/models/Qwen3-4B-Q4_K_M.gguf',
-        'hf_repo': 'bartowski/Qwen_Qwen3-4B-GGUF',
+        'hf_repo': 'Qwen/Qwen3-4B-GGUF',
         'hf_file': 'Qwen3-4B-Q4_K_M.gguf',
         'gpu': 1,            # GPU-Index: 1=P4
         'n_ctx': 4096,
@@ -18,7 +18,7 @@ MODELS = {
     },
     'main': {
         'path': '/models/Qwen3-8B-Q4_K_M.gguf',
-        'hf_repo': 'bartowski/Qwen_Qwen3-8B-GGUF',
+        'hf_repo': 'Qwen/Qwen3-8B-GGUF',
         'hf_file': 'Qwen3-8B-Q4_K_M.gguf',
         'gpu': 0,            # GPU-Index: 0=P100
         'n_ctx': 8192,
@@ -42,6 +42,11 @@ PORT = 8000
 
 # Admin-Benutzername, der beim Systemstart automatisch angelegt wird (falls noch kein Admin existiert)
 ADMIN_USER = 'admin'
+
+# HuggingFace API-Token (optional, aber empfohlen für automatische Modell-Downloads).
+# Wird benötigt, wenn das Modell-Repository auf HuggingFace eine Authentifizierung verlangt.
+# Token erstellen unter: https://huggingface.co/settings/tokens
+HF_TOKEN = ''  # z.B. 'hf_xxxxxxxxxxxxxxxxxxxx'
 
 # Embedding-Modell (für spätere Vektorsuche — Phase 2+)
 EMBEDDING_MODEL = {

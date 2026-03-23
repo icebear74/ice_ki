@@ -114,6 +114,16 @@ async def startup() -> None:
         )
         models_cfg = {}
 
+    # Apply HF_TOKEN from config to environment (if set and not already in env)
+    try:
+        import config as _cfg_hf  # noqa: PLC0415
+        hf_token = getattr(_cfg_hf, "HF_TOKEN", "")
+        if hf_token and not os.environ.get("HF_TOKEN"):
+            os.environ["HF_TOKEN"] = hf_token
+            logger.info("HF_TOKEN set from config.py.")
+    except ImportError:
+        pass
+
     # 2. Load LLMs (failures are logged but don't abort startup)
     if models_cfg:
         llm_manager.load_all(models_cfg)

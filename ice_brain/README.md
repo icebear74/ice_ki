@@ -86,9 +86,9 @@ cp config.py.example config.py
 # Auszug aus config.py.example:
 MODELS = {
     'router': {
-        'path': '/models/qwen3-4b-q4_k_m.gguf',
+        'path': '/models/Qwen3-4B-Q4_K_M.gguf',
         'hf_repo': 'Qwen/Qwen3-4B-GGUF',
-        'hf_file': 'qwen3-4b-q4_k_m.gguf',
+        'hf_file': 'Qwen3-4B-Q4_K_M.gguf',
         ...
     },
     ...
@@ -97,8 +97,8 @@ MODELS = {
 
 Manuell mit `huggingface-cli`:
 ```bash
-huggingface-cli download Qwen/Qwen3-4B-GGUF qwen3-4b-q4_k_m.gguf --local-dir /models
-huggingface-cli download Qwen/Qwen3-8B-GGUF qwen3-8b-q4_k_m.gguf --local-dir /models
+huggingface-cli download Qwen/Qwen3-4B-GGUF Qwen3-4B-Q4_K_M.gguf --local-dir /models
+huggingface-cli download Qwen/Qwen3-8B-GGUF Qwen3-8B-Q4_K_M.gguf --local-dir /models
 ```
 
 ### 4 – Requirements installieren
