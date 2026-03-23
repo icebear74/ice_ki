@@ -26,6 +26,8 @@ _EXPECTED_TABLES = {
     "users",
     "user_memory",
     "global_memory",
+    "wiki_cache",
+    "memory_knowledge_link",
     "wiki_chunks",
     "knowledge_entries",
     "conversation_log",
