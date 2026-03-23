@@ -310,9 +310,53 @@ When the user mentions another person's health, mood, activity, or state (e.g.
   → Rhetorical questions aimed at the AI ("Willst du Espresso trinken?",
     "Soll ich dir was mitbringen?") do NOT reveal a personal fact about the user.
 
+AI CORRECTION MESSAGES – when the user corrects the AI about a third party:
+Messages that correct the AI's wrong answer about a person/thing (e.g. "Er ist
+gestorben", "Das steht im Wiki", "Das stimmt nicht, sie ist längst tot",
+"Du liegst falsch, er hat aufgehört") are corrections aimed AT THE AI about
+a THIRD PARTY.  They do NOT reveal a personal fact about the user.
+  → Apply the THIRD PARTIES rule: output [].
+  → Do NOT store "Hat einen Verstorbenen", "Weiß dass X gestorben ist", or any
+    similar derived fact – none of these describe the user.
+
 Message: "Mann, die Susanne ist jetzt in die Kiste gestiegen, weil sie erkältet ist."
 → "Susanne" is a THIRD PARTY – her illness is NOT the user's mood or state.
 → No relationship mentioned → no relationship fact either.
+Output:
+[]
+
+Message: "Er ist gestorben. Das steht auch so im Wiki."
+→ User is correcting the AI about a third party (e.g. Chuck Norris).
+→ The death is a THIRD PARTY fact, not a personal fact about the user.
+Output:
+[]
+
+Message: "Tja .. Das wichtigste hast du vergessen .. Er ist gestorben .."
+→ User corrects the AI about a third party's death. No personal fact about the user.
+Output:
+[]
+
+SEARCH / INFORMATION REQUESTS – always low importance:
+When the message is primarily asking the AI for information about a topic, person,
+film, or event (e.g. "Was kannst du mir über X erzählen?", "Suche Filme mit X",
+"Was weißt du über X?", "Zeig mir etwas über X", "Erzähl mir über X"), this is
+a SEARCH QUERY or information request.
+  → If the message reveals NO personal fact about the user beyond the search itself,
+    output [].
+  → If a genuine personal interest IS implied (user explicitly states they like or
+    are curious about X), you MAY store it as:
+    category=topic, ttl="24h", importance=0.1 – NEVER higher than 0.2.
+  → NEVER store the search subject as a personal fact with importance ≥ 0.3.
+  → "Sucht Filme mit X" or "Hat einen Verstorbenen" are NOT meaningful personal facts
+    – output [].
+
+Message: "Was kannst du mir über Martin Schindler erzählen?"
+→ Pure information request – no personal fact about the user.
+Output:
+[]
+
+Message: "Suche mal Filme mit Chuck Norris"
+→ Information request / search query – not a personal fact about the user.
 Output:
 []
 
