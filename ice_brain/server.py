@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import logging.handlers
 import os
 import sys
 import threading
@@ -55,9 +56,21 @@ from router import IntentRouter
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
+_LOG_DIR = _HERE / "logs"
+_LOG_DIR.mkdir(exist_ok=True)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.handlers.RotatingFileHandler(
+            _LOG_DIR / "ice_brain.log",
+            maxBytes=10 * 1024 * 1024,  # 10 MB
+            backupCount=5,
+            encoding="utf-8",
+        ),
+    ],
 )
 logger = logging.getLogger("ice_brain")
 
@@ -304,6 +317,71 @@ async def auth_set_password(req: SetPasswordRequest) -> dict:
 _WIKI_SNIPPET_MAX_CHARS = 800  # max characters per wiki chunk injected into the system prompt
 _MAX_TOPIC_WORDS = 4           # max words to keep when extracting a search topic
 _SHORT_MSG_WORD_THRESHOLD = 8  # messages with ≤ this many words are treated as follow-ups
+
+# ---------------------------------------------------------------------------
+# Streaming thinking-block filter
+# ---------------------------------------------------------------------------
+
+class _StreamThinkingFilter:
+    """Stateful filter that strips <think>…</think> blocks from a token stream.
+
+    Chunks arrive one at a time via :meth:`feed`.  A partial tag that straddles
+    two chunks is handled by keeping a small look-ahead buffer.  Call
+    :meth:`flush` once the stream is done to emit any buffered remainder.
+    """
+
+    _OPEN = "<think>"
+    _CLOSE = "</think>"
+
+    def __init__(self, strip: bool = True) -> None:
+        self._strip = strip
+        self._buf = ""
+        self._in_think = False
+
+    def feed(self, text: str) -> str:
+        if not self._strip:
+            return text
+        self._buf += text
+        out: list[str] = []
+        while True:
+            if self._in_think:
+                end = self._buf.find(self._CLOSE)
+                if end == -1:
+                    # Still inside a think block – discard everything buffered.
+                    self._buf = ""
+                    break
+                # Found closing tag – discard up to and including </think>.
+                self._buf = self._buf[end + len(self._CLOSE):]
+                self._in_think = False
+            else:
+                start = self._buf.find(self._OPEN)
+                if start == -1:
+                    # No opening tag – but keep the last (len(_OPEN)-1) chars
+                    # buffered in case an opening tag straddles two chunks.
+                    safe = max(0, len(self._buf) - (len(self._OPEN) - 1))
+                    out.append(self._buf[:safe])
+                    self._buf = self._buf[safe:]
+                    break
+                # Emit everything before <think>, then enter think-block mode.
+                out.append(self._buf[:start])
+                self._buf = self._buf[start + len(self._OPEN):]
+                self._in_think = True
+        return "".join(out)
+
+    def flush(self) -> str:
+        if not self._strip:
+            remaining = self._buf
+            self._buf = ""
+            return remaining
+        if self._in_think:
+            # Incomplete think block at end of stream – discard.
+            self._buf = ""
+            self._in_think = False
+            return ""
+        remaining = self._buf
+        self._buf = ""
+        return remaining
+
 
 # ---------------------------------------------------------------------------
 # Correction detection + live Wikipedia lookup
