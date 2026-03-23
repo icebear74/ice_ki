@@ -1327,6 +1327,7 @@ async def trigger_enrichment(session_token: str | None = None) -> dict:
 
 
 
+_WEB_DIR = _HERE / "web"
 if _WEB_DIR.is_dir():
     app.mount("/", StaticFiles(directory=str(_WEB_DIR), html=True), name="static")
 
