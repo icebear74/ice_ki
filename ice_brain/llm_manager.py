@@ -47,23 +47,34 @@ except ImportError:
 
 
 def _check_cuda_build() -> bool:
-    """Return True if llama-cpp-python was compiled with CUDA support."""
+    """Return True if llama-cpp-python was compiled with CUDA support.
+
+    Uses the best available detection method.  When no detection API is
+    present (older llama-cpp-python releases), we optimistically return True
+    so that models are loaded with ``n_gpu_layers=-1`` and llama.cpp logs
+    the actual backend at load time.  If the build really has no CUDA the
+    layer count is silently ignored and the model runs on CPU – no harm done.
+    """
     if not _LLAMA_AVAILABLE:
         return False
     try:
         import llama_cpp  # noqa: PLC0415
-        # llama_cpp exposes the list of supported GGML backends since ~0.2.x
+        # Preferred: llama_cpp exposes this helper since ~0.2.x
         support = getattr(llama_cpp, "llama_supports_gpu_offload", None)
         if support is not None:
             return bool(support())
-        # Fallback: inspect the compiled-in backend list when available
+        # Fallback: compiled-in backend list (some builds expose this)
         backend_list = getattr(llama_cpp, "_llama_backend_list", None)
         if backend_list is not None:
             return any("cuda" in str(b).lower() or "cublas" in str(b).lower() for b in backend_list)
-        # Last resort: try to load a tiny dummy model on GPU and see if any
-        # GPU memory is allocated – we skip this to avoid side effects and
-        # instead rely on the log line llama.cpp always prints at load time.
-        return False
+        # No detection API available – assume CUDA is present and let llama.cpp
+        # decide at load time.  This avoids silently falling back to CPU-only
+        # when the detection helper is simply missing from an older build.
+        logger.debug(
+            "llama_cpp has no GPU-detection API; assuming CUDA build. "
+            "llama.cpp will log the actual backend when loading models."
+        )
+        return True
     except Exception:  # noqa: BLE001
         return False
 
