@@ -67,7 +67,10 @@ class IntentRouter:
 
         messages = [
             ChatMessage(role="system", content=_SYSTEM_PROMPT),
-            ChatMessage(role="user", content=user_message),
+            # /no_think suppresses Qwen3's extended <think>…</think> block so the
+            # model outputs the JSON intent object directly without burning tokens
+            # on chain-of-thought reasoning.
+            ChatMessage(role="user", content=f"{user_message}\n/no_think"),
         ]
 
         try:
@@ -75,7 +78,7 @@ class IntentRouter:
                 model_name=self._model_name,
                 messages=messages,
                 temperature=0.0,
-                max_tokens=512,
+                max_tokens=1024,
             )
             logger.debug("Router input: %r", user_message)
             logger.debug("Router raw LLM output: %r", raw)

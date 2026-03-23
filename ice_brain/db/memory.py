@@ -502,16 +502,19 @@ def extract_memories_sync(user_id: str, user_message: str, llm_manager: "LLMMana
 
         from models import ChatMessage  # noqa: PLC0415
 
+        # Append /no_think to suppress Qwen3's extended reasoning block.
+        # Without this, Qwen3 may exhaust all available tokens on a <think>…</think>
+        # block before producing the required JSON array.
         messages = [
             ChatMessage(role="system", content=_EXTRACTION_SYSTEM_PROMPT),
-            ChatMessage(role="user", content=user_message),
+            ChatMessage(role="user", content=f"{user_message}\n/no_think"),
         ]
 
         raw = llm_manager.chat_completion(
             model_name="main",
             messages=messages,
             temperature=0.0,
-            max_tokens=1024,
+            max_tokens=4096,
         )
 
         facts_raw = _parse_facts(raw)
