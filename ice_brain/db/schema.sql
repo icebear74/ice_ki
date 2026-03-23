@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS user_memory (
     INDEX idx_user (user_id),
     INDEX idx_category (category),
     INDEX idx_enrichment (user_id, enriched, category)
-    -- VECTOR INDEX idx_mem_embedding (embedding) requires NOT NULL; add manually once embeddings are populated
+    -- VECTOR INDEX idx_mem_embedding (embedding) requires NOT NULL - add manually once embeddings are populated
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS global_memory (
@@ -55,7 +55,7 @@ CREATE TABLE IF NOT EXISTS wiki_cache (
     UNIQUE INDEX idx_title_lang (title(200), lang),
     INDEX idx_fetched (fetched_at),
     FULLTEXT INDEX idx_fulltext_search (title, summary, keywords)
-    -- VECTOR INDEX idx_embedding (embedding) requires NOT NULL; add manually once embeddings are populated
+    -- VECTOR INDEX idx_embedding (embedding) requires NOT NULL - add manually once embeddings are populated
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS memory_knowledge_link (
@@ -79,7 +79,7 @@ CREATE TABLE IF NOT EXISTS wiki_chunks (
     updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_title (title(100)),
     INDEX idx_article (article_id)
-    -- VECTOR INDEX idx_wiki_embedding (embedding) requires NOT NULL; add manually once embeddings are populated
+    -- VECTOR INDEX idx_wiki_embedding (embedding) requires NOT NULL - add manually once embeddings are populated
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS knowledge_entries (
@@ -92,7 +92,7 @@ CREATE TABLE IF NOT EXISTS knowledge_entries (
     embedding   VECTOR(768) NULL,
     created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_domain (domain)
-    -- VECTOR INDEX idx_knowledge_embedding (embedding) requires NOT NULL; add manually once embeddings are populated
+    -- VECTOR INDEX idx_knowledge_embedding (embedding) requires NOT NULL - add manually once embeddings are populated
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS conversation_log (
