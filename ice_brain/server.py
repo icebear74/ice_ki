@@ -295,6 +295,7 @@ async def chat_completion(
                 "  `lege benutzer an: <Name>` – Neuen Benutzer anlegen",
                 "    Der neue Benutzer kann sich sofort einloggen; beim ersten Login wird ein Passwort gesetzt.",
                 "    Beispiel: `lege benutzer an: Maria Müller`",
+                "  `anreicherung starten` – Gespeicherte Erinnerungen sofort mit Wikipedia-Wissen anreichern",
             ]
         else:
             help_lines += [
@@ -327,6 +328,21 @@ async def chat_completion(
                 else:
                     logger.error("create_user error: %s", exc)
                     reply = f'\u26a0 Fehler beim Anlegen: {exc}'
+        return ChatCompletionResponse(
+            model=request.model,
+            choices=[ChatCompletionChoice(message=ChatMessage(role="assistant", content=reply))],
+            router_intent="admin_command",
+        )
+    # ──────────────────────────────────────────────────────────────────────
+
+    # ── Admin command: "anreicherung starten" ─────────────────────────────
+    if re.match(r"^\s*anreicherung\s+starten\s*$", last_message, re.IGNORECASE):
+        if not authed_user_id or _get_user_role(authed_user_id) != "admin":
+            reply = "⛔ Nur Administratoren können die Anreicherung manuell starten."
+        else:
+            from workers.enrichment import enrich_pending_memories  # noqa: PLC0415
+            background_tasks.add_task(enrich_pending_memories, llm_manager)
+            reply = "🔍 Anreicherung wird im Hintergrund gestartet – gespeicherte Erinnerungen werden mit Wikipedia-Wissen verknüpft."
         return ChatCompletionResponse(
             model=request.model,
             choices=[ChatCompletionChoice(message=ChatMessage(role="assistant", content=reply))],
