@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 MAX_ENRICHMENTS_PER_RUN: int = 5
 MAX_WIKI_QUERIES_PER_FACT: int = 3
+MAX_WIKI_RESULTS_PER_TERM: int = 3  # Wikipedia results fetched per search term
 MIN_IMPORTANCE_TO_ENRICH: float = 0.5
 ENRICHMENT_INTERVAL_SECONDS: int = 30 * 60  # 30 Minuten
 
@@ -182,28 +183,32 @@ def _enrich_single(llm_manager: "LLMManager", memory_id: int, content: str) -> b
 
     search_terms = [str(t) for t in search_terms if t][:MAX_WIKI_QUERIES_PER_FACT]
     if not search_terms:
-        logger.debug("Enrichment: no search terms for memory id=%d.", memory_id)
+        logger.info("Enrichment: no search terms returned by LLM for memory id=%d.", memory_id)
         return False
+
+    logger.info("Enrichment: memory id=%d → search terms: %s", memory_id, search_terms)
 
     # Step 2: Search Wikipedia for each term and link results
     wiki_hits = 0    # total Wikipedia results found across all terms
     links_saved = 0  # how many were successfully written to the DB
     for term in search_terms:
         try:
-            results = wiki_search(term, limit=1)
+            results = wiki_search(term, limit=MAX_WIKI_RESULTS_PER_TERM)
         except Exception as exc:  # noqa: BLE001
             logger.warning("wiki_search failed for term %r: %s", term, exc)
             continue
 
+        logger.debug("Enrichment: term %r → %d Wikipedia result(s)", term, len(results))
         for result in results:
             wiki_hits += 1
-            cache_id = _get_or_create_cache_id(result)
+            cache_id = _get_or_create_cache_id(result, memory_id)
             if cache_id is None:
                 logger.warning(
                     "Enrichment: could not get/create cache entry for %r (memory id=%d) – DB write failed?",
                     result.get("title"), memory_id,
                 )
                 continue
+            logger.debug("Enrichment: memory id=%d ↔ wiki_cache id=%d (%r)", memory_id, cache_id, result.get("title"))
             if _link_memory_to_cache(memory_id, cache_id):
                 links_saved += 1
             _fill_cache_keywords(llm_manager, cache_id, result.get("summary", ""))
@@ -220,8 +225,12 @@ def _enrich_single(llm_manager: "LLMManager", memory_id: int, content: str) -> b
     return True
 
 
-def _get_or_create_cache_id(entry: dict) -> int | None:
-    """Return the wiki_cache.id for *entry*, inserting if needed."""
+def _get_or_create_cache_id(entry: dict, source_memory_id: int | None = None) -> int | None:
+    """Return the wiki_cache.id for *entry*, inserting if needed.
+
+    *source_memory_id* is stored on first insert (ignored on cache hit) so the
+    entry can be traced back to the memory that triggered the enrichment.
+    """
     try:
         from db.connection import get_connection  # noqa: PLC0415
         title = entry.get("title", "")
@@ -235,31 +244,36 @@ def _get_or_create_cache_id(entry: dict) -> int | None:
             row = cursor.fetchone()
             if row:
                 cursor.close()
+                logger.debug("wiki_cache hit for %r (id=%d)", title, row[0])
                 return row[0]
             cursor.execute(
-                "INSERT INTO wiki_cache (title, query, summary, source_url, lang, fetched_at) "
-                "VALUES (%s, %s, %s, %s, %s, NOW())",
+                "INSERT INTO wiki_cache (title, query, summary, source_url, lang, fetched_at, source_memory_id) "
+                "VALUES (%s, %s, %s, %s, %s, NOW(), %s)",
                 (
                     title,
                     entry.get("query", ""),
                     entry.get("summary", ""),
                     entry.get("source_url", ""),
                     lang,
+                    source_memory_id,
                 ),
             )
             conn.commit()
             new_id = cursor.lastrowid
             cursor.close()
+            logger.info("wiki_cache inserted %r as id=%d (source_memory_id=%s)", title, new_id, source_memory_id)
             return new_id
     except Exception as exc:  # noqa: BLE001
-        logger.warning("_get_or_create_cache_id error: %s", exc)
+        logger.error("_get_or_create_cache_id error for %r: %s", entry.get("title"), exc)
         return None
 
 
 def _link_memory_to_cache(memory_id: int, cache_id: int) -> bool:
     """Insert a memory_knowledge_link row (ignore duplicates).
 
-    Returns True on success (row inserted or already existed), False on DB error.
+    Returns True when a row was actually inserted (or already existed as a
+    duplicate), False on DB error or when MariaDB silently swallowed an FK
+    violation via INSERT IGNORE (rowcount == 0 but no exception).
     """
     try:
         from db.connection import get_connection  # noqa: PLC0415
@@ -271,10 +285,21 @@ def _link_memory_to_cache(memory_id: int, cache_id: int) -> bool:
                 (memory_id, cache_id),
             )
             conn.commit()
+            affected = cursor.rowcount  # 1 = inserted, 0 = duplicate or FK-violation (IGNORE)
             cursor.close()
+        if affected == 0:
+            # Could be a harmless duplicate (already linked) or a silent FK failure.
+            # Log at WARNING so the admin can tell the difference.
+            logger.warning(
+                "_link_memory_to_cache: 0 rows affected for memory_id=%d cache_id=%d "
+                "(duplicate link or FK violation silently ignored)",
+                memory_id, cache_id,
+            )
+            return False
+        logger.info("memory_knowledge_link saved: memory_id=%d ↔ cache_id=%d", memory_id, cache_id)
         return True
     except Exception as exc:  # noqa: BLE001
-        logger.warning("_link_memory_to_cache error: %s", exc)
+        logger.error("_link_memory_to_cache error (memory_id=%d, cache_id=%d): %s", memory_id, cache_id, exc)
         return False
 
 
