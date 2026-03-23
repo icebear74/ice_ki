@@ -75,7 +75,6 @@ def _api_full_text(title: str) -> str:
                 params={
                     "action": "query",
                     "prop": "extracts",
-                    "exintro": False,
                     "explaintext": True,
                     "titles": title,
                     "format": "json",

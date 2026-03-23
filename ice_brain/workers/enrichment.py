@@ -254,12 +254,13 @@ def _get_or_create_cache_id(entry: dict, source_memory_id: int | None = None) ->
                 logger.debug("wiki_cache hit for %r (id=%d)", title, row[0])
                 return row[0]
             cursor.execute(
-                "INSERT INTO wiki_cache (title, query, summary, source_url, lang, fetched_at, source_memory_id) "
-                "VALUES (%s, %s, %s, %s, %s, NOW(), %s)",
+                "INSERT INTO wiki_cache (title, query, summary, full_text, source_url, lang, fetched_at, source_memory_id) "
+                "VALUES (%s, %s, %s, %s, %s, %s, NOW(), %s)",
                 (
                     title,
                     entry.get("query", ""),
                     entry.get("summary", ""),
+                    entry.get("full_text", "") or "",
                     entry.get("source_url", ""),
                     lang,
                     source_memory_id,
