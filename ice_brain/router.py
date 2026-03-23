@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import TYPE_CHECKING
 
 from models import RouterResult
@@ -82,14 +83,20 @@ class IntentRouter:
                 raw = raw.split("```")[1]
                 if raw.startswith("json"):
                     raw = raw[4:]
+            # Strip <think>…</think> reasoning blocks emitted by some models.
+            raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
             raw = raw.strip()
             if not raw:
                 logger.warning("Router model returned empty response – defaulting to 'general'.")
                 return RouterResult(intent="general", confidence=0.0)
+            logger.debug("Router raw response: %r", raw)
             data = json.loads(raw)
             result = RouterResult(**data)
             logger.info("Intent classified: %s (%.2f)", result.intent, result.confidence)
             return result
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Intent classification failed (%s) – defaulting to 'general'.", exc)
+            logger.warning(
+                "Intent classification failed (%s) – raw response: %r – defaulting to 'general'.",
+                exc, raw if "raw" in dir() else "<not captured>",
+            )
             return RouterResult(intent="general", confidence=0.0)
