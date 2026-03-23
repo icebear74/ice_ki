@@ -145,6 +145,11 @@ _EXTRA_COLUMNS: list[tuple[str, str, str]] = [
         "source_memory_id",
         "BIGINT NULL COMMENT 'user_memory.id das diesen Abruf ausgelöst hat (erste Anreicherung)'",
     ),
+    (
+        "wiki_cache",
+        "full_text",
+        "MEDIUMTEXT NULL COMMENT 'Volltext des Wikipedia-Artikels (plain text)'",
+    ),
 ]
 
 

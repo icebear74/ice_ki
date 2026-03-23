@@ -1,0 +1,209 @@
+"""
+wiki_chunks – Chunking, Embedding und Vektorsuche für Wikipedia-Artikel.
+
+Wikipedia-Artikel werden in Textabschnitte (Chunks) aufgeteilt, embeddiert
+und in der Tabelle `wiki_chunks` gespeichert.  Beim Chatten sucht
+search_wiki_chunks() über Python-seitige Cosine-Similarity die relevantesten
+Passagen heraus und gibt sie zurück, damit der LLM sie in seinen Kontext
+einbeziehen kann.
+
+Öffentliche API
+---------------
+store_article_chunks(wiki_cache_id, title, full_text, lang)
+    Zerlegt den Artikel in Chunks, bettet sie ein und schreibt sie in DB.
+    Idempotent – läuft leer wenn Chunks für diesen Artikel schon existieren.
+
+search_wiki_chunks(query, limit=5) -> list[dict]
+    Embed die Anfrage, berechnet Cosine-Similarity gegen alle gespeicherten
+    Chunks und gibt die Top-K zurück (keys: title, content, chunk_idx,
+    article_id, score).
+"""
+
+from __future__ import annotations
+
+import logging
+
+logger = logging.getLogger(__name__)
+
+CHUNK_SIZE = 500      # Zeichen pro Chunk
+CHUNK_OVERLAP = 100   # Überlappung zwischen benachbarten Chunks
+MIN_CHUNK_CHARS = 80  # Chunks kürzer als dieser Wert werden verworfen
+MAX_VECTOR_SEARCH_ROWS = 20_000  # Safety cap für den In-Memory-Cosine-Scan
+
+
+# ---------------------------------------------------------------------------
+# Chunking
+# ---------------------------------------------------------------------------
+
+def _split_chunks(text: str) -> list[str]:
+    """Split *text* into overlapping character-window chunks.
+
+    Returns a list of non-empty strings, each at least MIN_CHUNK_CHARS long.
+    """
+    if not text or not text.strip():
+        return []
+    chunks: list[str] = []
+    start = 0
+    length = len(text)
+    while start < length:
+        end = start + CHUNK_SIZE
+        chunk = text[start:end].strip()
+        if len(chunk) >= MIN_CHUNK_CHARS:
+            chunks.append(chunk)
+        if end >= length:
+            break
+        start += CHUNK_SIZE - CHUNK_OVERLAP
+    return chunks
+
+
+# ---------------------------------------------------------------------------
+# Storage
+# ---------------------------------------------------------------------------
+
+def store_article_chunks(
+    wiki_cache_id: int,
+    title: str,
+    full_text: str,
+    lang: str = "de",
+) -> int:
+    """Chunk, embed and persist a Wikipedia article in `wiki_chunks`.
+
+    Returns the number of newly stored chunks.
+    Idempotent: returns 0 immediately when chunks already exist for this article.
+    Never raises – all errors are logged.
+    """
+    if not full_text or not full_text.strip():
+        logger.debug("store_article_chunks: no text for wiki_cache_id=%d – skipped.", wiki_cache_id)
+        return 0
+
+    # Idempotency check
+    try:
+        from db.connection import get_connection  # noqa: PLC0415
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT COUNT(*) FROM wiki_chunks WHERE article_id = %s",
+                (wiki_cache_id,),
+            )
+            count = cursor.fetchone()[0]
+            cursor.close()
+        if count > 0:
+            logger.debug(
+                "store_article_chunks: %d chunk(s) already exist for wiki_cache_id=%d – skipped.",
+                count, wiki_cache_id,
+            )
+            return 0
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("store_article_chunks: idempotency check failed (wiki_cache_id=%d): %s", wiki_cache_id, exc)
+        return 0
+
+    chunks = _split_chunks(full_text)
+    if not chunks:
+        logger.debug("store_article_chunks: text for wiki_cache_id=%d produced no chunks.", wiki_cache_id)
+        return 0
+
+    # Embed all chunks in one batch
+    try:
+        from tools.embeddings import embed, pack_embedding  # noqa: PLC0415
+        vectors = embed(chunks)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("store_article_chunks: embedding failed for wiki_cache_id=%d: %s", wiki_cache_id, exc)
+        return 0
+
+    stored = 0
+    try:
+        from db.connection import get_connection  # noqa: PLC0415
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            for idx, (chunk, vec) in enumerate(zip(chunks, vectors)):
+                try:
+                    cursor.execute(
+                        "INSERT INTO wiki_chunks "
+                        "(article_id, title, chunk_idx, content, lang, embedding) "
+                        "VALUES (%s, %s, %s, %s, %s, %s)",
+                        (wiki_cache_id, title, idx, chunk, lang, pack_embedding(vec)),
+                    )
+                    stored += 1
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "store_article_chunks: could not store chunk idx=%d "
+                        "for wiki_cache_id=%d: %s",
+                        idx, wiki_cache_id, exc,
+                    )
+            conn.commit()
+            cursor.close()
+        logger.info(
+            "store_article_chunks: %d chunk(s) stored for %r (wiki_cache_id=%d).",
+            stored, title, wiki_cache_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("store_article_chunks: DB error for wiki_cache_id=%d: %s", wiki_cache_id, exc)
+
+    return stored
+
+
+# ---------------------------------------------------------------------------
+# Vector search
+# ---------------------------------------------------------------------------
+
+def search_wiki_chunks(query: str, limit: int = 5) -> list[dict]:
+    """Find the most relevant wiki chunks for *query* via cosine similarity.
+
+    Embeds *query*, fetches all stored chunk embeddings from `wiki_chunks`,
+    computes cosine similarity in Python and returns the top *limit* results.
+
+    Each result dict has keys:
+        id, article_id, title, chunk_idx, content, score (float 0-1)
+
+    Returns [] on error or when no chunks are stored yet.
+    """
+    if not query or not query.strip():
+        return []
+
+    # Embed the query
+    try:
+        from tools.embeddings import embed_one, cosine_similarity, unpack_embedding  # noqa: PLC0415
+        query_vec = embed_one(query)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("search_wiki_chunks: could not embed query: %s", exc)
+        return []
+
+    # Fetch all chunk embeddings (safety cap: MAX_VECTOR_SEARCH_ROWS)
+    try:
+        from db.connection import get_connection  # noqa: PLC0415
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id, article_id, title, chunk_idx, content, embedding "
+                "FROM wiki_chunks "
+                "WHERE embedding IS NOT NULL "
+                "LIMIT %s",
+                (MAX_VECTOR_SEARCH_ROWS,),
+            )
+            rows = cursor.fetchall()
+            cursor.close()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("search_wiki_chunks: DB fetch failed: %s", exc)
+        return []
+
+    if not rows:
+        return []
+
+    scored: list[dict] = []
+    for row_id, article_id, title, chunk_idx, content, embedding_bytes in rows:
+        try:
+            vec = unpack_embedding(embedding_bytes)
+            score = cosine_similarity(query_vec, vec)
+            scored.append({
+                "id": row_id,
+                "article_id": article_id,
+                "title": title,
+                "chunk_idx": chunk_idx,
+                "content": content,
+                "score": score,
+            })
+        except Exception:  # noqa: BLE001
+            continue
+
+    scored.sort(key=lambda x: x["score"], reverse=True)
+    return scored[:limit]

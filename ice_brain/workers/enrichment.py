@@ -214,6 +214,8 @@ def _enrich_single(llm_manager: "LLMManager", memory_id: int, content: str) -> b
                 )
                 continue
             logger.debug("Enrichment: memory id=%d ↔ wiki_cache id=%d (%r)", memory_id, cache_id, result.get("title"))
+            # Store article chunks with embeddings (idempotent)
+            _store_chunks_for_result(cache_id, result)
             if _link_memory_to_cache(memory_id, cache_id):
                 links_saved += 1
             _fill_cache_keywords(llm_manager, cache_id, result.get("summary", ""))
@@ -306,6 +308,27 @@ def _link_memory_to_cache(memory_id: int, cache_id: int) -> bool:
     except Exception as exc:  # noqa: BLE001
         logger.error("_link_memory_to_cache error (memory_id=%d, cache_id=%d): %s", memory_id, cache_id, exc)
         return False
+
+
+def _store_chunks_for_result(cache_id: int, result: dict) -> None:
+    """Chunk and embed a wiki article, storing results in wiki_chunks (idempotent).
+
+    Uses full_text when available; falls back to summary so that partial
+    content is still indexed even when the full-text fetch failed.
+    """
+    article_text = result.get("full_text") or result.get("summary") or ""
+    if not article_text:
+        return
+    try:
+        from db.wiki import store_article_chunks  # noqa: PLC0415
+        store_article_chunks(
+            wiki_cache_id=cache_id,
+            title=result.get("title", ""),
+            full_text=article_text,
+            lang=result.get("lang", "de"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("_store_chunks_for_result error (cache_id=%d): %s", cache_id, exc)
 
 
 def _fill_cache_keywords(llm_manager: "LLMManager", cache_id: int, summary: str) -> None:

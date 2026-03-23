@@ -265,6 +265,36 @@ async def auth_set_password(req: SetPasswordRequest) -> dict:
     return {"ok": True, "user_id": req.user_id, "username": username, "role": role, "token": token}
 
 
+_WIKI_SNIPPET_MAX_CHARS = 400  # max characters per wiki chunk injected into the system prompt
+
+
+def _wiki_context_for_message(message: str, limit: int = 3, min_score: float = 0.35) -> str:
+    """Search cached wiki chunks for *message* and format as a prompt section.
+
+    Returns an empty string when no relevant chunks are found, when the
+    embedding model is not yet loaded, or on any error (non-fatal).
+    """
+    if not message or len(message.strip()) < 4:
+        return ""
+    try:
+        from db.wiki import search_wiki_chunks  # noqa: PLC0415
+        results = search_wiki_chunks(message, limit=limit)
+        relevant = [r for r in results if r["score"] >= min_score]
+        if not relevant:
+            return ""
+        lines = [
+            "📚 Relevantes Wikipedia-Hintergrundwissen "
+            "(nutze es in deiner Antwort wenn passend, aber nur wenn es wirklich hilft):"
+        ]
+        for r in relevant:
+            snippet = r["content"][:_WIKI_SNIPPET_MAX_CHARS].replace("\n", " ").strip()
+            lines.append(f"[{r['title']}] {snippet}")
+        return "\n".join(lines)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Wiki context search failed (non-fatal): %s", exc)
+        return ""
+
+
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
 async def chat_completion(
     request: ChatCompletionRequest,
@@ -358,6 +388,9 @@ async def chat_completion(
     from db.memory import load_memories_for_prompt  # noqa: PLC0415
     memory_section = load_memories_for_prompt(user_id) if user_id != "default" else ""
 
+    # 2b. Wiki knowledge – vector-search cached Wikipedia chunks for relevant context
+    wiki_section = _wiki_context_for_message(last_message)
+
     # 3. Main LLM response (P100)
     if not llm_manager.is_ready("main"):
         return JSONResponse(
@@ -397,10 +430,12 @@ async def chat_completion(
         f"Aktuelle Uhrzeit: {now_str}. "
         f"Begrüße den Benutzer passend zur Tageszeit mit \"{greeting}\"."
     )
-    # Build the system prompt additions: time note + memory section
+    # Build the system prompt additions: time note + memory section + wiki context
     system_additions = time_note
     if memory_section:
         system_additions = f"{system_additions}\n\n{memory_section}"
+    if wiki_section:
+        system_additions = f"{system_additions}\n\n{wiki_section}"
 
     messages = list(request.messages)
     if messages and messages[0].role == "system":

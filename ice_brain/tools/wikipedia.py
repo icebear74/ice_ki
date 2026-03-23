@@ -61,8 +61,39 @@ def _api_summary(title: str) -> dict | None:
         return None
 
 
+def _api_full_text(title: str) -> str:
+    """Fetch the full plain-text content of a Wikipedia article.
+
+    Uses the MediaWiki action=query&prop=extracts API with explaintext=true
+    to retrieve the article as clean plain text without markup.
+    Returns an empty string on error or when the article is not found.
+    """
+    try:
+        with _get_client() as client:
+            resp = client.get(
+                "/w/api.php",
+                params={
+                    "action": "query",
+                    "prop": "extracts",
+                    "exintro": False,
+                    "explaintext": True,
+                    "titles": title,
+                    "format": "json",
+                    "utf8": 1,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            pages = data.get("query", {}).get("pages", {})
+            for page in pages.values():
+                return page.get("extract", "")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Wikipedia full-text error for title %r: %s", title, exc)
+    return ""
+
+
 def _api_search(query: str, limit: int = 3) -> list[dict]:
-    """Search Wikipedia and return up to *limit* summaries."""
+    """Search Wikipedia and return up to *limit* summaries with full text."""
     try:
         with _get_client() as client:
             resp = client.get(
@@ -87,16 +118,18 @@ def _api_search(query: str, limit: int = 3) -> list[dict]:
         title = hit.get("title", "")
         summary_data = _api_summary(title)
         if summary_data:
-            results.append(_normalise_summary(summary_data, query))
+            full_text = _api_full_text(title)
+            results.append(_normalise_summary(summary_data, query, full_text))
     return results
 
 
-def _normalise_summary(data: dict, query: str = "") -> dict:
+def _normalise_summary(data: dict, query: str = "", full_text: str = "") -> dict:
     """Extract relevant fields from a Wikipedia REST summary response."""
     return {
         "title": data.get("title", ""),
         "query": query,
         "summary": data.get("extract", ""),
+        "full_text": full_text,
         "source_url": data.get("content_urls", {}).get("desktop", {}).get("page", ""),
         "lang": "de",
     }
@@ -113,7 +146,7 @@ def _cache_get(title: str, lang: str = "de") -> dict | None:
         with get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT id, title, query, summary, source_url, lang, fetched_at, ttl_days "
+                "SELECT id, title, query, summary, full_text, source_url, lang, fetched_at, ttl_days "
                 "FROM wiki_cache "
                 "WHERE title = %s AND lang = %s "
                 "AND DATE_ADD(fetched_at, INTERVAL ttl_days DAY) > NOW() "
@@ -129,10 +162,11 @@ def _cache_get(title: str, lang: str = "de") -> dict | None:
             "title": row[1],
             "query": row[2],
             "summary": row[3],
-            "source_url": row[4],
-            "lang": row[5],
-            "fetched_at": str(row[6]),
-            "ttl_days": row[7],
+            "full_text": row[4] or "",
+            "source_url": row[5],
+            "lang": row[6],
+            "fetched_at": str(row[7]),
+            "ttl_days": row[8],
         }
     except Exception as exc:  # noqa: BLE001
         logger.warning("wiki_cache read error: %s", exc)
@@ -146,17 +180,19 @@ def _cache_set(entry: dict) -> None:
         with get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "INSERT INTO wiki_cache (title, query, summary, source_url, lang, fetched_at) "
-                "VALUES (%s, %s, %s, %s, %s, NOW()) "
+                "INSERT INTO wiki_cache (title, query, summary, full_text, source_url, lang, fetched_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, NOW()) "
                 "ON DUPLICATE KEY UPDATE "
                 "query = VALUES(query), "
                 "summary = VALUES(summary), "
+                "full_text = VALUES(full_text), "
                 "source_url = VALUES(source_url), "
                 "fetched_at = NOW()",
                 (
                     entry.get("title", ""),
                     entry.get("query", ""),
                     entry.get("summary", ""),
+                    entry.get("full_text", "") or "",
                     entry.get("source_url", ""),
                     entry.get("lang", "de"),
                 ),
@@ -190,7 +226,7 @@ def _cache_delete(title: str, lang: str = "de") -> None:
 def wiki_summary(title: str) -> dict | None:
     """Return the summary for a Wikipedia article, using the cache.
 
-    Returns a dict with keys: title, query, summary, source_url, lang.
+    Returns a dict with keys: title, query, summary, full_text, source_url, lang.
     Returns None if the article does not exist.
     """
     cached = _cache_get(title)
@@ -202,7 +238,8 @@ def wiki_summary(title: str) -> dict | None:
     if data is None:
         return None
 
-    entry = _normalise_summary(data)
+    full_text = _api_full_text(title)
+    entry = _normalise_summary(data, full_text=full_text)
     _cache_set(entry)
     return entry
 
