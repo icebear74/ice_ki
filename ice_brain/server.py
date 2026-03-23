@@ -176,7 +176,12 @@ async def startup() -> None:
 
     # 7. Pre-load embedding model so download/disk errors surface at startup
     try:
-        from tools.embeddings import load_embedding_model  # noqa: PLC0415
+        from tools.embeddings import configure_embedding_device, load_embedding_model  # noqa: PLC0415
+        emb_cfg = getattr(config, "EMBEDDING_MODEL", {}) if "config" in sys.modules else {}
+        emb_gpu = emb_cfg.get("gpu") if isinstance(emb_cfg, dict) else None
+        if emb_gpu is not None:
+            configure_embedding_device(f"cuda:{emb_gpu}")
+            logger.info("Embedding model will use GPU %d (cuda:%d).", emb_gpu, emb_gpu)
         load_embedding_model()
     except Exception as exc:  # noqa: BLE001
         logger.warning("Embedding model pre-load raised unexpected error: %s", exc)

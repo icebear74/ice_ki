@@ -33,7 +33,24 @@ _MODEL_NAME = "paraphrase-multilingual-mpnet-base-v2"
 EMBEDDING_DIM = 768
 
 _lock = threading.Lock()
-_model = None  # SentenceTransformer instance, populated on first use
+_model = None   # SentenceTransformer instance, populated on first use
+_device = "cpu"  # Target device; override via configure_embedding_device() at startup
+
+
+def configure_embedding_device(device: str) -> None:
+    """Set the PyTorch device used when loading the embedding model.
+
+    Must be called *before* the model is first loaded (i.e. at server startup,
+    before the first call to embed() / load_embedding_model()).  Typical values:
+      - "cpu"      – default, no GPU
+      - "cuda"     – first available CUDA GPU
+      - "cuda:0"   – specific CUDA device index 0
+      - "cuda:1"   – specific CUDA device index 1  (e.g. the P4)
+    Has no effect if the model is already loaded.
+    """
+    global _device  # noqa: PLW0603
+    _device = device
+    logger.debug("Embedding model device configured: %s", device)
 
 
 def _get_model():
@@ -51,9 +68,12 @@ def _get_model():
                 "sentence-transformers is not installed. "
                 "Run: pip install sentence-transformers"
             ) from exc
-        logger.info("Loading embedding model '%s' …", _MODEL_NAME)
-        _model = SentenceTransformer(_MODEL_NAME)
-        logger.info("Embedding model '%s' loaded (%d-dim).", _MODEL_NAME, EMBEDDING_DIM)
+        logger.info("Loading embedding model '%s' on device '%s' …", _MODEL_NAME, _device)
+        _model = SentenceTransformer(_MODEL_NAME, device=_device)
+        logger.info(
+            "Embedding model '%s' loaded (%d-dim, device=%s).",
+            _MODEL_NAME, EMBEDDING_DIM, _device,
+        )
     return _model
 
 

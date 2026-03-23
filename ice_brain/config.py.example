@@ -56,8 +56,11 @@ HF_TOKEN = ''  # z.B. 'hf_xxxxxxxxxxxxxxxxxxxx'
 # Im Produktivbetrieb auf False lassen!
 DEBUG_LOGGING = False
 
-# Embedding-Modell (für spätere Vektorsuche — Phase 2+)
+# Embedding-Modell (sentence-transformers, für Wiki-Vektorsuche)
+# 'gpu': CUDA-Geräte-Index, auf dem das Modell geladen wird.
+#   0 = P100  (Haupt-GPU)
+#   1 = P4    (teilt sich die GPU mit dem Router-Modell)
+# Entferne den 'gpu'-Schlüssel oder setze ihn auf None, um CPU zu erzwingen.
 EMBEDDING_MODEL = {
-    'path': '/models/nomic-embed-text-v1.5.Q4_K_M.gguf',
-    'gpu': 1,  # P4
+    'gpu': 1,  # P4 – teilt die GPU mit dem Router-Modell
 }
