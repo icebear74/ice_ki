@@ -1,18 +1,20 @@
 """
-Embedding helper – lazy-loads paraphrase-multilingual-mpnet-base-v2 (768-dim)
+Embedding helper – loads paraphrase-multilingual-mpnet-base-v2 (768-dim)
 via sentence-transformers and provides encode / similarity / pack helpers for
 storing embeddings in the MariaDB VECTOR(768) columns defined in schema.sql.
 
-Singleton pattern: the model is loaded once on first call to embed() and
+Singleton pattern: the model is loaded once (either eagerly via
+load_embedding_model() at server startup or on first call to embed()) and
 kept in memory for the lifetime of the process.
 
 Public API
 ----------
-embed(texts)       -> np.ndarray  shape (N, 768), float32, L2-normalised
-embed_one(text)    -> np.ndarray  shape (768,),   float32, L2-normalised
-cosine_similarity  -> float       dot product of two normalised vectors
-pack_embedding     -> bytes       LE float32 bytes for DB (3072 B)
-unpack_embedding   -> np.ndarray  bytes → float32 array
+load_embedding_model()  -> None        eager startup load; logs error prominently on failure
+embed(texts)            -> np.ndarray  shape (N, 768), float32, L2-normalised
+embed_one(text)         -> np.ndarray  shape (768,),   float32, L2-normalised
+cosine_similarity       -> float       dot product of two normalised vectors
+pack_embedding          -> bytes       LE float32 bytes for DB (3072 B)
+unpack_embedding        -> np.ndarray  bytes → float32 array
 """
 
 from __future__ import annotations
@@ -52,6 +54,32 @@ def _get_model():
         _model = SentenceTransformer(_MODEL_NAME)
         logger.info("Embedding model '%s' loaded (%d-dim).", _MODEL_NAME, EMBEDDING_DIM)
     return _model
+
+
+def load_embedding_model() -> bool:
+    """Eagerly load the embedding model singleton.
+
+    Intended to be called once at server startup so that download/disk errors
+    are visible immediately rather than on the first wiki search request.
+
+    Returns True on success, False on failure (error is logged prominently).
+    The server continues to run even if this fails; wiki search is simply
+    unavailable until the model can be loaded.
+    """
+    try:
+        _get_model()
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.error("=" * 60)
+        logger.error("EMBEDDING MODEL LOAD FAILED: %s", exc)
+        logger.error(
+            "Wiki-Vektorsuche ist nicht verfügbar bis das Modell geladen werden kann."
+        )
+        logger.error(
+            "Modell: %s (~1.1 GB) – ausreichend freien Speicher sicherstellen.", _MODEL_NAME
+        )
+        logger.error("=" * 60)
+        return False
 
 
 # ---------------------------------------------------------------------------

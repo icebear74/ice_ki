@@ -162,6 +162,13 @@ async def startup() -> None:
     except Exception as exc:  # noqa: BLE001
         logger.warning("Could not start enrichment loop: %s", exc)
 
+    # 7. Pre-load embedding model so download/disk errors surface at startup
+    try:
+        from tools.embeddings import load_embedding_model  # noqa: PLC0415
+        load_embedding_model()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Embedding model pre-load raised unexpected error: %s", exc)
+
 
 # ---------------------------------------------------------------------------
 # Background helpers
