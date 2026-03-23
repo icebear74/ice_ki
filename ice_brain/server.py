@@ -1372,6 +1372,32 @@ async def delete_memory_entry(memory_id: int, session_token: str | None = None) 
     return {"ok": True, "deleted_memory_id": memory_id}
 
 
+@app.delete("/v1/relation-memory/{memory_id}")
+async def delete_relation_memory_entry(memory_id: int, session_token: str | None = None) -> dict:
+    """Delete a relation_memory entry.
+
+    Admins may delete any entry; regular users may only delete their own.
+
+    Query parameter: ``session_token`` (required).
+    """
+    user_id = _resolve_token(session_token)
+    if user_id is None:
+        return JSONResponse(status_code=401, content={"error": "Nicht authentifiziert."})
+
+    from db.relations import delete_relation_memory  # noqa: PLC0415
+
+    role = _get_user_role(user_id)
+    owner_id = None if role == "admin" else user_id
+
+    deleted = delete_relation_memory(memory_id, user_id=owner_id)
+    if not deleted:
+        return JSONResponse(
+            status_code=404,
+            content={"error": f"Beziehungserinnerung {memory_id} nicht gefunden oder keine Berechtigung."},
+        )
+    return {"ok": True, "deleted_memory_id": memory_id}
+
+
 # ---------------------------------------------------------------------------
 # Admin API endpoints for manual worker triggers
 # ---------------------------------------------------------------------------

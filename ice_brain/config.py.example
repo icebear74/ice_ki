@@ -4,29 +4,72 @@
 # Kopiere diese Datei als config.py und passe die Werte an:
 #   cp config.py.example config.py
 
+# ============================================================================
 # Modell-Konfiguration
-# hf_repo / hf_file: Falls das Modell unter 'path' fehlt, wird es automatisch
-# von HuggingFace heruntergeladen (huggingface-hub muss installiert sein).
+# ============================================================================
+# Zwei Varianten stehen zur Auswahl:
+#
+#   1. Non-Thinking (Standard, empfohlen)
+#      Qwen2.5-Instruct – schnelle Antworten, kein <think>-Overhead,
+#      weniger GPU-Last, volles Token-Budget für die eigentliche Antwort.
+#      Router + Memory-Extraction brauchen ohnehin nur strukturiertes JSON,
+#      kein internes Reasoning.
+#
+#   2. Thinking (auskommentiert)
+#      Qwen3 – generiert intern einen <think>…</think>-Reasoning-Block vor
+#      jeder Antwort. Kann bei komplexen logischen Aufgaben bessere Ergebnisse
+#      liefern, kostet aber deutlich mehr Latenz und Tokens.
+#      Der Server filtert den Think-Block automatisch heraus (strip_thinking=True).
+#
+# Du kannst Router und Main unabhängig mischen – z.B. Non-Thinking-Router
+# (schnelle Klassifikation) + Thinking-Main (falls du die Qualität brauchst).
+# Einfach die gewünschten Blöcke einkommentieren.
+
 MODELS = {
+    # ── Router-Modell (Intent-Klassifikation, läuft auf P4) ──────────────
+    # Non-Thinking (empfohlen – reicht für JSON-Klassifikation, spart VRAM auf P4)
     'router': {
-        'path': '/models/Qwen3-4B-Q4_K_M.gguf',
-        'hf_repo': 'Qwen/Qwen3-4B-GGUF',
-        'hf_file': 'Qwen3-4B-Q4_K_M.gguf',
-        'gpu': 1,            # GPU-Index: 1=P4
+        'path': '/models/qwen2.5-3b-instruct-q4_k_m.gguf',
+        'hf_repo': 'Qwen/Qwen2.5-3B-Instruct-GGUF',
+        'hf_file': 'qwen2.5-3b-instruct-q4_k_m.gguf',
+        'gpu': 1,            # GPU-Index: 1 = P4
         'n_ctx': 4096,
         'n_gpu_layers': -1,  # -1 = alle Layer auf GPU
     },
+    # Thinking-Alternative (auskommentieren zum Aktivieren):
+    # 'router': {
+    #     'path': '/models/Qwen3-4B-Q4_K_M.gguf',
+    #     'hf_repo': 'Qwen/Qwen3-4B-GGUF',
+    #     'hf_file': 'Qwen3-4B-Q4_K_M.gguf',
+    #     'gpu': 1,
+    #     'n_ctx': 4096,
+    #     'n_gpu_layers': -1,
+    # },
+
+    # ── Main-Modell (Chat + Memory-Extraction, läuft auf P100) ───────────
+    # Non-Thinking (empfohlen – deutlich schnellere Antworten ohne Think-Overhead)
     'main': {
-        'path': '/models/Qwen3-8B-Q4_K_M.gguf',
-        'hf_repo': 'Qwen/Qwen3-8B-GGUF',
-        'hf_file': 'Qwen3-8B-Q4_K_M.gguf',
-        'gpu': 0,            # GPU-Index: 0=P100
+        'path': '/models/qwen2.5-7b-instruct-q4_k_m.gguf',
+        'hf_repo': 'Qwen/Qwen2.5-7B-Instruct-GGUF',
+        'hf_file': 'qwen2.5-7b-instruct-q4_k_m.gguf',
+        'gpu': 0,            # GPU-Index: 0 = P100
         'n_ctx': 8192,
         'n_gpu_layers': -1,
     },
+    # Thinking-Alternative (auskommentieren zum Aktivieren):
+    # 'main': {
+    #     'path': '/models/Qwen3-8B-Q4_K_M.gguf',
+    #     'hf_repo': 'Qwen/Qwen3-8B-GGUF',
+    #     'hf_file': 'Qwen3-8B-Q4_K_M.gguf',
+    #     'gpu': 0,
+    #     'n_ctx': 8192,
+    #     'n_gpu_layers': -1,
+    # },
 }
 
-# MySQL-Konfiguration
+# ============================================================================
+# MySQL / MariaDB-Konfiguration
+# ============================================================================
 MYSQL = {
     'host': 'localhost',
     'port': 3306,
@@ -36,32 +79,43 @@ MYSQL = {
     'pool_size': 5,
 }
 
+# ============================================================================
 # Server-Konfiguration
+# ============================================================================
 HOST = '0.0.0.0'
 PORT = 8000
 
-# Admin-Benutzername, der beim Systemstart automatisch angelegt wird (falls noch kein Admin existiert)
+# Admin-Benutzername, der beim Systemstart automatisch angelegt wird
+# (falls noch kein Admin existiert)
 ADMIN_USER = 'admin'
 
-# HuggingFace API-Token (optional, aber empfohlen für automatische Modell-Downloads).
-# Wird benötigt, wenn das Modell-Repository auf HuggingFace eine Authentifizierung verlangt.
+# ============================================================================
+# HuggingFace API-Token (optional)
+# ============================================================================
+# Wird benötigt, wenn das Modell-Repository auf HuggingFace eine
+# Authentifizierung verlangt (z.B. gated models).
 # Token erstellen unter: https://huggingface.co/settings/tokens
 HF_TOKEN = ''  # z.B. 'hf_xxxxxxxxxxxxxxxxxxxx'
 
-# Debug-Modus: Wenn True, werden alle ice_brain-Logger auf DEBUG-Level gesetzt.
+# ============================================================================
+# Debug-Modus
+# ============================================================================
+# Wenn True, werden alle ice_brain-Logger auf DEBUG-Level gesetzt.
 # Zeigt u.a.:
 #   - Router: vollständige Eingabe + Roh-Antwort des LLM
-#   - Wiki-Suche: Suchbegriff, alle Treffer mit Scores, was in den Prompt eingeflossen ist
-#   - Speicher-Abschnitt: ob und welche Erinnerungen in den Prompt eingebettet wurden
+#   - Wiki-Suche: Suchbegriff, alle Treffer mit Scores, Prompt-Injection
+#   - Speicher-Abschnitt: ob und welche Erinnerungen injiziert wurden
 # Im Produktivbetrieb auf False lassen!
 DEBUG_LOGGING = False
 
+# ============================================================================
 # Embedding-Modell (sentence-transformers, für Wiki-Vektorsuche)
+# ============================================================================
 # 'gpu': CUDA-Geräte-Index, auf dem das Modell geladen wird.
-#   0 = P100  (Haupt-GPU, 16 GB – empfohlen: mehr freier Speicher)
+#   0 = P100  (16 GB – empfohlen, mehr freier Speicher)
 #   1 = P4    (7.68 GB – kann bei voller GPU-Auslastung zu CUDA OOM führen)
 # Entferne den 'gpu'-Schlüssel oder setze ihn auf None, um CPU zu erzwingen.
 # Bei CUDA OOM fällt das Embedding-Modell automatisch auf CPU zurück.
 EMBEDDING_MODEL = {
-    'gpu': 0,  # P100 (16 GB) – empfohlen; P4 (gpu:1) hat zu wenig freien VRAM
+    'gpu': 0,  # P100 (16 GB) – empfohlen
 }
