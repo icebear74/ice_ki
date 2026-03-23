@@ -43,6 +43,7 @@ MIN_IMPORTANCE_TO_ENRICH: float = 0.5
 ENRICHMENT_INTERVAL_SECONDS: int = 30 * 60  # 30 Minuten
 
 _ENRICHABLE_CATEGORIES = {"preference", "hobby", "personal", "experience"}
+_ENRICHABLE_RELATION_TYPES = {"partner", "family", "colleague"}
 
 _SEARCH_TERMS_PROMPT = """\
 You are a knowledge assistant. Given a personal fact about a user, output a \
@@ -96,10 +97,10 @@ def enrich_pending_memories(llm_manager: "LLMManager") -> None:
 
 
 def _run_enrichment(llm_manager: "LLMManager") -> None:
-    """Fetch pending memories and enrich them."""
+    """Fetch pending memories and enrich them (user_memory + relation_memory)."""
     from db.connection import get_connection  # noqa: PLC0415
-    from tools.wikipedia import wiki_search  # noqa: PLC0415
 
+    # ── user_memory enrichment ─────────────────────────────────────────────
     with get_connection() as conn:
         cursor = conn.cursor()
         placeholders = ",".join(["%s"] * len(_ENRICHABLE_CATEGORIES))
@@ -115,11 +116,10 @@ def _run_enrichment(llm_manager: "LLMManager") -> None:
         rows = cursor.fetchall()
         cursor.close()
 
-    if not rows:
-        logger.info("Enrichment: no pending memories found.")
-        return
-
-    logger.info("Enrichment: processing %d memory entr%s.", len(rows), "y" if len(rows) == 1 else "ies")
+    if rows:
+        logger.info("Enrichment: processing %d user_memory entr%s.", len(rows), "y" if len(rows) == 1 else "ies")
+    else:
+        logger.info("Enrichment: no pending user_memory entries found.")
 
     for memory_id, content, category in rows:
         success = False
@@ -145,6 +145,164 @@ def _run_enrichment(llm_manager: "LLMManager") -> None:
                 cursor.close()
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not mark memory id=%d as enriched: %s", memory_id, exc)
+
+    # ── relation_memory enrichment (close relations only) ──────────────────
+    _run_relation_enrichment(llm_manager)
+
+
+def _run_relation_enrichment(llm_manager: "LLMManager") -> None:
+    """Enrich relation_memory entries for close relations (partner/family/colleague)."""
+    try:
+        from db.connection import get_connection  # noqa: PLC0415
+        rel_placeholders = ",".join(["%s"] * len(_ENRICHABLE_RELATION_TYPES))
+        cat_placeholders = ",".join(["%s"] * len(_ENRICHABLE_CATEGORIES))
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"SELECT rm.id, rm.content, rm.category "  # noqa: S608
+                f"FROM relation_memory rm "
+                f"JOIN relations r ON r.id = rm.relation_id "
+                f"WHERE rm.enriched = FALSE "
+                f"AND r.relation_type IN ({rel_placeholders}) "
+                f"AND rm.category IN ({cat_placeholders}) "
+                f"AND rm.importance >= %s "
+                f"AND (rm.expires_at IS NULL OR rm.expires_at > NOW()) "
+                f"LIMIT %s",
+                (
+                    *_ENRICHABLE_RELATION_TYPES,
+                    *_ENRICHABLE_CATEGORIES,
+                    MIN_IMPORTANCE_TO_ENRICH,
+                    MAX_ENRICHMENTS_PER_RUN,
+                ),
+            )
+            rows = cursor.fetchall()
+            cursor.close()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Enrichment: could not query relation_memory: %s", exc)
+        return
+
+    if not rows:
+        logger.info("Enrichment: no pending relation_memory entries found.")
+        return
+
+    logger.info("Enrichment: processing %d relation_memory entr%s.", len(rows), "y" if len(rows) == 1 else "ies")
+
+    for rm_id, content, category in rows:
+        success = False
+        try:
+            success = _enrich_relation_single(llm_manager, rm_id, content)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Enrichment failed for relation_memory id=%d: %s", rm_id, exc)
+            continue
+
+        if not success:
+            continue
+
+        try:
+            from db.connection import get_connection as _gc  # noqa: PLC0415
+            with _gc() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE relation_memory SET enriched = TRUE, enriched_at = NOW() WHERE id = %s",
+                    (rm_id,),
+                )
+                conn.commit()
+                cursor.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not mark relation_memory id=%d as enriched: %s", rm_id, exc)
+
+
+def _enrich_relation_single(llm_manager: "LLMManager", rm_id: int, content: str) -> bool:
+    """Enrich a single relation_memory entry with Wikipedia knowledge.
+
+    Links results via relation_knowledge_link instead of memory_knowledge_link.
+    Returns True on success, False on error.
+    """
+    from models import ChatMessage  # noqa: PLC0415
+    from tools.wikipedia import wiki_search  # noqa: PLC0415
+
+    prompt = _SEARCH_TERMS_PROMPT.format(
+        max_terms=MAX_WIKI_QUERIES_PER_FACT,
+        fact=content,
+    )
+    try:
+        raw = llm_manager.chat_completion(
+            model_name="main",
+            messages=[ChatMessage(role="user", content=prompt)],
+            temperature=0.0,
+            max_tokens=512,
+        )
+        raw = re.sub(r"<think>.*?(?:</think>|$)", "", raw, flags=re.DOTALL).strip()
+        if not raw:
+            search_terms: list[str] = []
+        else:
+            search_terms = json.loads(raw)
+            if not isinstance(search_terms, list):
+                search_terms = []
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not get search terms for relation_memory id=%d: %s", rm_id, exc)
+        return False
+
+    search_terms = [str(t) for t in search_terms if t][:MAX_WIKI_QUERIES_PER_FACT]
+    if not search_terms:
+        logger.info(
+            "Enrichment: LLM returned no search terms for relation_memory id=%d – marking enriched.",
+            rm_id,
+        )
+        return True
+
+    wiki_hits = 0
+    links_saved = 0
+    for term in search_terms:
+        try:
+            results = wiki_search(term, limit=MAX_WIKI_RESULTS_PER_TERM)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("wiki_search failed for term %r (relation): %s", term, exc)
+            continue
+
+        for result in results:
+            wiki_hits += 1
+            cache_id = _get_or_create_cache_id(result, source_memory_id=None)
+            if cache_id is None:
+                continue
+            _store_chunks_for_result(cache_id, result)
+            if _link_relation_memory_to_cache(rm_id, cache_id):
+                links_saved += 1
+            _fill_cache_keywords(llm_manager, cache_id, result.get("summary", ""))
+
+    if wiki_hits > 0 and links_saved == 0:
+        logger.warning(
+            "Enrichment: %d hit(s) found but no relation links saved for relation_memory id=%d.",
+            wiki_hits, rm_id,
+        )
+        return False
+
+    return True
+
+
+def _link_relation_memory_to_cache(rm_id: int, cache_id: int) -> bool:
+    """Insert a relation_knowledge_link row (ignore duplicates)."""
+    try:
+        from db.connection import get_connection  # noqa: PLC0415
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT IGNORE INTO relation_knowledge_link (memory_id, cache_id) "
+                "VALUES (%s, %s)",
+                (rm_id, cache_id),
+            )
+            conn.commit()
+            affected = cursor.rowcount
+            cursor.close()
+        if affected == 0:
+            logger.debug(
+                "_link_relation_memory_to_cache: link rm_id=%d ↔ cache_id=%d already exists.",
+                rm_id, cache_id,
+            )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.error("_link_relation_memory_to_cache error (rm_id=%d, cache_id=%d): %s", rm_id, cache_id, exc)
+        return False
 
 
 def _enrich_single(llm_manager: "LLMManager", memory_id: int, content: str) -> bool:

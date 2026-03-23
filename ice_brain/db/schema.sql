@@ -18,6 +18,8 @@ CREATE TABLE IF NOT EXISTS user_memory (
     category    VARCHAR(32) NOT NULL,
     content     TEXT NOT NULL,
     importance  FLOAT DEFAULT 0.5,
+    is_core     BOOLEAN NOT NULL DEFAULT FALSE,
+    temporal    VARCHAR(16) DEFAULT 'permanent',
     created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     expires_at  TIMESTAMP NULL,
@@ -26,7 +28,8 @@ CREATE TABLE IF NOT EXISTS user_memory (
     embedding   VECTOR(768) NULL,
     INDEX idx_user (user_id),
     INDEX idx_category (category),
-    INDEX idx_enrichment (user_id, enriched, category)
+    INDEX idx_enrichment (user_id, enriched, category),
+    INDEX idx_core (user_id, is_core)
     -- VECTOR INDEX idx_mem_embedding (embedding) requires NOT NULL - add manually once embeddings are populated
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
@@ -106,4 +109,48 @@ CREATE TABLE IF NOT EXISTS conversation_log (
     intent      VARCHAR(32),
     created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_user_time (user_id, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS relations (
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id         VARCHAR(64) NOT NULL,
+    name            VARCHAR(128) NOT NULL,
+    relation_type   VARCHAR(32) NOT NULL,
+    relation_detail TEXT NULL,
+    confirmed       BOOLEAN NOT NULL DEFAULT FALSE,
+    enrichment_done BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_user (user_id),
+    INDEX idx_name (user_id, name(100)),
+    INDEX idx_enrichment (user_id, enrichment_done, relation_type)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS relation_memory (
+    id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+    relation_id BIGINT NOT NULL,
+    category    VARCHAR(32) NOT NULL,
+    content     TEXT NOT NULL,
+    importance  FLOAT DEFAULT 0.5,
+    temporal    VARCHAR(16) DEFAULT 'permanent',
+    embedding   VECTOR(768) NULL,
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    expires_at  TIMESTAMP NULL,
+    enriched    BOOLEAN NOT NULL DEFAULT FALSE,
+    enriched_at TIMESTAMP NULL,
+    FOREIGN KEY (relation_id) REFERENCES relations(id) ON DELETE CASCADE,
+    INDEX idx_relation (relation_id),
+    INDEX idx_category (category),
+    INDEX idx_enrichment (relation_id, enriched, category)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS relation_knowledge_link (
+    memory_id    BIGINT NOT NULL,
+    cache_id     BIGINT NOT NULL,
+    relevance    FLOAT DEFAULT 0.5,
+    created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (memory_id, cache_id),
+    FOREIGN KEY (memory_id) REFERENCES relation_memory(id) ON DELETE CASCADE,
+    FOREIGN KEY (cache_id) REFERENCES wiki_cache(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

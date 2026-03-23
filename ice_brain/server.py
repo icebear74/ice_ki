@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import logging.handlers
 import os
 import sys
 import threading
@@ -55,9 +56,21 @@ from router import IntentRouter
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
+_LOG_DIR = _HERE / "logs"
+_LOG_DIR.mkdir(exist_ok=True)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.handlers.RotatingFileHandler(
+            _LOG_DIR / "ice_brain.log",
+            maxBytes=10 * 1024 * 1024,  # 10 MB
+            backupCount=5,
+            encoding="utf-8",
+        ),
+    ],
 )
 logger = logging.getLogger("ice_brain")
 
@@ -178,6 +191,14 @@ async def startup() -> None:
     except Exception as exc:  # noqa: BLE001
         logger.warning("Could not start enrichment loop: %s", exc)
 
+    # 7. Start background cleanup loop
+    try:
+        from workers.cleanup import cleanup_loop  # noqa: PLC0415
+        asyncio.ensure_future(cleanup_loop(llm_manager))
+        logger.info("Cleanup background loop registered.")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not start cleanup loop: %s", exc)
+
     # 7. Pre-load embedding model so download/disk errors surface at startup
     try:
         from tools.embeddings import configure_embedding_device, load_embedding_model  # noqa: PLC0415
@@ -296,6 +317,71 @@ async def auth_set_password(req: SetPasswordRequest) -> dict:
 _WIKI_SNIPPET_MAX_CHARS = 800  # max characters per wiki chunk injected into the system prompt
 _MAX_TOPIC_WORDS = 4           # max words to keep when extracting a search topic
 _SHORT_MSG_WORD_THRESHOLD = 8  # messages with ≤ this many words are treated as follow-ups
+
+# ---------------------------------------------------------------------------
+# Streaming thinking-block filter
+# ---------------------------------------------------------------------------
+
+class _StreamThinkingFilter:
+    """Stateful filter that strips <think>…</think> blocks from a token stream.
+
+    Chunks arrive one at a time via :meth:`feed`.  A partial tag that straddles
+    two chunks is handled by keeping a small look-ahead buffer.  Call
+    :meth:`flush` once the stream is done to emit any buffered remainder.
+    """
+
+    _OPEN = "<think>"
+    _CLOSE = "</think>"
+
+    def __init__(self, strip: bool = True) -> None:
+        self._strip = strip
+        self._buf = ""
+        self._in_think = False
+
+    def feed(self, text: str) -> str:
+        if not self._strip:
+            return text
+        self._buf += text
+        out: list[str] = []
+        while True:
+            if self._in_think:
+                end = self._buf.find(self._CLOSE)
+                if end == -1:
+                    # Still inside a think block – discard everything buffered.
+                    self._buf = ""
+                    break
+                # Found closing tag – discard up to and including </think>.
+                self._buf = self._buf[end + len(self._CLOSE):]
+                self._in_think = False
+            else:
+                start = self._buf.find(self._OPEN)
+                if start == -1:
+                    # No opening tag – but keep the last (len(_OPEN)-1) chars
+                    # buffered in case an opening tag straddles two chunks.
+                    safe = max(0, len(self._buf) - (len(self._OPEN) - 1))
+                    out.append(self._buf[:safe])
+                    self._buf = self._buf[safe:]
+                    break
+                # Emit everything before <think>, then enter think-block mode.
+                out.append(self._buf[:start])
+                self._buf = self._buf[start + len(self._OPEN):]
+                self._in_think = True
+        return "".join(out)
+
+    def flush(self) -> str:
+        if not self._strip:
+            remaining = self._buf
+            self._buf = ""
+            return remaining
+        if self._in_think:
+            # Incomplete think block at end of stream – discard.
+            self._buf = ""
+            self._in_think = False
+            return ""
+        remaining = self._buf
+        self._buf = ""
+        return remaining
+
 
 # ---------------------------------------------------------------------------
 # Correction detection + live Wikipedia lookup
@@ -532,9 +618,66 @@ def _live_wiki_context_proactive(message: str, limit: int = 2) -> str:
         return ""
 
 
+# ---------------------------------------------------------------------------
+# Tool-use pattern parser (text-pattern based, no OpenAI function calling)
+# ---------------------------------------------------------------------------
+
+_TOOL_CALL_RE = re.compile(
+    r"\[(SEARCH_MEMORY|SEARCH_RELATION|WIKI_SEARCH)\s*:\s*([^\]]{1,256})\]",
+    re.IGNORECASE,
+)
 
 
-class _StreamThinkingFilter:
+def _parse_tool_calls(text: str) -> list[tuple[str, str]]:
+    """Return list of (tool_name, query) tuples found in *text*."""
+    return [(m.group(1).upper(), m.group(2).strip()) for m in _TOOL_CALL_RE.finditer(text)]
+
+
+def _execute_tool_calls(
+    tool_calls: list[tuple[str, str]],
+    user_id: str,
+) -> str:
+    """Execute tool calls and return combined results as a formatted string."""
+    if not tool_calls:
+        return ""
+    parts: list[str] = []
+    for tool_name, query in tool_calls:
+        try:
+            if tool_name == "SEARCH_MEMORY":
+                from db.memory import semantic_recall  # noqa: PLC0415
+                results = semantic_recall(user_id, query, limit=5)
+                if results:
+                    lines = [f"[SEARCH_MEMORY: {query}]"]
+                    for r in results:
+                        lines.append(f"  - {r['content']} [{r.get('category','')}]")
+                    parts.append("\n".join(lines))
+            elif tool_name == "SEARCH_RELATION":
+                from db.relations import find_relation, get_relation, get_relation_facts  # noqa: PLC0415
+                relation_id = find_relation(user_id, query)
+                if relation_id is not None:
+                    rel = get_relation(relation_id)
+                    facts = get_relation_facts(relation_id)
+                    lines = [f"[SEARCH_RELATION: {query}]"]
+                    if rel:
+                        lines.append(f"  Name: {rel['name']}, Typ: {rel['relation_type']}")
+                    for f in facts:
+                        lines.append(f"  - {f['content']} [{f['category']}]")
+                    parts.append("\n".join(lines))
+            elif tool_name == "WIKI_SEARCH":
+                from tools.wikipedia import wiki_live_lookup  # noqa: PLC0415
+                results = wiki_live_lookup(query, limit=2)
+                if results:
+                    lines = [f"[WIKI_SEARCH: {query}]"]
+                    for r in results:
+                        snippet = (r.get("full_text") or r.get("summary", ""))[:600].replace("\n", " ")
+                        lines.append(f"  [{r['title']}] {snippet}")
+                    parts.append("\n".join(lines))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Tool call %s(%r) failed: %s", tool_name, query, exc)
+    return "\n\n".join(parts)
+
+
+
     """State machine that removes ``<think>…</think>`` blocks from a token
     stream when *strip* is True.
 
@@ -818,8 +961,8 @@ async def chat_completion(
     )
 
     # 2. Memory recall – load known facts and inject into system prompt
-    from db.memory import load_memories_for_prompt  # noqa: PLC0415
-    memory_section = load_memories_for_prompt(user_id) if user_id != "default" else ""
+    from db.memory import get_pending_ambiguity, load_memories_for_prompt  # noqa: PLC0415
+    memory_section = load_memories_for_prompt(user_id, last_message) if user_id != "default" else ""
     if memory_section:
         mem_lines = memory_section.count("\n") + 1
         logger.debug("Memory section: %d line(s) injected for user %r.", mem_lines, user_id)
@@ -977,21 +1120,54 @@ async def chat_completion(
         )
     else:
         time_note = f"Aktuelle Uhrzeit: {now_str}."
+
+    # Tool-use instructions (only for authenticated non-default users)
+    tool_note = ""
+    if user_id != "default":
+        tool_note = (
+            "\n\nVerfügbare Werkzeuge (nutze sie wenn nötig, indem du sie in deiner Antwort einbettest):\n"
+            "  [SEARCH_MEMORY: Suchanfrage] – Semantische Suche in gespeicherten Erinnerungen\n"
+            "  [SEARCH_RELATION: Name] – Alle gespeicherten Fakten über eine bekannte Person abrufen\n"
+            "  [WIKI_SEARCH: Suchanfrage] – Wikipedia on-demand abfragen"
+        )
+    # Inject pending disambiguation question if any
+    disambig_section = ""
+    if user_id != "default":
+        pending_disambig = get_pending_ambiguity(user_id)
+        if pending_disambig:
+            q = pending_disambig.get("question", "")
+            if q:
+                disambig_section = (
+                    f"\n\n⚠️ WICHTIG – Klärungsfrage: {q}\n"
+                    "Stelle dem Benutzer genau diese Frage in deiner nächsten Antwort, "
+                    "bevor du auf die aktuelle Nachricht eingehst."
+                )
+
     # Build the system prompt additions.
     # Correction live wiki goes FIRST so the model sees it before everything else.
-    # Order: [correction_wiki] + time_note + memory + [proactive_wiki] + cached_wiki
+    # Order: [correction_wiki] + time_note + memory + disambiguation + [proactive_wiki] + cached_wiki
+    _WIKI_PRIORITY_NOTE = (
+        "⚠️ Wikipedia-Vorrang: Wenn du Fakten aus Wikipedia-Quellen erhältst, "
+        "haben diese IMMER Vorrang vor deinem eigenen Trainingswissen. "
+        "Dein Trainingswissen kann veraltet sein. Wikipedia-Daten sind aktueller und vertrauenswürdiger."
+    )
+
     if _correction_live:
-        system_additions = f"{live_wiki_section}\n\n{time_note}"
+        system_additions = f"{live_wiki_section}\n\n{_WIKI_PRIORITY_NOTE}\n\n{time_note}{tool_note}"
         if memory_section:
             system_additions = f"{system_additions}\n\n{memory_section}"
+        if disambig_section:
+            system_additions = f"{system_additions}{disambig_section}"
         if wiki_section:
             system_additions = f"{system_additions}\n\n{wiki_section}"
     else:
-        system_additions = time_note
+        system_additions = f"{time_note}{tool_note}"
         if memory_section:
             system_additions = f"{system_additions}\n\n{memory_section}"
+        if disambig_section:
+            system_additions = f"{system_additions}{disambig_section}"
         if live_wiki_section:
-            system_additions = f"{system_additions}\n\n{live_wiki_section}"
+            system_additions = f"{system_additions}\n\n{_WIKI_PRIORITY_NOTE}\n\n{live_wiki_section}"
         if wiki_section:
             system_additions = f"{system_additions}\n\n{wiki_section}"
 
@@ -1113,6 +1289,34 @@ async def chat_completion(
     if request.strip_thinking:
         assistant_text = re.sub(r"<think>.*?</think>", "", assistant_text, flags=re.DOTALL).strip()
 
+    # Handle tool-use patterns in the assistant response.
+    # If the LLM emitted tool calls (e.g. [WIKI_SEARCH: Quantenverschränkung]),
+    # execute them and re-run the LLM with the enriched context (one pass only).
+    tool_calls = _parse_tool_calls(assistant_text)
+    if tool_calls and user_id != "default":
+        tool_results = _execute_tool_calls(tool_calls, user_id)
+        if tool_results:
+            logger.info("Tool-use: %d call(s) resolved, re-running LLM.", len(tool_calls))
+            enriched_messages = list(messages)
+            enriched_messages.append(ChatMessage(role="assistant", content=assistant_text))
+            enriched_messages.append(ChatMessage(
+                role="user",
+                content=f"[Tool-Ergebnisse]\n{tool_results}\n\nBitte beantworte die ursprüngliche Frage nun mit diesen Informationen.",
+            ))
+            try:
+                assistant_text = llm_manager.chat_completion(
+                    model_name="main",
+                    messages=enriched_messages,
+                    temperature=request.temperature,
+                    max_tokens=request.max_tokens,
+                )
+                if request.strip_thinking:
+                    assistant_text = re.sub(r"<think>.*?</think>", "", assistant_text, flags=re.DOTALL).strip()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Tool-use re-run failed: %s", exc)
+        # Always remove tool call markers from the response shown to the user
+        assistant_text = _TOOL_CALL_RE.sub("", assistant_text).strip()
+
     # 4. Async memory extraction (background task, zero user latency)
     # The built-in "admin" account is excluded – it is a shared system account
     # and should not accumulate personal memories.
@@ -1166,6 +1370,38 @@ async def delete_memory_entry(memory_id: int, session_token: str | None = None) 
             content={"error": f"Erinnerung {memory_id} nicht gefunden oder keine Berechtigung."},
         )
     return {"ok": True, "deleted_memory_id": memory_id}
+
+
+# ---------------------------------------------------------------------------
+# Admin API endpoints for manual worker triggers
+# ---------------------------------------------------------------------------
+
+@app.post("/admin/cleanup")
+async def trigger_cleanup(session_token: str | None = None) -> dict:
+    """Manually trigger the cleanup worker (admin only)."""
+    user_id = _resolve_token(session_token)
+    if user_id is None:
+        return JSONResponse(status_code=401, content={"error": "Nicht authentifiziert."})
+    if _get_user_role(user_id) != "admin":
+        return JSONResponse(status_code=403, content={"error": "Nur Administratoren können den Cleanup starten."})
+    from workers.cleanup import run_cleanup_now  # noqa: PLC0415
+    loop = asyncio.get_running_loop()
+    summary = await loop.run_in_executor(None, run_cleanup_now, llm_manager)
+    return {"ok": True, "summary": summary}
+
+
+@app.post("/admin/enrichment")
+async def trigger_enrichment(session_token: str | None = None) -> dict:
+    """Manually trigger the enrichment worker (admin only)."""
+    user_id = _resolve_token(session_token)
+    if user_id is None:
+        return JSONResponse(status_code=401, content={"error": "Nicht authentifiziert."})
+    if _get_user_role(user_id) != "admin":
+        return JSONResponse(status_code=403, content={"error": "Nur Administratoren können die Anreicherung starten."})
+    from workers.enrichment import enrich_pending_memories  # noqa: PLC0415
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, enrich_pending_memories, llm_manager)
+    return {"ok": True, "message": "Anreicherung abgeschlossen."}
 
 
 

@@ -31,6 +31,9 @@ _EXPECTED_TABLES = {
     "wiki_chunks",
     "knowledge_entries",
     "conversation_log",
+    "relations",
+    "relation_memory",
+    "relation_knowledge_link",
 }
 
 _SCHEMA_FILE = Path(__file__).parent / "schema.sql"
@@ -149,6 +152,16 @@ _EXTRA_COLUMNS: list[tuple[str, str, str]] = [
         "wiki_cache",
         "full_text",
         "MEDIUMTEXT NULL COMMENT 'Volltext des Wikipedia-Artikels (plain text)'",
+    ),
+    (
+        "user_memory",
+        "is_core",
+        "BOOLEAN NOT NULL DEFAULT FALSE COMMENT 'Immer in den System-Prompt injizieren'",
+    ),
+    (
+        "user_memory",
+        "temporal",
+        "VARCHAR(16) DEFAULT 'permanent' COMMENT 'permanent | current | past'",
     ),
 ]
 
