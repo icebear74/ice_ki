@@ -75,7 +75,7 @@ class IntentRouter:
                 model_name=self._model_name,
                 messages=messages,
                 temperature=0.0,
-                max_tokens=128,
+                max_tokens=512,
             )
             # Strip markdown code fences if present.
             raw = raw.strip()
@@ -84,7 +84,8 @@ class IntentRouter:
                 if raw.startswith("json"):
                     raw = raw[4:]
             # Strip <think>…</think> reasoning blocks emitted by some models.
-            raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL)
+            # Also handles unclosed blocks (output truncated before </think>).
+            raw = re.sub(r"<think>.*?(?:</think>|$)", "", raw, flags=re.DOTALL)
             raw = raw.strip()
             if not raw:
                 logger.warning("Router model returned empty response – defaulting to 'general'.")
