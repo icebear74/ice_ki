@@ -236,6 +236,28 @@ Output:
   {"content": "Besitzt eine Jahreskarte für den Moviepark", "category": "personal", "importance": 0.8, "ttl": null}
 ]
 
+INTERACTION INSTRUCTIONS – always extract as preference:
+When the user gives an explicit instruction about HOW they want to be addressed,
+spoken to, or interacted with (e.g. "call me Sir", "use formal language",
+"always address me as Herr X", "rede mich mit Sir an", "sprich mich immer als X an"),
+this is a permanent PREFERENCE about communication style.
+  → Extract as category=preference, ttl=null.
+  → Content: describe the instruction in third person, clearly.
+  Example: "Rede mich ab sofort bitte immer mit Sir an"
+  → "Möchte mit 'Sir' angesprochen werden"
+
+Message: "Rede mich ab sofort bitte immer mit Sir an"
+Output:
+[
+  {"content": "Möchte mit 'Sir' angesprochen werden", "category": "preference", "importance": 0.9, "ttl": null}
+]
+
+Message: "Bitte sprich mich immer förmlich an"
+Output:
+[
+  {"content": "Möchte förmlich (Sie) angesprochen werden", "category": "preference", "importance": 0.9, "ttl": null}
+]
+
 Message: "ok"
 Output:
 []
