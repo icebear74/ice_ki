@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -156,9 +157,11 @@ def _enrich_single(llm_manager: "LLMManager", memory_id: int, content: str) -> N
             model_name="main",
             messages=[ChatMessage(role="user", content=prompt)],
             temperature=0.0,
-            max_tokens=128,
+            max_tokens=512,
         )
-        search_terms: list[str] = json.loads(raw.strip())
+        # Strip <think>…</think> reasoning blocks emitted by some models.
+        raw = re.sub(r"<think>.*?(?:</think>|$)", "", raw, flags=re.DOTALL).strip()
+        search_terms: list[str] = json.loads(raw)
         if not isinstance(search_terms, list):
             search_terms = []
     except Exception as exc:  # noqa: BLE001
@@ -250,8 +253,10 @@ def _fill_cache_keywords(llm_manager: "LLMManager", cache_id: int, summary: str)
             model_name="main",
             messages=[ChatMessage(role="user", content=prompt)],
             temperature=0.0,
-            max_tokens=64,
-        ).strip()
+            max_tokens=256,
+        )
+        # Strip <think>…</think> reasoning blocks emitted by some models.
+        keywords = re.sub(r"<think>.*?(?:</think>|$)", "", keywords, flags=re.DOTALL).strip()
         from db.connection import get_connection  # noqa: PLC0415
         with get_connection() as conn:
             cursor = conn.cursor()
