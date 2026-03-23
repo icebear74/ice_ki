@@ -740,10 +740,15 @@ async def chat_completion(
         greeting = "Guten Abend"
     else:
         greeting = "Hallo"
-    time_note = (
-        f"Aktuelle Uhrzeit: {now_str}. "
-        f"Begrüße den Benutzer passend zur Tageszeit mit \"{greeting}\"."
-    )
+    # Only greet on the very first turn of a conversation (no prior assistant message).
+    is_first_turn = not any(m.role == "assistant" for m in request.messages)
+    if is_first_turn:
+        time_note = (
+            f"Aktuelle Uhrzeit: {now_str}. "
+            f"Begrüße den Benutzer einmalig passend zur Tageszeit mit \"{greeting}\"."
+        )
+    else:
+        time_note = f"Aktuelle Uhrzeit: {now_str}."
     # Build the system prompt additions: time note + memory + live wiki (high prio) + cached wiki
     system_additions = time_note
     if memory_section:
