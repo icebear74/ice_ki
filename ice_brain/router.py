@@ -82,6 +82,10 @@ class IntentRouter:
                 raw = raw.split("```")[1]
                 if raw.startswith("json"):
                     raw = raw[4:]
+            raw = raw.strip()
+            if not raw:
+                logger.warning("Router model returned empty response – defaulting to 'general'.")
+                return RouterResult(intent="general", confidence=0.0)
             data = json.loads(raw)
             result = RouterResult(**data)
             logger.info("Intent classified: %s (%.2f)", result.intent, result.confidence)

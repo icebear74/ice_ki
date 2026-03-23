@@ -275,6 +275,40 @@ async def chat_completion(
     user_id = authed_user_id or request.user or "default"
     last_message = request.messages[-1].content if request.messages else ""
 
+    # ── Help command: "help" / "hilfe" ────────────────────────────────────
+    if re.match(r"^\s*(help|hilfe)\s*$", last_message, re.IGNORECASE):
+        is_admin = bool(authed_user_id and _get_user_role(authed_user_id) == "admin")
+        help_lines = [
+            "**ice_brain – Verfügbare Befehle**",
+            "",
+            "**Allgemeine Befehle** (für alle Benutzer):",
+            "  `help` / `hilfe` – Diese Hilfeseite anzeigen",
+            "",
+            "**Konversation:**",
+            "  Schreibe einfach deine Frage oder Nachricht – ice_brain antwortet.",
+            "  Persönliche Informationen werden automatisch gespeichert und später abgerufen.",
+        ]
+        if is_admin:
+            help_lines += [
+                "",
+                "**Administrator-Befehle:**",
+                "  `lege benutzer an: <Name>` – Neuen Benutzer anlegen",
+                "    Der neue Benutzer kann sich sofort einloggen; beim ersten Login wird ein Passwort gesetzt.",
+                "    Beispiel: `lege benutzer an: Maria Müller`",
+            ]
+        else:
+            help_lines += [
+                "",
+                "*(Administrator-Befehle sind nur für Admins sichtbar.)*",
+            ]
+        reply = "\n".join(help_lines)
+        return ChatCompletionResponse(
+            model=request.model,
+            choices=[ChatCompletionChoice(message=ChatMessage(role="assistant", content=reply))],
+            router_intent="help",
+        )
+    # ──────────────────────────────────────────────────────────────────────
+
     # ── Admin command: "lege benutzer an: <Name>" ─────────────────────────
     _cmd = re.match(r"^\s*lege\s+benutzer\s+an\s*:\s*(.+)$", last_message, re.IGNORECASE)
     if _cmd:
@@ -376,7 +410,9 @@ async def chat_completion(
         )
 
     # 4. Async memory extraction (background task, zero user latency)
-    if user_id != "default" and last_message.strip():
+    # The built-in "admin" account is excluded – it is a shared system account
+    # and should not accumulate personal memories.
+    if user_id != "default" and user_id != "admin" and last_message.strip():
         from db.memory import extract_memories_sync  # noqa: PLC0415
         background_tasks.add_task(
             extract_memories_sync, user_id, last_message, llm_manager
