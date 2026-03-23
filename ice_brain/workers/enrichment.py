@@ -183,8 +183,13 @@ def _enrich_single(llm_manager: "LLMManager", memory_id: int, content: str) -> b
 
     search_terms = [str(t) for t in search_terms if t][:MAX_WIKI_QUERIES_PER_FACT]
     if not search_terms:
-        logger.info("Enrichment: no search terms returned by LLM for memory id=%d.", memory_id)
-        return False
+        # LLM explicitly decided that no Wikipedia lookup is useful for this fact.
+        # Mark as enriched=TRUE so we don't retry endlessly.
+        logger.info(
+            "Enrichment: LLM returned no search terms for memory id=%d – marking as enriched (no wiki needed).",
+            memory_id,
+        )
+        return True
 
     logger.info("Enrichment: memory id=%d → search terms: %s", memory_id, search_terms)
 
@@ -288,14 +293,14 @@ def _link_memory_to_cache(memory_id: int, cache_id: int) -> bool:
             affected = cursor.rowcount  # 1 = inserted, 0 = duplicate or FK-violation (IGNORE)
             cursor.close()
         if affected == 0:
-            # Could be a harmless duplicate (already linked) or a silent FK failure.
-            # Log at WARNING so the admin can tell the difference.
-            logger.warning(
-                "_link_memory_to_cache: 0 rows affected for memory_id=%d cache_id=%d "
-                "(duplicate link or FK violation silently ignored)",
+            # No FK constraints in this DB, so 0 rows = the link already exists (duplicate).
+            # This is not an error – treat as success so partially-enriched memories can
+            # be finalised on the next run instead of retrying forever.
+            logger.debug(
+                "_link_memory_to_cache: link memory_id=%d ↔ cache_id=%d already exists (duplicate, skipped)",
                 memory_id, cache_id,
             )
-            return False
+            return True
         logger.info("memory_knowledge_link saved: memory_id=%d ↔ cache_id=%d", memory_id, cache_id)
         return True
     except Exception as exc:  # noqa: BLE001
