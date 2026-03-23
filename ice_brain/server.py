@@ -497,9 +497,36 @@ async def chat_completion(
     )
 
 
-# ---------------------------------------------------------------------------
-# Static WebUI (must be mounted AFTER routes)
-# ---------------------------------------------------------------------------
+@app.delete("/v1/memory/{memory_id}")
+async def delete_memory_entry(memory_id: int, session_token: str | None = None) -> dict:
+    """Delete a user_memory entry and its exclusively linked wiki knowledge.
+
+    Any wiki_cache / wiki_chunks rows that were linked *only* to this memory
+    are also removed (cascade).  Admins may delete any memory; regular users
+    may only delete their own.
+
+    Query parameter: ``session_token`` (required).
+    """
+    user_id = _resolve_token(session_token)
+    if user_id is None:
+        return JSONResponse(status_code=401, content={"error": "Nicht authentifiziert."})
+
+    from db.memory import delete_memory  # noqa: PLC0415
+
+    role = _get_user_role(user_id)
+    # Admins may delete any memory; users only their own.
+    owner_id = None if role == "admin" else user_id
+
+    deleted = delete_memory(memory_id, user_id=owner_id)
+    if not deleted:
+        return JSONResponse(
+            status_code=404,
+            content={"error": f"Erinnerung {memory_id} nicht gefunden oder keine Berechtigung."},
+        )
+    return {"ok": True, "deleted_memory_id": memory_id}
+
+
+
 _WEB_DIR = _HERE / "web"
 if _WEB_DIR.is_dir():
     app.mount("/", StaticFiles(directory=str(_WEB_DIR), html=True), name="static")

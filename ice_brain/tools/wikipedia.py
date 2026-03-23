@@ -25,6 +25,23 @@ _BASE_URL = "https://de.wikipedia.org"
 _USER_AGENT = "ice_brain/1.0 (https://github.com/icebear74/ice_ki; contact via GitHub)"
 _TIMEOUT = 5.0  # seconds
 
+_UMLAUT_TABLE = str.maketrans({
+    "ä": "ae", "ö": "oe", "ü": "ue",
+    "Ä": "Ae", "Ö": "Oe", "Ü": "Ue",
+    "ß": "ss",
+})
+
+
+def _transliterate_umlauts(text: str) -> str:
+    """Replace German umlauts with their two-letter ASCII equivalents.
+
+    The MediaWiki search API can fail to find articles when the search query
+    contains umlauts (ä, ö, ü, ß), even on the German Wikipedia.  Transliterating
+    them to ae/oe/ue/ss before searching improves recall significantly.
+    Article *titles* returned by the API are kept as-is.
+    """
+    return text.translate(_UMLAUT_TABLE)
+
 
 # ---------------------------------------------------------------------------
 # HTTP helpers
@@ -100,7 +117,7 @@ def _api_search(query: str, limit: int = 3) -> list[dict]:
                 params={
                     "action": "query",
                     "list": "search",
-                    "srsearch": query,
+                    "srsearch": _transliterate_umlauts(query),
                     "srlimit": limit,
                     "format": "json",
                     "utf8": 1,

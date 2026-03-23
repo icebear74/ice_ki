@@ -404,6 +404,83 @@ def _upsert_fact(cursor, user_id: str, fact: dict) -> None:
 # Public: extraction (runs in background thread)
 # ---------------------------------------------------------------------------
 
+def delete_memory(memory_id: int, user_id: str | None = None) -> bool:
+    """Delete a user_memory row and clean up exclusively linked wiki knowledge.
+
+    If *user_id* is given the deletion is scoped to that user (ownership check).
+
+    Cascade behaviour:
+    - wiki_cache entries linked *only* to this memory (not to any other) are
+      deleted together with their wiki_chunks rows.
+    - memory_knowledge_link rows are cleaned up automatically via FK CASCADE.
+
+    Returns True on success, False when the row was not found or not owned.
+    """
+    try:
+        from db.connection import get_connection  # noqa: PLC0415
+        with get_connection() as conn:
+            cursor = conn.cursor()
+
+            # Verify the row exists (and belongs to user_id when given)
+            if user_id is not None:
+                cursor.execute(
+                    "SELECT id FROM user_memory WHERE id = %s AND user_id = %s",
+                    (memory_id, user_id),
+                )
+            else:
+                cursor.execute(
+                    "SELECT id FROM user_memory WHERE id = %s",
+                    (memory_id,),
+                )
+            if cursor.fetchone() is None:
+                cursor.close()
+                logger.info("delete_memory: id=%d not found (or wrong user).", memory_id)
+                return False
+
+            # Find wiki_cache IDs that are exclusively linked to this memory
+            # (i.e., not linked to any other memory row).
+            cursor.execute(
+                "SELECT mkl.cache_id "
+                "FROM memory_knowledge_link mkl "
+                "WHERE mkl.memory_id = %s "
+                "AND NOT EXISTS ("
+                "    SELECT 1 FROM memory_knowledge_link mkl2 "
+                "    WHERE mkl2.cache_id = mkl.cache_id AND mkl2.memory_id != %s"
+                ")",
+                (memory_id, memory_id),
+            )
+            orphan_cache_ids = [row[0] for row in cursor.fetchall()]
+
+            # Delete wiki_chunks and wiki_cache for orphaned articles
+            if orphan_cache_ids:
+                placeholders = ",".join(["%s"] * len(orphan_cache_ids))
+                cursor.execute(
+                    f"DELETE FROM wiki_chunks WHERE article_id IN ({placeholders})",  # noqa: S608
+                    orphan_cache_ids,
+                )
+                cursor.execute(
+                    f"DELETE FROM wiki_cache WHERE id IN ({placeholders})",  # noqa: S608
+                    orphan_cache_ids,
+                )
+                logger.info(
+                    "delete_memory: removed %d orphaned wiki_cache entr%s for memory id=%d.",
+                    len(orphan_cache_ids),
+                    "y" if len(orphan_cache_ids) == 1 else "ies",
+                    memory_id,
+                )
+
+            # Delete the memory row (memory_knowledge_link CASCADE-deleted by FK)
+            cursor.execute("DELETE FROM user_memory WHERE id = %s", (memory_id,))
+            conn.commit()
+            cursor.close()
+
+        logger.info("delete_memory: memory id=%d deleted.", memory_id)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.error("delete_memory error for id=%d: %s", memory_id, exc)
+        return False
+
+
 def extract_memories_sync(user_id: str, user_message: str, llm_manager: "LLMManager") -> None:
     """Extract facts from *user_message* and persist them for *user_id*.
 
