@@ -785,7 +785,7 @@ async def chat_completion(
                     for raw_sse in llm_manager.chat_completion_stream(
                         "main", messages, temperature, max_tokens
                     ):
-                        if "[DONE]" in raw_sse:
+                        if raw_sse.strip() == "data: [DONE]":
                             # Flush any chars buffered by the thinking filter BEFORE
                             # forwarding [DONE].  The client breaks on [DONE], so content
                             # sent after it would be silently discarded.
@@ -827,7 +827,7 @@ async def chat_completion(
                 if item is None:
                     break
                 # Collect content for post-stream background tasks
-                if "[DONE]" not in item and item.startswith("data: "):
+                if item.strip() != "data: [DONE]" and item.startswith("data: "):
                     try:
                         d = json.loads(item[6:].strip())
                         c = d["choices"][0]["delta"].get("content", "")
