@@ -1130,6 +1130,10 @@ class VSRTrainer:
                 # Layer-Aktivitäten
                 layer_activity_map=layer_act_dict,
                 layer_activity_peak_value=peak_activity_value,
+                # TemporalAlign flow magnitudes – extracted from layer_act_dict so the
+                # dedicated top-level JSON fields always match what the web UI shows.
+                align_backward_flow=layer_act_dict.get('Backward Align', 0.0),
+                align_forward_flow=layer_act_dict.get('Forward Align', 0.0),
                 
                 # Batch-Konfiguration mit gemessenen VRAM-Werten
                 adaptive_batch_config=self._build_ui_batch_config(),
