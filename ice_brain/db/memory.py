@@ -94,11 +94,26 @@ REAL statement that follows. Never store "thinks about X" or "believes X". \
 Instead extract the actual fact from the rest of the sentence.
   Example: "ich denke, meine Kaffeemaschine kann das gut" → fact: owns a coffee machine.
 
+WEATHER / ENVIRONMENT – do NOT extract these as personal facts:
+Observations about weather, temperature, nature, or the environment (e.g. \
+"Es wird wärmer", "Das Wetter wird besser", "Es regnet", "It's getting warmer") \
+describe the world, NOT the user. Never store them as mood, activity, or any \
+other personal fact. Skip them entirely.
+
 POSSESSIVES = OWNERSHIP – always extract ownership as a permanent fact:
-Words like "mein", "meine", "my", "die ich habe", "die ich besitze", "I own", \
-"I have", "at home", "zu hause" reveal that the user OWNS something.
+Words like "mein", "meine", "my", "die ich habe", "die ich besitze", "ich besitze", \
+"I own", "I have", "I possess", "at home", "zu hause" reveal that the user OWNS \
+or holds a membership/pass/subscription for something.
   → Extract as category=personal, ttl=null.
-  → Content: "Besitzt [object]" / "Has/owns [object]".
+  → Content: "Besitzt [object]" / "Hat [membership/pass] für [place]".
+  → This includes passes, memberships, subscriptions (Jahreskarte, Abo, annual pass).
+
+FUTURE WISH / "es wird Zeit" = hobby or preference signal:
+Phrases like "es wird Zeit mal wieder X zu tun", "I should really do X again", \
+"höchste Zeit für X" mean the user already knows and enjoys X – it reveals a \
+PERMANENT habit or preference/hobby.
+  → Extract as category=hobby or preference, ttl=null.
+  → Do NOT add a short-term activity entry – it hasn't happened yet.
 
 HABITUAL vs. CURRENT – this distinction is critical:
 
@@ -207,6 +222,16 @@ Output:
 [
   {"content": "Besitzt eine Siemens EQ9 S700 Kaffeemaschine", "category": "personal", "importance": 0.8, "ttl": null},
   {"content": "Findet die Siemens EQ9 S700 gut / ist zufrieden damit", "category": "preference", "importance": 0.6, "ttl": null}
+]
+
+Message: "Das Wetter wird besser, es wird Zeit mal wieder Achterbahn zu fahren, zb im Moviepark wo ich ja eine Jahreskarte besitze"
+→ "Das Wetter wird besser" → WEATHER observation → skip, not a personal fact.
+→ "es wird Zeit mal wieder Achterbahn zu fahren" → FUTURE WISH signal → permanent hobby.
+→ "eine Jahreskarte besitze" + "Moviepark" → POSSESSIVES/OWNERSHIP → permanent personal fact.
+Output:
+[
+  {"content": "Fährt gerne Achterbahn", "category": "hobby", "importance": 0.7, "ttl": null},
+  {"content": "Besitzt eine Jahreskarte für den Moviepark", "category": "personal", "importance": 0.8, "ttl": null}
 ]
 
 Message: "ok"
