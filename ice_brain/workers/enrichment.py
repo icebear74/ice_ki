@@ -75,7 +75,7 @@ def enrich_pending_memories(llm_manager: "LLMManager") -> None:
     Never raises – all errors are logged.
     """
     if not llm_manager.is_ready("main"):
-        logger.debug("Enrichment skipped – main model not loaded.")
+        logger.info("Enrichment skipped – main model not loaded.")
         return
 
     # Check if the main model lock is currently held (busy during inference).
@@ -83,7 +83,7 @@ def enrich_pending_memories(llm_manager: "LLMManager") -> None:
     from llm_manager import _ModelHandle  # noqa: PLC0415 (internal, same package)
     handle = llm_manager._models.get("main")  # noqa: SLF001
     if handle is not None and not handle.lock.acquire(blocking=False):
-        logger.debug("Enrichment skipped – main model is busy.")
+        logger.info("Enrichment skipped – main model is busy.")
         return
     if handle is not None:
         handle.lock.release()
@@ -115,19 +115,23 @@ def _run_enrichment(llm_manager: "LLMManager") -> None:
         cursor.close()
 
     if not rows:
-        logger.debug("Enrichment: no pending memories found.")
+        logger.info("Enrichment: no pending memories found.")
         return
 
     logger.info("Enrichment: processing %d memory entr%s.", len(rows), "y" if len(rows) == 1 else "ies")
 
     for memory_id, content, category in rows:
+        success = False
         try:
-            _enrich_single(llm_manager, memory_id, content)
+            success = _enrich_single(llm_manager, memory_id, content)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Enrichment failed for memory id=%d: %s", memory_id, exc)
             continue
 
-        # Mark as enriched regardless of whether wiki results were found
+        if not success:
+            continue
+
+        # Mark as enriched only when the LLM+Wikipedia step completed without error
         try:
             from db.connection import get_connection as _gc  # noqa: PLC0415
             with _gc() as conn:
@@ -142,8 +146,12 @@ def _run_enrichment(llm_manager: "LLMManager") -> None:
             logger.warning("Could not mark memory id=%d as enriched: %s", memory_id, exc)
 
 
-def _enrich_single(llm_manager: "LLMManager", memory_id: int, content: str) -> None:
-    """Enrich a single memory entry with Wikipedia knowledge."""
+def _enrich_single(llm_manager: "LLMManager", memory_id: int, content: str) -> bool:
+    """Enrich a single memory entry with Wikipedia knowledge.
+
+    Returns True if enrichment completed successfully (search terms obtained and
+    Wikipedia was queried), False if it had to abort early due to an error.
+    """
     from models import ChatMessage  # noqa: PLC0415
     from tools.wikipedia import wiki_search  # noqa: PLC0415
 
@@ -166,12 +174,12 @@ def _enrich_single(llm_manager: "LLMManager", memory_id: int, content: str) -> N
             search_terms = []
     except Exception as exc:  # noqa: BLE001
         logger.warning("Could not get search terms for memory id=%d: %s", memory_id, exc)
-        return
+        return False
 
     search_terms = [str(t) for t in search_terms if t][:MAX_WIKI_QUERIES_PER_FACT]
     if not search_terms:
         logger.debug("Enrichment: no search terms for memory id=%d.", memory_id)
-        return
+        return False
 
     # Step 2: Search Wikipedia for each term and link results
     for term in search_terms:
@@ -187,6 +195,8 @@ def _enrich_single(llm_manager: "LLMManager", memory_id: int, content: str) -> N
                 continue
             _link_memory_to_cache(memory_id, cache_id)
             _fill_cache_keywords(llm_manager, cache_id, result.get("summary", ""))
+
+    return True
 
 
 def _get_or_create_cache_id(entry: dict) -> int | None:
