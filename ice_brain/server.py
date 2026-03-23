@@ -294,6 +294,8 @@ async def auth_set_password(req: SetPasswordRequest) -> dict:
 
 
 _WIKI_SNIPPET_MAX_CHARS = 800  # max characters per wiki chunk injected into the system prompt
+_MAX_TOPIC_WORDS = 4           # max words to keep when extracting a search topic
+_SHORT_MSG_WORD_THRESHOLD = 8  # messages with ≤ this many words are treated as follow-ups
 
 # ---------------------------------------------------------------------------
 # Correction detection + live Wikipedia lookup
@@ -399,7 +401,7 @@ def _extract_correction_topic(message: str) -> str:
     caps.sort(key=len, reverse=True)
     lower.sort(key=len, reverse=True)
     combined = caps + lower
-    return " ".join(combined[:4])
+    return " ".join(combined[:_MAX_TOPIC_WORDS])
 
 
 def _extract_topic(message: str) -> str:
@@ -807,7 +809,17 @@ async def chat_completion(
     else:
         logger.debug("Wiki section: no relevant chunks found for this message.")
 
-    # 2c. Live Wikipedia lookup when the user is correcting the AI
+    # 2c. Live Wikipedia lookup
+    #
+    # Priority order (mutually exclusive, first match wins):
+    #   1. Correction signal → authoritative live lookup (highest priority).
+    #   2. Router classified intent as "wiki" → always do live lookup, because
+    #      cached chunks may be irrelevant (semantic search can return off-topic
+    #      results when the topic is not yet in the local index).
+    #   3. Short follow-up / clarification message → combine with the previous
+    #      user turn to build the topic; do a live lookup when there is no good
+    #      cached data.
+    #   4. Topical question with no cached data → proactive live lookup.
     live_wiki_section = ""
     if _detect_correction(last_message):
         logger.info("Correction signal detected – performing live Wikipedia lookup.")
@@ -818,18 +830,60 @@ async def chat_completion(
             logger.info("Live wiki section injected (%d chars).", len(live_wiki_section))
         else:
             logger.info("Live wiki lookup returned no results for correction message.")
-    elif not wiki_section and bool(_TOPIC_QUESTION_RE.search(last_message)):
-        # No cached data and the message looks like a topical question →
-        # proactively fetch fresh Wikipedia data so the model has something to
-        # work with.  This is a best-effort step; failures are silently ignored.
-        logger.info("No cached wiki data and topical question detected – proactive live lookup.")
+    elif intent_str == "wiki":
+        # Router explicitly recognised a wiki intent → always fetch live data so
+        # the model has the most relevant and up-to-date information, even when
+        # there are cached chunks (they may be from an unrelated topic).
+        logger.info("Wiki intent detected – performing proactive live Wikipedia lookup.")
         live_wiki_section = await asyncio.get_running_loop().run_in_executor(
             None, _live_wiki_context_proactive, last_message
         )
         if live_wiki_section:
-            logger.info("Proactive wiki section injected (%d chars).", len(live_wiki_section))
+            logger.info("Live wiki section injected for wiki intent (%d chars).", len(live_wiki_section))
         else:
-            logger.info("Proactive live wiki lookup returned no results.")
+            logger.info("Proactive live wiki lookup (wiki intent) returned no results.")
+    else:
+        # Build the effective query: if the current message is very short (likely a
+        # follow-up or clarification), extend it with the last user turn from the
+        # conversation history so the topic extraction has more to work with.
+        _prior_user_messages = [
+            m.content for m in request.messages[:-1] if m.role == "user"
+        ]
+        if len(last_message.split()) <= 8 and _prior_user_messages:
+            _effective_query = f"{_prior_user_messages[-1]} {last_message}"
+            logger.debug(
+                "Short follow-up message – extended query for wiki lookup: %r",
+                _effective_query[:120],
+            )
+        else:
+            _effective_query = last_message
+        if not wiki_section and bool(_TOPIC_QUESTION_RE.search(_effective_query)):
+            # No cached data and the effective query looks like a topical question →
+            # proactively fetch fresh Wikipedia data.
+            logger.info("No cached wiki data and topical question detected – proactive live lookup.")
+            live_wiki_section = await asyncio.get_running_loop().run_in_executor(
+                None, _live_wiki_context_proactive, _effective_query
+            )
+            if live_wiki_section:
+                logger.info("Proactive wiki section injected (%d chars).", len(live_wiki_section))
+            else:
+                logger.info("Proactive live wiki lookup returned no results.")
+        elif not wiki_section and len(last_message.split()) <= 8 and _prior_user_messages:
+            # Short follow-up with no cached data and no question pattern either –
+            # still worth a live lookup using the extended query.
+            _topic = _extract_topic(_effective_query)
+            if _topic:
+                logger.info(
+                    "Short follow-up with no cached wiki data – proactive live lookup for topic %r.",
+                    _topic,
+                )
+                live_wiki_section = await asyncio.get_running_loop().run_in_executor(
+                    None, _live_wiki_context_proactive, _effective_query
+                )
+                if live_wiki_section:
+                    logger.info("Follow-up wiki section injected (%d chars).", len(live_wiki_section))
+                else:
+                    logger.info("Follow-up live wiki lookup returned no results.")
 
     # 3. Main LLM response (P100)
     if not llm_manager.is_ready("main"):
