@@ -193,9 +193,21 @@ def init_db() -> None:
 
 @contextmanager
 def get_connection() -> Generator[mysql.connector.MySQLConnection, None, None]:
-    """Context manager that yields a pooled connection and returns it on exit."""
+    """Context manager that yields a pooled connection and returns it on exit.
+
+    If init_db() was not called yet (or failed at startup because MySQL was
+    temporarily unavailable), a single lazy re-initialisation attempt is made
+    so the application self-heals once the database becomes reachable.
+    """
+    global _pool  # noqa: PLW0603
     if _pool is None:
-        raise RuntimeError("DB pool not initialised. Call init_db() first.")
+        logger.info("DB pool not yet initialised – attempting lazy init_db() …")
+        try:
+            init_db()
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(
+                f"DB pool not initialised and lazy init failed: {exc}"
+            ) from exc
     conn = _pool.get_connection()
     try:
         yield conn
