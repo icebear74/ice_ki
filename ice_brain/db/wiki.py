@@ -145,6 +145,39 @@ def store_article_chunks(
     return stored
 
 
+def refresh_article_chunks(
+    wiki_cache_id: int,
+    title: str,
+    full_text: str,
+    lang: str = "de",
+) -> int:
+    """Delete all existing chunks for *wiki_cache_id* then re-store fresh ones.
+
+    Unlike :func:`store_article_chunks` (which is idempotent and skips when
+    chunks already exist), this function always replaces the stored content.
+    Returns the number of newly stored chunks.
+    """
+    try:
+        from db.connection import get_connection  # noqa: PLC0415
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM wiki_chunks WHERE article_id = %s",
+                (wiki_cache_id,),
+            )
+            conn.commit()
+            cursor.close()
+        logger.debug("refresh_article_chunks: deleted old chunks for wiki_cache_id=%d.", wiki_cache_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "refresh_article_chunks: could not delete old chunks for wiki_cache_id=%d: %s",
+            wiki_cache_id, exc,
+        )
+        return 0
+
+    return store_article_chunks(wiki_cache_id, title, full_text, lang)
+
+
 # ---------------------------------------------------------------------------
 # Vector search
 # ---------------------------------------------------------------------------

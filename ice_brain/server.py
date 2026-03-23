@@ -295,10 +295,104 @@ async def auth_set_password(req: SetPasswordRequest) -> dict:
 
 _WIKI_SNIPPET_MAX_CHARS = 800  # max characters per wiki chunk injected into the system prompt
 
+# ---------------------------------------------------------------------------
+# Correction detection + live Wikipedia lookup
+# ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# Streaming helpers
-# ---------------------------------------------------------------------------
+# Phrases that signal the user is correcting the AI (German + common English)
+_CORRECTION_RE = re.compile(
+    r"(?:"
+    r"da\s+bist\s+du\s+(?:aber\s+)?falsch"
+    r"|du\s+liegst\s+(?:da\s+)?falsch"
+    r"|das\s+stimmt\s+(?:so\s+)?nicht"
+    r"|das\s+ist\s+(?:nicht|falsch|inkorrekt|wrong)"
+    r"|du\s+(?:hast|liegst|bist)[^.!?]{0,40}(?:falsch|unrecht|irr(?:st|tu))"
+    r"|falsch\s+informiert"
+    r"|nicht\s+(?:korrekt|richtig|stimmt)"
+    r"|aktualisier(?:e)?\s+dich"
+    r"|inform(?:iere?)?\s+dich\s+(?:mal|bitte|doch)?"
+    r"|schlag\s+(?:das\s+)?(?:mal\s+)?nach"
+    r"|check\s+(?:das\s+)?(?:mal\s+)?nach"
+    r"|wiki\s+(?:abfragen|nachschauen|nachschlagen)"
+    r"|update\s+(?:dich|dein\s+wissen)"
+    r"|korrigier(?:e)?\s+(?:dich|deine\s+(?:info|infos|angaben?))"
+    r")",
+    re.IGNORECASE,
+)
+
+# Stopwords to strip when extracting a search topic from the correction message
+_STOPWORDS = frozenset({
+    "ein", "eine", "einer", "einen", "einem", "eines",
+    "der", "die", "das", "dem", "den", "des",
+    "ist", "sind", "war", "waren", "wird", "werden",
+    "du", "ich", "er", "sie", "es", "wir", "ihr",
+    "nicht", "kein", "keine", "keiner",
+    "aber", "und", "oder", "doch", "mal", "bitte",
+    "falsch", "richtig", "korrekt", "inkorrekt", "wrong", "incorrect",
+    "da", "das", "dass", "bist", "hast", "liegst",
+    "dich", "dein", "deine", "deiner", "deinem",
+    "aktualisier", "informier", "schlag", "nach", "check",
+    "wiki", "update", "korrigier",
+})
+
+
+def _detect_correction(message: str) -> bool:
+    """Return True when the user's message signals a factual correction."""
+    return bool(_CORRECTION_RE.search(message))
+
+
+def _extract_correction_topic(message: str) -> str:
+    """Extract a short search topic from a correction message.
+
+    Strips the correction phrases and stopwords, then returns the most
+    meaningful remaining words as a search query (max 6 words).
+    """
+    # Remove the correction trigger phrase
+    cleaned = _CORRECTION_RE.sub(" ", message)
+    # Tokenise (keep alphanumerics + umlauts)
+    tokens = re.findall(r"[A-Za-zÄÖÜäöüß0-9]+", cleaned)
+    # Filter stopwords and very short tokens
+    meaningful = [t for t in tokens if t.lower() not in _STOPWORDS and len(t) > 2]
+    if not meaningful:
+        # Fallback: use full message if nothing meaningful survived stripping
+        return message.strip()
+    # Prefer longer tokens (likely proper nouns / subject matter)
+    meaningful.sort(key=len, reverse=True)
+    return " ".join(meaningful[:6])
+
+
+def _live_wiki_context_for_correction(message: str, limit: int = 2) -> str:
+    """Fetch fresh Wikipedia data for the topic being corrected.
+
+    Returns a formatted string to be injected into the system prompt with high
+    priority.  Returns an empty string when the lookup fails or yields nothing.
+    """
+    topic = _extract_correction_topic(message)
+    if not topic:
+        return ""
+    logger.info("Live wiki lookup triggered by correction. Query: %r", topic)
+    try:
+        from tools.wikipedia import wiki_live_lookup  # noqa: PLC0415
+        results = wiki_live_lookup(topic, limit=limit)
+        if not results:
+            logger.info("Live wiki lookup: no results for %r.", topic)
+            return ""
+        lines = [
+            "🔄 AKTUELLES WIKIPEDIA-WISSEN (live abgerufen – hat höchste Priorität und "
+            "überschreibt alle früheren Annahmen):"
+        ]
+        for r in results:
+            snippet = (r.get("full_text") or r.get("summary", ""))[:1200].replace("\n", " ").strip()
+            lines.append(f"[{r['title']}] {snippet}")
+            if r.get("source_url"):
+                lines.append(f"  Quelle: {r['source_url']}")
+        return "\n".join(lines)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Live wiki lookup failed (non-fatal): %s", exc)
+        return ""
+
+
+
 
 class _StreamThinkingFilter:
     """State machine that removes ``<think>…</think>`` blocks from a token
@@ -599,6 +693,18 @@ async def chat_completion(
     else:
         logger.debug("Wiki section: no relevant chunks found for this message.")
 
+    # 2c. Live Wikipedia lookup when the user is correcting the AI
+    live_wiki_section = ""
+    if _detect_correction(last_message):
+        logger.info("Correction signal detected – performing live Wikipedia lookup.")
+        live_wiki_section = await asyncio.get_running_loop().run_in_executor(
+            None, _live_wiki_context_for_correction, last_message
+        )
+        if live_wiki_section:
+            logger.info("Live wiki section injected (%d chars).", len(live_wiki_section))
+        else:
+            logger.info("Live wiki lookup returned no results for correction message.")
+
     # 3. Main LLM response (P100)
     if not llm_manager.is_ready("main"):
         return JSONResponse(
@@ -638,10 +744,13 @@ async def chat_completion(
         f"Aktuelle Uhrzeit: {now_str}. "
         f"Begrüße den Benutzer passend zur Tageszeit mit \"{greeting}\"."
     )
-    # Build the system prompt additions: time note + memory section + wiki context
+    # Build the system prompt additions: time note + memory + live wiki (high prio) + cached wiki
     system_additions = time_note
     if memory_section:
         system_additions = f"{system_additions}\n\n{memory_section}"
+    if live_wiki_section:
+        # Live section placed before cached wiki so the model sees it first
+        system_additions = f"{system_additions}\n\n{live_wiki_section}"
     if wiki_section:
         system_additions = f"{system_additions}\n\n{wiki_section}"
 

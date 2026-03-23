@@ -272,6 +272,61 @@ def wiki_search(query: str, limit: int = 3) -> list[dict]:
     return results
 
 
+def wiki_live_lookup(query: str, limit: int = 2) -> list[dict]:
+    """Fetch fresh Wikipedia results for *query*, bypassing the local cache.
+
+    Unlike :func:`wiki_search`, this function:
+    * always calls the Wikipedia API (ignores cached TTL),
+    * force-refreshes the ``wiki_cache`` row for each result,
+    * deletes and re-stores the ``wiki_chunks`` so the vector search index
+      reflects the latest article content.
+
+    Use this when the user has signalled that the AI gave incorrect information
+    and needs up-to-date facts.
+
+    Returns a list of result dicts (same shape as :func:`wiki_search`).
+    """
+    results = _api_search(query, limit=limit)
+    for entry in results:
+        title = entry.get("title", "")
+        lang = entry.get("lang", "de")
+
+        # Force-refresh the cache row
+        _cache_delete(title, lang)
+        _cache_set(entry)
+
+        # Get the id of the just-written cache row
+        cache_id: int | None = None
+        try:
+            from db.connection import get_connection  # noqa: PLC0415
+            with get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT id FROM wiki_cache WHERE title = %s AND lang = %s LIMIT 1",
+                    (title, lang),
+                )
+                row = cursor.fetchone()
+                cursor.close()
+            cache_id = row[0] if row else None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("wiki_live_lookup: could not fetch cache id for %r: %s", title, exc)
+
+        if cache_id is not None:
+            try:
+                from db.wiki import refresh_article_chunks  # noqa: PLC0415
+                refresh_article_chunks(
+                    cache_id,
+                    title,
+                    entry.get("full_text") or entry.get("summary", ""),
+                    lang,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("wiki_live_lookup: chunk refresh failed for %r: %s", title, exc)
+
+    logger.info("wiki_live_lookup: refreshed %d article(s) for query %r.", len(results), query)
+    return results
+
+
 def wiki_refresh(title: str) -> dict | None:
     """Invalidate the cache entry for *title* and re-fetch from Wikipedia.
 
