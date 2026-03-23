@@ -235,6 +235,62 @@ def _cache_delete(title: str, lang: str = "de") -> None:
         logger.warning("wiki_cache delete error for title %r: %s", title, exc)
 
 
+def wiki_topic_is_stale(topic: str, lang: str = "de", max_age_days: int = 7) -> bool:
+    """Return True when the wiki_cache has no fresh entry for *topic*.
+
+    A "fresh" entry is one whose ``fetched_at`` is within *max_age_days* days.
+    If no entry exists at all, or all matching entries are older than
+    *max_age_days*, True (= stale) is returned so the caller knows to perform a
+    live lookup.
+
+    The match is intentionally broad: the *topic* keywords are searched inside
+    both the ``title`` and the ``query`` columns so that short extracted topics
+    (e.g. "Schindler Martin") still find articles cached under their full title.
+
+    On any DB error the function returns True (= assume stale, better to
+    over-fetch than to serve outdated data).
+    """
+    if not topic or not topic.strip():
+        return True
+    try:
+        from db.connection import get_connection  # noqa: PLC0415
+        # Build a LIKE pattern from each word in the topic so that "Martin
+        # Schindler" will match both "Martin Schindler" and "Schindler, Martin".
+        words = [w for w in topic.split() if len(w) > 1]
+        if not words:
+            return True
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            # Check whether ANY matching row was fetched within max_age_days.
+            # A single fresh row is sufficient to consider the topic cached.
+            like_clauses = " OR ".join(
+                "(title LIKE %s OR query LIKE %s)" for _ in words
+            )
+            params: list[str | int] = []
+            for w in words:
+                pattern = f"%{w}%"
+                params.extend([pattern, pattern])
+            params.append(max_age_days)
+            cursor.execute(
+                f"SELECT 1 FROM wiki_cache "  # noqa: S608
+                f"WHERE lang = %s AND ({like_clauses}) "
+                f"AND fetched_at >= DATE_SUB(NOW(), INTERVAL %s DAY) "
+                f"LIMIT 1",
+                [lang, *params],
+            )
+            row = cursor.fetchone()
+            cursor.close()
+        is_stale = row is None
+        logger.debug(
+            "wiki_topic_is_stale(%r, max_age_days=%d): %s",
+            topic, max_age_days, "stale" if is_stale else "fresh",
+        )
+        return is_stale
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("wiki_topic_is_stale check failed (assuming stale): %s", exc)
+        return True
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------

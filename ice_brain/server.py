@@ -831,17 +831,35 @@ async def chat_completion(
         else:
             logger.info("Live wiki lookup returned no results for correction message.")
     elif intent_str == "wiki":
-        # Router explicitly recognised a wiki intent → always fetch live data so
-        # the model has the most relevant and up-to-date information, even when
-        # there are cached chunks (they may be from an unrelated topic).
-        logger.info("Wiki intent detected – performing proactive live Wikipedia lookup.")
-        live_wiki_section = await asyncio.get_running_loop().run_in_executor(
-            None, _live_wiki_context_proactive, last_message
-        )
-        if live_wiki_section:
-            logger.info("Live wiki section injected for wiki intent (%d chars).", len(live_wiki_section))
+        # Router explicitly recognised a wiki intent.  Only do a live lookup
+        # when the cached data for this topic is stale (older than 7 days) or
+        # does not exist yet.  Fresh cache is good enough – no extra network
+        # request needed.
+        wiki_topic = _extract_topic(last_message)
+        is_stale = True  # default: assume stale so we do a lookup when unsure
+        if wiki_topic:
+            try:
+                from tools.wikipedia import wiki_topic_is_stale  # noqa: PLC0415
+                is_stale = wiki_topic_is_stale(wiki_topic)
+            except Exception as exc_stale:  # noqa: BLE001
+                logger.warning("wiki_topic_is_stale check failed (assuming stale): %s", exc_stale)
+        if is_stale:
+            logger.info(
+                "Wiki intent detected and cache is stale/missing for topic %r – live lookup.",
+                wiki_topic,
+            )
+            live_wiki_section = await asyncio.get_running_loop().run_in_executor(
+                None, _live_wiki_context_proactive, last_message
+            )
+            if live_wiki_section:
+                logger.info("Live wiki section injected for wiki intent (%d chars).", len(live_wiki_section))
+            else:
+                logger.info("Proactive live wiki lookup (wiki intent) returned no results.")
         else:
-            logger.info("Proactive live wiki lookup (wiki intent) returned no results.")
+            logger.debug(
+                "Wiki intent detected but cache is fresh for topic %r – skipping live lookup.",
+                wiki_topic,
+            )
     else:
         # Build the effective query: if the current message is very short (likely a
         # follow-up or clarification), extend it with the last user turn from the
