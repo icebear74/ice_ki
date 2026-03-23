@@ -94,297 +94,88 @@ _TTL_MAP: dict[str, int] = {
 # ---------------------------------------------------------------------------
 
 _EXTRACTION_SYSTEM_PROMPT = """\
-You are a memory extraction assistant. Your job is to extract personal facts \
-about the user from their message and output them as a JSON array.
+You are a memory extraction assistant. Extract personal facts from the user's message and output a JSON object.
 
-Rules:
-- Extract ALL facts – a single message can contain multiple facts.
+CRITICAL RULES:
+- Every fact MUST have an explicit "subject": "user" for facts about the user, or the person's name (e.g. "susanne") for facts about third parties.
+- "relation_type" is REQUIRED when subject is not "user" (partner/friend/family/colleague/acquaintance/other).
 - Write facts in THIRD PERSON (e.g. "Drinks coffee", not "I drink coffee").
-- ONLY output the JSON array – no prose, no markdown fences.
-- If the message contains NO extractable personal facts (e.g. "ok", "thanks", \
-"what is the weather?"), output an empty array: []
-- IMPORTANT: Also extract facts from INDIRECT or QUESTION-FORM statements. \
-If the user says "did you know I like coffee?" or "wusstest du dass ich Kaffee mag?", \
-this still reveals the fact "Likes coffee" – extract it!
+- Output ONLY the JSON – no prose, no markdown fences.
+- "temporal": "permanent" for lasting facts, "current" for right-now, "past" for one-time past events.
+- "ttl": null for permanent, "2h"/"24h"/"48h" for temporary.
+- Also extract facts from INDIRECT or QUESTION-FORM statements. "wusstest du dass ich Kaffee mag?" still reveals "Mag Kaffee" – extract it.
+- Possessives ("mein", "meine", "my") reveal ownership/preferences – always extract them.
 
-DISCOURSE MARKERS – do NOT extract these as facts:
-Words like "ich denke", "ich glaube", "ich meine", "ich vermute", "I think", \
-"I believe", "I suppose", "I guess" are hedging phrases – they introduce the \
-REAL statement that follows. Never store "thinks about X" or "believes X". \
-Instead extract the actual fact from the rest of the sentence.
-  Example: "ich denke, meine Kaffeemaschine kann das gut" → fact: owns a coffee machine.
+DO NOT EXTRACT:
+- Weather/environment observations ("Es regnet", "Es wird wärmer").
+- Third-party states attributed to the user ("Susanne is sick" must NOT be stored as user fact).
+- AI corrections about third parties ("Er ist gestorben" = THIRD PARTY FACT, NOT user fact).
+- Pure information requests with no personal disclosure.
 
-WEATHER / ENVIRONMENT – do NOT extract these as personal facts:
-Observations about weather, temperature, nature, or the environment (e.g. \
-"Es wird wärmer", "Das Wetter wird besser", "Es regnet", "It's getting warmer") \
-describe the world, NOT the user. Never store them as mood, activity, or any \
-other personal fact. Skip them entirely.
+AMBIGUITY: When a relation type is unclear (e.g. "meine Freundin" could be partner or friend), add an entry to "ambiguities".
 
-POSSESSIVES = OWNERSHIP – always extract ownership as a permanent fact:
-Words like "mein", "meine", "my", "die ich habe", "die ich besitze", "ich besitze", \
-"I own", "I have", "I possess", "at home", "zu hause" reveal that the user OWNS \
-or holds a membership/pass/subscription for something.
-  → Extract as category=personal, ttl=null.
-  → Content: "Besitzt [object]" / "Hat [membership/pass] für [place]".
-  → This includes passes, memberships, subscriptions (Jahreskarte, Abo, annual pass).
-
-FUTURE WISH / "es wird Zeit" = hobby or preference signal:
-Phrases like "es wird Zeit mal wieder X zu tun", "I should really do X again", \
-"höchste Zeit für X" mean the user already knows and enjoys X – it reveals a \
-PERMANENT habit or preference/hobby.
-  → Extract as category=hobby or preference, ttl=null.
-  → Do NOT add a short-term activity entry – it hasn't happened yet.
-
-HABITUAL vs. CURRENT – this distinction is critical:
-
-HABITUAL signals (words like: gerne, manchmal, ab und zu, oft, öfters, immer, \
-häufig, meistens, abends, morgens, jeden Tag, sometimes, usually, often, \
-always, like to, love to, tend to):
-  → The statement describes a PERMANENT habit or preference.
-  → Extract ONE permanent fact only: category=preference or hobby, ttl=null.
-  → Do NOT add a short-term activity entry – there is no "right now" meaning.
-
-CURRENT signals (words like: gerade, jetzt, im Moment, gerade eben, soeben, \
-right now, currently, at the moment, just now):
-  → The statement describes something happening RIGHT NOW.
-  → Extract TWO facts:
-      1. The current action:  category=activity, ttl appropriate (e.g. "2h")
-      2. The underlying habit: category=preference or hobby, ttl=null
-  → Both facts are needed: one is temporary, one is permanent.
-  → If the current activity involves another person (e.g. "Lisa kocht gerade"), \
-also infer a permanent preference/habit for that person (e.g. "Lisa kocht gerne").
-
-Valid categories: preference, personal, relationship, hobby, experience, \
-activity, mood, plan, topic
-
-Valid ttl values: "1h", "2h", "4h", "8h", "24h", "48h", or null (permanent)
-
-JSON schema for each fact:
+JSON schema:
 {
-  "content": "<fact in third person, concise>",
-  "category": "<one of the valid categories>",
-  "importance": <float 0.0-1.0>,
-  "ttl": "<ttl string or null>"
+  "facts": [
+    {
+      "subject": "user",
+      "content": "<fact in third person>",
+      "category": "<preference|personal|relationship|hobby|experience|activity|mood|plan|topic>",
+      "importance": <0.0-1.0>,
+      "temporal": "<permanent|current|past>",
+      "ttl": "<null or 1h/2h/4h/8h/24h/48h>"
+    },
+    {
+      "subject": "susanne",
+      "relation_type": "friend",
+      "content": "<fact about susanne in third person>",
+      "category": "personal",
+      "importance": 0.6,
+      "temporal": "permanent",
+      "ttl": null
+    }
+  ],
+  "ambiguities": [
+    {
+      "question": "<German follow-up question to ask user>",
+      "context": "<why this is ambiguous>"
+    }
+  ]
 }
 
 Examples:
 
+Message: "Susanne habe ich in die Firma gebracht, sie arbeitet als DevOps Engineer wie ich"
+Output:
+{"facts": [
+  {"subject": "user", "content": "Arbeitet als DevOps Engineer", "category": "personal", "importance": 0.8, "temporal": "permanent", "ttl": null},
+  {"subject": "susanne", "relation_type": "acquaintance", "content": "Arbeitet als DevOps Engineer", "category": "personal", "importance": 0.6, "temporal": "permanent", "ttl": null},
+  {"subject": "susanne", "relation_type": "acquaintance", "content": "Arbeitet in derselben Firma wie User", "category": "personal", "importance": 0.6, "temporal": "permanent", "ttl": null}
+], "ambiguities": []}
+
+Message: "Meine Bekannte Susanne legt sich hin, die ist krank"
+Output:
+{"facts": [
+  {"subject": "susanne", "relation_type": "acquaintance", "content": "Ist gerade krank", "category": "mood", "importance": 0.5, "temporal": "current", "ttl": "24h"}
+], "ambiguities": []}
+
 Message: "Ich trinke gerne abends mal einen Espresso"
-→ "gerne" + "mal" are HABITUAL signals → permanent preference only, NO activity with ttl
 Output:
-[
-  {"content": "Trinkt gerne abends Espresso", "category": "preference", "importance": 0.7, "ttl": null}
-]
+{"facts": [
+  {"subject": "user", "content": "Trinkt gerne abends Espresso", "category": "preference", "importance": 0.7, "temporal": "permanent", "ttl": null}
+], "ambiguities": []}
 
-Message: "Ich trinke gerade einen Espresso"
-→ "gerade" is a CURRENT signal → activity (short-term) + preference (permanent)
+Message: "meine Freundin Susanne hat heute Geburtstag"
 Output:
-[
-  {"content": "Trinkt gerade Espresso", "category": "activity", "importance": 0.3, "ttl": "2h"},
-  {"content": "Trinkt Espresso / mag Espresso", "category": "preference", "importance": 0.6, "ttl": null}
-]
-
-Message: "Ich trinke gerade einen Kaffee"
-→ "gerade" is a CURRENT signal → activity (short-term) + preference (permanent)
-Output:
-[
-  {"content": "Trinkt gerade Kaffee", "category": "activity", "importance": 0.3, "ttl": "2h"},
-  {"content": "Trinkt Kaffee / mag Kaffee", "category": "preference", "importance": 0.6, "ttl": null}
-]
-
-Message: "wusstest du dass ich kaffee mag?"
-Output:
-[
-  {"content": "Mag Kaffee", "category": "preference", "importance": 0.6, "ttl": null}
-]
-
-Message: "did you know I love hiking?"
-Output:
-[
-  {"content": "Loves hiking", "category": "hobby", "importance": 0.7, "ttl": null}
-]
-
-Message: "Ich war im August im Urlaub"
-Output:
-[
-  {"content": "War im August im Urlaub", "category": "experience", "importance": 0.5, "ttl": null}
-]
-
-Message: "Meine Frau Lisa kocht gerade Pasta"
-→ "gerade" is a CURRENT signal → activity (short-term) + preference (permanent)
-Output:
-[
-  {"content": "Lisa kocht gerade Pasta", "category": "activity", "importance": 0.3, "ttl": "2h"},
-  {"content": "Hat eine Frau namens Lisa", "category": "relationship", "importance": 0.8, "ttl": null},
-  {"content": "Lisa kocht gerne", "category": "preference", "importance": 0.5, "ttl": null}
-]
-
-Message: "Ich bin müde, war heute den ganzen Tag joggen"
-Output:
-[
-  {"content": "Ist gerade müde", "category": "mood", "importance": 0.4, "ttl": "4h"},
-  {"content": "War heute joggen", "category": "activity", "importance": 0.3, "ttl": "24h"},
-  {"content": "Geht joggen / ist sportlich", "category": "hobby", "importance": 0.7, "ttl": null}
-]
-
-Message: "Ich gehe manchmal abends spazieren"
-→ "manchmal" is a HABITUAL signal → permanent hobby only
-Output:
-[
-  {"content": "Geht manchmal abends spazieren", "category": "hobby", "importance": 0.5, "ttl": null}
-]
-
-Message: "ich denke, meine Siemens EQ9 S700 die ich zu hause habe, kann das schon ganz gut"
-→ "ich denke" is a DISCOURSE MARKER – ignore it, extract the real facts.
-→ "meine … die ich zu hause habe" → OWNS the machine → permanent personal fact.
-→ "kann das schon ganz gut" → positive opinion about it → permanent preference fact.
-Output:
-[
-  {"content": "Besitzt eine Siemens EQ9 S700 Kaffeemaschine", "category": "personal", "importance": 0.8, "ttl": null},
-  {"content": "Findet die Siemens EQ9 S700 gut / ist zufrieden damit", "category": "preference", "importance": 0.6, "ttl": null}
-]
-
-Message: "Das Wetter wird besser, es wird Zeit mal wieder Achterbahn zu fahren, zb im Moviepark wo ich ja eine Jahreskarte besitze"
-→ "Das Wetter wird besser" → WEATHER observation → skip, not a personal fact.
-→ "es wird Zeit mal wieder Achterbahn zu fahren" → FUTURE WISH signal → permanent hobby.
-→ "eine Jahreskarte besitze" + "Moviepark" → POSSESSIVES/OWNERSHIP → permanent personal fact.
-Output:
-[
-  {"content": "Fährt gerne Achterbahn", "category": "hobby", "importance": 0.7, "ttl": null},
-  {"content": "Besitzt eine Jahreskarte für den Moviepark", "category": "personal", "importance": 0.8, "ttl": null}
-]
-
-HEALTH / MEDICAL CONDITIONS – always extract as permanent personal fact:
-When the user mentions having a medical condition, illness, diagnosis, disability,
-or chronic health issue (e.g. "Ich habe [Krankheit]", "I have [condition]",
-"I was diagnosed with X", "ich leide an X", "ich bin krank an X"), this is a
-permanent personal fact – even if the statement is embedded in a question.
-  → Extract as category=personal, ttl=null.
-  → Content: "Hat [Erkrankung/Zustand]" (German) or "Has [condition]" (English).
-  → The question part ("kannst du mir etwas darüber sagen?", "can you tell me about it?")
-    is directed at the AI and must NOT prevent extraction of the personal disclosure.
-
-Message: "Ich habe Radio Ulnae Synostose .. kannst du mir etwas darüber sagen ?"
-→ "Ich habe Radio Ulnae Synostose" → HEALTH/MEDICAL disclosure → permanent personal fact.
-→ "kannst du mir etwas darüber sagen?" → question to the AI → ignore for extraction.
-Output:
-[
-  {"content": "Hat Radio Ulnae Synostose", "category": "personal", "importance": 0.9, "ttl": null}
-]
-
-Message: "I have diabetes, can you explain what I should eat?"
-Output:
-[
-  {"content": "Has diabetes", "category": "personal", "importance": 0.9, "ttl": null}
-]
-
-INTERACTION INSTRUCTIONS – always extract as preference:
-When the user gives an explicit instruction about HOW they want to be addressed,
-spoken to, or interacted with (e.g. "call me Sir", "use formal language",
-"always address me as Herr X", "rede mich mit Sir an", "sprich mich immer als X an"),
-this is a permanent PREFERENCE about communication style.
-  → Extract as category=preference, ttl=null.
-  → Content: describe the instruction in third person, clearly.
-  Example: "Rede mich ab sofort bitte immer mit Sir an"
-  → "Möchte mit 'Sir' angesprochen werden"
-
-Message: "Rede mich ab sofort bitte immer mit Sir an"
-Output:
-[
-  {"content": "Möchte mit 'Sir' angesprochen werden", "category": "preference", "importance": 0.9, "ttl": null}
-]
-
-Message: "Bitte sprich mich immer förmlich an"
-Output:
-[
-  {"content": "Möchte förmlich (Sie) angesprochen werden", "category": "preference", "importance": 0.9, "ttl": null}
-]
-
-THIRD PARTIES – NEVER attribute their states or actions to the user:
-When the user mentions another person's health, mood, activity, or state (e.g.
-"Susanne ist erkältet", "mein Freund hat Grippe", "meine Mutter schläft",
-"Lisa ist traurig"), those facts describe the THIRD PERSON, not the user.
-  → Do NOT extract them as the user's mood, activity, or any other personal fact.
-  → The ONLY extractable fact may be a relationship (e.g. "Hat eine Freundin namens
-    Susanne"), but ONLY if the relationship itself is mentioned in the message.
-  → Rhetorical questions aimed at the AI ("Willst du Espresso trinken?",
-    "Soll ich dir was mitbringen?") do NOT reveal a personal fact about the user.
-
-AI CORRECTION MESSAGES – when the user corrects the AI about a third party:
-Messages that correct the AI's wrong answer about a person/thing (e.g. "Er ist
-gestorben", "Das steht im Wiki", "Das stimmt nicht, sie ist längst tot",
-"Du liegst falsch, er hat aufgehört") are corrections aimed AT THE AI about
-a THIRD PARTY.  They do NOT reveal a personal fact about the user.
-  → Apply the THIRD PARTIES rule: output [].
-  → Do NOT store "Hat einen Verstorbenen", "Weiß dass X gestorben ist", or any
-    similar derived fact – none of these describe the user.
-
-Message: "Mann, die Susanne ist jetzt in die Kiste gestiegen, weil sie erkältet ist."
-→ "Susanne" is a THIRD PARTY – her illness is NOT the user's mood or state.
-→ No relationship mentioned → no relationship fact either.
-Output:
-[]
-
-Message: "Er ist gestorben. Das steht auch so im Wiki."
-→ User is correcting the AI about a third party (e.g. Chuck Norris).
-→ The death is a THIRD PARTY fact, not a personal fact about the user.
-Output:
-[]
-
-Message: "Tja .. Das wichtigste hast du vergessen .. Er ist gestorben .."
-→ User corrects the AI about a third party's death. No personal fact about the user.
-Output:
-[]
-
-SEARCH / INFORMATION REQUESTS – only low importance when NO personal disclosure:
-When the message is PURELY asking the AI for information about a topic, person,
-film, or event with NO possessive or personal disclosure
-(e.g. "Was kannst du mir über X erzählen?", "Suche Filme mit X",
-"Was weißt du über X?", "Zeig mir etwas über X", "Erzähl mir über X"), this is
-a SEARCH QUERY or information request.
-  → If the message reveals NO personal fact about the user, output [].
-  → "Sucht Filme mit X" or "Hat einen Verstorbenen" are NOT meaningful personal facts
-    – output [].
-
-EXCEPTION – POSSESSIVES reveal real personal facts and MUST be extracted:
-When the message contains possessives that describe the user's own preferences,
-interests, or belongings (e.g. "meine Lieblingsserien", "mein Lieblingsfilm",
-"meine Hobbys", "mein Lieblingsessen", "my favorite", "meine …", "my …"),
-those ARE genuine personal facts – extract them normally, regardless of whether
-the message is phrased as a question.
-  → The question structure ("Was kannst du mir … erzählen?") is directed at the AI.
-    The CONTENT ("meine Lieblingsserien von Star Trek") reveals a personal preference.
-  → Extract: category=preference or hobby, importance according to the normal rules,
-    ttl=null.
-
-Message: "Was kannst du mir über Martin Schindler erzählen?"
-→ Pure information request – no possessive, no personal fact about the user.
-Output:
-[]
-
-Message: "Suche mal Filme mit Chuck Norris"
-→ Information request / search query – not a personal fact about the user.
-Output:
-[]
-
-Message: "was kannst du mir über meine lieblingsserien von Star Trek erzählen?"
-→ "meine lieblingsserien" is a POSSESSIVE → reveals the user's permanent preference.
-→ "Star Trek" is identified as the user's favorite series.
-Output:
-[
-  {"content": "Hat Star Trek als Lieblingsserie", "category": "preference", "importance": 0.7, "ttl": null}
-]
-
-Message: "what can you tell me about my favorite sci-fi movies?"
-→ "my favorite" is a POSSESSIVE → extract the preference.
-Output:
-[
-  {"content": "Likes sci-fi movies", "category": "preference", "importance": 0.6, "ttl": null}
-]
+{"facts": [
+  {"subject": "susanne", "relation_type": "friend", "content": "Hat heute Geburtstag", "category": "personal", "importance": 0.7, "temporal": "current", "ttl": "24h"}
+], "ambiguities": [
+  {"question": "Ist Susanne deine Partnerin oder eine (platonische) Freundin?", "context": "meine Freundin kann Lebensgefährtin oder platonische Freundin bedeuten"}
+]}
 
 Message: "ok"
 Output:
-[]
+{"facts": [], "ambiguities": []}
 """
 
 
@@ -392,11 +183,14 @@ Output:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _parse_facts(raw: str) -> list[dict]:
-    """Parse the JSON array from the LLM response.  Returns [] on failure."""
+def _parse_extraction_result(raw: str) -> tuple[list[dict], list[dict]]:
+    """Parse the JSON extraction result from the LLM.
+
+    Returns (facts, ambiguities).  Handles both the new object schema
+    {"facts": [...], "ambiguities": [...]} and the legacy flat array [...].
+    """
     raw = raw.strip()
     # Strip <think>…</think> reasoning blocks emitted by some models.
-    # Also handles unclosed blocks (output truncated before </think>).
     raw = re.sub(r"<think>.*?(?:</think>|$)", "", raw, flags=re.DOTALL)
     raw = raw.strip()
     # Strip markdown fences if present
@@ -405,26 +199,55 @@ def _parse_facts(raw: str) -> list[dict]:
         raw = parts[1] if len(parts) > 1 else raw
         if raw.startswith("json"):
             raw = raw[4:]
-    # Sometimes the model wraps the array in an outer key
+    raw = raw.strip()
+
+    # Try to parse JSON
+    data = None
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        # Try to find a JSON array in the output
-        start = raw.find("[")
-        end = raw.rfind("]")
-        if start != -1 and end != -1 and end > start:
-            try:
-                data = json.loads(raw[start : end + 1])
-            except json.JSONDecodeError:
-                logger.warning("Memory extraction: could not parse JSON from model output: %r", raw[:200])
-                return []
-        else:
-            logger.warning("Memory extraction: no JSON array found in model output: %r", raw[:200])
-            return []
+        # Try to find a JSON object or array in the output
+        for start_char, end_char in [('{', '}'), ('[', ']')]:
+            start = raw.find(start_char)
+            end = raw.rfind(end_char)
+            if start != -1 and end != -1 and end > start:
+                try:
+                    data = json.loads(raw[start:end + 1])
+                    break
+                except json.JSONDecodeError:
+                    continue
+        if data is None:
+            logger.warning("Memory extraction: could not parse JSON: %r", raw[:200])
+            return [], []
 
-    if not isinstance(data, list):
-        return []
-    return data
+    # New schema: {"facts": [...], "ambiguities": [...]}
+    if isinstance(data, dict):
+        facts = data.get("facts", [])
+        ambiguities = data.get("ambiguities", [])
+        if not isinstance(facts, list):
+            facts = []
+        if not isinstance(ambiguities, list):
+            ambiguities = []
+        return facts, ambiguities
+
+    # Legacy schema: flat array of facts (no subject field)
+    if isinstance(data, list):
+        # Inject subject="user" for backward compat
+        for f in data:
+            if isinstance(f, dict) and "subject" not in f:
+                f["subject"] = "user"
+        return data, []
+
+    return [], []
+
+
+def _parse_facts(raw: str) -> list[dict]:
+    """Parse the JSON array from the LLM response.  Returns [] on failure.
+
+    Legacy helper kept for backward compatibility.
+    """
+    facts, _ = _parse_extraction_result(raw)
+    return facts
 
 
 def _compute_expires_at(ttl_str: str | None, category: str) -> datetime | None:
@@ -457,12 +280,56 @@ def _normalise_fact(fact: dict) -> dict | None:
     ttl_str = fact.get("ttl")
     if ttl_str is not None and str(ttl_str) not in _TTL_MAP:
         ttl_str = None
+    temporal = str(fact.get("temporal", "permanent"))
+    if temporal not in ("permanent", "current", "past"):
+        temporal = "permanent"
     return {
         "content": content,
         "category": category,
         "importance": importance,
         "ttl": ttl_str,
+        "temporal": temporal,
     }
+
+
+def _normalise_fact_with_subject(fact: dict) -> dict | None:
+    """Same as _normalise_fact but preserves subject/relation_type fields."""
+    norm = _normalise_fact(fact)
+    if norm is None:
+        return None
+    norm["subject"] = str(fact.get("subject", "user")).strip().lower()
+    norm["relation_type"] = str(fact.get("relation_type", "acquaintance")).strip().lower()
+    return norm
+
+
+# ---------------------------------------------------------------------------
+# Pending disambiguation cache (in-process, cleared on restart)
+# ---------------------------------------------------------------------------
+
+# user_id → list of pending questions
+_pending_disambiguations: dict[str, list[dict]] = {}
+
+
+def _store_pending_ambiguity(user_id: str, ambiguities: list[dict]) -> None:
+    """Store disambiguation questions for the next LLM turn."""
+    if not ambiguities:
+        return
+    if user_id not in _pending_disambiguations:
+        _pending_disambiguations[user_id] = []
+    for a in ambiguities:
+        if isinstance(a, dict) and a.get("question"):
+            _pending_disambiguations[user_id].append(a)
+    logger.debug(
+        "Stored %d pending disambiguation(s) for user %r.", len(ambiguities), user_id
+    )
+
+
+def get_pending_ambiguity(user_id: str) -> dict | None:
+    """Pop and return the oldest pending disambiguation question, or None."""
+    questions = _pending_disambiguations.get(user_id)
+    if not questions:
+        return None
+    return questions.pop(0)
 
 
 # ---------------------------------------------------------------------------
@@ -520,35 +387,72 @@ def _find_similar(cursor, user_id: str, category: str, content: str) -> int | No
 
 
 def _upsert_fact(cursor, user_id: str, fact: dict) -> None:
-    """Insert or update a single fact in user_memory."""
+    """Insert or update a single fact in user_memory (with embedding on write)."""
     expires_at = _compute_expires_at(fact["ttl"], fact["category"])
     existing_id = _find_similar(cursor, user_id, fact["category"], fact["content"])
 
+    temporal = str(fact.get("temporal", "permanent"))
+    if temporal not in ("permanent", "current", "past"):
+        temporal = "permanent"
+
+    # Compute embedding for semantic recall
+    embedding_text: str | None = None
+    try:
+        from tools.embeddings import embed_one, vec_to_text  # noqa: PLC0415
+        vec = embed_one(fact["content"])
+        embedding_text = vec_to_text(vec)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("_upsert_fact: embedding failed (non-fatal): %s", exc)
+
     if existing_id is not None:
-        if expires_at is not None:
-            cursor.execute(
-                "UPDATE user_memory SET content = %s, importance = %s, "
-                "updated_at = NOW(), expires_at = %s "
-                "WHERE id = %s",
-                (fact["content"], fact["importance"], expires_at, existing_id),
-            )
+        if embedding_text:
+            if expires_at is not None:
+                cursor.execute(
+                    "UPDATE user_memory SET content = %s, importance = %s, temporal = %s, "
+                    "updated_at = NOW(), expires_at = %s, embedding = VEC_FromText(%s) "
+                    "WHERE id = %s",
+                    (fact["content"], fact["importance"], temporal, expires_at, embedding_text, existing_id),
+                )
+            else:
+                cursor.execute(
+                    "UPDATE user_memory SET content = %s, importance = %s, temporal = %s, "
+                    "updated_at = NOW(), expires_at = NULL, embedding = VEC_FromText(%s) "
+                    "WHERE id = %s",
+                    (fact["content"], fact["importance"], temporal, embedding_text, existing_id),
+                )
         else:
-            cursor.execute(
-                "UPDATE user_memory SET content = %s, importance = %s, "
-                "updated_at = NOW(), expires_at = NULL "
-                "WHERE id = %s",
-                (fact["content"], fact["importance"], existing_id),
-            )
+            if expires_at is not None:
+                cursor.execute(
+                    "UPDATE user_memory SET content = %s, importance = %s, temporal = %s, "
+                    "updated_at = NOW(), expires_at = %s "
+                    "WHERE id = %s",
+                    (fact["content"], fact["importance"], temporal, expires_at, existing_id),
+                )
+            else:
+                cursor.execute(
+                    "UPDATE user_memory SET content = %s, importance = %s, temporal = %s, "
+                    "updated_at = NOW(), expires_at = NULL "
+                    "WHERE id = %s",
+                    (fact["content"], fact["importance"], temporal, existing_id),
+                )
         logger.debug(
             "Memory updated (id=%d, category=%s): %s",
             existing_id, fact["category"], fact["content"]
         )
     else:
-        cursor.execute(
-            "INSERT INTO user_memory (user_id, category, content, importance, expires_at) "
-            "VALUES (%s, %s, %s, %s, %s)",
-            (user_id, fact["category"], fact["content"], fact["importance"], expires_at),
-        )
+        if embedding_text:
+            cursor.execute(
+                "INSERT INTO user_memory (user_id, category, content, importance, temporal, expires_at, embedding) "
+                "VALUES (%s, %s, %s, %s, %s, %s, VEC_FromText(%s))",
+                (user_id, fact["category"], fact["content"], fact["importance"],
+                 temporal, expires_at, embedding_text),
+            )
+        else:
+            cursor.execute(
+                "INSERT INTO user_memory (user_id, category, content, importance, temporal, expires_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s)",
+                (user_id, fact["category"], fact["content"], fact["importance"], temporal, expires_at),
+            )
         logger.debug(
             "Memory inserted (category=%s): %s", fact["category"], fact["content"]
         )
@@ -641,6 +545,11 @@ def extract_memories_sync(user_id: str, user_message: str, llm_manager: "LLMMana
     Designed to run in a background thread (via FastAPI BackgroundTasks or
     asyncio.get_event_loop().run_in_executor).  Never raises – all errors are
     logged.
+
+    Facts with subject="user" are upserted into user_memory.
+    Facts with subject="<name>" are routed to relation_memory via relations.
+    Ambiguities are stored in the pending_disambiguations in-memory cache so
+    the main LLM can ask the user a follow-up question on the next turn.
     """
     if not user_message or not user_message.strip():
         return
@@ -657,8 +566,6 @@ def extract_memories_sync(user_id: str, user_message: str, llm_manager: "LLMMana
         from models import ChatMessage  # noqa: PLC0415
 
         # Append /no_think to suppress Qwen3's extended reasoning block.
-        # Without this, Qwen3 may exhaust all available tokens on a <think>…</think>
-        # block before producing the required JSON array.
         messages = [
             ChatMessage(role="system", content=_EXTRACTION_SYSTEM_PROMPT),
             ChatMessage(role="user", content=f"{user_message}\n/no_think"),
@@ -671,8 +578,8 @@ def extract_memories_sync(user_id: str, user_message: str, llm_manager: "LLMMana
             max_tokens=4096,
         )
 
-        facts_raw = _parse_facts(raw)
-        if not facts_raw:
+        facts_raw, ambiguities = _parse_extraction_result(raw)
+        if not facts_raw and not ambiguities:
             logger.info(
                 "Memory extraction: no facts extracted for user %r. "
                 "Model output: %r",
@@ -680,28 +587,66 @@ def extract_memories_sync(user_id: str, user_message: str, llm_manager: "LLMMana
             )
             return
 
-        facts = [_normalise_fact(f) for f in facts_raw]
-        facts = [f for f in facts if f is not None]
+        # Store ambiguities for follow-up question on next turn
+        if ambiguities:
+            _store_pending_ambiguity(user_id, ambiguities)
 
-        if not facts:
-            return
+        # Partition facts into user-facts and relation-facts
+        user_facts: list[dict] = []
+        relation_facts: list[tuple[str, str, dict]] = []  # (name, relation_type, fact)
 
-        from db.connection import get_connection  # noqa: PLC0415
+        for raw_fact in facts_raw:
+            if not isinstance(raw_fact, dict):
+                continue
+            subject = str(raw_fact.get("subject", "user")).strip().lower()
+            if subject == "user":
+                norm = _normalise_fact(raw_fact)
+                if norm:
+                    user_facts.append(norm)
+            else:
+                # Fact about a named person
+                relation_type = str(raw_fact.get("relation_type", "acquaintance")).strip().lower()
+                norm = _normalise_fact_with_subject(raw_fact)
+                if norm:
+                    relation_facts.append((subject, relation_type, norm))
 
-        with get_connection() as conn:
-            cursor = conn.cursor()
-            stored = 0
-            for fact in facts:
+        stored = 0
+
+        # ── Store user facts ─────────────────────────────────────────────────
+        if user_facts:
+            from db.connection import get_connection  # noqa: PLC0415
+            with get_connection() as conn:
+                cursor = conn.cursor()
+                for fact in user_facts:
+                    try:
+                        _upsert_fact(cursor, user_id, fact)
+                        stored += 1
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("Could not upsert memory fact: %s", exc)
+                conn.commit()
+                cursor.close()
+
+        # ── Store relation facts ─────────────────────────────────────────────
+        if relation_facts:
+            from db.relations import find_or_create_relation, upsert_relation_fact  # noqa: PLC0415
+            for name, relation_type, fact in relation_facts:
                 try:
-                    _upsert_fact(cursor, user_id, fact)
+                    relation_id, created = find_or_create_relation(
+                        user_id, name, relation_type
+                    )
+                    upsert_relation_fact(relation_id, fact)
                     stored += 1
+                    if created:
+                        logger.info(
+                            "New relation created: %r (%s) for user %r.",
+                            name, relation_type, user_id,
+                        )
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning("Could not upsert memory fact: %s", exc)
-            conn.commit()
-            cursor.close()
+                    logger.warning("Could not upsert relation fact for %r: %s", name, exc)
 
         logger.info(
-            "Memory extraction: %d fact(s) stored for user %r.", stored, user_id
+            "Memory extraction: %d fact(s) stored for user %r (ambiguities: %d).",
+            stored, user_id, len(ambiguities),
         )
 
     except Exception as exc:  # noqa: BLE001
@@ -709,52 +654,188 @@ def extract_memories_sync(user_id: str, user_message: str, llm_manager: "LLMMana
 
 
 # ---------------------------------------------------------------------------
+# Public: semantic recall
+# ---------------------------------------------------------------------------
+
+_SEMANTIC_RECALL_LIMIT = 5   # top-K results from semantic search
+_SEMANTIC_MIN_SCORE = 0.30   # minimum cosine similarity to include
+
+
+def semantic_recall(user_id: str, user_message: str, limit: int = _SEMANTIC_RECALL_LIMIT) -> list[dict]:
+    """Semantic vector search across user_memory, relation_memory, and wiki_chunks.
+
+    Returns up to *limit* results sorted by score descending.
+    Each result has: source ('user_memory'|'relation_memory'|'wiki'), content,
+    category, score, and optional extra fields.
+
+    Returns [] on error or when no embeddings are available.
+    """
+    if not user_message or not user_message.strip():
+        return []
+
+    try:
+        from tools.embeddings import cosine_similarity, embed_one, unpack_embedding  # noqa: PLC0415
+        query_vec = embed_one(user_message)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("semantic_recall: embedding failed: %s", exc)
+        return []
+
+    candidates: list[tuple[float, dict]] = []
+
+    # ── user_memory (excluding is_core and timezone) ─────────────────────────
+    try:
+        from db.connection import get_connection  # noqa: PLC0415
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id, category, content, importance, embedding "
+                "FROM user_memory "
+                "WHERE user_id = %s AND is_core = FALSE AND category != 'timezone' "
+                "AND (expires_at IS NULL OR expires_at > NOW()) "
+                "AND embedding IS NOT NULL",
+                (user_id,),
+            )
+            rows = cursor.fetchall()
+            cursor.close()
+        for row_id, category, content, importance, emb_raw in rows:
+            try:
+                vec = unpack_embedding(emb_raw)
+                score = cosine_similarity(query_vec, vec)
+                candidates.append((score, {
+                    "source": "user_memory",
+                    "id": row_id,
+                    "category": category,
+                    "content": content,
+                    "importance": importance,
+                }))
+            except Exception:  # noqa: BLE001
+                continue
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("semantic_recall: user_memory query failed: %s", exc)
+
+    # ── relation_memory ───────────────────────────────────────────────────────
+    try:
+        from db.relations import semantic_search_relation_memory  # noqa: PLC0415
+        rel_results = semantic_search_relation_memory(user_id, query_vec, limit=limit)
+        for r in rel_results:
+            candidates.append((r["score"], {
+                "source": "relation_memory",
+                "id": r["id"],
+                "relation_id": r["relation_id"],
+                "name": r["name"],
+                "relation_type": r["relation_type"],
+                "category": r["category"],
+                "content": r["content"],
+                "importance": r["importance"],
+            }))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("semantic_recall: relation_memory search failed: %s", exc)
+
+    # ── wiki_chunks ───────────────────────────────────────────────────────────
+    try:
+        from db.wiki import search_wiki_chunks  # noqa: PLC0415
+        wiki_results = search_wiki_chunks(user_message, limit=limit)
+        for r in wiki_results:
+            if r.get("score", 0) >= _SEMANTIC_MIN_SCORE:
+                candidates.append((r["score"], {
+                    "source": "wiki",
+                    "id": r["id"],
+                    "category": "knowledge",
+                    "content": r["content"],
+                    "title": r.get("title", ""),
+                    "importance": r.get("score", 0.5),
+                }))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("semantic_recall: wiki search failed: %s", exc)
+
+    # Sort and filter
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    results = [
+        r for score, r in candidates[:limit]
+        if score >= _SEMANTIC_MIN_SCORE
+    ]
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Public: recall (called before main LLM)
 # ---------------------------------------------------------------------------
 
-def load_memories_for_prompt(user_id: str) -> str:
+def load_memories_for_prompt(user_id: str, user_message: str = "") -> str:
     """Return a German-language memory section for the system prompt.
+
+    1. Core memories (is_core=TRUE) – always injected.
+    2. Semantic recall (vector search) for top-5 contextually relevant memories.
 
     Returns "" when there are no relevant memories or on any error.
     """
     try:
         from db.connection import get_connection  # noqa: PLC0415
 
+        # ── 1. Core memories (always inject) ──────────────────────────────
+        core_entries: list[str] = []
         with get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT category, content, importance, expires_at "
-                "FROM user_memory "
-                "WHERE user_id = %s "
-                "  AND category != 'timezone' "
-                "  AND (expires_at IS NULL OR expires_at > NOW()) "
-                "ORDER BY importance DESC, updated_at DESC "
-                "LIMIT %s",
-                (user_id, _MAX_MEMORIES_FOR_PROMPT),
+                "SELECT category, content FROM user_memory "
+                "WHERE user_id = %s AND is_core = TRUE "
+                "AND category != 'timezone' "
+                "AND (expires_at IS NULL OR expires_at > NOW()) "
+                "ORDER BY importance DESC",
+                (user_id,),
             )
             rows = cursor.fetchall()
             cursor.close()
+        for category, content in rows:
+            core_entries.append(f"- {content} [{category}]")
 
-        if not rows:
+        # ── 2. Semantic recall for contextual memories ─────────────────────
+        semantic_entries: list[str] = []
+        if user_message:
+            recalled = semantic_recall(user_id, user_message)
+            for item in recalled:
+                source = item["source"]
+                content = item["content"]
+                category = item.get("category", "")
+                if source == "relation_memory":
+                    name = item.get("name", "")
+                    rel_type = item.get("relation_type", "")
+                    semantic_entries.append(f"- [{name} ({rel_type})] {content} [{category}]")
+                elif source == "wiki":
+                    title = item.get("title", "")
+                    semantic_entries.append(f"- [Wiki: {title}] {content[:200]}")
+                else:
+                    semantic_entries.append(f"- {content} [{category}]")
+        else:
+            # Fallback: top memories by importance when no message available
+            with get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT category, content, importance, expires_at "
+                    "FROM user_memory "
+                    "WHERE user_id = %s AND is_core = FALSE "
+                    "  AND category != 'timezone' "
+                    "  AND (expires_at IS NULL OR expires_at > NOW()) "
+                    "ORDER BY importance DESC, updated_at DESC "
+                    "LIMIT %s",
+                    (user_id, _MAX_MEMORIES_FOR_PROMPT),
+                )
+                rows = cursor.fetchall()
+                cursor.close()
+            for category, content, importance, expires_at in rows:
+                entry = f"- {content} [{category}]"
+                semantic_entries.append(entry)
+
+        if not core_entries and not semantic_entries:
             return ""
 
-        permanent: list[str] = []
-        temporary: list[str] = []
-
-        for category, content, importance, expires_at in rows:
-            entry = f"- {content} [{category}]"
-            if expires_at is None:
-                permanent.append(entry)
-            else:
-                temporary.append(entry)
-
         parts: list[str] = ["Bekannte Informationen über den Benutzer:"]
-        if permanent:
-            parts.append("\n📌 Dauerhaft:")
-            parts.extend(permanent)
-        if temporary:
-            parts.append("\n⏳ Aktuell:")
-            parts.extend(temporary)
+        if core_entries:
+            parts.append("\n📌 Grundregeln (immer beachten):")
+            parts.extend(core_entries)
+        if semantic_entries:
+            parts.append("\n🧠 Relevante Erinnerungen:")
+            parts.extend(semantic_entries)
 
         return "\n".join(parts)
 

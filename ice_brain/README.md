@@ -36,12 +36,22 @@ Frontends (WebUI, curl, Telegram, …)
 | Auto-Download von GGUF-Modellen | ✅ aktiv |
 | MariaDB 11.8 LTS + VECTOR-Typ | ✅ aktiv |
 | User-Memory (Extraktion + Recall) | ✅ aktiv |
+| Schema-basierte Extraktion (subject-aware) | ✅ aktiv |
+| Relations-System (Personen als eigene Entitäten) | ✅ aktiv |
+| Relation-Memory (Fakten über Dritte) | ✅ aktiv |
+| Semantischer Recall (Vektor-Suche) | ✅ aktiv |
+| Core-Memories (immer injiziert) | ✅ aktiv |
+| Disambiguierungs-Flow (Beziehungstyp klären) | ✅ aktiv |
+| Tool-Use (SEARCH_MEMORY, SEARCH_RELATION, WIKI_SEARCH) | ✅ aktiv |
+| Wikipedia-Vorrang (Wiki > Trainingswissen) | ✅ aktiv |
 | Fuzzy-Deduplizierung (difflib) | ✅ aktiv |
+| Embedding on Write (user_memory + relation_memory) | ✅ aktiv |
 | Wikipedia-Tool mit Cache | ✅ aktiv |
-| Enrichment-Loop (Background) | ✅ aktiv |
+| Enrichment-Loop (user_memory + relation_memory) | ✅ aktiv |
+| Cleanup-Worker (Duplikate, Widersprüche, Ablauf) | ✅ aktiv |
+| Admin-API (/admin/cleanup, /admin/enrichment) | ✅ aktiv |
 | Conversation-Log (DB) | ✅ aktiv |
 | Test-WebUI | ✅ aktiv |
-| RAG / Vektorsuche | 🔲 Phase 2 |
 | Tool-Calls (Wetter, Kalender) | 🔲 Phase 5 |
 
 ---
@@ -191,22 +201,27 @@ ice_brain/
 ├── README.md
 ├── requirements.txt
 ├── config.py.example        ← Template; als config.py kopieren
-├── server.py                ← FastAPI Entry Point
+├── server.py                ← FastAPI Entry Point (Tool-Use, Admin-API, Disambiguierung)
 ├── llm_manager.py           ← GGUF-Modelle laden + Auto-Download
 ├── router.py                ← Intent-Klassifikation
 ├── models.py                ← Pydantic-Schemas
 ├── db/
 │   ├── __init__.py
 │   ├── connection.py        ← MariaDB Pool + Auto-Init
-│   ├── memory.py            ← User-Memory (Fuzzy-Dedup, Extraktion via Main-LLM)
+│   ├── memory.py            ← User-Memory: schema-basierte Extraktion, semantischer Recall
+│   ├── relations.py         ← Relations-System: CRUD für Personen + relation_memory
+│   ├── users.py             ← Auth, Timezone
+│   ├── wiki.py              ← Wiki-Cache + Vektorsuche
 │   └── schema.sql           ← Tabellen (MariaDB 11.8, VECTOR(768))
 ├── tools/
 │   ├── __init__.py
+│   ├── embeddings.py        ← paraphrase-multilingual-mpnet-base-v2 (768-dim)
 │   ├── dummy_weather.py     ← Beispiel-Tool (Dummy)
 │   └── wikipedia.py         ← Wikipedia REST API + MariaDB-Cache
 ├── workers/
 │   ├── __init__.py
-│   └── enrichment.py        ← Background Knowledge Enrichment Loop
+│   ├── enrichment.py        ← Background Knowledge Enrichment (user_memory + relation_memory)
+│   └── cleanup.py           ← Cleanup Worker (Duplikate, Widersprüche, Ablauf)
 └── web/
     └── index.html           ← Test-WebUI (kein Framework)
 ```
