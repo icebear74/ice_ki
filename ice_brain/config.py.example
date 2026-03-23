@@ -58,9 +58,10 @@ DEBUG_LOGGING = False
 
 # Embedding-Modell (sentence-transformers, für Wiki-Vektorsuche)
 # 'gpu': CUDA-Geräte-Index, auf dem das Modell geladen wird.
-#   0 = P100  (Haupt-GPU)
-#   1 = P4    (teilt sich die GPU mit dem Router-Modell)
+#   0 = P100  (Haupt-GPU, 16 GB – empfohlen: mehr freier Speicher)
+#   1 = P4    (7.68 GB – kann bei voller GPU-Auslastung zu CUDA OOM führen)
 # Entferne den 'gpu'-Schlüssel oder setze ihn auf None, um CPU zu erzwingen.
+# Bei CUDA OOM fällt das Embedding-Modell automatisch auf CPU zurück.
 EMBEDDING_MODEL = {
-    'gpu': 1,  # P4 – teilt die GPU mit dem Router-Modell
+    'gpu': 0,  # P100 (16 GB) – empfohlen; P4 (gpu:1) hat zu wenig freien VRAM
 }

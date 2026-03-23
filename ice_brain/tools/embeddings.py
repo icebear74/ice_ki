@@ -77,6 +77,31 @@ def _get_model():
     return _model
 
 
+def _fallback_to_cpu() -> None:
+    """Move the loaded embedding model to CPU after a CUDA OOM.
+
+    Called automatically by :func:`embed` when the GPU runs out of memory.
+    After this all subsequent calls will run on CPU for the remainder of the
+    process lifetime.
+    """
+    global _device  # noqa: PLW0603
+    logger.warning(
+        "Embedding model: CUDA out of memory – moving model to CPU "
+        "(all subsequent embedding calls will use CPU)."
+    )
+    _device = "cpu"
+    if _model is not None:
+        try:
+            _model.to("cpu")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Embedding model: could not move to CPU: %s", exc)
+    try:
+        import torch  # noqa: PLC0415
+        torch.cuda.empty_cache()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def load_embedding_model() -> bool:
     """Eagerly load the embedding model singleton.
 
@@ -111,9 +136,20 @@ def embed(texts: list[str]) -> np.ndarray:
     """Encode *texts* into L2-normalised float32 embeddings.
 
     Returns shape (N, 768) numpy array.
+
+    If the configured GPU runs out of memory the model is transparently moved
+    to CPU and the encoding is retried.  All subsequent calls will also use CPU.
     """
     model = _get_model()
-    vecs = model.encode(texts, normalize_embeddings=True, show_progress_bar=False)
+    try:
+        vecs = model.encode(texts, normalize_embeddings=True, show_progress_bar=False)
+    except RuntimeError as exc:
+        if "out of memory" in str(exc).lower() and _device != "cpu":
+            _fallback_to_cpu()
+            model = _get_model()
+            vecs = model.encode(texts, normalize_embeddings=True, show_progress_bar=False)
+        else:
+            raise
     return np.array(vecs, dtype=np.float32)
 
 
