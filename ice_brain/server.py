@@ -318,6 +318,19 @@ _CORRECTION_RE = re.compile(
     r"|wiki\s+(?:abfragen|nachschauen|nachschlagen)"
     r"|update\s+(?:dich|dein\s+wissen)"
     r"|korrigier(?:e)?\s+(?:dich|deine\s+(?:info|infos|angaben?))"
+    # Death / obituary corrections
+    r"|(?:er|sie|es)\s+ist\s+(?:gestorben|tot|verstorben)"
+    r"|ist\s+(?:doch\s+)?(?:schon\s+)?(?:gestorben|tot|verstorben)"
+    r"|(?:er|sie)\s+starb\b"
+    r"|ist\s+(?:letztes?\s+(?:jahr|monat)|letzte\s+woche|kürzlich|neulich|gerade)\s+(?:gestorben|verstorben)"
+    # "steht im Wiki / Wikipedia"
+    r"|steht\s+(?:doch\s+)?(?:so\s+)?(?:auch\s+)?im\s+(?:wiki|wikipedia)"
+    r"|steht\s+(?:auch\s+)?(?:so\s+)?(?:doch\s+)?im\s+(?:wiki|wikipedia)"
+    r"|(?:das\s+)?steht\s+im\s+(?:artikel|wiki|wikipedia)"
+    # "hast du vergessen"
+    r"|hast\s+du\s+(?:das\s+)?vergessen"
+    r"|das\s+hast\s+du\s+vergessen"
+    r"|du\s+hast\s+(?:das\s+)?(?:wichtigste\s+)?vergessen"
     r")",
     re.IGNORECASE,
 )
@@ -445,13 +458,20 @@ _TOPIC_QUESTION_RE = re.compile(
 )
 
 
-def _live_wiki_context_for_correction(message: str, limit: int = 2) -> str:
+def _live_wiki_context_for_correction(message: str, limit: int = 2, prior_context: str = "") -> str:
     """Fetch fresh Wikipedia data for the topic being corrected.
 
-    Returns a formatted string to be injected into the system prompt with high
-    priority.  Returns an empty string when the lookup fails or yields nothing.
+    Returns a formatted string to be injected at the top of the system prompt
+    as a hard instruction the model MUST follow.  Returns an empty string when
+    the lookup fails or yields nothing.
+
+    When the correction message itself contains no recognisable topic (e.g.
+    "Er ist gestorben"), *prior_context* (the last few user messages joined as
+    a string) is used as a fallback to find the subject of the correction.
     """
     topic = _extract_correction_topic(message)
+    if not topic and prior_context:
+        topic = _extract_topic(prior_context)
     if not topic:
         return ""
     logger.info("Live wiki lookup triggered by correction. Query: %r", topic)
@@ -462,8 +482,12 @@ def _live_wiki_context_for_correction(message: str, limit: int = 2) -> str:
             logger.info("Live wiki lookup: no results for %r.", topic)
             return ""
         lines = [
-            "🔄 AKTUELLES WIKIPEDIA-WISSEN (live abgerufen – hat höchste Priorität und "
-            "überschreibt alle früheren Annahmen):"
+            "⚠️ FAKTENKORREKTUR – WIKIPEDIA LIVE (HÖCHSTE PRIORITÄT):",
+            "Du MUSST die folgenden Fakten als korrekt akzeptieren und in deiner Antwort verwenden.",
+            "Diese Daten wurden soeben live von Wikipedia abgerufen.",
+            "Sie überschreiben dein Trainingswissen vollständig.",
+            "Antworte AUSSCHLIESSLICH auf Basis dieser Daten – ignoriere jede gegenteilige Annahme aus deinem Training.",
+            "",
         ]
         for r in results:
             snippet = (r.get("full_text") or r.get("summary", ""))[:1200].replace("\n", " ").strip()
@@ -821,12 +845,18 @@ async def chat_completion(
     #      cached data.
     #   4. Topical question with no cached data → proactive live lookup.
     live_wiki_section = ""
+    _correction_live = False  # True when live section came from a correction signal
     if _detect_correction(last_message):
         logger.info("Correction signal detected – performing live Wikipedia lookup.")
+        # Build a prior-context string from the last few user messages so that
+        # topic-less corrections like "Er ist gestorben" can still find the subject.
+        _prior_msgs = [m.content for m in request.messages[:-1] if m.role == "user"]
+        _prior_ctx = " ".join(_prior_msgs[-3:]) if _prior_msgs else ""
         live_wiki_section = await asyncio.get_running_loop().run_in_executor(
-            None, _live_wiki_context_for_correction, last_message
+            None, _live_wiki_context_for_correction, last_message, 2, _prior_ctx
         )
         if live_wiki_section:
+            _correction_live = True
             logger.info("Live wiki section injected (%d chars).", len(live_wiki_section))
         else:
             logger.info("Live wiki lookup returned no results for correction message.")
@@ -947,15 +977,23 @@ async def chat_completion(
         )
     else:
         time_note = f"Aktuelle Uhrzeit: {now_str}."
-    # Build the system prompt additions: time note + memory + live wiki (high prio) + cached wiki
-    system_additions = time_note
-    if memory_section:
-        system_additions = f"{system_additions}\n\n{memory_section}"
-    if live_wiki_section:
-        # Live section placed before cached wiki so the model sees it first
-        system_additions = f"{system_additions}\n\n{live_wiki_section}"
-    if wiki_section:
-        system_additions = f"{system_additions}\n\n{wiki_section}"
+    # Build the system prompt additions.
+    # Correction live wiki goes FIRST so the model sees it before everything else.
+    # Order: [correction_wiki] + time_note + memory + [proactive_wiki] + cached_wiki
+    if _correction_live:
+        system_additions = f"{live_wiki_section}\n\n{time_note}"
+        if memory_section:
+            system_additions = f"{system_additions}\n\n{memory_section}"
+        if wiki_section:
+            system_additions = f"{system_additions}\n\n{wiki_section}"
+    else:
+        system_additions = time_note
+        if memory_section:
+            system_additions = f"{system_additions}\n\n{memory_section}"
+        if live_wiki_section:
+            system_additions = f"{system_additions}\n\n{live_wiki_section}"
+        if wiki_section:
+            system_additions = f"{system_additions}\n\n{wiki_section}"
 
     messages = list(request.messages)
     if messages and messages[0].role == "system":
