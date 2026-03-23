@@ -14,6 +14,7 @@ embed(texts)            -> np.ndarray  shape (N, 768), float32, L2-normalised
 embed_one(text)         -> np.ndarray  shape (768,),   float32, L2-normalised
 cosine_similarity       -> float       dot product of two normalised vectors
 pack_embedding          -> bytes       LE float32 bytes for DB (3072 B)
+vec_to_text             -> str         JSON-array string for VEC_FromText() INSERT/UPDATE
 unpack_embedding        -> np.ndarray  bytes → float32 array
 """
 
@@ -109,6 +110,18 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
 def pack_embedding(vec: np.ndarray) -> bytes:
     """Pack a float32 numpy array into LE bytes for MariaDB VECTOR storage."""
     return np.array(vec, dtype=np.float32).tobytes()
+
+
+def vec_to_text(vec: np.ndarray) -> str:
+    """Serialise a float32 vector as a JSON-array string for ``VEC_FromText()``.
+
+    MariaDB's VECTOR type accepts the ``[f1,f2,...]`` text format via
+    ``VEC_FromText()``.  Passing raw bytes through ``mysql-connector-python``
+    can cause charset-encoding corruption (the connector applies utf8mb4
+    encoding to ``bytes`` parameters), so text format is the safe path for
+    INSERT/UPDATE statements.
+    """
+    return "[" + ",".join(f"{v:.8g}" for v in np.array(vec, dtype=np.float32).tolist()) + "]"
 
 
 def unpack_embedding(data: bytes) -> np.ndarray:

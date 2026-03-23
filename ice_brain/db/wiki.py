@@ -104,7 +104,7 @@ def store_article_chunks(
 
     # Embed all chunks in one batch
     try:
-        from tools.embeddings import embed, pack_embedding  # noqa: PLC0415
+        from tools.embeddings import embed, vec_to_text  # noqa: PLC0415
         vectors = embed(chunks)
     except Exception as exc:  # noqa: BLE001
         logger.warning("store_article_chunks: embedding failed for wiki_cache_id=%d: %s", wiki_cache_id, exc)
@@ -118,10 +118,13 @@ def store_article_chunks(
             for idx, (chunk, vec) in enumerate(zip(chunks, vectors)):
                 try:
                     cursor.execute(
+                        # VEC_FromText() parses the JSON-array string '[f1,f2,…]'.
+                        # Passing raw bytes via %s causes charset-encoding corruption
+                        # (mysql-connector applies utf8mb4 encoding to bytes params).
                         "INSERT INTO wiki_chunks "
                         "(article_id, title, chunk_idx, content, lang, embedding) "
-                        "VALUES (%s, %s, %s, %s, %s, %s)",
-                        (wiki_cache_id, title, idx, chunk, lang, pack_embedding(vec)),
+                        "VALUES (%s, %s, %s, %s, %s, VEC_FromText(%s))",
+                        (wiki_cache_id, title, idx, chunk, lang, vec_to_text(vec)),
                     )
                     stored += 1
                 except Exception as exc:  # noqa: BLE001
