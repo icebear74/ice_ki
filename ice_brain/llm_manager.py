@@ -29,11 +29,14 @@ threading.Lock that must be held during inference.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
+import time
+import uuid
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterator, List
 
 logger = logging.getLogger(__name__)
 
@@ -283,8 +286,54 @@ class LLMManager:
 
         return result["choices"][0]["message"]["content"]
 
+    def chat_completion_stream(
+        self,
+        model_name: str,
+        messages: List[Any],
+        temperature: float = 0.7,
+        max_tokens: int = 2048,
+    ) -> Iterator[str]:
+        """Generate a streaming response, yielding SSE data lines.
+
+        Each yielded string is a complete SSE event line of the form
+        ``data: {…}\\n\\n``.  The final line is ``data: [DONE]\\n\\n``.
+
+        The per-model threading.Lock is held for the **entire** iteration, so
+        callers MUST drive this iterator from a background thread – never
+        directly from the asyncio event loop.
+        """
+        if model_name not in self._models:
+            raise RuntimeError(
+                f"Model '{model_name}' is not loaded. "
+                f"Available models: {list(self._models)}"
+            )
+
+        handle = self._models[model_name]
+        msg_dicts = [{"role": m.role, "content": m.content} for m in messages]
+        resp_id = f"chatcmpl-{uuid.uuid4().hex}"
+        created = int(time.time())
+
+        with handle.lock:
+            for chunk in handle.llm.create_chat_completion(
+                messages=msg_dicts,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=True,
+            ):
+                delta = chunk["choices"][0].get("delta", {})
+                finish = chunk["choices"][0].get("finish_reason")
+                payload = {
+                    "id": resp_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model_name,
+                    "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+                }
+                yield f"data: {json.dumps(payload)}\n\n"
+
+        yield "data: [DONE]\n\n"
+
     # ------------------------------------------------------------------
-    # Status
     # ------------------------------------------------------------------
 
     def get_status(self) -> Dict[str, Any]:

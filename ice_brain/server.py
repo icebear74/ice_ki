@@ -14,9 +14,13 @@ Startup sequence
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import os
 import sys
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -31,7 +35,7 @@ import re
 import secrets
 
 from fastapi import BackgroundTasks, FastAPI
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from db.connection import init_db
@@ -289,7 +293,139 @@ async def auth_set_password(req: SetPasswordRequest) -> dict:
     return {"ok": True, "user_id": req.user_id, "username": username, "role": role, "token": token}
 
 
-_WIKI_SNIPPET_MAX_CHARS = 400  # max characters per wiki chunk injected into the system prompt
+_WIKI_SNIPPET_MAX_CHARS = 800  # max characters per wiki chunk injected into the system prompt
+
+
+# ---------------------------------------------------------------------------
+# Streaming helpers
+# ---------------------------------------------------------------------------
+
+class _StreamThinkingFilter:
+    """State machine that removes ``<think>…</think>`` blocks from a token
+    stream when *strip* is True.
+
+    Feed tokens one at a time via :meth:`feed`; call :meth:`flush` after the
+    last token to drain any bytes buffered for boundary detection.
+    """
+
+    _OPEN = "<think>"
+    _CLOSE = "</think>"
+
+    def __init__(self, strip: bool) -> None:
+        self._strip = strip
+        self._buf: str = ""
+        self._in_think: bool = False
+
+    def feed(self, token: str) -> str:  # noqa: C901
+        if not self._strip:
+            return token
+        self._buf += token
+        out_parts: list[str] = []
+        while self._buf:
+            if self._in_think:
+                idx = self._buf.find(self._CLOSE)
+                if idx >= 0:
+                    self._buf = self._buf[idx + len(self._CLOSE):]
+                    self._in_think = False
+                else:
+                    keep = len(self._CLOSE) - 1
+                    self._buf = self._buf[-keep:] if len(self._buf) > keep else self._buf
+                    break
+            else:
+                idx = self._buf.find(self._OPEN)
+                if idx >= 0:
+                    out_parts.append(self._buf[:idx])
+                    self._buf = self._buf[idx + len(self._OPEN):]
+                    self._in_think = True
+                else:
+                    keep = len(self._OPEN) - 1
+                    safe = len(self._buf) - keep
+                    if safe > 0:
+                        out_parts.append(self._buf[:safe])
+                        self._buf = self._buf[safe:]
+                    break
+        return "".join(out_parts)
+
+    def flush(self) -> str:
+        """Return any buffered content held for boundary detection."""
+        if self._strip and self._in_think:
+            self._buf = ""
+            return ""
+        out = self._buf
+        self._buf = ""
+        return out
+
+
+# ---------------------------------------------------------------------------
+# GPU stats helpers
+# ---------------------------------------------------------------------------
+
+_gpu_stats_cache: dict = {"data": None, "ts": 0.0}
+_GPU_STATS_TTL = 2.0  # seconds between real queries
+
+
+def _query_gpu_stats() -> dict:
+    """Query per-GPU utilisation via pynvml (preferred) or nvidia-smi."""
+    try:
+        import pynvml  # noqa: PLC0415
+        pynvml.nvmlInit()
+        count = pynvml.nvmlDeviceGetCount()
+        gpus = []
+        for i in range(count):
+            h = pynvml.nvmlDeviceGetHandleByIndex(i)
+            name = pynvml.nvmlDeviceGetName(h)
+            if isinstance(name, bytes):
+                name = name.decode()
+            util = pynvml.nvmlDeviceGetUtilizationRates(h)
+            mem = pynvml.nvmlDeviceGetMemoryInfo(h)
+            try:
+                temp: int | None = pynvml.nvmlDeviceGetTemperature(h, pynvml.NVML_TEMPERATURE_GPU)
+            except Exception:  # noqa: BLE001
+                temp = None
+            gpus.append({
+                "index": i,
+                "name": name,
+                "util_pct": util.gpu,
+                "mem_util_pct": util.memory,
+                "mem_used_mb": mem.used // (1024 * 1024),
+                "mem_total_mb": mem.total // (1024 * 1024),
+                "temp_c": temp,
+            })
+        return {"gpus": gpus, "source": "nvml"}
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Fallback: nvidia-smi subprocess
+    import subprocess  # noqa: PLC0415
+    try:
+        result = subprocess.run(  # noqa: S603
+            [
+                "nvidia-smi",
+                "--query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        gpus = []
+        for line in result.stdout.strip().splitlines():
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 6:
+                continue
+            gpus.append({
+                "index": int(parts[0]) if parts[0].isdigit() else 0,
+                "name": parts[1],
+                "util_pct": int(parts[2]) if parts[2].isdigit() else 0,
+                "mem_util_pct": None,
+                "mem_used_mb": int(parts[3]) if parts[3].isdigit() else 0,
+                "mem_total_mb": int(parts[4]) if parts[4].isdigit() else 0,
+                "temp_c": int(parts[5]) if parts[5].isdigit() else None,
+            })
+        return {"gpus": gpus, "source": "nvidia-smi"}
+    except Exception as exc:  # noqa: BLE001
+        return {"gpus": [], "error": str(exc)}
+
+
+
 
 
 def _wiki_context_for_message(message: str, limit: int = 3, min_score: float = 0.35) -> str:
@@ -337,6 +473,18 @@ def _wiki_context_for_message(message: str, limit: int = 3, min_score: float = 0
     except Exception as exc:  # noqa: BLE001
         logger.debug("Wiki context search failed (non-fatal): %s", exc)
         return ""
+
+
+@app.get("/v1/gpu-stats")
+async def get_gpu_stats() -> dict:
+    """Return per-GPU utilisation stats (cached for up to 2 s)."""
+    now = time.monotonic()
+    if _gpu_stats_cache["data"] is not None and now - _gpu_stats_cache["ts"] < _GPU_STATS_TTL:
+        return _gpu_stats_cache["data"]  # type: ignore[return-value]
+    data = await asyncio.get_running_loop().run_in_executor(None, _query_gpu_stats)
+    _gpu_stats_cache["data"] = data
+    _gpu_stats_cache["ts"] = now
+    return data
 
 
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
@@ -506,6 +654,93 @@ async def chat_completion(
     else:
         messages.insert(0, ChatMessage(role="system", content=system_additions))
 
+    # ── Streaming path ──────────────────────────────────────────────────────
+    if request.stream:
+        strip = request.strip_thinking
+        temperature = request.temperature
+        max_tokens = request.max_tokens
+
+        async def _sse_gen() -> "AsyncGenerator[str, None]":  # type: ignore[name-defined]
+            loop = asyncio.get_running_loop()
+            queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=256)
+            filt = _StreamThinkingFilter(strip=strip)
+            collected: list[str] = []
+
+            def _produce() -> None:
+                try:
+                    for raw_sse in llm_manager.chat_completion_stream(
+                        "main", messages, temperature, max_tokens
+                    ):
+                        if "[DONE]" not in raw_sse:
+                            # Apply thinking filter on the content delta
+                            try:
+                                payload = json.loads(raw_sse[len("data: "):].strip())
+                                raw_content = (
+                                    payload.get("choices", [{}])[0]
+                                    .get("delta", {})
+                                    .get("content", "")
+                                )
+                                filtered = filt.feed(raw_content)
+                                payload["choices"][0]["delta"]["content"] = filtered
+                                raw_sse = f"data: {json.dumps(payload)}\n\n"
+                            except Exception:  # noqa: BLE001
+                                pass
+                        asyncio.run_coroutine_threadsafe(queue.put(raw_sse), loop).result()
+                except Exception as exc:  # noqa: BLE001
+                    err_payload = json.dumps({"error": str(exc)})
+                    asyncio.run_coroutine_threadsafe(
+                        queue.put(f"data: {err_payload}\n\n"), loop
+                    ).result()
+                finally:
+                    remaining = filt.flush()
+                    if remaining:
+                        flush_payload = json.dumps(
+                            {"choices": [{"delta": {"content": remaining}, "finish_reason": None}]}
+                        )
+                        asyncio.run_coroutine_threadsafe(
+                            queue.put(f"data: {flush_payload}\n\n"), loop
+                        ).result()
+                    asyncio.run_coroutine_threadsafe(queue.put(None), loop).result()
+
+            threading.Thread(target=_produce, daemon=True).start()
+
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                # Collect content for post-stream background tasks
+                if "[DONE]" not in item and item.startswith("data: "):
+                    try:
+                        d = json.loads(item[6:].strip())
+                        c = d["choices"][0]["delta"].get("content", "")
+                        if c:
+                            collected.append(c)
+                    except Exception:  # noqa: BLE001
+                        pass
+                yield item
+            yield "data: [DONE]\n\n"
+
+            # Fire-and-forget background work after streaming completes
+            full_text = "".join(collected)
+            if user_id != "default" and user_id != "admin" and last_message.strip():
+                from db.memory import extract_memories_sync  # noqa: PLC0415
+                asyncio.ensure_future(
+                    asyncio.to_thread(extract_memories_sync, user_id, last_message, llm_manager)
+                )
+            asyncio.ensure_future(
+                asyncio.to_thread(_log_conversation_sync, user_id, last_message, full_text, intent_str)
+            )
+
+        return StreamingResponse(
+            _sse_gen(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",   # disable Nginx proxy buffering
+            },
+        )
+
+    # ── Non-streaming path ───────────────────────────────────────────────────
     try:
         assistant_text = llm_manager.chat_completion(
             model_name="main",

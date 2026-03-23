@@ -270,6 +270,57 @@
     #send-btn:hover:not(:disabled) { background: var(--accent-dim); }
     #send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
+    #gpu-toggle {
+      background: none;
+      border: 1px solid var(--surface2);
+      border-radius: 6px;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 0.75rem;
+      padding: 3px 8px;
+    }
+    #gpu-toggle:hover  { color: var(--text); border-color: var(--accent); }
+    #gpu-toggle.active { color: #6ee7b7; border-color: #6ee7b7; }
+
+    /* ── GPU stats panel ── */
+    #gpu-panel {
+      width: 100%;
+      max-width: 800px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--surface2);
+      padding: 8px 20px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 20px;
+      align-items: center;
+    }
+    #gpu-panel.hidden { display: none; }
+
+    .gpu-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.76rem;
+      color: var(--text-muted);
+    }
+    .gpu-name { color: var(--text); font-weight: 500; }
+    .gpu-bar-wrap {
+      width: 70px;
+      height: 7px;
+      background: var(--surface2);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    .gpu-bar {
+      height: 100%;
+      border-radius: 4px;
+      background: var(--accent);
+      transition: width 0.6s ease;
+    }
+    .gpu-mem-bar {
+      background: #f59e0b;
+    }
+
     @media (max-width: 600px) {
       .bubble { max-width: 88%; }
       header  { padding: 10px 12px 8px; }
@@ -321,10 +372,13 @@
   <div id="user-info">
     <span id="user-label">–</span>
     <button id="think-toggle" title="Denk-Blöcke (<think>) ein-/ausblenden">💭 Denken</button>
+    <button id="gpu-toggle" title="GPU-Auslastung anzeigen">⚡ GPU</button>
     <button id="logout-btn">Abmelden</button>
   </div>
   <span id="model-status">Verbindet…</span>
 </header>
+
+<div id="gpu-panel" class="hidden"></div>
 
 <div id="chat" role="log" aria-live="polite" aria-label="Chatverlauf"></div>
 
@@ -336,6 +390,7 @@
 <script>
   const API_URL      = '/v1/chat/completions';
   const HEALTH_URL   = '/health';
+  const GPU_STATS_URL= '/v1/gpu-stats';
   const LOGIN_URL    = '/auth/login';
   const SETPW_URL    = '/auth/set-password';
 
@@ -343,7 +398,7 @@
   let session = (() => {
     try { return JSON.parse(localStorage.getItem('ice_session') || 'null'); } catch { return null; }
   })();
-  let firstLoginUserId = null;   // held between step 1 and step 2
+  let firstLoginUserId = null;
 
   const history = [];
 
@@ -360,8 +415,10 @@
   const userLabel    = document.getElementById('user-label');
   const logoutBtn    = document.getElementById('logout-btn');
   const thinkToggle  = document.getElementById('think-toggle');
+  const gpuToggle    = document.getElementById('gpu-toggle');
+  const gpuPanel     = document.getElementById('gpu-panel');
 
-  /* ── Think-block toggle (default: hidden / strip_thinking = true) ── */
+  /* ── Think-block toggle ── */
   let showThinking = false;
   thinkToggle.addEventListener('click', () => {
     showThinking = !showThinking;
@@ -369,6 +426,59 @@
     thinkToggle.title = showThinking
       ? 'Denk-Blöcke werden angezeigt – klicken zum Ausblenden'
       : 'Denk-Blöcke (<think>) ein-/ausblenden';
+  });
+
+  /* ── GPU panel toggle ── */
+  let gpuVisible  = false;
+  let gpuTimer    = null;
+
+  async function refreshGpuStats() {
+    try {
+      const res  = await fetch(GPU_STATS_URL);
+      if (!res.ok) return;
+      const data = await res.json();
+      const gpus = data.gpus || [];
+      if (!gpus.length) {
+        gpuPanel.innerHTML = '<span style="font-size:0.76rem;color:var(--text-muted)">Keine GPU-Daten verfügbar</span>';
+        return;
+      }
+      gpuPanel.innerHTML = '';
+      for (const g of gpus) {
+        const util    = g.util_pct    ?? 0;
+        const memPct  = g.mem_total_mb ? Math.round(100 * g.mem_used_mb / g.mem_total_mb) : 0;
+        const memUsed = (g.mem_used_mb  / 1024).toFixed(1);
+        const memTot  = (g.mem_total_mb / 1024).toFixed(1);
+        const temp    = g.temp_c != null ? ` · ${g.temp_c}°C` : '';
+        const shortName = (g.name || '').replace(/NVIDIA\s*/i, '').substring(0, 22);
+
+        const item = document.createElement('div');
+        item.className = 'gpu-item';
+        item.innerHTML = `
+          <span class="gpu-name">GPU${g.index}&thinsp;<em style="font-weight:400">${shortName}</em></span>
+          <span title="Compute ${util}%">
+            <div class="gpu-bar-wrap"><div class="gpu-bar" style="width:${util}%"></div></div>
+          </span>
+          <span>${util}%</span>
+          <span title="VRAM ${memUsed}/${memTot} GB">
+            <div class="gpu-bar-wrap"><div class="gpu-bar gpu-mem-bar" style="width:${memPct}%"></div></div>
+          </span>
+          <span>${memUsed}/${memTot}&thinsp;GB${temp}</span>`;
+        gpuPanel.appendChild(item);
+      }
+    } catch { /* ignore */ }
+  }
+
+  gpuToggle.addEventListener('click', () => {
+    gpuVisible = !gpuVisible;
+    gpuToggle.classList.toggle('active', gpuVisible);
+    gpuPanel.classList.toggle('hidden', !gpuVisible);
+    if (gpuVisible) {
+      refreshGpuStats();
+      gpuTimer = setInterval(refreshGpuStats, 3000);
+    } else {
+      clearInterval(gpuTimer);
+      gpuTimer = null;
+    }
   });
 
   /* ── Overlay helpers ── */
@@ -530,6 +640,9 @@
     history.push({ role: 'user', content: text });
 
     const typingEl = showTyping();
+    let fullText    = '';
+    let botWrap     = null;
+    let botBubble   = null;
 
     try {
       const res = await fetch(API_URL, {
@@ -539,10 +652,12 @@
           model: 'main',
           messages: history,
           temperature: 0.7,
-          max_tokens: 1024,
+          max_tokens: 4096,
+          stream: true,
           user: session.user_id,
           session_token: session.token,
           strip_thinking: !showThinking,
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         }),
       });
 
@@ -563,12 +678,63 @@
         return;
       }
 
-      const data = await res.json();
-      const reply = data.choices?.[0]?.message?.content ?? '(keine Antwort)';
-      const intent = data.router_intent ?? null;
+      const contentType = res.headers.get('content-type') || '';
 
-      appendMessage('bot', reply, intent);
-      history.push({ role: 'assistant', content: reply });
+      if (contentType.includes('text/event-stream') && res.body) {
+        /* ── SSE streaming path ── */
+        const reader  = res.body.getReader();
+        const decoder = new TextDecoder();
+        let sseBuffer = '';
+
+        outer: while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          sseBuffer += decoder.decode(value, { stream: true });
+          const lines = sseBuffer.split('\n');
+          sseBuffer = lines.pop() ?? '';   // keep incomplete last line
+
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
+            const data = line.slice(6).trim();
+            if (data === '[DONE]') break outer;
+
+            let chunk;
+            try { chunk = JSON.parse(data); } catch { continue; }
+
+            const content = chunk?.choices?.[0]?.delta?.content ?? '';
+            if (content) {
+              fullText += content;
+              if (!botBubble) {
+                // First real token – replace typing indicator with a real bubble
+                botWrap   = document.createElement('div');
+                botWrap.className = 'msg-wrap bot';
+                botBubble = document.createElement('div');
+                botBubble.className = 'bubble';
+                botWrap.appendChild(botBubble);
+                chat.appendChild(botWrap);
+              }
+              botBubble.textContent = fullText;
+              chat.scrollTop = chat.scrollHeight;
+            }
+          }
+        }
+
+        if (!botBubble) {
+          appendMessage('bot', '(keine Antwort)');
+        }
+
+      } else {
+        /* ── Non-streaming fallback ── */
+        const data  = await res.json();
+        fullText    = data.choices?.[0]?.message?.content ?? '(keine Antwort)';
+        const intent = data.router_intent ?? null;
+        appendMessage('bot', fullText, intent);
+      }
+
+      if (fullText) {
+        history.push({ role: 'assistant', content: fullText });
+      }
 
     } catch (e) {
       typingEl.remove();
