@@ -336,22 +336,29 @@ Message: "Tja .. Das wichtigste hast du vergessen .. Er ist gestorben .."
 Output:
 []
 
-SEARCH / INFORMATION REQUESTS – always low importance:
-When the message is primarily asking the AI for information about a topic, person,
-film, or event (e.g. "Was kannst du mir über X erzählen?", "Suche Filme mit X",
+SEARCH / INFORMATION REQUESTS – only low importance when NO personal disclosure:
+When the message is PURELY asking the AI for information about a topic, person,
+film, or event with NO possessive or personal disclosure
+(e.g. "Was kannst du mir über X erzählen?", "Suche Filme mit X",
 "Was weißt du über X?", "Zeig mir etwas über X", "Erzähl mir über X"), this is
 a SEARCH QUERY or information request.
-  → If the message reveals NO personal fact about the user beyond the search itself,
-    output [].
-  → If a genuine personal interest IS implied (user explicitly states they like or
-    are curious about X), you MAY store it as:
-    category=topic, ttl="24h", importance=0.1 – NEVER higher than 0.2.
-  → NEVER store the search subject as a personal fact with importance ≥ 0.3.
+  → If the message reveals NO personal fact about the user, output [].
   → "Sucht Filme mit X" or "Hat einen Verstorbenen" are NOT meaningful personal facts
     – output [].
 
+EXCEPTION – POSSESSIVES reveal real personal facts and MUST be extracted:
+When the message contains possessives that describe the user's own preferences,
+interests, or belongings (e.g. "meine Lieblingsserien", "mein Lieblingsfilm",
+"meine Hobbys", "mein Lieblingsessen", "my favorite", "meine …", "my …"),
+those ARE genuine personal facts – extract them normally, regardless of whether
+the message is phrased as a question.
+  → The question structure ("Was kannst du mir … erzählen?") is directed at the AI.
+    The CONTENT ("meine Lieblingsserien von Star Trek") reveals a personal preference.
+  → Extract: category=preference or hobby, importance according to the normal rules,
+    ttl=null.
+
 Message: "Was kannst du mir über Martin Schindler erzählen?"
-→ Pure information request – no personal fact about the user.
+→ Pure information request – no possessive, no personal fact about the user.
 Output:
 []
 
@@ -359,6 +366,21 @@ Message: "Suche mal Filme mit Chuck Norris"
 → Information request / search query – not a personal fact about the user.
 Output:
 []
+
+Message: "was kannst du mir über meine lieblingsserien von Star Trek erzählen?"
+→ "meine lieblingsserien" is a POSSESSIVE → reveals the user's permanent preference.
+→ "Star Trek" is identified as the user's favorite series.
+Output:
+[
+  {"content": "Hat Star Trek als Lieblingsserie", "category": "preference", "importance": 0.7, "ttl": null}
+]
+
+Message: "what can you tell me about my favorite sci-fi movies?"
+→ "my favorite" is a POSSESSIVE → extract the preference.
+Output:
+[
+  {"content": "Likes sci-fi movies", "category": "preference", "importance": 0.6, "ttl": null}
+]
 
 Message: "ok"
 Output:
