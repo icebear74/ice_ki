@@ -27,6 +27,7 @@ from __future__ import annotations
 import difflib
 import json
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
@@ -248,6 +249,10 @@ Output:
 def _parse_facts(raw: str) -> list[dict]:
     """Parse the JSON array from the LLM response.  Returns [] on failure."""
     raw = raw.strip()
+    # Strip <think>…</think> reasoning blocks emitted by some models.
+    # Also handles unclosed blocks (output truncated before </think>).
+    raw = re.sub(r"<think>.*?(?:</think>|$)", "", raw, flags=re.DOTALL)
+    raw = raw.strip()
     # Strip markdown fences if present
     if raw.startswith("```"):
         parts = raw.split("```")
@@ -429,7 +434,7 @@ def extract_memories_sync(user_id: str, user_message: str, llm_manager: "LLMMana
             model_name="main",
             messages=messages,
             temperature=0.0,
-            max_tokens=512,
+            max_tokens=1024,
         )
 
         facts_raw = _parse_facts(raw)
