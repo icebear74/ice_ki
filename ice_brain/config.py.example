@@ -48,6 +48,14 @@ ADMIN_USER = 'admin'
 # Token erstellen unter: https://huggingface.co/settings/tokens
 HF_TOKEN = ''  # z.B. 'hf_xxxxxxxxxxxxxxxxxxxx'
 
+# Debug-Modus: Wenn True, werden alle ice_brain-Logger auf DEBUG-Level gesetzt.
+# Zeigt u.a.:
+#   - Router: vollständige Eingabe + Roh-Antwort des LLM
+#   - Wiki-Suche: Suchbegriff, alle Treffer mit Scores, was in den Prompt eingeflossen ist
+#   - Speicher-Abschnitt: ob und welche Erinnerungen in den Prompt eingebettet wurden
+# Im Produktivbetrieb auf False lassen!
+DEBUG_LOGGING = False
+
 # Embedding-Modell (für spätere Vektorsuche — Phase 2+)
 EMBEDDING_MODEL = {
     'path': '/models/nomic-embed-text-v1.5.Q4_K_M.gguf',

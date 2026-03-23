@@ -77,6 +77,8 @@ class IntentRouter:
                 temperature=0.0,
                 max_tokens=512,
             )
+            logger.debug("Router input: %r", user_message)
+            logger.debug("Router raw LLM output: %r", raw)
             # Strip markdown code fences if present.
             raw = raw.strip()
             if raw.startswith("```"):

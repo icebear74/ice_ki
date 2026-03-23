@@ -124,6 +124,18 @@ async def startup() -> None:
     except ImportError:
         pass
 
+    # Apply DEBUG_LOGGING flag: when True, set all ice_brain-related loggers to DEBUG level.
+    try:
+        import config as _cfg_debug  # noqa: PLC0415
+        if getattr(_cfg_debug, "DEBUG_LOGGING", False):
+            for _log_name in ("ice_brain", "router", "db.memory", "db.wiki", "workers.enrichment", "tools.wikipedia"):
+                logging.getLogger(_log_name).setLevel(logging.DEBUG)
+            # Also lower the root handler threshold so DEBUG messages are actually emitted.
+            logging.getLogger().setLevel(logging.DEBUG)
+            logger.info("DEBUG_LOGGING enabled – verbose logging active.")
+    except ImportError:
+        pass
+
     # 2. Load LLMs (failures are logged but don't abort startup)
     if models_cfg:
         llm_manager.load_all(models_cfg)
@@ -285,10 +297,30 @@ def _wiki_context_for_message(message: str, limit: int = 3, min_score: float = 0
         return ""
     try:
         from db.wiki import search_wiki_chunks  # noqa: PLC0415
+        logger.debug("Wiki search: querying chunks for message %r (limit=%d, min_score=%.2f)", message, limit, min_score)
         results = search_wiki_chunks(message, limit=limit)
+        if not results:
+            logger.debug("Wiki search: no chunks in DB (nothing indexed yet).")
+            return ""
+        logger.debug(
+            "Wiki search: %d chunk(s) returned. Scores: %s",
+            len(results),
+            ", ".join(f"{r['title']!r}={r['score']:.3f}" for r in results),
+        )
         relevant = [r for r in results if r["score"] >= min_score]
         if not relevant:
+            logger.debug(
+                "Wiki search: no chunks above threshold %.2f – best score was %.3f (%r).",
+                min_score,
+                results[0]["score"] if results else 0.0,
+                results[0]["title"] if results else "",
+            )
             return ""
+        logger.debug(
+            "Wiki search: %d relevant chunk(s) injected into prompt: %s",
+            len(relevant),
+            ", ".join(f"{r['title']!r} (score={r['score']:.3f})" for r in relevant),
+        )
         lines = [
             "📚 Relevantes Wikipedia-Hintergrundwissen "
             "(nutze es in deiner Antwort wenn passend, aber nur wenn es wirklich hilft):"
@@ -390,13 +422,29 @@ async def chat_completion(
     # 1. Intent classification (router LLM on P4, Phase 1: log only)
     router_result = intent_router.classify(last_message) if intent_router else None
     intent_str = router_result.intent if router_result else "general"
+    logger.debug(
+        "Router classification: intent=%r confidence=%s (user=%r, message=%r)",
+        intent_str,
+        f"{router_result.confidence:.2f}" if router_result else "n/a",
+        user_id,
+        last_message[:120],
+    )
 
     # 2. Memory recall – load known facts and inject into system prompt
     from db.memory import load_memories_for_prompt  # noqa: PLC0415
     memory_section = load_memories_for_prompt(user_id) if user_id != "default" else ""
+    if memory_section:
+        mem_lines = memory_section.count("\n") + 1
+        logger.debug("Memory section: %d line(s) injected for user %r.", mem_lines, user_id)
+    else:
+        logger.debug("Memory section: empty for user %r.", user_id)
 
     # 2b. Wiki knowledge – vector-search cached Wikipedia chunks for relevant context
     wiki_section = _wiki_context_for_message(last_message)
+    if wiki_section:
+        logger.debug("Wiki section injected into prompt (%d chars).", len(wiki_section))
+    else:
+        logger.debug("Wiki section: no relevant chunks found for this message.")
 
     # 3. Main LLM response (P100)
     if not llm_manager.is_ready("main"):
