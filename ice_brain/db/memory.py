@@ -62,6 +62,24 @@ _MAX_SIMILARITY_SEARCH_ROWS = 50    # rows scanned for deduplication per categor
 _MIN_WORD_LENGTH_FOR_SIMILARITY = 4 # minimum word length used for similarity matching
 _MIN_MESSAGE_LENGTH = 4             # messages shorter than this are not extracted
 
+# Generic high-frequency words that appear as the first word in many memory entries
+# and must NOT be used alone as a similarity key (they would cause false duplicates).
+# Example: "Möchte mit 'Sir' angesprochen werden" vs.
+#          "Möchte wie ein ungehobelter Mensch angesprochen werden"
+# both start with "Möchte" – without this guard they would incorrectly be treated
+# as duplicates and the second would overwrite the first.
+_SIMILARITY_STOP_WORDS: frozenset[str] = frozenset({
+    # German verbs / modal / auxiliary commonly used as memory entry prefixes
+    "möchte", "mag", "magst", "will", "will,", "muss", "kann", "soll",
+    "hat", "hatte", "haben", "ist", "war", "sind", "waren",
+    "wird", "wurde", "wäre", "geht", "fährt", "macht", "trinkt",
+    "isst", "spielt", "liebt", "hasst", "kennt", "wohnt", "lebt",
+    "arbeitet", "schläft", "liest", "hört", "sieht", "sucht",
+    # English equivalents (in case mixed-language entries occur)
+    "likes", "loves", "hates", "wants", "needs", "has", "have",
+    "is", "was", "are", "were", "does", "will", "would", "prefers",
+})
+
 _TTL_MAP: dict[str, int] = {
     "1h": 1,
     "2h": 2,
@@ -282,6 +300,22 @@ Output:
   {"content": "Möchte förmlich (Sie) angesprochen werden", "category": "preference", "importance": 0.9, "ttl": null}
 ]
 
+THIRD PARTIES – NEVER attribute their states or actions to the user:
+When the user mentions another person's health, mood, activity, or state (e.g.
+"Susanne ist erkältet", "mein Freund hat Grippe", "meine Mutter schläft",
+"Lisa ist traurig"), those facts describe the THIRD PERSON, not the user.
+  → Do NOT extract them as the user's mood, activity, or any other personal fact.
+  → The ONLY extractable fact may be a relationship (e.g. "Hat eine Freundin namens
+    Susanne"), but ONLY if the relationship itself is mentioned in the message.
+  → Rhetorical questions aimed at the AI ("Willst du Espresso trinken?",
+    "Soll ich dir was mitbringen?") do NOT reveal a personal fact about the user.
+
+Message: "Mann, die Susanne ist jetzt in die Kiste gestiegen, weil sie erkältet ist."
+→ "Susanne" is a THIRD PARTY – her illness is NOT the user's mood or state.
+→ No relationship mentioned → no relationship fact either.
+Output:
+[]
+
 Message: "ok"
 Output:
 []
@@ -389,8 +423,16 @@ def _find_similar(cursor, user_id: str, category: str, content: str) -> int | No
     if not rows:
         return None
 
-    # Use first meaningful word (>= 4 chars) of new content as key
-    words = [w.lower() for w in content.split() if len(w) >= _MIN_WORD_LENGTH_FOR_SIMILARITY]
+    # Use first two meaningful words (>= 4 chars, not generic stop-words) as keys.
+    # Stop-words like "Möchte", "Hat", "Trinkt" are intentionally excluded: they
+    # appear as the first word in many entries of the same category and would cause
+    # unrelated facts (e.g. two distinct preferences) to be falsely deduplicated.
+    words = [
+        w.lower()
+        for w in content.split()
+        if len(w) >= _MIN_WORD_LENGTH_FOR_SIMILARITY
+        and w.lower().rstrip(",.;:!?") not in _SIMILARITY_STOP_WORDS
+    ]
 
     content_lower = content.lower()
 

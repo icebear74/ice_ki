@@ -785,7 +785,19 @@ async def chat_completion(
                     for raw_sse in llm_manager.chat_completion_stream(
                         "main", messages, temperature, max_tokens
                     ):
-                        if "[DONE]" not in raw_sse:
+                        if "[DONE]" in raw_sse:
+                            # Flush any chars buffered by the thinking filter BEFORE
+                            # forwarding [DONE].  The client breaks on [DONE], so content
+                            # sent after it would be silently discarded.
+                            remaining = filt.flush()
+                            if remaining:
+                                flush_payload = json.dumps(
+                                    {"choices": [{"index": 0, "delta": {"content": remaining}, "finish_reason": None}]}
+                                )
+                                asyncio.run_coroutine_threadsafe(
+                                    queue.put(f"data: {flush_payload}\n\n"), loop
+                                ).result()
+                        else:
                             # Apply thinking filter on the content delta
                             try:
                                 payload = json.loads(raw_sse[len("data: "):].strip())
@@ -806,14 +818,6 @@ async def chat_completion(
                         queue.put(f"data: {err_payload}\n\n"), loop
                     ).result()
                 finally:
-                    remaining = filt.flush()
-                    if remaining:
-                        flush_payload = json.dumps(
-                            {"choices": [{"delta": {"content": remaining}, "finish_reason": None}]}
-                        )
-                        asyncio.run_coroutine_threadsafe(
-                            queue.put(f"data: {flush_payload}\n\n"), loop
-                        ).result()
                     asyncio.run_coroutine_threadsafe(queue.put(None), loop).result()
 
             threading.Thread(target=_produce, daemon=True).start()
