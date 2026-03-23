@@ -236,6 +236,30 @@ Output:
   {"content": "Besitzt eine Jahreskarte für den Moviepark", "category": "personal", "importance": 0.8, "ttl": null}
 ]
 
+HEALTH / MEDICAL CONDITIONS – always extract as permanent personal fact:
+When the user mentions having a medical condition, illness, diagnosis, disability,
+or chronic health issue (e.g. "Ich habe [Krankheit]", "I have [condition]",
+"I was diagnosed with X", "ich leide an X", "ich bin krank an X"), this is a
+permanent personal fact – even if the statement is embedded in a question.
+  → Extract as category=personal, ttl=null.
+  → Content: "Hat [Erkrankung/Zustand]" (German) or "Has [condition]" (English).
+  → The question part ("kannst du mir etwas darüber sagen?", "can you tell me about it?")
+    is directed at the AI and must NOT prevent extraction of the personal disclosure.
+
+Message: "Ich habe Radio Ulnae Synostose .. kannst du mir etwas darüber sagen ?"
+→ "Ich habe Radio Ulnae Synostose" → HEALTH/MEDICAL disclosure → permanent personal fact.
+→ "kannst du mir etwas darüber sagen?" → question to the AI → ignore for extraction.
+Output:
+[
+  {"content": "Hat Radio Ulnae Synostose", "category": "personal", "importance": 0.9, "ttl": null}
+]
+
+Message: "I have diabetes, can you explain what I should eat?"
+Output:
+[
+  {"content": "Has diabetes", "category": "personal", "importance": 0.9, "ttl": null}
+]
+
 INTERACTION INSTRUCTIONS – always extract as preference:
 When the user gives an explicit instruction about HOW they want to be addressed,
 spoken to, or interacted with (e.g. "call me Sir", "use formal language",
