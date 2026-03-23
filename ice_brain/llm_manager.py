@@ -134,7 +134,7 @@ class LLMManager:
 
         path = cfg.get("path", "")
         gpu_index = cfg.get("gpu", 0)
-        n_ctx = cfg.get("n_ctx", 4096)
+        n_ctx = cfg.get("n_ctx", 8192)
         n_gpu_layers = cfg.get("n_gpu_layers", -1)
 
         # Auto-download from HuggingFace if the file is missing
@@ -262,7 +262,7 @@ class LLMManager:
         model_name: str,
         messages: List[Any],
         temperature: float = 0.7,
-        max_tokens: int = 512,
+        max_tokens: int = 2048,
     ) -> str:
         """Generate a response and return the assistant content string.
 
