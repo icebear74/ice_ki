@@ -80,15 +80,31 @@ about the user from their message and output them as a JSON array.
 Rules:
 - Extract ALL facts – a single message can contain multiple facts.
 - Write facts in THIRD PERSON (e.g. "Drinks coffee", not "I drink coffee").
-- Distinguish between SHORT-TERM facts (what is happening RIGHT NOW or very soon) \
-and LONG-TERM facts (permanent preferences, relationships, habits).
-- Short-term facts get a ttl (e.g. "2h"); long-term facts get ttl: null.
+- ONLY output the JSON array – no prose, no markdown fences.
+- If the message contains NO extractable personal facts (e.g. "ok", "thanks", \
+"what is the weather?"), output an empty array: []
 - IMPORTANT: Also extract facts from INDIRECT or QUESTION-FORM statements. \
 If the user says "did you know I like coffee?" or "wusstest du dass ich Kaffee mag?", \
 this still reveals the fact "Likes coffee" – extract it!
-- If the message contains NO extractable personal facts (e.g. "ok", "thanks", \
-"what is the weather?"), output an empty array: []
-- ONLY output the JSON array – no prose, no markdown fences.
+
+HABITUAL vs. CURRENT – this distinction is critical:
+
+HABITUAL signals (words like: gerne, manchmal, ab und zu, oft, öfters, immer, \
+häufig, meistens, abends, morgens, jeden Tag, sometimes, usually, often, \
+always, like to, love to, tend to):
+  → The statement describes a PERMANENT habit or preference.
+  → Extract ONE permanent fact only: category=preference or hobby, ttl=null.
+  → Do NOT add a short-term activity entry – there is no "right now" meaning.
+
+CURRENT signals (words like: gerade, jetzt, im Moment, gerade eben, soeben, \
+right now, currently, at the moment, just now):
+  → The statement describes something happening RIGHT NOW.
+  → Extract TWO facts:
+      1. The current action:  category=activity, ttl appropriate (e.g. "2h")
+      2. The underlying habit: category=preference or hobby, ttl=null
+  → Both facts are needed: one is temporary, one is permanent.
+  → If the current activity involves another person (e.g. "Lisa kocht gerade"), \
+also infer a permanent preference/habit for that person (e.g. "Lisa kocht gerne").
 
 Valid categories: preference, personal, relationship, hobby, experience, \
 activity, mood, plan, topic
@@ -104,7 +120,24 @@ JSON schema for each fact:
 }
 
 Examples:
+
+Message: "Ich trinke gerne abends mal einen Espresso"
+→ "gerne" + "mal" are HABITUAL signals → permanent preference only, NO activity with ttl
+Output:
+[
+  {"content": "Trinkt gerne abends Espresso", "category": "preference", "importance": 0.7, "ttl": null}
+]
+
+Message: "Ich trinke gerade einen Espresso"
+→ "gerade" is a CURRENT signal → activity (short-term) + preference (permanent)
+Output:
+[
+  {"content": "Trinkt gerade Espresso", "category": "activity", "importance": 0.3, "ttl": "2h"},
+  {"content": "Trinkt Espresso / mag Espresso", "category": "preference", "importance": 0.6, "ttl": null}
+]
+
 Message: "Ich trinke gerade einen Kaffee"
+→ "gerade" is a CURRENT signal → activity (short-term) + preference (permanent)
 Output:
 [
   {"content": "Trinkt gerade Kaffee", "category": "activity", "importance": 0.3, "ttl": "2h"},
@@ -130,6 +163,7 @@ Output:
 ]
 
 Message: "Meine Frau Lisa kocht gerade Pasta"
+→ "gerade" is a CURRENT signal → activity (short-term) + preference (permanent)
 Output:
 [
   {"content": "Lisa kocht gerade Pasta", "category": "activity", "importance": 0.3, "ttl": "2h"},
@@ -143,6 +177,13 @@ Output:
   {"content": "Ist gerade müde", "category": "mood", "importance": 0.4, "ttl": "4h"},
   {"content": "War heute joggen", "category": "activity", "importance": 0.3, "ttl": "24h"},
   {"content": "Geht joggen / ist sportlich", "category": "hobby", "importance": 0.7, "ttl": null}
+]
+
+Message: "Ich gehe manchmal abends spazieren"
+→ "manchmal" is a HABITUAL signal → permanent hobby only
+Output:
+[
+  {"content": "Geht manchmal abends spazieren", "category": "hobby", "importance": 0.5, "ttl": null}
 ]
 
 Message: "ok"
