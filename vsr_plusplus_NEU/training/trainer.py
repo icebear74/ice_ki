@@ -520,6 +520,12 @@ class VSRTrainer:
                         perceptual_w = scheduled_perceptual_w
                         # Keep adaptive_status in sync for logging
                         adaptive_status['perceptual_weight'] = perceptual_w
+                        # Suppress AdaptiveSystem's 0.05 floor so the scheduled
+                        # value (which may be 0.0 in Phase 1) is fully respected.
+                        self.adaptive_system.set_perceptual_floor(0.0)
+                    else:
+                        # Phase 3: restore AdaptiveSystem's autonomous floor.
+                        self.adaptive_system.set_perceptual_floor(0.05)
                 # ── End graduated perceptual loss scheduling ─────────────────
                 
                 # Compute loss
@@ -1124,6 +1130,10 @@ class VSRTrainer:
                 # Layer-Aktivitäten
                 layer_activity_map=layer_act_dict,
                 layer_activity_peak_value=peak_activity_value,
+                # TemporalAlign flow magnitudes – extracted from layer_act_dict so the
+                # dedicated top-level JSON fields always match what the web UI shows.
+                align_backward_flow=layer_act_dict.get('Backward Align', 0.0),
+                align_forward_flow=layer_act_dict.get('Forward Align', 0.0),
                 
                 # Batch-Konfiguration mit gemessenen VRAM-Werten
                 adaptive_batch_config=self._build_ui_batch_config(),
@@ -1427,9 +1437,9 @@ class VSRTrainer:
             self.web_monitor.update(
                 quality_lr_value=self.last_metrics.get('lr_quality', 0.0),
                 quality_ki_value=self.last_metrics.get('ki_quality', 0.0),
-                quality_improvement_value=self.last_metrics.get('improvement', 0.0),
-                quality_ki_to_gt_value=self.last_metrics.get('ki_to_gt', 0.0),
-                quality_lr_to_gt_value=self.last_metrics.get('lr_to_gt', 0.0),
+                quality_improvement_value=self.last_metrics.get('improvement', 0.0) / 100.0,
+                quality_ki_to_gt_value=self.last_metrics.get('ki_to_gt', 0.0) / 100.0,
+                quality_lr_to_gt_value=self.last_metrics.get('lr_to_gt', 0.0) / 100.0,
                 validation_loss_value=self.last_metrics.get('val_loss', 0.0),
             )
         
