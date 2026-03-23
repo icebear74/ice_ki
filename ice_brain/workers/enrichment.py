@@ -169,9 +169,13 @@ def _enrich_single(llm_manager: "LLMManager", memory_id: int, content: str) -> b
         )
         # Strip <think>…</think> reasoning blocks emitted by some models.
         raw = re.sub(r"<think>.*?(?:</think>|$)", "", raw, flags=re.DOTALL).strip()
-        search_terms: list[str] = json.loads(raw)
-        if not isinstance(search_terms, list):
-            search_terms = []
+        # Some models return only a think-block with no actual output – treat as no terms.
+        if not raw:
+            search_terms: list[str] = []
+        else:
+            search_terms = json.loads(raw)
+            if not isinstance(search_terms, list):
+                search_terms = []
     except Exception as exc:  # noqa: BLE001
         logger.warning("Could not get search terms for memory id=%d: %s", memory_id, exc)
         return False
