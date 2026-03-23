@@ -186,6 +186,8 @@ def _enrich_single(llm_manager: "LLMManager", memory_id: int, content: str) -> b
         return False
 
     # Step 2: Search Wikipedia for each term and link results
+    wiki_hits = 0    # total Wikipedia results found across all terms
+    links_saved = 0  # how many were successfully written to the DB
     for term in search_terms:
         try:
             results = wiki_search(term, limit=1)
@@ -194,11 +196,26 @@ def _enrich_single(llm_manager: "LLMManager", memory_id: int, content: str) -> b
             continue
 
         for result in results:
+            wiki_hits += 1
             cache_id = _get_or_create_cache_id(result)
             if cache_id is None:
+                logger.warning(
+                    "Enrichment: could not get/create cache entry for %r (memory id=%d) – DB write failed?",
+                    result.get("title"), memory_id,
+                )
                 continue
-            _link_memory_to_cache(memory_id, cache_id)
+            if _link_memory_to_cache(memory_id, cache_id):
+                links_saved += 1
             _fill_cache_keywords(llm_manager, cache_id, result.get("summary", ""))
+
+    # If Wikipedia returned results but nothing could be saved, the DB writes
+    # all failed → report failure so the record stays unenriched and is retried.
+    if wiki_hits > 0 and links_saved == 0:
+        logger.warning(
+            "Enrichment: %d Wikipedia hit(s) found but no links saved for memory id=%d – will retry.",
+            wiki_hits, memory_id,
+        )
+        return False
 
     return True
 
@@ -239,8 +256,11 @@ def _get_or_create_cache_id(entry: dict) -> int | None:
         return None
 
 
-def _link_memory_to_cache(memory_id: int, cache_id: int) -> None:
-    """Insert a memory_knowledge_link row (ignore duplicates)."""
+def _link_memory_to_cache(memory_id: int, cache_id: int) -> bool:
+    """Insert a memory_knowledge_link row (ignore duplicates).
+
+    Returns True on success (row inserted or already existed), False on DB error.
+    """
     try:
         from db.connection import get_connection  # noqa: PLC0415
         with get_connection() as conn:
@@ -252,8 +272,10 @@ def _link_memory_to_cache(memory_id: int, cache_id: int) -> None:
             )
             conn.commit()
             cursor.close()
+        return True
     except Exception as exc:  # noqa: BLE001
         logger.warning("_link_memory_to_cache error: %s", exc)
+        return False
 
 
 def _fill_cache_keywords(llm_manager: "LLMManager", cache_id: int, summary: str) -> None:

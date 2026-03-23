@@ -41,19 +41,21 @@ CREATE TABLE IF NOT EXISTS global_memory (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS wiki_cache (
-    id          BIGINT AUTO_INCREMENT PRIMARY KEY,
-    title       VARCHAR(512) NOT NULL,
-    query       VARCHAR(512) NOT NULL,
-    summary     TEXT NOT NULL,
-    full_text   MEDIUMTEXT NULL,
-    keywords    TEXT NULL                    COMMENT 'Stichpunkte im Klartext die der Vektor enthält – für manuelle Pflege/Löschung',
-    source_url  VARCHAR(1024),
-    lang        CHAR(2) DEFAULT 'de',
-    fetched_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    ttl_days    INT NOT NULL DEFAULT 30,
-    embedding   VECTOR(768) NULL,
+    id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+    title             VARCHAR(512) NOT NULL,
+    query             VARCHAR(512) NOT NULL,
+    summary           TEXT NOT NULL,
+    full_text         MEDIUMTEXT NULL,
+    keywords          TEXT NULL                    COMMENT 'Stichpunkte im Klartext die der Vektor enthält – für manuelle Pflege/Löschung',
+    source_url        VARCHAR(1024),
+    lang              CHAR(2) DEFAULT 'de',
+    fetched_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    ttl_days          INT NOT NULL DEFAULT 30,
+    embedding         VECTOR(768) NULL,
+    source_memory_id  BIGINT NULL                  COMMENT 'user_memory.id das diesen Abruf ausgelöst hat (erste Anreicherung)',
     UNIQUE INDEX idx_title_lang (title(200), lang),
     INDEX idx_fetched (fetched_at),
+    INDEX idx_source_memory (source_memory_id),
     FULLTEXT INDEX idx_fulltext_search (title, summary, keywords)
     -- VECTOR INDEX idx_embedding (embedding) requires NOT NULL - add manually once embeddings are populated
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
