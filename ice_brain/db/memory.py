@@ -87,6 +87,19 @@ Rules:
 If the user says "did you know I like coffee?" or "wusstest du dass ich Kaffee mag?", \
 this still reveals the fact "Likes coffee" – extract it!
 
+DISCOURSE MARKERS – do NOT extract these as facts:
+Words like "ich denke", "ich glaube", "ich meine", "ich vermute", "I think", \
+"I believe", "I suppose", "I guess" are hedging phrases – they introduce the \
+REAL statement that follows. Never store "thinks about X" or "believes X". \
+Instead extract the actual fact from the rest of the sentence.
+  Example: "ich denke, meine Kaffeemaschine kann das gut" → fact: owns a coffee machine.
+
+POSSESSIVES = OWNERSHIP – always extract ownership as a permanent fact:
+Words like "mein", "meine", "my", "die ich habe", "die ich besitze", "I own", \
+"I have", "at home", "zu hause" reveal that the user OWNS something.
+  → Extract as category=personal, ttl=null.
+  → Content: "Besitzt [object]" / "Has/owns [object]".
+
 HABITUAL vs. CURRENT – this distinction is critical:
 
 HABITUAL signals (words like: gerne, manchmal, ab und zu, oft, öfters, immer, \
@@ -184,6 +197,16 @@ Message: "Ich gehe manchmal abends spazieren"
 Output:
 [
   {"content": "Geht manchmal abends spazieren", "category": "hobby", "importance": 0.5, "ttl": null}
+]
+
+Message: "ich denke, meine Siemens EQ9 S700 die ich zu hause habe, kann das schon ganz gut"
+→ "ich denke" is a DISCOURSE MARKER – ignore it, extract the real facts.
+→ "meine … die ich zu hause habe" → OWNS the machine → permanent personal fact.
+→ "kann das schon ganz gut" → positive opinion about it → permanent preference fact.
+Output:
+[
+  {"content": "Besitzt eine Siemens EQ9 S700 Kaffeemaschine", "category": "personal", "importance": 0.8, "ttl": null},
+  {"content": "Findet die Siemens EQ9 S700 gut / ist zufrieden damit", "category": "preference", "importance": 0.6, "ttl": null}
 ]
 
 Message: "ok"
