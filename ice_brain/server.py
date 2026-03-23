@@ -322,15 +322,42 @@ _CORRECTION_RE = re.compile(
 
 # Stopwords to strip when extracting a search topic from the correction message
 _STOPWORDS = frozenset({
+    # Articles
     "ein", "eine", "einer", "einen", "einem", "eines",
     "der", "die", "das", "dem", "den", "des",
-    "ist", "sind", "war", "waren", "wird", "werden",
-    "du", "ich", "er", "sie", "es", "wir", "ihr",
-    "nicht", "kein", "keine", "keiner",
-    "aber", "und", "oder", "doch", "mal", "bitte",
-    "falsch", "richtig", "korrekt", "inkorrekt", "wrong", "incorrect",
-    "da", "das", "dass", "bist", "hast", "liegst",
-    "dich", "dein", "deine", "deiner", "deinem",
+    # Pronouns
+    "du", "ich", "er", "sie", "es", "wir", "ihr", "man",
+    "mich", "mir", "sich", "uns", "euch",
+    "dich", "dein", "deine", "deiner", "deinem", "deinen",
+    "mein", "meine", "meinem", "meinen", "meiner",
+    # Common verbs
+    "ist", "sind", "war", "waren", "wird", "werden", "wurde", "wurden",
+    "hat", "haben", "hatte", "hatten", "habe", "hast",
+    "sein", "bist", "bin", "seid",
+    "liegst", "stehen", "steht", "standen", "kommen", "gehen", "machen",
+    "sagen", "denk", "denke", "denken", "glaub", "glaube", "glauben",
+    "weiß", "weißt", "wissen", "kann", "kannst", "können", "konnten",
+    "musst", "muss", "müssen", "soll", "sollst", "sollen",
+    "darf", "darfst", "dürfen", "magst", "möchte", "möchtest",
+    "stimmt", "stimmen", "stimmst",
+    # Prepositions / conjunctions
+    "über", "unter", "nach", "vor", "mit", "ohne", "von", "beim",
+    "aus", "bei", "für", "an", "auf", "in", "zu", "zum", "zur",
+    "durch", "gegen", "zwischen", "neben", "hinter", "ab", "seit",
+    "bis", "außer", "wegen", "trotz",
+    "und", "oder", "aber", "doch", "mal", "bitte", "denn", "weil",
+    "dass", "wann", "wenn", "ob", "wie", "was", "wer", "wo", "woher",
+    # Adjectives / adverbs frequently appearing in corrections
+    "nicht", "kein", "keine", "keiner", "nein", "ja",
+    "falsch", "falsche", "falschen", "falscher", "falsches",
+    "richtig", "richtige", "richtigen", "korrekt", "inkorrekt",
+    "wrong", "incorrect", "false",
+    "da", "dort", "hier", "hin", "her", "also", "noch", "schon",
+    "eben", "doch", "halt", "nur", "sehr", "ganz", "viel", "alle",
+    # Generic nouns that are not useful as search topics
+    "informationen", "infos", "info", "angaben", "daten", "aussage",
+    "fakt", "fakten", "sache", "sachen", "zeug",
+    # Correction-related words
     "aktualisier", "informier", "schlag", "nach", "check",
     "wiki", "update", "korrigier",
 })
@@ -345,20 +372,75 @@ def _extract_correction_topic(message: str) -> str:
     """Extract a short search topic from a correction message.
 
     Strips the correction phrases and stopwords, then returns the most
-    meaningful remaining words as a search query (max 6 words).
+    meaningful remaining words as a search query (max 4 words).
+
+    Strategy: prefer words that appear capitalised in the middle of a sentence
+    (German nouns / proper nouns) over lowercase common words.
     """
     # Remove the correction trigger phrase
     cleaned = _CORRECTION_RE.sub(" ", message)
-    # Tokenise (keep alphanumerics + umlauts)
-    tokens = re.findall(r"[A-Za-zÄÖÜäöüß0-9]+", cleaned)
+    # Tokenise (keep alphanumerics + umlauts) together with their original form
+    raw_tokens = re.findall(r"[A-Za-zÄÖÜäöüß0-9]+", cleaned)
     # Filter stopwords and very short tokens
-    meaningful = [t for t in tokens if t.lower() not in _STOPWORDS and len(t) > 2]
+    meaningful = [t for t in raw_tokens if t.lower() not in _STOPWORDS and len(t) > 2]
     if not meaningful:
-        # Fallback: use full message if nothing meaningful survived stripping
+        # Fallback: try whole message without correction phrases
+        raw_tokens_full = re.findall(r"[A-Za-zÄÖÜäöüß0-9]+", message)
+        meaningful = [t for t in raw_tokens_full if t.lower() not in _STOPWORDS and len(t) > 2]
+    if not meaningful:
         return message.strip()
-    # Prefer longer tokens (likely proper nouns / subject matter)
-    meaningful.sort(key=len, reverse=True)
-    return " ".join(meaningful[:6])
+
+    # Separate into capitalized (likely German nouns / proper nouns) and the rest.
+    # Capitalised words in German tend to be the actual topics (nouns).
+    caps = [t for t in meaningful if t[0].isupper()]
+    lower = [t for t in meaningful if not t[0].isupper()]
+
+    # Build query: capitalized tokens first (sorted by length desc), then others
+    caps.sort(key=len, reverse=True)
+    lower.sort(key=len, reverse=True)
+    combined = caps + lower
+    return " ".join(combined[:4])
+
+
+def _extract_topic(message: str) -> str:
+    """Extract a short search topic from any user message (not just corrections).
+
+    Used for proactive wiki lookups when no cached chunks are found.
+    Returns up to 4 meaningful words, preferring capitalised German nouns.
+    """
+    raw_tokens = re.findall(r"[A-Za-zÄÖÜäöüß0-9]+", message)
+    meaningful = [t for t in raw_tokens if t.lower() not in _STOPWORDS and len(t) > 2]
+    if not meaningful:
+        return ""
+    caps = [t for t in meaningful if t[0].isupper()]
+    lower = [t for t in meaningful if not t[0].isupper()]
+    caps.sort(key=len, reverse=True)
+    lower.sort(key=len, reverse=True)
+    combined = caps + lower
+    return " ".join(combined[:4])
+
+
+# Patterns that suggest the user is asking about a specific topic
+_TOPIC_QUESTION_RE = re.compile(
+    r"(?:"
+    r"kennst\s+du"
+    r"|weiß(?:t)?\s+du"
+    r"|sag\s+(?:mir|mal)"
+    r"|erzähl"
+    r"|was\s+(?:ist|sind|war|waren|bedeutet|weiß)"
+    r"|wer\s+(?:ist|war)"
+    r"|wo\s+(?:ist|liegt|befindet|gibt)"
+    r"|wie\s+(?:ist|war|funktioniert|geht)"
+    r"|can\s+you\s+tell"
+    r"|do\s+you\s+know"
+    r"|what\s+is"
+    r"|gibt\s+es"
+    r"|handelt\s+(?:es\s+)?sich"
+    r"|erkl(?:är|aer)"
+    r"|\?\s*$"
+    r")",
+    re.IGNORECASE,
+)
 
 
 def _live_wiki_context_for_correction(message: str, limit: int = 2) -> str:
@@ -389,6 +471,38 @@ def _live_wiki_context_for_correction(message: str, limit: int = 2) -> str:
         return "\n".join(lines)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Live wiki lookup failed (non-fatal): %s", exc)
+        return ""
+
+
+def _live_wiki_context_proactive(message: str, limit: int = 2) -> str:
+    """Fetch Wikipedia data for the topic of a message when no cached data exists.
+
+    Called as a fallback when the vector search returns nothing relevant.
+    Uses a softer label than the correction variant so the model knows the
+    information is background context rather than a verified correction.
+    Returns an empty string when the lookup fails or yields nothing.
+    """
+    topic = _extract_topic(message)
+    if not topic:
+        return ""
+    logger.info("Proactive live wiki lookup (no cached data). Query: %r", topic)
+    try:
+        from tools.wikipedia import wiki_live_lookup  # noqa: PLC0415
+        results = wiki_live_lookup(topic, limit=limit)
+        if not results:
+            logger.info("Proactive live wiki lookup: no results for %r.", topic)
+            return ""
+        lines = [
+            "📡 WIKIPEDIA-HINTERGRUNDWISSEN (live abgerufen, da kein lokaler Cache vorhanden):"
+        ]
+        for r in results:
+            snippet = (r.get("full_text") or r.get("summary", ""))[:1000].replace("\n", " ").strip()
+            lines.append(f"[{r['title']}] {snippet}")
+            if r.get("source_url"):
+                lines.append(f"  Quelle: {r['source_url']}")
+        return "\n".join(lines)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Proactive live wiki lookup failed (non-fatal): %s", exc)
         return ""
 
 
@@ -704,6 +818,18 @@ async def chat_completion(
             logger.info("Live wiki section injected (%d chars).", len(live_wiki_section))
         else:
             logger.info("Live wiki lookup returned no results for correction message.")
+    elif not wiki_section and bool(_TOPIC_QUESTION_RE.search(last_message)):
+        # No cached data and the message looks like a topical question →
+        # proactively fetch fresh Wikipedia data so the model has something to
+        # work with.  This is a best-effort step; failures are silently ignored.
+        logger.info("No cached wiki data and topical question detected – proactive live lookup.")
+        live_wiki_section = await asyncio.get_running_loop().run_in_executor(
+            None, _live_wiki_context_proactive, last_message
+        )
+        if live_wiki_section:
+            logger.info("Proactive wiki section injected (%d chars).", len(live_wiki_section))
+        else:
+            logger.info("Proactive live wiki lookup returned no results.")
 
     # 3. Main LLM response (P100)
     if not llm_manager.is_ready("main"):
