@@ -56,6 +56,9 @@ class ChatCompletionRequest(BaseModel):
     # Optional IANA timezone name sent by the client (e.g. "Europe/Berlin").
     # Used to show the correct local time in the system prompt.
     timezone: Optional[str] = None
+    # When True (default), <think>…</think> blocks are stripped from the
+    # assistant response before it is returned to the client.
+    strip_thinking: bool = True
 
 
 # ---------------------------------------------------------------------------

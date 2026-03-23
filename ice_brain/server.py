@@ -409,6 +409,10 @@ async def chat_completion(
             content={"error": f"LLM inference failed: {exc}"},
         )
 
+    # Strip <think>…</think> reasoning blocks when requested (default: True).
+    if request.strip_thinking:
+        assistant_text = re.sub(r"<think>.*?</think>", "", assistant_text, flags=re.DOTALL).strip()
+
     # 4. Async memory extraction (background task, zero user latency)
     # The built-in "admin" account is excluded – it is a shared system account
     # and should not accumulate personal memories.

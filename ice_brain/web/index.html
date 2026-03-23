@@ -140,6 +140,19 @@
     }
     #logout-btn:hover { color: var(--text); border-color: var(--accent); }
 
+    #think-toggle {
+      background: none;
+      border: 1px solid var(--surface2);
+      border-radius: 6px;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 0.75rem;
+      padding: 3px 8px;
+      user-select: none;
+    }
+    #think-toggle:hover  { color: var(--text); border-color: var(--accent); }
+    #think-toggle.active { color: #fbbf24; border-color: #fbbf24; }
+
     #model-status {
       font-size: 0.75rem;
       padding: 3px 8px;
@@ -307,6 +320,7 @@
   <h1>🧊 ice_brain</h1>
   <div id="user-info">
     <span id="user-label">–</span>
+    <button id="think-toggle" title="Denk-Blöcke (<think>) ein-/ausblenden">💭 Denken</button>
     <button id="logout-btn">Abmelden</button>
   </div>
   <span id="model-status">Verbindet…</span>
@@ -345,6 +359,17 @@
   const statusEl     = document.getElementById('model-status');
   const userLabel    = document.getElementById('user-label');
   const logoutBtn    = document.getElementById('logout-btn');
+  const thinkToggle  = document.getElementById('think-toggle');
+
+  /* ── Think-block toggle (default: hidden / strip_thinking = true) ── */
+  let showThinking = false;
+  thinkToggle.addEventListener('click', () => {
+    showThinking = !showThinking;
+    thinkToggle.classList.toggle('active', showThinking);
+    thinkToggle.title = showThinking
+      ? 'Denk-Blöcke werden angezeigt – klicken zum Ausblenden'
+      : 'Denk-Blöcke (<think>) ein-/ausblenden';
+  });
 
   /* ── Overlay helpers ── */
   function showLogin() {
@@ -517,6 +542,7 @@
           max_tokens: 1024,
           user: session.user_id,
           session_token: session.token,
+          strip_thinking: !showThinking,
         }),
       });
 
