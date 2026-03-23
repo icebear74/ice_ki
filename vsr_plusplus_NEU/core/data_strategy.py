@@ -15,27 +15,27 @@ class DataStrategyScheduler:
     Key design principle
     -------------------
     The training dataset files on disk are **already pre-weighted** in the
-    correct long-run ratio (≈ 50 % 540, 25 % 720, 25 % 720_169).  Therefore
+    correct long-run ratio (≈ 40 % 720_169, 40 % 720, 20 % 540).  Therefore
     Phase 3 does NOT apply any distribution override – the sampler simply
     draws proportionally to file counts, which naturally yields the desired
     mix.
 
-    Phase 1 – Warmup (steps 0–10000):
+    Phase 1 – Warmup (steps 0–3000):
         Data : 100 % 720_169 (full-frames only, via explicit override)
                → model learns global structure without crop conflicts.
-               Phase 2 will NOT start even at step 10 000 if fewer than
+               Phase 2 will NOT start even at step 3 000 if fewer than
                MIN_CROP_FILES crop files exist (see can_introduce_crops()).
         Loss : perceptual weight = 0.0
 
-    Phase 2 – Crop Introduction (steps 10000–20000):
+    Phase 2 – Crop Introduction (steps 3000–8000):
         Data : linear interpolation from 100 % 720_169 → approximate natural
                distribution (CROP_INTRO_END_DISTRIBUTION), so that by step
-               20000 the override values closely match what is already on disk.
-               step 10000 → {720_169: 1.00, 540: 0.00, 720: 0.00}
-               step ~20000 → approaching {720_169: 0.25, 540: 0.50, 720: 0.25}
+               8000 the override values closely match what is already on disk.
+               step 3000 → {720_169: 1.00, 720: 0.00, 540: 0.00}
+               step ~8000 → approaching {720_169: 0.40, 720: 0.40, 540: 0.20}
         Loss : perceptual weight 0.0 → 0.08 (linear)
 
-    Phase 3 – Stable Training (steps 20000+):
+    Phase 3 – Stable Training (steps 8000+):
         Data : natural file-count proportional sampling (no override).
                get_distribution() returns None so the sampler uses the actual
                file ratio on disk (which is already the desired distribution).
@@ -52,12 +52,13 @@ class DataStrategyScheduler:
     PHASE_STABLE = 'stable'
 
     # Phase boundaries (in global training steps)
-    # Reduced from 15 000 → 10 000: crops are expected to start arriving
-    # around step 8 000–10 000.  Phase 2 will only actually activate once
-    # crop files exist (see can_introduce_crops()); until then the sampler
-    # keeps the 100 % full-frame distribution regardless of step number.
-    WARMUP_END = 10000
-    CROP_INTRO_END = 20000
+    # Phase 1 ends at step 3 000: by then the model has learned basic structure
+    # (quality_ki ≈ 0.40) and benefits from crop diversity rather than more
+    # full-frame repetition.  Phase 2 will only actually activate once crop
+    # files exist (see can_introduce_crops()); until then the sampler keeps
+    # the 100 % full-frame distribution regardless of step number.
+    WARMUP_END = 3000
+    CROP_INTRO_END = 8000
 
     # Minimum number of files that must exist for a given crop size before
     # Phase 2 sampling is allowed to include that size.
@@ -69,14 +70,14 @@ class DataStrategyScheduler:
     MIN_CROP_FILES_TRAINING = 10000
 
     # End-point of the Phase 2 interpolation.
-    # This approximates the natural file ratio on disk (50 % 540, 25 % 720,
-    # 25 % 720_169).  It is used ONLY during Phase 2; Phase 3 uses None
+    # Matches the actual on-disk distribution (40 % 720_169, 40 % 720,
+    # 20 % 540).  It is used ONLY during Phase 2; Phase 3 uses None
     # (natural file-count sampling) so the actual on-disk distribution takes
     # over seamlessly.
     CROP_INTRO_END_DISTRIBUTION = {
-        '720_169': 0.25,
-        '540': 0.50,
-        '720': 0.25,
+        '720_169': 0.40,
+        '540': 0.20,
+        '720': 0.40,
     }
 
     # Distribution used during Phase 1 warmup

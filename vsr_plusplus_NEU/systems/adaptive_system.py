@@ -122,6 +122,11 @@ class AdaptiveSystem:
         # Cached mode — updated by update_loss_weights so get_status() always
         # returns the true current mode (Warmup / Settling / Stable / Aggressive)
         self._cached_mode = 'Warmup'
+
+        # Perceptual floor: minimum value _update_perceptual_weight() will enforce.
+        # Set to 0.0 during DataStrategy Phase 1/2 so the scheduler's suppression
+        # is respected; set back to 0.05 in Phase 3 (AdaptiveSystem controls weight).
+        self._perceptual_floor = 0.05
     
     def _update_ema_loss(self, l1_loss_value):
         """Update EMA of L1 loss for smooth tracking"""
@@ -129,6 +134,18 @@ class AdaptiveSystem:
             self.ema_l1_loss = l1_loss_value
         else:
             self.ema_l1_loss = self.ema_alpha * l1_loss_value + (1 - self.ema_alpha) * self.ema_l1_loss
+
+    def set_perceptual_floor(self, value):
+        """Set the minimum perceptual weight enforced by _update_perceptual_weight().
+
+        Call with 0.0 during DataStrategy Phase 1/2 so the scheduler's
+        suppression is fully respected.  Call with 0.05 (the default) when
+        entering Phase 3 to restore autonomous AdaptiveSystem control.
+
+        Args:
+            value: float – new floor value (typically 0.0 or 0.05).
+        """
+        self._perceptual_floor = float(value)
     
     def _apply_momentum(self, current_value, target_value):
         """Apply momentum constraint: limit change to max_weight_change"""
@@ -157,7 +174,7 @@ class AdaptiveSystem:
         else:
             max_perc = 0.10  # L1 unstable -> structure first
         
-        min_perc = 0.05  # Never turn off completely
+        min_perc = self._perceptual_floor  # Respects DataStrategy phase suppression
         
         target_perc = self.perceptual_weight
         
