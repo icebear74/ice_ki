@@ -1,0 +1,288 @@
+"""
+Enrichment-Worker – Background Knowledge Enrichment Loop.
+
+Für jeden unangereicherten user_memory-Eintrag (enriched=FALSE) mit
+relevanter Kategorie und ausreichender Wichtigkeit:
+1. Main-LLM gibt Wikipedia-Suchbegriffe vor (JSON-Array, max 3)
+2. wikipedia.wiki_search() wird für jeden Begriff aufgerufen
+3. Treffer werden in memory_knowledge_link verknüpft
+4. Eintrag wird als enriched=TRUE markiert
+5. keywords-Feld im wiki_cache wird vom Main-LLM befüllt
+
+Der Worker läuft als asyncio-Background-Task, prüft alle 30 Minuten und
+überspringt den Lauf falls das Main-LLM gerade belegt ist.
+
+Konfiguration
+-------------
+MAX_ENRICHMENTS_PER_RUN     – wie viele Einträge pro Durchlauf verarbeitet werden
+MAX_WIKI_QUERIES_PER_FACT   – maximale Wikipedia-Abfragen pro Fakt
+MIN_IMPORTANCE_TO_ENRICH    – minimale Wichtigkeit für Anreicherung
+ENRICHMENT_INTERVAL_SECONDS – Pause zwischen zwei Läufen (Standard: 30 Minuten)
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from llm_manager import LLMManager
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Konfiguration
+# ---------------------------------------------------------------------------
+MAX_ENRICHMENTS_PER_RUN: int = 5
+MAX_WIKI_QUERIES_PER_FACT: int = 3
+MIN_IMPORTANCE_TO_ENRICH: float = 0.5
+ENRICHMENT_INTERVAL_SECONDS: int = 30 * 60  # 30 Minuten
+
+_ENRICHABLE_CATEGORIES = {"preference", "hobby", "personal", "experience"}
+
+_SEARCH_TERMS_PROMPT = """\
+You are a knowledge assistant. Given a personal fact about a user, output a \
+JSON array of up to {max_terms} Wikipedia search terms (in German) that are \
+most relevant for enriching that fact with background knowledge.
+
+Rules:
+- Output ONLY the JSON array – no prose, no markdown fences.
+- Each term should be a concise German search query (1-4 words).
+- If no Wikipedia enrichment makes sense, output an empty array: []
+
+Fact: {fact}
+"""
+
+_KEYWORDS_PROMPT = """\
+Extract 5-10 concise German keywords from the following Wikipedia summary that \
+describe its main topics. Output them as a comma-separated list only – no prose.
+
+Summary: {summary}
+"""
+
+
+# ---------------------------------------------------------------------------
+# Core enrichment logic (synchronous, runs in a thread)
+# ---------------------------------------------------------------------------
+
+def enrich_pending_memories(llm_manager: "LLMManager") -> None:
+    """Load pending memories and enrich them with Wikipedia knowledge.
+
+    Designed to be called from a background thread / asyncio executor.
+    Never raises – all errors are logged.
+    """
+    if not llm_manager.is_ready("main"):
+        logger.debug("Enrichment skipped – main model not loaded.")
+        return
+
+    # Check if the main model lock is currently held (busy during inference).
+    # We do a non-blocking acquire; if it fails the model is in use.
+    from llm_manager import _ModelHandle  # noqa: PLC0415 (internal, same package)
+    handle = llm_manager._models.get("main")  # noqa: SLF001
+    if handle is not None and not handle.lock.acquire(blocking=False):
+        logger.debug("Enrichment skipped – main model is busy.")
+        return
+    if handle is not None:
+        handle.lock.release()
+
+    try:
+        _run_enrichment(llm_manager)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Enrichment loop error: %s", exc)
+
+
+def _run_enrichment(llm_manager: "LLMManager") -> None:
+    """Fetch pending memories and enrich them."""
+    from db.connection import get_connection  # noqa: PLC0415
+    from tools.wikipedia import wiki_search  # noqa: PLC0415
+
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        placeholders = ",".join(["%s"] * len(_ENRICHABLE_CATEGORIES))
+        cursor.execute(
+            f"SELECT id, content, category FROM user_memory "  # noqa: S608
+            f"WHERE enriched = FALSE "
+            f"AND category IN ({placeholders}) "
+            f"AND importance >= %s "
+            f"AND (expires_at IS NULL OR expires_at > NOW()) "
+            f"LIMIT %s",
+            (*_ENRICHABLE_CATEGORIES, MIN_IMPORTANCE_TO_ENRICH, MAX_ENRICHMENTS_PER_RUN),
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+
+    if not rows:
+        logger.debug("Enrichment: no pending memories found.")
+        return
+
+    logger.info("Enrichment: processing %d memory entr%s.", len(rows), "y" if len(rows) == 1 else "ies")
+
+    for memory_id, content, category in rows:
+        try:
+            _enrich_single(llm_manager, memory_id, content)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Enrichment failed for memory id=%d: %s", memory_id, exc)
+            continue
+
+        # Mark as enriched regardless of whether wiki results were found
+        try:
+            from db.connection import get_connection as _gc  # noqa: PLC0415
+            with _gc() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE user_memory SET enriched = TRUE, enriched_at = NOW() WHERE id = %s",
+                    (memory_id,),
+                )
+                conn.commit()
+                cursor.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not mark memory id=%d as enriched: %s", memory_id, exc)
+
+
+def _enrich_single(llm_manager: "LLMManager", memory_id: int, content: str) -> None:
+    """Enrich a single memory entry with Wikipedia knowledge."""
+    from models import ChatMessage  # noqa: PLC0415
+    from tools.wikipedia import wiki_search  # noqa: PLC0415
+
+    # Step 1: Ask main LLM for relevant search terms
+    prompt = _SEARCH_TERMS_PROMPT.format(
+        max_terms=MAX_WIKI_QUERIES_PER_FACT,
+        fact=content,
+    )
+    try:
+        raw = llm_manager.chat_completion(
+            model_name="main",
+            messages=[ChatMessage(role="user", content=prompt)],
+            temperature=0.0,
+            max_tokens=128,
+        )
+        search_terms: list[str] = json.loads(raw.strip())
+        if not isinstance(search_terms, list):
+            search_terms = []
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not get search terms for memory id=%d: %s", memory_id, exc)
+        return
+
+    search_terms = [str(t) for t in search_terms if t][:MAX_WIKI_QUERIES_PER_FACT]
+    if not search_terms:
+        logger.debug("Enrichment: no search terms for memory id=%d.", memory_id)
+        return
+
+    # Step 2: Search Wikipedia for each term and link results
+    for term in search_terms:
+        try:
+            results = wiki_search(term, limit=1)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("wiki_search failed for term %r: %s", term, exc)
+            continue
+
+        for result in results:
+            cache_id = _get_or_create_cache_id(result)
+            if cache_id is None:
+                continue
+            _link_memory_to_cache(memory_id, cache_id)
+            _fill_cache_keywords(llm_manager, cache_id, result.get("summary", ""))
+
+
+def _get_or_create_cache_id(entry: dict) -> int | None:
+    """Return the wiki_cache.id for *entry*, inserting if needed."""
+    try:
+        from db.connection import get_connection  # noqa: PLC0415
+        title = entry.get("title", "")
+        lang = entry.get("lang", "de")
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id FROM wiki_cache WHERE title = %s AND lang = %s LIMIT 1",
+                (title, lang),
+            )
+            row = cursor.fetchone()
+            if row:
+                cursor.close()
+                return row[0]
+            cursor.execute(
+                "INSERT INTO wiki_cache (title, query, summary, source_url, lang, fetched_at) "
+                "VALUES (%s, %s, %s, %s, %s, NOW())",
+                (
+                    title,
+                    entry.get("query", ""),
+                    entry.get("summary", ""),
+                    entry.get("source_url", ""),
+                    lang,
+                ),
+            )
+            conn.commit()
+            new_id = cursor.lastrowid
+            cursor.close()
+            return new_id
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("_get_or_create_cache_id error: %s", exc)
+        return None
+
+
+def _link_memory_to_cache(memory_id: int, cache_id: int) -> None:
+    """Insert a memory_knowledge_link row (ignore duplicates)."""
+    try:
+        from db.connection import get_connection  # noqa: PLC0415
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT IGNORE INTO memory_knowledge_link (memory_id, cache_id) "
+                "VALUES (%s, %s)",
+                (memory_id, cache_id),
+            )
+            conn.commit()
+            cursor.close()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("_link_memory_to_cache error: %s", exc)
+
+
+def _fill_cache_keywords(llm_manager: "LLMManager", cache_id: int, summary: str) -> None:
+    """Ask main LLM to extract keywords from *summary* and store them."""
+    if not summary:
+        return
+    try:
+        from models import ChatMessage  # noqa: PLC0415
+        prompt = _KEYWORDS_PROMPT.format(summary=summary[:1000])
+        keywords = llm_manager.chat_completion(
+            model_name="main",
+            messages=[ChatMessage(role="user", content=prompt)],
+            temperature=0.0,
+            max_tokens=64,
+        ).strip()
+        from db.connection import get_connection  # noqa: PLC0415
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE wiki_cache SET keywords = %s WHERE id = %s",
+                (keywords, cache_id),
+            )
+            conn.commit()
+            cursor.close()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("_fill_cache_keywords error for cache_id=%d: %s", cache_id, exc)
+
+
+# ---------------------------------------------------------------------------
+# Asyncio background loop
+# ---------------------------------------------------------------------------
+
+async def enrichment_loop(llm_manager: "LLMManager") -> None:
+    """Async background task that runs enrichment every ENRICHMENT_INTERVAL_SECONDS.
+
+    Register at startup with:
+        asyncio.ensure_future(enrichment_loop(llm_manager))
+    """
+    logger.info(
+        "Enrichment loop started (interval=%ds, max_per_run=%d).",
+        ENRICHMENT_INTERVAL_SECONDS, MAX_ENRICHMENTS_PER_RUN,
+    )
+    while True:
+        await asyncio.sleep(ENRICHMENT_INTERVAL_SECONDS)
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, enrich_pending_memories, llm_manager)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Enrichment loop iteration error: %s", exc)

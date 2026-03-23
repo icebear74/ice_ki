@@ -30,7 +30,9 @@ threading.Lock that must be held during inference.
 from __future__ import annotations
 
 import logging
+import os
 import threading
+from pathlib import Path
 from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)
@@ -106,6 +108,10 @@ class LLMManager:
     def load_model(self, name: str, cfg: dict) -> bool:
         """Load a GGUF model onto the configured GPU.
 
+        If the file at *path* does not exist and *hf_repo* + *hf_file* are
+        configured, the model is downloaded automatically from HuggingFace
+        before loading.
+
         Returns True on success, False on failure (server continues).
         """
         if not _LLAMA_AVAILABLE:
@@ -116,6 +122,22 @@ class LLMManager:
         gpu_index = cfg.get("gpu", 0)
         n_ctx = cfg.get("n_ctx", 4096)
         n_gpu_layers = cfg.get("n_gpu_layers", -1)
+
+        # Auto-download from HuggingFace if the file is missing
+        if path and not Path(path).exists():
+            hf_repo = cfg.get("hf_repo", "")
+            hf_file = cfg.get("hf_file", "")
+            if hf_repo and hf_file:
+                path = self._download_from_hf(name, path, hf_repo, hf_file)
+                if path is None:
+                    return False
+            else:
+                logger.error(
+                    "Cannot load model '%s': file not found at '%s' and no "
+                    "hf_repo/hf_file configured for auto-download.",
+                    name, path,
+                )
+                return False
 
         if not self._cuda_available:
             logger.warning(
@@ -157,6 +179,42 @@ class LLMManager:
                 name, exc, path, gpu_index,
             )
             return False
+
+    def _download_from_hf(self, name: str, path: str, hf_repo: str, hf_file: str) -> str | None:
+        """Download *hf_file* from *hf_repo* into the directory of *path*.
+
+        Returns the local file path on success, None on failure.
+        """
+        try:
+            from huggingface_hub import hf_hub_download  # noqa: PLC0415
+        except ImportError:
+            logger.error(
+                "Cannot auto-download model '%s': huggingface-hub is not installed. "
+                "Run: pip install huggingface-hub",
+                name,
+            )
+            return None
+
+        target_dir = str(Path(path).parent)
+        os.makedirs(target_dir, exist_ok=True)
+        logger.info(
+            "Model '%s' not found at '%s' – downloading from HuggingFace: %s / %s …",
+            name, path, hf_repo, hf_file,
+        )
+        try:
+            local_path = hf_hub_download(
+                repo_id=hf_repo,
+                filename=hf_file,
+                local_dir=target_dir,
+            )
+            logger.info("Model '%s' downloaded to '%s'.", name, local_path)
+            return local_path
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "Failed to download model '%s' from HuggingFace (%s/%s): %s",
+                name, hf_repo, hf_file, exc,
+            )
+            return None
 
     def load_all(self, models_cfg: dict) -> None:
         """Load all models defined in the MODELS config dict."""

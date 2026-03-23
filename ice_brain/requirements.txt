@@ -1,5 +1,7 @@
 fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
 llama-cpp-python>=0.3.0
-mysql-connector-python>=8.2.0
+mariadb>=1.1.0
 pydantic>=2.0.0
+huggingface-hub>=0.20.0
+httpx>=0.25.0

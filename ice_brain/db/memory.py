@@ -8,8 +8,8 @@ Two memory tiers
                 relationship, hobby, experience)
 
 Extraction runs as a BACKGROUND TASK after every assistant response so the
-user sees zero added latency.  The router model (3B, P4) is used for
-extraction, not the main model.
+user sees zero added latency.  The main model (8B) is used for extraction
+to ensure high-quality fact parsing.
 
 Public API
 ----------
@@ -24,6 +24,7 @@ load_memories_for_prompt(user_id) -> str
 
 from __future__ import annotations
 
+import difflib
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -320,9 +321,11 @@ def _normalise_fact(fact: dict) -> dict | None:
 def _find_similar(cursor, user_id: str, category: str, content: str) -> int | None:
     """Return the id of an existing row that is similar to *content*, or None.
 
-    "Similar" means: the stored content contains one of the first two words of
-    the new content, or the new content contains one of the first two words of
-    the stored content.  Simple substring matching is sufficient for Phase 1.
+    Two-stage matching:
+    1. Fast word-based substring check: the stored content contains one of the
+       first two meaningful words (≥4 chars) of the new content.
+    2. Fuzzy fallback via difflib.SequenceMatcher: ratio() ≥ 0.75 counts as a
+       match so that typos like "Phantasieland" vs "Phantasialand" are caught.
     """
     cursor.execute(
         "SELECT id, content FROM user_memory "
@@ -337,14 +340,23 @@ def _find_similar(cursor, user_id: str, category: str, content: str) -> int | No
 
     # Use first meaningful word (>= 4 chars) of new content as key
     words = [w.lower() for w in content.split() if len(w) >= _MIN_WORD_LENGTH_FOR_SIMILARITY]
-    if not words:
-        return None
+
+    content_lower = content.lower()
 
     for row_id, row_content in rows:
         row_lower = row_content.lower()
-        for word in words[:2]:
-            if word in row_lower:
-                return row_id
+
+        # Stage 1: fast word-based substring matching
+        if words:
+            for word in words[:2]:
+                if word in row_lower:
+                    return row_id
+
+        # Stage 2: fuzzy full-content comparison
+        ratio = difflib.SequenceMatcher(None, content_lower, row_lower).ratio()
+        if ratio >= 0.75:
+            return row_id
+
     return None
 
 
@@ -402,8 +414,8 @@ def extract_memories_sync(user_id: str, user_message: str, llm_manager: "LLMMana
         return
 
     try:
-        if not llm_manager.is_ready("router"):
-            logger.info("Memory extraction skipped – router model not loaded.")
+        if not llm_manager.is_ready("main"):
+            logger.info("Memory extraction skipped – main model not loaded.")
             return
 
         from models import ChatMessage  # noqa: PLC0415
@@ -414,7 +426,7 @@ def extract_memories_sync(user_id: str, user_message: str, llm_manager: "LLMMana
         ]
 
         raw = llm_manager.chat_completion(
-            model_name="router",
+            model_name="main",
             messages=messages,
             temperature=0.0,
             max_tokens=512,

@@ -5,15 +5,21 @@
 #   cp config.py.example config.py
 
 # Modell-Konfiguration
+# hf_repo / hf_file: Falls das Modell unter 'path' fehlt, wird es automatisch
+# von HuggingFace heruntergeladen (huggingface-hub muss installiert sein).
 MODELS = {
     'router': {
-        'path': '/models/qwen2.5-3b-instruct-q4_k_m.gguf',
-        'gpu': 1,            # GPU-Index: 0=P100, 1=P4
+        'path': '/models/qwen3-4b-q4_k_m.gguf',
+        'hf_repo': 'Qwen/Qwen3-4B-GGUF',
+        'hf_file': 'qwen3-4b-q4_k_m.gguf',
+        'gpu': 1,            # GPU-Index: 1=P4
         'n_ctx': 4096,
         'n_gpu_layers': -1,  # -1 = alle Layer auf GPU
     },
     'main': {
-        'path': '/models/deepseek-r1-14b-q4_k_m.gguf',
+        'path': '/models/qwen3-8b-q4_k_m.gguf',
+        'hf_repo': 'Qwen/Qwen3-8B-GGUF',
+        'hf_file': 'qwen3-8b-q4_k_m.gguf',
         'gpu': 0,            # GPU-Index: 0=P100
         'n_ctx': 8192,
         'n_gpu_layers': -1,

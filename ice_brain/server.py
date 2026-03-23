@@ -143,6 +143,15 @@ async def startup() -> None:
 
     logger.info("ice_brain ready.  Model status: %s", llm_manager.get_status())
 
+    # 6. Start background enrichment loop
+    try:
+        import asyncio  # noqa: PLC0415
+        from workers.enrichment import enrichment_loop  # noqa: PLC0415
+        asyncio.ensure_future(enrichment_loop(llm_manager))
+        logger.info("Enrichment background loop registered.")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not start enrichment loop: %s", exc)
+
 
 # ---------------------------------------------------------------------------
 # Background helpers
