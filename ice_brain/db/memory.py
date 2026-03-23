@@ -451,16 +451,18 @@ def extract_memories_sync(user_id: str, user_message: str, llm_manager: "LLMMana
 
         with get_connection() as conn:
             cursor = conn.cursor()
+            stored = 0
             for fact in facts:
                 try:
                     _upsert_fact(cursor, user_id, fact)
+                    stored += 1
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Could not upsert memory fact: %s", exc)
             conn.commit()
             cursor.close()
 
         logger.info(
-            "Memory extraction: %d fact(s) stored for user %r.", len(facts), user_id
+            "Memory extraction: %d fact(s) stored for user %r.", stored, user_id
         )
 
     except Exception as exc:  # noqa: BLE001
