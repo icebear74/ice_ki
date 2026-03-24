@@ -787,9 +787,9 @@ def _extract_correction_topic(message: str) -> str:
     caps = [t for t in meaningful if t[0].isupper()]
     lower = [t for t in meaningful if not t[0].isupper()]
 
-    # Build query: capitalized tokens first (sorted by length desc), then others
-    caps.sort(key=len, reverse=True)
-    lower.sort(key=len, reverse=True)
+    # Build query: capitalized tokens first (in original order), then lowercase
+    # tokens (in original order).  We no longer sort by length so that proper
+    # names like "Chuck Norris" keep their natural word order.
     combined = caps + lower
     return " ".join(combined[:_MAX_TOPIC_WORDS])
 
@@ -1529,14 +1529,17 @@ async def chat_completion(
             logger.info("Live wiki lookup (Update) returned no results.")
     elif intent_str == "wiki":
         # Router explicitly recognised a wiki intent.
-        # Prefer a named entity extracted by the router (person, place, topic,
-        # etc.) as the lookup query – it has correct capitalisation and word
-        # order.  Fall back to _extract_topic() on the raw message only when no
-        # entity was provided.
+        # Prefer entities.topic extracted by the router as the lookup query –
+        # it has correct capitalisation and word order.  Fall back to the
+        # generic first-string entity value, then to _extract_topic() on the
+        # raw message only when no entity was provided.
         _router_entities = router_result.entities if router_result else {}
-        _entity_query = next(
-            (str(v) for v in _router_entities.values() if isinstance(v, str) and v.strip()),
-            None,
+        _entity_query = (
+            _router_entities.get("topic", "").strip()
+            or next(
+                (str(v) for v in _router_entities.values() if isinstance(v, str) and v.strip()),
+                None,
+            )
         )
         # Use the router entity as the canonical topic; fall back to
         # _extract_topic() which strips question filler words ("was weißt du über",
@@ -1646,7 +1649,9 @@ async def chat_completion(
     web_search_section = ""
     _did_web_search = False
     if intent_str in ("news", "sports", "web_search"):
-        _web_query = _extract_topic(last_message) or last_message
+        _router_entities = router_result.entities if router_result else {}
+        _entity_topic = _router_entities.get("topic", "").strip() if _router_entities else ""
+        _web_query = _entity_topic or _extract_topic(last_message) or last_message
         _is_news = intent_str in ("news", "sports")
         logger.info(
             "Web search intent %r detected – proactive %s search for query %r.",
@@ -1668,7 +1673,9 @@ async def chat_completion(
     # tags itself (which can lead to hallucination loops).
     weather_section = ""
     if intent_str == "weather":
-        _weather_location = _extract_topic(last_message) or None
+        _router_entities = router_result.entities if router_result else {}
+        _entity_topic = _router_entities.get("topic", "").strip() if _router_entities else ""
+        _weather_location = _entity_topic or _extract_topic(last_message) or None
         # Guard: if the "location" extracted from the message is also the
         # title of an already-injected wiki article (i.e. it's a person or
         # topic, not a real place), skip the weather lookup entirely.  This
