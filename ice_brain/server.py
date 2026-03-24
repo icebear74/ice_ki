@@ -1215,7 +1215,22 @@ def _wiki_context_for_message(message: str, limit: int = 3, min_score: float = 0
                 results[0]["score"] if results else 0.0,
                 results[0]["title"] if results else "",
             )
-            return ""
+            # Title-based fallback: when the embedding fails to surface the
+            # right article (common for proper-name queries buried in meta-
+            # questions), do a direct SQL title match.  This reliably finds
+            # e.g. "Martin Schindler" even when cosine similarity scores it
+            # below threshold.
+            from db.wiki import search_wiki_chunks_by_title  # noqa: PLC0415
+            title_hits = search_wiki_chunks_by_title(message, limit=limit)
+            if title_hits:
+                logger.debug(
+                    "Wiki search: title-based fallback found %d chunk(s): %s",
+                    len(title_hits),
+                    ", ".join(f"{r['title']!r}" for r in title_hits),
+                )
+                relevant = title_hits
+            else:
+                return ""
 
         # Relevanzfilter: Prüfen ob signifikante Wörter der Nachricht in Chunk-Titeln vorkommen
         sig_words = [
