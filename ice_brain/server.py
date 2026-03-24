@@ -906,6 +906,23 @@ def _execute_tool_calls(
                     for r in results:
                         snippet = (r.get("full_text") or r.get("summary", ""))[:600].replace("\n", " ")
                         lines.append(f"  [{r['title']}] {snippet}")
+                        if r.get("source_url"):
+                            title = r.get("title", "Wikipedia")
+                            lines.append(f"  Quelle: [{title} – Wikipedia]({r['source_url']})")
+                        if r.get("image_url"):
+                            try:
+                                from db.images import fetch_and_cache_url, link_image  # noqa: PLC0415
+                                img_id = fetch_and_cache_url(
+                                    r["image_url"], "wikipedia", r.get("title", "unknown"),
+                                    alt_text=r.get("title", ""),
+                                )
+                                if img_id is not None:
+                                    cache_id = r.get("id")
+                                    if cache_id is not None:
+                                        link_image(img_id, "wiki_cache", cache_id)
+                                    lines.append(f"  Bild: ![{r.get('title', '')}](/api/image/{img_id}?thumb=true)")
+                            except Exception as exc_img:  # noqa: BLE001
+                                logger.warning("Wiki image caching failed (non-fatal): %s", exc_img)
                     parts.append("\n".join(lines))
             elif tool_name == "WEATHER":
                 from tools.weather import get_weather_for_user  # noqa: PLC0415
