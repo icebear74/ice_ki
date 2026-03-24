@@ -939,6 +939,7 @@ def _live_wiki_context_for_url(title: str) -> str:
 
 
 
+def _live_wiki_context_proactive(message: str, limit: int = 2) -> str:
     """Fetch Wikipedia data for the topic of a message when no cached data exists.
 
     Called as a fallback when the vector search returns nothing relevant.
