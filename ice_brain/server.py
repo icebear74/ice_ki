@@ -1508,18 +1508,21 @@ async def chat_completion(
             (str(v) for v in _router_entities.values() if isinstance(v, str) and v.strip()),
             None,
         )
-        wiki_topic = _entity_query or _extract_topic(last_message)
+        # Use the router entity as the canonical topic; fall back to the raw
+        # message (never to _extract_topic which reverses word order).
+        wiki_topic = _entity_query or last_message
         _wiki_lookup_query = _entity_query or last_message
         # If the standard local search (min_score=0.55) returned nothing, retry
-        # with the entity string and a softer threshold (0.40).  The router has
-        # already confirmed the intent, so we trust a near-miss result rather
-        # than discarding locally-cached chunks that are clearly relevant.
-        if not wiki_section and _entity_query:
-            wiki_section = _wiki_context_for_message(_entity_query, min_score=0.40)
+        # with a softer threshold (0.40).  Use the router entity when available,
+        # otherwise the raw message — the router has already confirmed the intent
+        # so we trust near-miss results rather than discarding relevant chunks.
+        if not wiki_section:
+            _retry_query = _entity_query or last_message
+            wiki_section = _wiki_context_for_message(_retry_query, min_score=0.40)
             if wiki_section:
                 logger.debug(
-                    "Wiki intent: local cache hit with entity %r (threshold=0.40, %d chars).",
-                    _entity_query, len(wiki_section),
+                    "Wiki intent: local cache hit for %r (threshold=0.40, %d chars).",
+                    _retry_query, len(wiki_section),
                 )
         # Live lookup gate: only fetch from Wikipedia when
         #   a) no local chunks exist, OR
