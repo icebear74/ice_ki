@@ -1433,11 +1433,18 @@ async def chat_completion(
     # Priority order (mutually exclusive, first match wins):
     #   1. User pasted a Wikipedia URL → fetch that exact article (highest priority).
     #   2. Correction signal → authoritative live lookup.
-    #   3. Router classified intent as "wiki" → always do live lookup.
+    #   3. Router classified intent as "wiki":
+    #       - Skip live lookup when local cached data exists AND is fresh (< 14 days).
+    #       - Always fetch when no local data or article is stale.
     #   4. Short follow-up / clarification message → extend with prior turn.
     #   5. Topical question → proactive live lookup.
     live_wiki_section = ""
     _correction_live = False  # True when live section came from a correction/URL signal
+    # Initialised here so _sse_gen closure can always reference them regardless of intent.
+    _wiki_lookup_query: str = ""
+    # Background web-search task: started when wiki returns nothing (typo fallback).
+    # Runs concurrently with LLM generation; result is appended after the response.
+    _bg_web_task: "asyncio.Task[str] | None" = None
     _wiki_url_title = _extract_wiki_url_title(last_message)
     if _wiki_url_title:
         logger.info("Wikipedia URL in message – fetching article %r directly.", _wiki_url_title)
@@ -1476,8 +1483,7 @@ async def chat_completion(
         else:
             logger.info("Live wiki lookup (Update) returned no results.")
     elif intent_str == "wiki":
-        # Router explicitly recognised a wiki intent → always do a live lookup
-        # for fresh data, regardless of cache age.
+        # Router explicitly recognised a wiki intent.
         # Prefer a named entity extracted by the router (person, place, topic,
         # etc.) as the lookup query – it has correct capitalisation and word
         # order.  Fall back to _extract_topic() on the raw message only when no
@@ -1500,14 +1506,44 @@ async def chat_completion(
                     "Wiki intent: local cache hit with entity %r (threshold=0.40, %d chars).",
                     _entity_query, len(wiki_section),
                 )
-        logger.info("Wiki intent detected – performing live lookup for topic %r.", wiki_topic)
-        live_wiki_section = await asyncio.get_running_loop().run_in_executor(
-            None, _live_wiki_context_proactive, _wiki_lookup_query
-        )
-        if live_wiki_section:
-            logger.info("Live wiki section injected for wiki intent (%d chars).", len(live_wiki_section))
-        else:
-            logger.info("Proactive live wiki lookup (wiki intent) returned no results.")
+        # Live lookup gate: only fetch from Wikipedia when
+        #   a) no local chunks exist, OR
+        #   b) the cached article is stale (> 14 days).
+        # Correction signals are handled earlier (before this branch) and always
+        # trigger a live lookup regardless of cache age.
+        _needs_live_lookup = True
+        if wiki_section:
+            try:
+                from tools.wikipedia import wiki_topic_is_stale  # noqa: PLC0415
+                _needs_live_lookup = wiki_topic_is_stale(wiki_topic, max_age_days=14)
+                if not _needs_live_lookup:
+                    logger.info(
+                        "Wiki intent: local cache is fresh (< 14 days) for %r – skipping live lookup.",
+                        wiki_topic,
+                    )
+            except Exception as _exc_stale:  # noqa: BLE001
+                logger.debug("wiki_topic_is_stale check failed (%s) – assuming stale.", _exc_stale)
+        if _needs_live_lookup:
+            logger.info("Wiki intent detected – performing live lookup for topic %r.", wiki_topic)
+            live_wiki_section = await asyncio.get_running_loop().run_in_executor(
+                None, _live_wiki_context_proactive, _wiki_lookup_query
+            )
+            if live_wiki_section:
+                logger.info("Live wiki section injected for wiki intent (%d chars).", len(live_wiki_section))
+            else:
+                logger.info("Proactive live wiki lookup (wiki intent) returned no results.")
+        # If we still have no wiki data at all (local + live), the user's query
+        # may contain a typo that the Wikipedia search engine couldn't handle.
+        # Start a background DuckDuckGo web search in parallel with the LLM so
+        # we can append the result after the response without adding latency.
+        if not wiki_section and not live_wiki_section:
+            logger.info(
+                "Wiki intent: no wiki data found – starting background web search for %r (typo fallback).",
+                _wiki_lookup_query,
+            )
+            _bg_web_task = asyncio.create_task(
+                asyncio.to_thread(_web_search_context, _wiki_lookup_query)
+            )
     else:
         # Build the effective query: if the current message is very short (likely a
         # follow-up or clarification), extend it with the last user turn from the
@@ -1835,6 +1871,26 @@ async def chat_completion(
                     full_text += _extra
                     collected.append(_extra)
 
+            # Background web search result (typo fallback for wiki intent).
+            # If a background web task was started, wait up to 8 s for the
+            # result and stream it as a short follow-up paragraph.
+            if _bg_web_task is not None:
+                try:
+                    _bg_web_result = await asyncio.wait_for(_bg_web_task, timeout=8.0)
+                    if _bg_web_result:
+                        _follow_up = (
+                            "\n\n💡 *Moment – ich habe noch etwas im Web dazu gefunden:*\n\n"
+                            + _bg_web_result
+                        )
+                        _fu_payload = json.dumps({
+                            "choices": [{"index": 0, "delta": {"content": _follow_up}, "finish_reason": None}]
+                        })
+                        yield f"data: {_fu_payload}\n\n"
+                        full_text += _follow_up
+                        collected.append(_follow_up)
+                except (asyncio.TimeoutError, Exception) as _bg_exc:  # noqa: BLE001
+                    logger.debug("Background web task not available in time: %s", _bg_exc)
+
             yield "data: [DONE]\n\n"
 
             # Fire-and-forget background work after streaming completes
@@ -1912,6 +1968,17 @@ async def chat_completion(
     for _img_md in _pending_imgs:
         if _img_md not in assistant_text:
             assistant_text += f"\n\n{_img_md}"
+
+    # Background web search result (typo fallback, non-streaming path).
+    if _bg_web_task is not None:
+        try:
+            _bg_web_result = await asyncio.wait_for(_bg_web_task, timeout=10.0)
+            if _bg_web_result:
+                assistant_text += (
+                    "\n\n💡 *Ich habe noch etwas im Web dazu gefunden:*\n\n" + _bg_web_result
+                )
+        except (asyncio.TimeoutError, Exception) as _bg_exc:  # noqa: BLE001
+            logger.debug("Background web task timed out or failed (non-streaming): %s", _bg_exc)
 
     # 4. Async memory extraction (background task, zero user latency)
     # The built-in "admin" account is excluded – it is a shared system account
