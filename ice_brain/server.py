@@ -953,7 +953,10 @@ def _live_wiki_context_proactive(message: str, limit: int = 2) -> str:
     information is background context rather than a verified correction.
     Returns an empty string when the lookup fails or yields nothing.
     """
-    query = message.strip()
+    # Extract the actual search topic – never pass the raw user sentence to
+    # Wikipedia, which would match on unrelated filler words and return wrong
+    # articles (e.g. "lebt chuck norris noch ?" → "Joe Lewis", "Delta Force 2").
+    query = _extract_topic(message) or message.strip()
     if not query:
         return ""
     logger.info("Proactive live wiki lookup. Query: %r", query)
@@ -1666,18 +1669,40 @@ async def chat_completion(
     weather_section = ""
     if intent_str == "weather":
         _weather_location = _extract_topic(last_message) or None
-        logger.info("Weather intent detected – proactive weather lookup for location %r.", _weather_location)
-        try:
-            from tools.weather import get_weather_for_user  # noqa: PLC0415
-            weather_section = await asyncio.get_running_loop().run_in_executor(
-                None, get_weather_for_user, user_id, _weather_location
+        # Guard: if the "location" extracted from the message is also the
+        # title of an already-injected wiki article (i.e. it's a person or
+        # topic, not a real place), skip the weather lookup entirely.  This
+        # prevents "lebt Chuck Norris noch?" from geocoding "chuck norris".
+        _wiki_titles_lower = ""
+        if wiki_section or live_wiki_section:
+            import re as _re_w  # noqa: PLC0415
+            _wiki_titles_lower = " ".join(
+                t.lower()
+                for t in _re_w.findall(r"\[([^\]]+)\]", (wiki_section or "") + (live_wiki_section or ""))
             )
-            if weather_section:
-                logger.info("Proactive weather section injected (%d chars).", len(weather_section))
-            else:
-                logger.info("Proactive weather lookup returned no results.")
-        except Exception as exc_weather:  # noqa: BLE001
-            logger.warning("Proactive weather lookup failed (non-fatal): %s", exc_weather)
+        _location_is_wiki_topic = bool(
+            _weather_location
+            and _wiki_titles_lower
+            and _weather_location.lower() in _wiki_titles_lower
+        )
+        if _location_is_wiki_topic:
+            logger.info(
+                "Weather intent: skipping geocoding – %r is a wiki article topic, not a place.",
+                _weather_location,
+            )
+        else:
+            logger.info("Weather intent detected – proactive weather lookup for location %r.", _weather_location)
+            try:
+                from tools.weather import get_weather_for_user  # noqa: PLC0415
+                weather_section = await asyncio.get_running_loop().run_in_executor(
+                    None, get_weather_for_user, user_id, _weather_location
+                )
+                if weather_section:
+                    logger.info("Proactive weather section injected (%d chars).", len(weather_section))
+                else:
+                    logger.info("Proactive weather lookup returned no results.")
+            except Exception as exc_weather:  # noqa: BLE001
+                logger.warning("Proactive weather lookup failed (non-fatal): %s", exc_weather)
 
     # 3. Main LLM response (P100)
     if not llm_manager.is_ready("main"):
