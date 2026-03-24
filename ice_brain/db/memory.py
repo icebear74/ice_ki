@@ -86,8 +86,13 @@ _TTL_MAP: dict[str, int] = {
     "2h": 2,
     "4h": 4,
     "8h": 8,
+    "12h": 12,
     "24h": 24,
     "48h": 48,
+    "72h": 72,
+    "96h": 96,
+    "120h": 120,
+    "168h": 168,
 }
 
 # ---------------------------------------------------------------------------
@@ -145,9 +150,14 @@ DO NOT EXTRACT:
 
 LOCATION FACTS:
 - Categorize where the user lives, works, or is located as "location", NOT "preference".
-- For location/travel mentions, set category to "location" and include "latitude" and "longitude" fields if you can identify a specific place.
 - For temporary stays ("Ich bin 3 Tage in Berlin", "Ich fahre morgen nach Paris"), set "ttl" to the appropriate duration (e.g. "72h" for 3 days).
+- For same-day visits ("Ich bin heute im Phantasialand", "Ich bin grade auf dem Nürburgring"), set "ttl" to "24h" and temporal to "current".
+- "heute" / "today" → ttl "24h". "grade" / "gerade" / "momentan" → ttl "8h".
+- POI (Points of Interest) like theme parks, stadiums, landmarks count as locations too:
+  "Ich bin im Phantasialand" → category "location", content "Ist im Phantasialand", ttl "8h", temporal "current".
+  "Ich bin heute auf dem Nürburgring" → category "location", content "Ist heute auf dem Nürburgring", ttl "24h", temporal "current".
 - For permanent moves ("Ich bin nach München gezogen") or residence ("Ich wohne in Köln"), set "temporal" to "permanent" with no TTL and category "location".
+- Do NOT include latitude/longitude fields in the JSON output – geocoding is handled automatically after extraction.
 - Examples: "Ich wohne in Dinslaken" → category "location", content "Wohnt in Dinslaken".
 
 AMBIGUITY: When a relation type is unclear (e.g. "meine Freundin" could be partner or friend), add an entry to "ambiguities".
@@ -161,7 +171,7 @@ JSON schema:
       "category": "<preference|personal|relationship|hobby|experience|location|activity|mood|plan|topic>",
       "importance": <0.0-1.0>,
       "temporal": "<permanent|current|past>",
-      "ttl": "<null or 1h/2h/4h/8h/24h/48h>"
+      "ttl": "<null or 1h/2h/4h/8h/12h/24h/48h/72h/96h/120h/168h>"
     },
     {
       "subject": "susanne",
@@ -230,6 +240,18 @@ Message: "Ich wohne in Dinslaken"
 Output:
 {"facts": [
   {"subject": "user", "content": "Wohnt in Dinslaken", "category": "location", "importance": 0.9, "temporal": "permanent", "ttl": null}
+], "ambiguities": []}
+
+Message: "Ich bin heute im Phantasialand"
+Output:
+{"facts": [
+  {"subject": "user", "content": "Ist heute im Phantasialand", "category": "location", "importance": 0.7, "temporal": "current", "ttl": "24h"}
+], "ambiguities": []}
+
+Message: "Ich bin grade für 2 Tage in Berlin"
+Output:
+{"facts": [
+  {"subject": "user", "content": "Ist für 2 Tage in Berlin", "category": "location", "importance": 0.7, "temporal": "current", "ttl": "48h"}
 ], "ambiguities": []}
 
 Message: "ok"
@@ -456,8 +478,12 @@ def _find_similar(cursor, user_id: str, category: str, content: str) -> int | No
     return None
 
 
-def _upsert_fact(cursor, user_id: str, fact: dict) -> None:
-    """Insert or update a single fact in user_memory (with embedding on write)."""
+def _upsert_fact(cursor, user_id: str, fact: dict) -> int | None:
+    """Insert or update a single fact in user_memory (with embedding on write).
+
+    Returns the row ID of the affected row (existing_id on UPDATE, lastrowid on INSERT),
+    or None if the operation failed silently.
+    """
     expires_at = _compute_expires_at(fact["ttl"], fact["category"])
     existing_id = _find_similar(cursor, user_id, fact["category"], fact["content"])
 
@@ -511,6 +537,7 @@ def _upsert_fact(cursor, user_id: str, fact: dict) -> None:
             "Memory updated (id=%d, category=%s): %s",
             existing_id, fact["category"], fact["content"]
         )
+        return existing_id
     else:
         if embedding_text:
             cursor.execute(
@@ -525,9 +552,11 @@ def _upsert_fact(cursor, user_id: str, fact: dict) -> None:
                 "VALUES (%s, %s, %s, %s, %s, %s)",
                 (user_id, fact["category"], fact["content"], fact["importance"], temporal, expires_at),
             )
+        new_id = cursor.lastrowid
         logger.debug(
-            "Memory inserted (category=%s): %s", fact["category"], fact["content"]
+            "Memory inserted (id=%s, category=%s): %s", new_id, fact["category"], fact["content"]
         )
+        return new_id
 
 
 # ---------------------------------------------------------------------------
@@ -611,18 +640,28 @@ def delete_memory(memory_id: int, user_id: str | None = None) -> bool:
         return False
 
 
-def _geocode_location_fact(user_id: str, content: str) -> None:
-    """Try to geocode a location fact and log the resolved coordinates.
+def _geocode_location_fact(user_id: str, content: str, memory_id: int) -> None:
+    """Geocode a location fact and embed coordinates directly into the content text.
 
     Extracts a place name from *content* (e.g. "Wohnt in Dinslaken" → "Dinslaken"),
-    calls the geocoding tool, and logs the result.  Non-fatal – errors are
-    silently swallowed so they never block memory extraction.
+    calls the geocoding tool, enriches the content string with display_name and
+    coordinates in the format "Wohnt in Dinslaken, Nordrhein-Westfalen (📍 51.5672, 6.7331)",
+    then UPDATEs the DB row (content + embedding).
+
+    Idempotent: if *content* already contains '📍', nothing is done.
+    Non-fatal – errors are silently swallowed so they never block memory extraction.
     """
     try:
-        # Simple heuristic: look for a capitalised word after common German prepositions
+        # Already geocoded – skip to stay idempotent
+        if "📍" in content:
+            return
+
+        # Extract the place name using extended German preposition patterns
         match = re.search(
-            r"(?:in|nach|bei|aus|von|wohn(?:t|en)\s+in|lebt?\s+in|zog\s+nach)\s+"
-            r"([A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-]+(?:\s+[A-Za-zÄÖÜäöüß\-]+)*)",
+            r"(?:in|im|nach|bei|aus|von|auf\s+de[mnr]|am|"
+            r"wohn(?:t|en)\s+in|lebt?\s+in|zog\s+nach|"
+            r"[Ii]st\s+(?:heute\s+)?(?:im|in|auf\s+de[mnr]|am|bei))\s+"
+            r"([A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-]+(?:[\s\-][A-Za-zÄÖÜäöüß\-]+)*)",
             content,
         )
         if not match:
@@ -637,18 +676,59 @@ def _geocode_location_fact(user_id: str, content: str) -> None:
 
         from tools.geocoding import geocode  # noqa: PLC0415
         result = geocode(place_name)
-        if result:
-            logger.info(
-                "Geocoded location fact for user %r: %r → lat=%.4f lon=%.4f (%s)",
-                user_id, place_name,
-                result["lat"], result["lon"],
-                result.get("display_name", ""),
-            )
-        else:
+        if not result:
             logger.debug(
                 "Geocoding returned no result for place %r (user %r).",
                 place_name, user_id,
             )
+            return
+
+        lat = result["lat"]
+        lon = result["lon"]
+        display_name = result.get("display_name", place_name)
+
+        # Build enriched content: append display_name and coordinates
+        # Use only the first two components of the display_name (e.g. "Dinslaken, Nordrhein-Westfalen")
+        display_parts = [p.strip() for p in display_name.split(",")]
+        short_display = ", ".join(display_parts[:2])
+
+        # Avoid redundancy if the place name is already part of the content
+        if short_display.lower() in content.lower():
+            enriched_content = f"{content.rstrip()} (📍 {lat:.4f}, {lon:.4f})"
+        else:
+            enriched_content = f"{content.rstrip()}, {short_display} (📍 {lat:.4f}, {lon:.4f})"
+
+        # Compute new embedding for enriched content
+        embedding_text: str | None = None
+        try:
+            from tools.embeddings import embed_one, vec_to_text  # noqa: PLC0415
+            vec = embed_one(enriched_content)
+            embedding_text = vec_to_text(vec)
+        except Exception as emb_exc:  # noqa: BLE001
+            logger.debug("_geocode_location_fact: embedding failed (non-fatal): %s", emb_exc)
+
+        # UPDATE the DB row with enriched content and new embedding
+        from db.connection import get_connection  # noqa: PLC0415
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            if embedding_text:
+                cursor.execute(
+                    "UPDATE user_memory SET content = %s, updated_at = NOW(), "
+                    "embedding = VEC_FromText(%s) WHERE id = %s",
+                    (enriched_content, embedding_text, memory_id),
+                )
+            else:
+                cursor.execute(
+                    "UPDATE user_memory SET content = %s, updated_at = NOW() WHERE id = %s",
+                    (enriched_content, memory_id),
+                )
+            conn.commit()
+            cursor.close()
+
+        logger.info(
+            "Geocoded location fact for user %r (id=%d): %r → lat=%.4f lon=%.4f (%s)",
+            user_id, memory_id, place_name, lat, lon, display_name,
+        )
     except Exception as exc:  # noqa: BLE001
         logger.debug("_geocode_location_fact failed (non-fatal): %s", exc)
 
@@ -752,24 +832,26 @@ def extract_memories_sync(
         # ── Store user facts ─────────────────────────────────────────────────
         if user_facts:
             from db.connection import get_connection  # noqa: PLC0415
+            location_facts_with_ids: list[tuple[dict, int | None]] = []
             with get_connection() as conn:
                 cursor = conn.cursor()
                 for fact in user_facts:
                     try:
-                        _upsert_fact(cursor, user_id, fact)
+                        fact_id = _upsert_fact(cursor, user_id, fact)
                         stored += 1
+                        if fact.get("category") == "location":
+                            location_facts_with_ids.append((fact, fact_id))
                     except Exception as exc:  # noqa: BLE001
                         logger.warning("Could not upsert memory fact: %s", exc)
                 conn.commit()
                 cursor.close()
 
             # ── Geocode location facts ─────────────────────────────────────
-            # When a permanent location fact is stored, call the geocoding tool
-            # to resolve lat/lon coordinates and log them for future use
-            # (e.g. weather queries for the user's home city).
-            for fact in user_facts:
-                if fact.get("category") == "location" and fact.get("temporal") == "permanent":
-                    _geocode_location_fact(user_id, fact["content"])
+            # Geocode ALL location facts (permanent and temporary) to embed
+            # coordinates directly into the content text (no schema change needed).
+            for fact, fact_id in location_facts_with_ids:
+                if fact_id is not None:
+                    _geocode_location_fact(user_id, fact["content"], fact_id)
 
         # ── Store relation facts ─────────────────────────────────────────────
         if relation_facts:
