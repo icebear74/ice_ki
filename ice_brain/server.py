@@ -35,7 +35,7 @@ if str(_HERE) not in sys.path:
 import re
 import secrets
 
-from fastapi import BackgroundTasks, FastAPI
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -528,16 +528,25 @@ _TOPIC_QUESTION_RE = re.compile(
     r"|weiß(?:t)?\s+du"
     r"|sag\s+(?:mir|mal)"
     r"|erzähl"
-    r"|was\s+(?:ist|sind|war|waren|bedeutet|weiß)"
-    r"|wer\s+(?:ist|war)"
-    r"|wo\s+(?:ist|liegt|befindet|gibt)"
-    r"|wie\s+(?:ist|war|funktioniert|geht)"
+    r"|was\s+(?:ist|sind|war|waren|bedeutet|weiß|macht|kann)"
+    r"|wer\s+(?:ist|war|sind|waren)"
+    r"|wo\s+(?:ist|liegt|befindet|gibt|war)"
+    r"|wie\s+(?:ist|war|funktioniert|geht|heißt|alt)"
+    r"|wann\s+(?:ist|war|wurde|hat|starb|geboren)"
     r"|can\s+you\s+tell"
     r"|do\s+you\s+know"
-    r"|what\s+is"
+    r"|what\s+(?:is|are|was|were|does|did)"
+    r"|who\s+(?:is|was|are)"
+    r"|when\s+(?:is|was|did)"
+    r"|where\s+(?:is|was|are)"
     r"|gibt\s+es"
     r"|handelt\s+(?:es\s+)?sich"
     r"|erkl(?:är|aer)"
+    r"|beschreib"
+    r"|nenne\s+(?:mir)?"
+    r"|zeig\s+(?:mir)?"
+    r"|such\s+(?:mir|mal)?"
+    r"|info(?:rmation(?:en)?)?\s+(?:über|zu|von)"
     r"|\?\s*$"
     r")",
     re.IGNORECASE,
@@ -1125,10 +1134,20 @@ async def chat_completion(
     tool_note = ""
     if user_id != "default":
         tool_note = (
-            "\n\nVerfügbare Werkzeuge (nutze sie wenn nötig, indem du sie in deiner Antwort einbettest):\n"
+            "\n\nVerfügbare Werkzeuge (nutze sie indem du sie in deiner Antwort einbettest):\n"
             "  [SEARCH_MEMORY: Suchanfrage] – Semantische Suche in gespeicherten Erinnerungen\n"
             "  [SEARCH_RELATION: Name] – Alle gespeicherten Fakten über eine bekannte Person abrufen\n"
-            "  [WIKI_SEARCH: Suchanfrage] – Wikipedia on-demand abfragen"
+            "  [WIKI_SEARCH: Suchanfrage] – Wikipedia on-demand abfragen\n"
+            "\n"
+            "WICHTIGE REGELN für Werkzeug-Nutzung:\n"
+            "1. Du hast KEINEN Zugang zu Suchmaschinen (Google, Bing etc.) und KEINEN Internetzugang.\n"
+            "2. Wenn du Fakten über Personen, Orte, Ereignisse oder Themen brauchst, "
+            "nutze IMMER [WIKI_SEARCH: ...] – das ist deine EINZIGE Quelle für aktuelles Wissen.\n"
+            "3. Erfinde NIEMALS Suchergebnisse oder tue so, als hättest du im Internet gesucht.\n"
+            "4. Wenn du dir bei Fakten unsicher bist, nutze [WIKI_SEARCH: ...] BEVOR du antwortest.\n"
+            "5. Bei Fragen über Personen (Wer ist X?, Was macht X?) → IMMER [WIKI_SEARCH: Name].\n"
+            "6. ANTWORTE IMMER IN DER SPRACHE, IN DER DER BENUTZER SCHREIBT. "
+            "Deutsch → Deutsch, Englisch → Englisch, andere Sprache → dieselbe Sprache."
         )
     # Inject pending disambiguation question if any
     disambig_section = ""
@@ -1143,6 +1162,14 @@ async def chat_completion(
                     "bevor du auf die aktuelle Nachricht eingehst."
                 )
 
+    # Spracherkennungs-Hinweis (für nicht-authentifizierte Benutzer ohne tool_note)
+    lang_note = ""
+    if user_id == "default":
+        lang_note = (
+            "\n\nANTWORTE IMMER IN DER SPRACHE, IN DER DER BENUTZER SCHREIBT. "
+            "Deutsch → Deutsch, Englisch → Englisch, andere Sprache → dieselbe Sprache."
+        )
+
     # Build the system prompt additions.
     # Correction live wiki goes FIRST so the model sees it before everything else.
     # Order: [correction_wiki] + time_note + memory + disambiguation + [proactive_wiki] + cached_wiki
@@ -1153,7 +1180,7 @@ async def chat_completion(
     )
 
     if _correction_live:
-        system_additions = f"{live_wiki_section}\n\n{_WIKI_PRIORITY_NOTE}\n\n{time_note}{tool_note}"
+        system_additions = f"{live_wiki_section}\n\n{_WIKI_PRIORITY_NOTE}\n\n{time_note}{tool_note}{lang_note}"
         if memory_section:
             system_additions = f"{system_additions}\n\n{memory_section}"
         if disambig_section:
@@ -1161,7 +1188,7 @@ async def chat_completion(
         if wiki_section:
             system_additions = f"{system_additions}\n\n{wiki_section}"
     else:
-        system_additions = f"{time_note}{tool_note}"
+        system_additions = f"{time_note}{tool_note}{lang_note}"
         if memory_section:
             system_additions = f"{system_additions}\n\n{memory_section}"
         if disambig_section:
@@ -1402,6 +1429,35 @@ async def delete_relation_memory_entry(memory_id: int, session_token: str | None
 # Admin API endpoints for manual worker triggers
 # ---------------------------------------------------------------------------
 
+@app.get("/api/image/{image_id}")
+async def serve_image(image_id: int, thumb: bool = False) -> StreamingResponse:
+    """Liefert ein gecachtes Bild anhand seiner ID.
+
+    ?thumb=true gibt das WebP-Vorschaubild zurück (falls vorhanden).
+    Gibt 404 zurück, wenn das Bild nicht gefunden wurde.
+    """
+    from db.images import get_image  # noqa: PLC0415
+
+    record = get_image(image_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Bild nicht gefunden.")
+
+    if thumb and record.get("thumb_data"):
+        data = record["thumb_data"]
+        media_type = "image/webp"
+    else:
+        data = record.get("image_data")
+        if not data:
+            raise HTTPException(status_code=404, detail="Bilddaten nicht verfügbar.")
+        media_type = record.get("mime_type", "application/octet-stream")
+
+    return StreamingResponse(
+        iter([bytes(data)]),
+        media_type=media_type,
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
 @app.post("/admin/cleanup")
 async def trigger_cleanup(session_token: str | None = None) -> dict:
     """Manually trigger the cleanup worker (admin only)."""
@@ -1449,4 +1505,27 @@ if __name__ == "__main__":
     except ImportError:
         host, port = "0.0.0.0", 8000
 
-    uvicorn.run("server:app", host=host, port=port, reload=False)
+    # SSL-Zertifikat automatisch erzeugen (selbstsigniert, 10 Jahre)
+    ssl_certfile: str | None = None
+    ssl_keyfile: str | None = None
+    try:
+        from tools.ssl_cert import ensure_ssl_cert  # noqa: PLC0415
+        cert_paths = ensure_ssl_cert()
+        if cert_paths:
+            ssl_certfile, ssl_keyfile = cert_paths
+    except Exception as _ssl_exc:  # noqa: BLE001
+        logger.warning("SSL-Zertifikat konnte nicht erstellt werden: %s", _ssl_exc)
+
+    if ssl_certfile and ssl_keyfile:
+        logger.info("Starte ice_brain mit HTTPS auf %s:%s", host, port)
+        uvicorn.run(
+            "server:app",
+            host=host,
+            port=port,
+            reload=False,
+            ssl_certfile=ssl_certfile,
+            ssl_keyfile=ssl_keyfile,
+        )
+    else:
+        logger.info("Starte ice_brain mit HTTP (kein SSL) auf %s:%s", host, port)
+        uvicorn.run("server:app", host=host, port=port, reload=False)
