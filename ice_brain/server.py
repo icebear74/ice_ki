@@ -1478,10 +1478,20 @@ async def chat_completion(
     elif intent_str == "wiki":
         # Router explicitly recognised a wiki intent → always do a live lookup
         # for fresh data, regardless of cache age.
-        wiki_topic = _extract_topic(last_message)
+        # Prefer a named entity extracted by the router (person, place, topic,
+        # etc.) as the lookup query – it has correct capitalisation and word
+        # order.  Fall back to _extract_topic() on the raw message only when no
+        # entity was provided.
+        _router_entities = router_result.entities if router_result else {}
+        _entity_query = next(
+            (str(v) for v in _router_entities.values() if isinstance(v, str) and v.strip()),
+            None,
+        )
+        wiki_topic = _entity_query or _extract_topic(last_message)
+        _wiki_lookup_query = _entity_query or last_message
         logger.info("Wiki intent detected – performing live lookup for topic %r.", wiki_topic)
         live_wiki_section = await asyncio.get_running_loop().run_in_executor(
-            None, _live_wiki_context_proactive, last_message
+            None, _live_wiki_context_proactive, _wiki_lookup_query
         )
         if live_wiki_section:
             logger.info("Live wiki section injected for wiki intent (%d chars).", len(live_wiki_section))
