@@ -5,10 +5,15 @@ Standort-Verwaltung – aktiven Standort des Benutzers aus user_memory lesen.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# Regex to extract coordinates embedded in content text.
+# Matches "📍 51.5672, 6.7331" or "📍51.5672,6.7331" etc.
+_COORD_RE = re.compile(r"📍\s*(-?[\d.]+),\s*(-?[\d.]+)")
 
 
 def get_active_location(user_id: str) -> dict[str, Any] | None:
@@ -17,6 +22,9 @@ def get_active_location(user_id: str) -> dict[str, Any] | None:
     Liest aus der user_memory-Tabelle (category='location') und priorisiert:
     1. Temporärer Standort (has expires_at, not expired) – z.B. Reise
     2. Permanenter Heimatstandort (expires_at IS NULL)
+
+    Koordinaten werden per Regex aus dem Content-Text extrahiert (📍 lat, lon).
+    Einträge ohne '📍'-Marker werden übersprungen (noch nicht geocoded).
 
     Rückgabe:
         {
@@ -34,18 +42,18 @@ def get_active_location(user_id: str) -> dict[str, Any] | None:
             cursor = conn.cursor()
             now_utc = datetime.now(tz=timezone.utc)
 
-            # Alle Standort-Einträge mit gültigen Koordinaten laden
+            # Lade Standort-Einträge die bereits mit 📍 geocoded wurden
             cursor.execute(
                 """
-                SELECT content, latitude, longitude, expires_at
+                SELECT id, content, expires_at
                 FROM user_memory
                 WHERE user_id = %s
                   AND category = 'location'
-                  AND latitude IS NOT NULL
-                  AND longitude IS NOT NULL
+                  AND content LIKE '%📍%'
+                  AND (expires_at IS NULL OR expires_at > %s)
                 ORDER BY
-                    CASE WHEN expires_at IS NOT NULL AND expires_at > %s THEN 0 ELSE 1 END ASC,
-                    created_at DESC
+                    CASE WHEN expires_at IS NOT NULL THEN 0 ELSE 1 END ASC,
+                    updated_at DESC
                 LIMIT 10
                 """,
                 (user_id, now_utc),
@@ -58,8 +66,17 @@ def get_active_location(user_id: str) -> dict[str, Any] | None:
 
         # Ersten gültigen Eintrag zurückgeben (temporär vor permanent)
         for row in rows:
-            content, lat, lon, expires_at = row
-            if lat is None or lon is None:
+            _row_id, content, expires_at = row
+
+            # Koordinaten per Regex aus dem Content extrahieren
+            coord_match = _COORD_RE.search(content or "")
+            if not coord_match:
+                continue
+
+            try:
+                lat = float(coord_match.group(1))
+                lon = float(coord_match.group(2))
+            except ValueError:
                 continue
 
             # Abgelaufene temporäre Einträge überspringen
@@ -75,8 +92,8 @@ def get_active_location(user_id: str) -> dict[str, Any] | None:
 
             return {
                 "content": content or "",
-                "latitude": float(lat),
-                "longitude": float(lon),
+                "latitude": lat,
+                "longitude": lon,
                 "expires_at": expires_at,
             }
 
