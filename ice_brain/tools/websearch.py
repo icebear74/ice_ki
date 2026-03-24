@@ -17,12 +17,9 @@ from __future__ import annotations
 
 import logging
 
-from tools import register_tool
-
 logger = logging.getLogger(__name__)
 
 
-@register_tool("web_search")
 def web_search(query: str, max_results: int = 5) -> list[dict]:
     """Search the web using DuckDuckGo and return structured results.
 
@@ -45,7 +42,6 @@ def web_search(query: str, max_results: int = 5) -> list[dict]:
         return []
 
 
-@register_tool("news_search")
 def news_search(
     query: str,
     max_results: int = 5,

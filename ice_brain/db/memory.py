@@ -620,14 +620,14 @@ def _geocode_location_fact(user_id: str, content: str) -> None:
     """
     try:
         # Simple heuristic: look for a capitalised word after common German prepositions
-        import re as _re  # noqa: PLC0415
-        match = _re.search(
-            r"(?:in|nach|bei|aus|von|wohn(?:t|en)\s+in|lebt?\s+in|zog\s+nach)\s+([A-ZÄÖÜ][A-Za-zÄÖÜäöüß\s\-]{1,40})",
+        match = re.search(
+            r"(?:in|nach|bei|aus|von|wohn(?:t|en)\s+in|lebt?\s+in|zog\s+nach)\s+"
+            r"([A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-]+(?:\s+[A-Za-zÄÖÜäöüß\-]+)*)",
             content,
         )
         if not match:
             # Fallback: take the last capitalised word-sequence as the place name
-            caps = _re.findall(r"\b[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-]+(?:\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-]+)*", content)
+            caps = re.findall(r"\b[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-]+(?:\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-]+)*", content)
             place_name = caps[-1].strip() if caps else ""
         else:
             place_name = match.group(1).strip()

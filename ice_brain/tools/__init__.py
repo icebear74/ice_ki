@@ -40,8 +40,11 @@ def call_tool(name: str, **kwargs: Any) -> Any:
     return _REGISTRY[name](**kwargs)
 
 
-# Register built-in tools (import triggers @register_tool decorators)
+# Register built-in tools without relying on the @register_tool decorator
+# inside submodules (which would cause circular imports).
 try:
-    from tools import websearch as _websearch  # noqa: F401, PLC0415
+    from tools.websearch import news_search as _news_search, web_search as _web_search  # noqa: PLC0415
+    _REGISTRY["web_search"] = _web_search
+    _REGISTRY["news_search"] = _news_search
 except Exception:  # noqa: BLE001
     pass
