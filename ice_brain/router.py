@@ -31,11 +31,15 @@ You are an intent classifier. Given a user message, output ONLY a JSON object â€
 Available intents:
 - general        : general conversation or questions
 - weather        : weather queries (current or forecast)
-- wiki           : factual / encyclopaedic questions
+- wiki           : factual / encyclopaedic questions about people, places, concepts, history, or products
 - recipe         : cooking / food recipes
 - movie          : film recommendations or information
 - memory_store   : user wants to save personal information
 - memory_recall  : user asks about previously stored personal information
+- news           : current events, breaking news, today's headlines
+- sports         : sports scores, results, standings, fixtures (e.g. Bundesliga, football)
+- web_search     : questions requiring up-to-date web information that Wikipedia cannot answer
+                   (prices, stocks, recent software releases, live events, etc.)
 
 JSON schema:
 {

@@ -47,6 +47,7 @@ _CATEGORY_TTL: dict[str, int | None] = {
     "relationship": None,   # permanent
     "hobby":        None,   # permanent
     "experience":   None,   # permanent
+    "location":     None,   # permanent – where user lives / works / is located
     "activity":     2,      # expires in 2 h
     "mood":         6,      # expires in 6 h
     "plan":         48,     # expires in 48 h
@@ -106,6 +107,11 @@ CRITICAL RULES:
 - Also extract facts from INDIRECT or QUESTION-FORM statements. "wusstest du dass ich Kaffee mag?" still reveals "Mag Kaffee" – extract it.
 - Possessives ("mein", "meine", "my") reveal ownership/preferences – always extract them.
 
+ANTI-HALLUCINATION:
+- Extract ONLY facts EXPLICITLY stated by the user. NEVER infer or invent details like years, model years, model numbers, prices, quantities, or specifications that the user did NOT mention.
+- If the user says "Ich fahre einen Opel Corsa", extract ONLY "Fährt einen Opel Corsa" – do NOT add a model year, engine size, or any other detail not stated.
+- If the user says "Ich habe ein Auto", extract only "Hat ein Auto" – do NOT add a brand, model, or year.
+
 PRONOUN RESOLUTION:
 - "ihre/sein/ihren/seinen/ihrem/seinem/ihrer/seines" (her/his) → fact about the LAST MENTIONED PERSON, NOT the user.
 - "unser/unsere/unserem/unseren" (our/shared) → extract for BOTH the user AND the mentioned relation person.
@@ -138,9 +144,11 @@ DO NOT EXTRACT:
 - "I want SPI on pin 18" → IGNORE (implementation detail)
 
 LOCATION FACTS:
+- Categorize where the user lives, works, or is located as "location", NOT "preference".
 - For location/travel mentions, set category to "location" and include "latitude" and "longitude" fields if you can identify a specific place.
 - For temporary stays ("Ich bin 3 Tage in Berlin", "Ich fahre morgen nach Paris"), set "ttl" to the appropriate duration (e.g. "72h" for 3 days).
-- For permanent moves ("Ich bin nach München gezogen"), set "temporal" to "permanent" with no TTL and category "location".
+- For permanent moves ("Ich bin nach München gezogen") or residence ("Ich wohne in Köln"), set "temporal" to "permanent" with no TTL and category "location".
+- Examples: "Ich wohne in Dinslaken" → category "location", content "Wohnt in Dinslaken".
 
 AMBIGUITY: When a relation type is unclear (e.g. "meine Freundin" could be partner or friend), add an entry to "ambiguities".
 
@@ -150,7 +158,7 @@ JSON schema:
     {
       "subject": "user",
       "content": "<fact in third person>",
-      "category": "<preference|personal|relationship|hobby|experience|activity|mood|plan|topic>",
+      "category": "<preference|personal|relationship|hobby|experience|location|activity|mood|plan|topic>",
       "importance": <0.0-1.0>,
       "temporal": "<permanent|current|past>",
       "ttl": "<null or 1h/2h/4h/8h/24h/48h>"
@@ -217,6 +225,12 @@ Output:
   {"subject": "emily", "relation_type": "family", "content": "Emily ist Kind des Benutzers", "category": "personal", "importance": 0.8, "temporal": "permanent", "ttl": null},
   {"subject": "tony", "relation_type": "family", "content": "Tony ist Kind des Benutzers", "category": "personal", "importance": 0.8, "temporal": "permanent", "ttl": null}
 ], "ambiguities": [{"question": "Wessen Kinder sind Timo und Sarah? Sind das die Kinder deiner Partnerin?", "context": "'ihre Kinder' – Pronomen bezieht sich auf eine zuvor genannte Person"}]}
+
+Message: "Ich wohne in Dinslaken"
+Output:
+{"facts": [
+  {"subject": "user", "content": "Wohnt in Dinslaken", "category": "location", "importance": 0.9, "temporal": "permanent", "ttl": null}
+], "ambiguities": []}
 
 Message: "ok"
 Output:
@@ -389,15 +403,26 @@ def _find_similar(cursor, user_id: str, category: str, content: str) -> int | No
        first two meaningful words (≥4 chars) of the new content.
     2. Fuzzy fallback via difflib.SequenceMatcher: ratio() ≥ 0.75 counts as a
        match so that typos like "Phantasieland" vs "Phantasialand" are caught.
+
+    For ``location`` facts, also scans the ``preference`` category to catch old
+    location facts that were stored under the wrong category (migration path).
     """
-    cursor.execute(
-        "SELECT id, content FROM user_memory "
-        "WHERE user_id = %s AND category = %s "
-        "AND (expires_at IS NULL OR expires_at > NOW()) "
-        "LIMIT %s",
-        (user_id, category, _MAX_SIMILARITY_SEARCH_ROWS),
-    )
-    rows = cursor.fetchall()
+    # For location facts, also check 'preference' rows so we can overwrite
+    # old location facts that were previously mis-categorised.
+    categories_to_search = [category]
+    if category == "location":
+        categories_to_search.append("preference")
+
+    rows: list[tuple] = []
+    for cat in categories_to_search:
+        cursor.execute(
+            "SELECT id, content FROM user_memory "
+            "WHERE user_id = %s AND category = %s "
+            "AND (expires_at IS NULL OR expires_at > NOW()) "
+            "LIMIT %s",
+            (user_id, cat, _MAX_SIMILARITY_SEARCH_ROWS),
+        )
+        rows.extend(cursor.fetchall())
     if not rows:
         return None
 
@@ -450,35 +475,37 @@ def _upsert_fact(cursor, user_id: str, fact: dict) -> None:
         logger.debug("_upsert_fact: embedding failed (non-fatal): %s", exc)
 
     if existing_id is not None:
+        # Update the existing row; also correct the category in case an old
+        # fact was stored under the wrong category (e.g. location → preference).
         if embedding_text:
             if expires_at is not None:
                 cursor.execute(
-                    "UPDATE user_memory SET content = %s, importance = %s, temporal = %s, "
+                    "UPDATE user_memory SET content = %s, category = %s, importance = %s, temporal = %s, "
                     "updated_at = NOW(), expires_at = %s, embedding = VEC_FromText(%s) "
                     "WHERE id = %s",
-                    (fact["content"], fact["importance"], temporal, expires_at, embedding_text, existing_id),
+                    (fact["content"], fact["category"], fact["importance"], temporal, expires_at, embedding_text, existing_id),
                 )
             else:
                 cursor.execute(
-                    "UPDATE user_memory SET content = %s, importance = %s, temporal = %s, "
+                    "UPDATE user_memory SET content = %s, category = %s, importance = %s, temporal = %s, "
                     "updated_at = NOW(), expires_at = NULL, embedding = VEC_FromText(%s) "
                     "WHERE id = %s",
-                    (fact["content"], fact["importance"], temporal, embedding_text, existing_id),
+                    (fact["content"], fact["category"], fact["importance"], temporal, embedding_text, existing_id),
                 )
         else:
             if expires_at is not None:
                 cursor.execute(
-                    "UPDATE user_memory SET content = %s, importance = %s, temporal = %s, "
+                    "UPDATE user_memory SET content = %s, category = %s, importance = %s, temporal = %s, "
                     "updated_at = NOW(), expires_at = %s "
                     "WHERE id = %s",
-                    (fact["content"], fact["importance"], temporal, expires_at, existing_id),
+                    (fact["content"], fact["category"], fact["importance"], temporal, expires_at, existing_id),
                 )
             else:
                 cursor.execute(
-                    "UPDATE user_memory SET content = %s, importance = %s, temporal = %s, "
+                    "UPDATE user_memory SET content = %s, category = %s, importance = %s, temporal = %s, "
                     "updated_at = NOW(), expires_at = NULL "
                     "WHERE id = %s",
-                    (fact["content"], fact["importance"], temporal, existing_id),
+                    (fact["content"], fact["category"], fact["importance"], temporal, existing_id),
                 )
         logger.debug(
             "Memory updated (id=%d, category=%s): %s",
@@ -584,12 +611,64 @@ def delete_memory(memory_id: int, user_id: str | None = None) -> bool:
         return False
 
 
-def extract_memories_sync(user_id: str, user_message: str, llm_manager: "LLMManager") -> None:
+def _geocode_location_fact(user_id: str, content: str) -> None:
+    """Try to geocode a location fact and log the resolved coordinates.
+
+    Extracts a place name from *content* (e.g. "Wohnt in Dinslaken" → "Dinslaken"),
+    calls the geocoding tool, and logs the result.  Non-fatal – errors are
+    silently swallowed so they never block memory extraction.
+    """
+    try:
+        # Simple heuristic: look for a capitalised word after common German prepositions
+        match = re.search(
+            r"(?:in|nach|bei|aus|von|wohn(?:t|en)\s+in|lebt?\s+in|zog\s+nach)\s+"
+            r"([A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-]+(?:\s+[A-Za-zÄÖÜäöüß\-]+)*)",
+            content,
+        )
+        if not match:
+            # Fallback: take the last capitalised word-sequence as the place name
+            caps = re.findall(r"\b[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-]+(?:\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüß\-]+)*", content)
+            place_name = caps[-1].strip() if caps else ""
+        else:
+            place_name = match.group(1).strip()
+
+        if not place_name:
+            return
+
+        from tools.geocoding import geocode  # noqa: PLC0415
+        result = geocode(place_name)
+        if result:
+            logger.info(
+                "Geocoded location fact for user %r: %r → lat=%.4f lon=%.4f (%s)",
+                user_id, place_name,
+                result["lat"], result["lon"],
+                result.get("display_name", ""),
+            )
+        else:
+            logger.debug(
+                "Geocoding returned no result for place %r (user %r).",
+                place_name, user_id,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("_geocode_location_fact failed (non-fatal): %s", exc)
+
+
+def extract_memories_sync(
+    user_id: str,
+    user_message: str,
+    llm_manager: "LLMManager",
+    recent_messages: list[str] | None = None,
+) -> None:
     """Extract facts from *user_message* and persist them for *user_id*.
 
     Designed to run in a background thread (via FastAPI BackgroundTasks or
     asyncio.get_event_loop().run_in_executor).  Never raises – all errors are
     logged.
+
+    *recent_messages* is an optional list of the last few user messages (oldest
+    first) that provides context for correction detection.  When supplied, the
+    extraction prompt receives the recent conversation history so the LLM can
+    detect statements like "Nein, ich meine NRW, nicht Rheinland-Pfalz".
 
     Facts with subject="user" are upserted into user_memory.
     Facts with subject="<name>" are routed to relation_memory via relations.
@@ -610,10 +689,23 @@ def extract_memories_sync(user_id: str, user_message: str, llm_manager: "LLMMana
 
         from models import ChatMessage  # noqa: PLC0415
 
+        # Build the extraction input: include recent conversation history when
+        # available so the LLM can detect corrections like "eigentlich NRW".
+        if recent_messages and len(recent_messages) > 1:
+            history_lines = "\n".join(
+                f"[Frühere Nachricht] {m}" for m in recent_messages[:-1]
+            )
+            extraction_input = (
+                f"{history_lines}\n"
+                f"[Aktuelle Nachricht] {user_message}"
+            )
+        else:
+            extraction_input = user_message
+
         # Append /no_think to suppress Qwen3's extended reasoning block.
         messages = [
             ChatMessage(role="system", content=_EXTRACTION_SYSTEM_PROMPT),
-            ChatMessage(role="user", content=f"{user_message}\n/no_think"),
+            ChatMessage(role="user", content=f"{extraction_input}\n/no_think"),
         ]
 
         raw = llm_manager.chat_completion(
@@ -670,6 +762,14 @@ def extract_memories_sync(user_id: str, user_message: str, llm_manager: "LLMMana
                         logger.warning("Could not upsert memory fact: %s", exc)
                 conn.commit()
                 cursor.close()
+
+            # ── Geocode location facts ─────────────────────────────────────
+            # When a permanent location fact is stored, call the geocoding tool
+            # to resolve lat/lon coordinates and log them for future use
+            # (e.g. weather queries for the user's home city).
+            for fact in user_facts:
+                if fact.get("category") == "location" and fact.get("temporal") == "permanent":
+                    _geocode_location_fact(user_id, fact["content"])
 
         # ── Store relation facts ─────────────────────────────────────────────
         if relation_facts:
