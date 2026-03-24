@@ -210,9 +210,11 @@ def search_wiki_chunks(query: str, limit: int = 5) -> list[dict]:
         with get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT id, article_id, title, chunk_idx, content, embedding "
-                "FROM wiki_chunks "
-                "WHERE embedding IS NOT NULL "
+                "SELECT wc.id, wc.article_id, wc.title, wc.chunk_idx, wc.content, "
+                "       wc.embedding, wcache.image_url "
+                "FROM wiki_chunks wc "
+                "LEFT JOIN wiki_cache wcache ON wcache.id = wc.article_id "
+                "WHERE wc.embedding IS NOT NULL "
                 "LIMIT %s",
                 (MAX_VECTOR_SEARCH_ROWS,),
             )
@@ -226,7 +228,7 @@ def search_wiki_chunks(query: str, limit: int = 5) -> list[dict]:
         return []
 
     scored: list[dict] = []
-    for row_id, article_id, title, chunk_idx, content, embedding_bytes in rows:
+    for row_id, article_id, title, chunk_idx, content, embedding_bytes, image_url in rows:
         try:
             vec = unpack_embedding(embedding_bytes)
             score = cosine_similarity(query_vec, vec)
@@ -237,6 +239,7 @@ def search_wiki_chunks(query: str, limit: int = 5) -> list[dict]:
                 "chunk_idx": chunk_idx,
                 "content": content,
                 "score": score,
+                "image_url": image_url or None,
             })
         except Exception:  # noqa: BLE001
             continue

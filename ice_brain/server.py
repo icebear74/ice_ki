@@ -248,6 +248,53 @@ def _pop_blocked_ips_for_admin() -> list[dict]:
 # Startup / Shutdown
 # ---------------------------------------------------------------------------
 
+def _reset_wiki_cache_if_no_images() -> None:
+    """One-time migration: clear stale wiki cache so it is rebuilt with image_url.
+
+    Runs only when wiki_cache contains rows but NONE have image_url populated —
+    i.e. the first startup after the image pipeline was added.  Subsequent
+    startups are no-ops because at least one row will have image_url set.
+    """
+    from db.connection import get_connection  # noqa: PLC0415
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM wiki_cache")
+        total = cursor.fetchone()[0]
+        if total == 0:
+            cursor.close()
+            logger.info("Wiki cache is empty – no reset needed.")
+            return
+        cursor.execute("SELECT COUNT(*) FROM wiki_cache WHERE image_url IS NOT NULL")
+        with_image = cursor.fetchone()[0]
+        cursor.close()
+
+    if with_image > 0:
+        logger.info(
+            "Wiki cache already has %d/%d entries with image_url – skipping one-time reset.",
+            with_image, total,
+        )
+        return
+
+    logger.info(
+        "Wiki cache has %d entries but none have image_url – clearing for rebuild.", total
+    )
+    try:
+        from db.connection import get_connection as _gc  # noqa: PLC0415
+        with _gc() as conn:
+            cursor = conn.cursor()
+            # wiki_chunks has no FK cascade, delete explicitly first
+            cursor.execute("DELETE FROM wiki_chunks")
+            cursor.execute("DELETE FROM wiki_cache")
+            # Reset enrichment flags so the enrichment worker rebuilds the cache
+            cursor.execute("UPDATE user_memory SET enriched = FALSE, enriched_at = NULL")
+            cursor.execute("UPDATE relation_memory SET enriched = FALSE, enriched_at = NULL")
+            conn.commit()
+            cursor.close()
+        logger.info("Wiki cache cleared and enrichment flags reset – rebuild will start automatically.")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Wiki cache reset failed: %s", exc)
+
+
 @app.on_event("startup")
 async def startup() -> None:
     # 1. Load config
@@ -301,6 +348,14 @@ async def startup() -> None:
         logger.error(
             "The server will run without database support until MySQL is reachable."
         )
+
+    # 4b. One-time wiki cache rebuild: clear old entries that have no image_url so
+    #     the enrichment worker re-fetches them with the new image pipeline.
+    #     Only runs when wiki_cache rows exist but NONE have image_url populated yet.
+    try:
+        _reset_wiki_cache_if_no_images()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Wiki cache reset check failed (non-fatal): %s", exc)
 
     # 5. Ensure admin user exists
     try:
@@ -862,6 +917,21 @@ _TOOL_CALL_RE = re.compile(
     re.IGNORECASE,
 )
 
+_IMG_MARKDOWN_RE = re.compile(r'!\[[^\]]*\]\(/api/image/[^)]+\)')
+
+
+def _extract_pending_images(*sections: str) -> list[str]:
+    """Extract all /api/image/ Markdown snippets from context sections (deduplicated)."""
+    seen: set[str] = set()
+    images: list[str] = []
+    for s in sections:
+        for m in _IMG_MARKDOWN_RE.finditer(s):
+            img = m.group()
+            if img not in seen:
+                seen.add(img)
+                images.append(img)
+    return images
+
 
 def _parse_tool_calls(text: str) -> list[tuple[str, str]]:
     """Return list of (tool_name, query) tuples found in *text*."""
@@ -1086,10 +1156,32 @@ def _wiki_context_for_message(message: str, limit: int = 3, min_score: float = 0
         for r in relevant:
             snippet = r["content"][:_WIKI_SNIPPET_MAX_CHARS].replace("\n", " ").strip()
             lines.append(f"[{r['title']}] {snippet}")
+
+        # Inject cached images for each unique article (deduplicated by article_id)
+        seen_article_ids: set[int] = set()
+        for r in relevant:
+            article_id = r.get("article_id")
+            image_url = r.get("image_url")
+            if not image_url or not article_id or article_id in seen_article_ids:
+                continue
+            seen_article_ids.add(article_id)
+            try:
+                from db.images import fetch_and_cache_url, link_image  # noqa: PLC0415
+                img_id = fetch_and_cache_url(
+                    image_url, "wikipedia", r["title"],
+                    alt_text=r["title"],
+                )
+                if img_id is not None:
+                    link_image(img_id, "wiki_cache", article_id)
+                    lines.append(f"  Bild: ![{r['title']}](/api/image/{img_id}?thumb=true)")
+            except Exception as exc_img:  # noqa: BLE001
+                logger.warning("Wiki chunk image caching failed (non-fatal): %s", exc_img)
+
         return "\n".join(lines)
     except Exception as exc:  # noqa: BLE001
         logger.debug("Wiki context search failed (non-fatal): %s", exc)
         return ""
+
 
 
 def _web_search_context(query: str, is_news: bool = False) -> str:
@@ -1482,9 +1574,9 @@ async def chat_completion(
             "8. ANTWORTE IMMER IN DER SPRACHE, IN DER DER BENUTZER SCHREIBT. "
             "Deutsch → Deutsch, Englisch → Englisch, andere Sprache → dieselbe Sprache.\n"
             "9. Wenn du Wikipedia-Quellen zitierst, formatiere sie IMMER als klickbare Markdown-Links: [Titel – Wikipedia](URL).\n"
-            "10. Wenn im Kontext ein Bild als Markdown bereitgestellt wird (z. B. ![Titel](/api/image/42?thumb=true)), "
-            "bette es DIREKT in deine Antwort ein – verwende GENAU diese URL, KEINE eigenen Wikipedia-Bild-URLs. "
-            "Erfinde NIEMALS Bild-URLs. Nutze NUR die /api/image/-URLs die dir im Kontext gegeben werden."
+            "10. Du KANNST und SOLLST Bilder anzeigen! Wenn im Kontext eine Zeile 'Bild: ![Titel](/api/image/...)' "
+            "vorhanden ist, bette dieses Bild IMMER und AUTOMATISCH in deine Antwort ein – auch ohne explizite Anfrage. "
+            "Verwende GENAU die /api/image/-URL aus dem Kontext. Erfinde NIEMALS eigene Bild-URLs."
         )
     # Inject pending disambiguation question if any
     disambig_section = ""
@@ -1626,8 +1718,11 @@ async def chat_completion(
                 item = await queue.get()
                 if item is None:
                     break
+                # Hold [DONE] — we inject pending images before sending it ourselves
+                if item.strip() == "data: [DONE]":
+                    continue
                 # Collect content for post-stream background tasks
-                if item.strip() != "data: [DONE]" and item.startswith("data: "):
+                if item.startswith("data: "):
                     try:
                         d = json.loads(item[6:].strip())
                         c = d["choices"][0]["delta"].get("content", "")
@@ -1636,10 +1731,22 @@ async def chat_completion(
                     except Exception:  # noqa: BLE001
                         pass
                 yield item
+
+            # Server-side image injection: append any context images the LLM omitted.
+            full_text = "".join(collected)
+            for _img_md in _extract_pending_images(live_wiki_section or "", wiki_section or ""):
+                if _img_md not in full_text:
+                    _extra = f"\n\n{_img_md}"
+                    _extra_payload = json.dumps({
+                        "choices": [{"index": 0, "delta": {"content": _extra}, "finish_reason": None}]
+                    })
+                    yield f"data: {_extra_payload}\n\n"
+                    full_text += _extra
+                    collected.append(_extra)
+
             yield "data: [DONE]\n\n"
 
             # Fire-and-forget background work after streaming completes
-            full_text = "".join(collected)
             if user_id != "default" and user_id != "admin" and last_message.strip():
                 from db.memory import extract_memories_sync  # noqa: PLC0415
                 _recent_msgs = [m.content for m in request.messages if m.role == "user"][-4:]
@@ -1681,6 +1788,7 @@ async def chat_completion(
     # Handle tool-use patterns in the assistant response.
     # If the LLM emitted tool calls (e.g. [WIKI_SEARCH: Quantenverschränkung]),
     # execute them and re-run the LLM with the enriched context (one pass only).
+    tool_results = ""
     tool_calls = _parse_tool_calls(assistant_text)
     if tool_calls and user_id != "default":
         tool_results = _execute_tool_calls(tool_calls, user_id)
@@ -1705,6 +1813,14 @@ async def chat_completion(
                 logger.warning("Tool-use re-run failed: %s", exc)
         # Always remove tool call markers from the response shown to the user
         assistant_text = _TOOL_CALL_RE.sub("", assistant_text).strip()
+
+    # Server-side image injection: append any context images the LLM omitted.
+    _pending_imgs = _extract_pending_images(
+        live_wiki_section or "", wiki_section or "", tool_results
+    )
+    for _img_md in _pending_imgs:
+        if _img_md not in assistant_text:
+            assistant_text += f"\n\n{_img_md}"
 
     # 4. Async memory extraction (background task, zero user latency)
     # The built-in "admin" account is excluded – it is a shared system account

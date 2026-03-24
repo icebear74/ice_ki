@@ -169,7 +169,7 @@ def _cache_get(title: str, lang: str = "de") -> dict | None:
         with get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT id, title, query, summary, full_text, source_url, lang, fetched_at, ttl_days "
+                "SELECT id, title, query, summary, full_text, source_url, lang, fetched_at, ttl_days, image_url "
                 "FROM wiki_cache "
                 "WHERE title = %s AND lang = %s "
                 "AND DATE_ADD(fetched_at, INTERVAL ttl_days DAY) > NOW() "
