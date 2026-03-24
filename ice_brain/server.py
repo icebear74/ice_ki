@@ -616,6 +616,36 @@ _ANTI_HALLUCINATION_NOTE = (
     "\n  Wenn er englisch schreibt, antworte auf englisch. Passe dich dynamisch an."
 )
 
+# Detects a pasted German (or generic) Wikipedia article URL.
+# Captures the URL-encoded article title from the path.
+# Examples:
+#   https://de.wikipedia.org/wiki/Dinslaken
+#   https://de.wikipedia.org/wiki/Bürgermeister
+#   http://de.wikipedia.org/wiki/Some_Article
+_WIKI_URL_RE = re.compile(
+    r"https?://(?:[a-z]{2}\.)?wikipedia\.org/wiki/([^\s\"'<>]+)",
+    re.IGNORECASE,
+)
+
+
+def _extract_wiki_url_title(message: str) -> str | None:
+    """Return the article title when the message contains a Wikipedia URL.
+
+    The URL-encoded title (e.g. 'B%C3%BCrgermeister' or 'Dinslaken') is
+    decoded and underscores are replaced with spaces.  Returns None when no
+    Wikipedia URL is found.
+    """
+    m = _WIKI_URL_RE.search(message)
+    if not m:
+        return None
+    try:
+        from urllib.parse import unquote  # noqa: PLC0415
+        raw = m.group(1)
+        return unquote(raw).replace("_", " ").strip()
+    except Exception:  # noqa: BLE001
+        return None
+
+
 # Phrases that signal the user is correcting the AI (German + common English)
 _CORRECTION_RE = re.compile(
     r"(?:"
@@ -868,7 +898,47 @@ def _live_wiki_context_for_correction(message: str, limit: int = 2, prior_contex
         return ""
 
 
-def _live_wiki_context_proactive(message: str, limit: int = 2) -> str:
+def _live_wiki_context_for_url(title: str) -> str:
+    """Fetch a specific Wikipedia article by exact title and return it as a
+    highest-priority FAKTENKORREKTUR block.
+
+    Called when the user pastes a direct Wikipedia URL into the chat — they are
+    explicitly pointing to an authoritative source so we must use that exact
+    article, not a search result.
+    """
+    logger.info("Wikipedia URL detected – fetching article %r directly.", title)
+    try:
+        from tools.wikipedia import wiki_live_lookup_by_title  # noqa: PLC0415
+        results = wiki_live_lookup_by_title(title)
+        if not results:
+            logger.info("wiki_live_lookup_by_title: article %r not found.", title)
+            return ""
+        lines = [
+            "⚠️ FAKTENKORREKTUR – WIKIPEDIA LIVE (HÖCHSTE PRIORITÄT):",
+            "Der Benutzer hat dir diesen Wikipedia-Artikel als Quelle angegeben.",
+            "Du MUSST die folgenden Fakten als korrekt akzeptieren.",
+            "Diese Daten wurden soeben live von Wikipedia abgerufen.",
+            "Sie überschreiben dein Trainingswissen vollständig.",
+            "Antworte AUSSCHLIESSLICH auf Basis dieser Daten.",
+            "",
+        ]
+        for r in results:
+            snippet = (r.get("full_text") or r.get("summary", ""))[:1200].replace("\n", " ").strip()
+            lines.append(f"[{r['title']}] {snippet}")
+            if r.get("source_url"):
+                t = r.get("title", "Wikipedia")
+                lines.append(f"  Quelle: [{t} – Wikipedia]({r['source_url']})")
+            if r.get("image_url"):
+                img_src = _img_src_for_result(r)
+                if img_src:
+                    lines.append(f"  Bild: ![{r.get('title', '')}]({img_src})")
+        return "\n".join(lines)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("wiki_live_lookup_by_title failed (non-fatal): %s", exc)
+        return ""
+
+
+
     """Fetch Wikipedia data for the topic of a message when no cached data exists.
 
     Called as a fallback when the vector search returns nothing relevant.
@@ -1360,17 +1430,25 @@ async def chat_completion(
     # 2c. Live Wikipedia lookup
     #
     # Priority order (mutually exclusive, first match wins):
-    #   1. Correction signal → authoritative live lookup (highest priority).
-    #   2. Router classified intent as "wiki" → always do live lookup, because
-    #      cached chunks may be irrelevant (semantic search can return off-topic
-    #      results when the topic is not yet in the local index).
-    #   3. Short follow-up / clarification message → combine with the previous
-    #      user turn to build the topic; do a live lookup when there is no good
-    #      cached data.
-    #   4. Topical question with no cached data → proactive live lookup.
+    #   1. User pasted a Wikipedia URL → fetch that exact article (highest priority).
+    #   2. Correction signal → authoritative live lookup.
+    #   3. Router classified intent as "wiki" → always do live lookup.
+    #   4. Short follow-up / clarification message → extend with prior turn.
+    #   5. Topical question → proactive live lookup.
     live_wiki_section = ""
-    _correction_live = False  # True when live section came from a correction signal
-    if _detect_correction(last_message):
+    _correction_live = False  # True when live section came from a correction/URL signal
+    _wiki_url_title = _extract_wiki_url_title(last_message)
+    if _wiki_url_title:
+        logger.info("Wikipedia URL in message – fetching article %r directly.", _wiki_url_title)
+        live_wiki_section = await asyncio.get_running_loop().run_in_executor(
+            None, _live_wiki_context_for_url, _wiki_url_title
+        )
+        if live_wiki_section:
+            _correction_live = True
+            logger.info("Live wiki section (from URL) injected (%d chars).", len(live_wiki_section))
+        else:
+            logger.info("wiki_live_lookup_by_title returned no results for %r.", _wiki_url_title)
+    elif _detect_correction(last_message):
         logger.info("Correction signal detected – performing live Wikipedia lookup.")
         # Build a prior-context string from the last few user messages so that
         # topic-less corrections like "Er ist gestorben" can still find the subject.

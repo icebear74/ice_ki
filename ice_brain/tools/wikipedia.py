@@ -500,3 +500,59 @@ def wiki_refresh(title: str) -> dict | None:
     """
     _cache_delete(title)
     return wiki_summary(title)
+
+
+def wiki_live_lookup_by_title(title: str) -> list[dict]:
+    """Fetch a specific Wikipedia article by exact title, bypassing the cache.
+
+    Like :func:`wiki_live_lookup` but uses a direct title fetch instead of a
+    full-text search.  Use this when the user has supplied an explicit Wikipedia
+    URL so that we fetch exactly the article they pointed to, not a search result
+    that might differ.
+
+    Returns a list with at most one entry (empty when the article is not found).
+    """
+    lang = "de"
+    data = _api_summary(title)
+    if data is None:
+        logger.info("wiki_live_lookup_by_title: article %r not found.", title)
+        return []
+
+    full_text = _api_full_text(title)
+    entry = _normalise_summary(data, query=title, full_text=full_text)
+    entry["lang"] = lang
+
+    # Force-refresh the cache row
+    _cache_delete(title, lang)
+    _cache_set(entry)
+
+    # Rebuild the vector-search chunks
+    cache_id: int | None = None
+    try:
+        from db.connection import get_connection  # noqa: PLC0415
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id FROM wiki_cache WHERE title = %s AND lang = %s LIMIT 1",
+                (title, lang),
+            )
+            row = cursor.fetchone()
+            cursor.close()
+        cache_id = row[0] if row else None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("wiki_live_lookup_by_title: could not fetch cache id for %r: %s", title, exc)
+
+    if cache_id is not None:
+        try:
+            from db.wiki import refresh_article_chunks  # noqa: PLC0415
+            refresh_article_chunks(
+                cache_id,
+                title,
+                entry.get("full_text") or entry.get("summary", ""),
+                lang,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("wiki_live_lookup_by_title: chunk refresh failed for %r: %s", title, exc)
+
+    logger.info("wiki_live_lookup_by_title: fetched article %r.", title)
+    return [entry]
