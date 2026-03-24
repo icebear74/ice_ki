@@ -210,9 +210,11 @@ def search_wiki_chunks(query: str, limit: int = 5) -> list[dict]:
         with get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT id, article_id, title, chunk_idx, content, embedding "
-                "FROM wiki_chunks "
-                "WHERE embedding IS NOT NULL "
+                "SELECT wc.id, wc.article_id, wc.title, wc.chunk_idx, wc.content, "
+                "       wc.embedding, wcache.image_url "
+                "FROM wiki_chunks wc "
+                "LEFT JOIN wiki_cache wcache ON wcache.id = wc.article_id "
+                "WHERE wc.embedding IS NOT NULL "
                 "LIMIT %s",
                 (MAX_VECTOR_SEARCH_ROWS,),
             )
@@ -226,7 +228,7 @@ def search_wiki_chunks(query: str, limit: int = 5) -> list[dict]:
         return []
 
     scored: list[dict] = []
-    for row_id, article_id, title, chunk_idx, content, embedding_bytes in rows:
+    for row_id, article_id, title, chunk_idx, content, embedding_bytes, image_url in rows:
         try:
             vec = unpack_embedding(embedding_bytes)
             score = cosine_similarity(query_vec, vec)
@@ -237,9 +239,71 @@ def search_wiki_chunks(query: str, limit: int = 5) -> list[dict]:
                 "chunk_idx": chunk_idx,
                 "content": content,
                 "score": score,
+                "image_url": image_url or None,
             })
         except Exception:  # noqa: BLE001
             continue
 
     scored.sort(key=lambda x: x["score"], reverse=True)
     return scored[:limit]
+
+
+def search_wiki_chunks_by_title(query: str, limit: int = 3) -> list[dict]:
+    """Find wiki chunks whose article title contains words from *query*.
+
+    This is a fast SQL-side fallback used when vector (cosine) search misses
+    the target because the embedding is dominated by meta-question semantics
+    (e.g. "was weißt du über martin schindler" → embedding drifts away from
+    the entity).  A direct title match reliably surfaces the correct article
+    (e.g. "Martin Schindler") regardless of embedding quality.
+
+    Returns the first *limit* chunks for matching articles, ordered by
+    chunk_idx (i.e. the start of the article comes first).  Each result dict
+    has the same shape as :func:`search_wiki_chunks` with ``score=1.0``.
+    Returns [] on error or when no words can be extracted from *query*.
+    """
+    import re  # noqa: PLC0415
+
+    # Extract words ≥ 3 chars to build LIKE clauses.  We intentionally keep
+    # all words (including lowercase) so that "martin schindler" works even
+    # though neither word is stop-word filtered here.
+    words = [w for w in re.findall(r"[A-Za-zÄÖÜäöüß]{3,}", query)]
+    if not words:
+        return []
+
+    try:
+        from db.connection import get_connection  # noqa: PLC0415
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            # Require ALL words to appear in the title (AND logic) so that
+            # "martin schindler" only matches "Martin Schindler", not just
+            # any article with "Martin" or any article with "Schindler".
+            like_clauses = " AND ".join("wc.title LIKE %s" for _ in words)
+            params = [f"%{w}%" for w in words]
+            cursor.execute(
+                f"SELECT wc.id, wc.article_id, wc.title, wc.chunk_idx, "  # noqa: S608
+                f"       wc.content, wcache.image_url "
+                f"FROM wiki_chunks wc "
+                f"LEFT JOIN wiki_cache wcache ON wcache.id = wc.article_id "
+                f"WHERE {like_clauses} "
+                f"ORDER BY wc.article_id, wc.chunk_idx ASC "
+                f"LIMIT %s",
+                [*params, limit],
+            )
+            rows = cursor.fetchall()
+            cursor.close()
+        return [
+            {
+                "id": row[0],
+                "article_id": row[1],
+                "title": row[2],
+                "chunk_idx": row[3],
+                "content": row[4],
+                "score": 1.0,
+                "image_url": row[5] or None,
+            }
+            for row in rows
+        ]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("search_wiki_chunks_by_title error for query %r: %s", query, exc)
+        return []

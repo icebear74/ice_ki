@@ -175,6 +175,11 @@ _EXTRA_COLUMNS: list[tuple[str, str, str]] = [
         "longitude",
         "DECIMAL(9,6) NULL COMMENT 'Längengrad des gespeicherten Standorts'",
     ),
+    (
+        "wiki_cache",
+        "image_url",
+        "VARCHAR(1024) NULL COMMENT 'Original-Bild-URL vom Wikipedia-Thumbnail'",
+    ),
 ]
 
 

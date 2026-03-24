@@ -189,11 +189,10 @@
       border-radius: var(--radius);
       font-size: 0.93rem;
       line-height: 1.55;
-      white-space: pre-wrap;
       word-break: break-word;
     }
 
-    .user .bubble { background: var(--user-bg); border-bottom-right-radius: 4px; }
+    .user .bubble { background: var(--user-bg); border-bottom-right-radius: 4px; white-space: pre-wrap; }
     .bot  .bubble { background: var(--bot-bg);  border-bottom-left-radius: 4px; }
 
     .intent-badge {
@@ -327,7 +326,79 @@
       #chat   { padding: 14px 10px; }
       #input-bar { padding: 8px 10px 14px; }
     }
+    /* ── Markdown content inside bot bubbles ── */
+    .bot .bubble { white-space: normal; }
+    .bot .bubble p { margin: 0 0 0.5em; }
+    .bot .bubble p:last-child { margin-bottom: 0; }
+    .bot .bubble h1, .bot .bubble h2, .bot .bubble h3,
+    .bot .bubble h4, .bot .bubble h5, .bot .bubble h6 {
+      margin: 0.6em 0 0.3em;
+      font-weight: 600;
+      line-height: 1.3;
+    }
+    .bot .bubble h1 { font-size: 1.15em; }
+    .bot .bubble h2 { font-size: 1.05em; }
+    .bot .bubble h3 { font-size: 0.98em; }
+    .bot .bubble ul, .bot .bubble ol {
+      margin: 0.3em 0 0.3em 1.4em;
+      padding: 0;
+    }
+    .bot .bubble li { margin: 0.15em 0; }
+    .bot .bubble a {
+      color: #7b8cff;
+      text-decoration: underline;
+      word-break: break-all;
+    }
+    .bot .bubble a:hover { color: #a0aaff; }
+    .bot .bubble strong { font-weight: 700; }
+    .bot .bubble em { font-style: italic; }
+    .bot .bubble code {
+      background: rgba(255,255,255,0.08);
+      border-radius: 4px;
+      padding: 0.1em 0.35em;
+      font-family: 'Consolas', 'Fira Code', monospace;
+      font-size: 0.88em;
+    }
+    .bot .bubble pre {
+      background: rgba(255,255,255,0.06);
+      border-radius: 6px;
+      padding: 0.7em 1em;
+      overflow-x: auto;
+      margin: 0.4em 0;
+    }
+    .bot .bubble pre code {
+      background: none;
+      padding: 0;
+      font-size: 0.87em;
+    }
+    .bot .bubble blockquote {
+      border-left: 3px solid var(--accent);
+      margin: 0.4em 0;
+      padding-left: 0.8em;
+      color: var(--text-muted);
+    }
+    .bot .bubble img {
+      max-width: 100%;
+      max-height: 320px;
+      border-radius: 8px;
+      margin: 0.4em 0;
+      display: block;
+    }
+    .bot .bubble hr {
+      border: none;
+      border-top: 1px solid var(--surface2);
+      margin: 0.5em 0;
+    }
+    .bot .bubble table { border-collapse: collapse; font-size: 0.88em; }
+    .bot .bubble th, .bot .bubble td {
+      border: 1px solid var(--surface2);
+      padding: 3px 8px;
+    }
+    .bot .bubble th { background: rgba(255,255,255,0.06); }
   </style>
+  <!-- Markdown parser + HTML sanitizer (loaded from CDN) -->
+  <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
 </head>
 <body>
 
@@ -530,6 +601,13 @@
         showSetPw();
       } else {
         hideOverlay({ token: data.token, user_id: data.user_id, username: data.username, role: data.role });
+        if (data.security_alerts && data.security_alerts.length > 0) {
+          let alertMsg = '🚨 **Sicherheitswarnung:**\n\n';
+          for (const alert of data.security_alerts) {
+            alertMsg += `IP **${alert.ip}** wurde am ${alert.blocked_at} nach ${alert.attempts} fehlgeschlagenen Anmeldeversuchen gesperrt (letzter Benutzername: "${alert.last_username}").\n`;
+          }
+          appendMessage('bot', alertMsg);
+        }
       }
     } catch (e) {
       loginErr.textContent = 'Netzwerkfehler: ' + e.message;
@@ -591,13 +669,48 @@
   checkStatus();
   setInterval(checkStatus, 15000);
 
+  /* ── Markdown rendering for bot messages ── */
+  function renderBotMarkdown(text) {
+    if (typeof marked === 'undefined' || typeof DOMPurify === 'undefined') {
+      return null; // fallback: caller uses textContent
+    }
+    marked.setOptions({ breaks: true, gfm: true });
+    const rawHtml = marked.parse(text);
+    let safe = DOMPurify.sanitize(rawHtml, {
+      ALLOWED_TAGS: [
+        'p','br','strong','em','b','i','u','s','del','ins',
+        'h1','h2','h3','h4','h5','h6',
+        'ul','ol','li',
+        'a','img',
+        'code','pre',
+        'blockquote',
+        'hr','table','thead','tbody','tr','th','td',
+      ],
+      ALLOWED_ATTR: ['href','src','alt','title','width','height','class'],
+      ALLOW_DATA_ATTR: false,
+    });
+    // Open all external links in a new tab
+    safe = safe.replace(/<a href="(https?:\/\/[^"]+)">/g,
+      '<a href="$1" target="_blank" rel="noopener noreferrer">');
+    return safe;
+  }
+
   /* ── Message rendering ── */
   function appendMessage(role, text, intent) {
     const wrap = document.createElement('div');
     wrap.className = `msg-wrap ${role === 'user' ? 'user' : 'bot'}`;
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
-    bubble.textContent = text;
+    if (role !== 'user') {
+      const html = renderBotMarkdown(text);
+      if (html !== null) {
+        bubble.innerHTML = html;
+      } else {
+        bubble.textContent = text;
+      }
+    } else {
+      bubble.textContent = text;
+    }
     wrap.appendChild(bubble);
     if (intent && intent !== 'admin_command' && role !== 'user') {
       const badge = document.createElement('span');
@@ -714,7 +827,12 @@
                 botWrap.appendChild(botBubble);
                 chat.appendChild(botWrap);
               }
-              botBubble.textContent = fullText;
+              const _html = renderBotMarkdown(fullText);
+              if (_html !== null) {
+                botBubble.innerHTML = _html;
+              } else {
+                botBubble.textContent = fullText;
+              }
               chat.scrollTop = chat.scrollHeight;
             }
           }

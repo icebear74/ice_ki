@@ -36,8 +36,8 @@ import re
 import secrets
 from dataclasses import dataclass, field
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from db.connection import init_db
@@ -162,8 +162,138 @@ def _get_user_role(user_id: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Brute-force protection
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _LoginAttemptTracker:
+    """Tracks failed login attempts per IP address."""
+    failed_count: int = 0
+    first_attempt: float = field(default_factory=time.time)
+    blocked_until: float = 0.0
+
+
+_login_attempts: dict[str, _LoginAttemptTracker] = {}
+_blocked_ips_log: list[dict] = []  # Global memory for admin notifications
+
+_MAX_FAILED_ATTEMPTS = 5
+_BLOCK_DURATION_SEC = 60 * 60  # 60 minutes
+
+
+def _get_client_ip(request: Request) -> str:
+    """Extract client IP, respecting X-Forwarded-For behind a reverse proxy."""
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _is_ip_blocked(ip: str) -> bool:
+    tracker = _login_attempts.get(ip)
+    if tracker is None:
+        return False
+    if tracker.blocked_until > time.time():
+        return True
+    # Block expired – reset
+    if tracker.blocked_until > 0:
+        del _login_attempts[ip]
+    return False
+
+
+def _record_failed_login(ip: str, username: str) -> bool:
+    """Record a failed attempt. Returns True if the IP is now blocked."""
+    now = time.time()
+    tracker = _login_attempts.get(ip)
+    if tracker is None:
+        tracker = _LoginAttemptTracker(failed_count=1, first_attempt=now)
+        _login_attempts[ip] = tracker
+        return False
+    # Reset if older than block duration
+    if now - tracker.first_attempt > _BLOCK_DURATION_SEC:
+        tracker.failed_count = 1
+        tracker.first_attempt = now
+        return False
+    tracker.failed_count += 1
+    if tracker.failed_count >= _MAX_FAILED_ATTEMPTS:
+        tracker.blocked_until = now + _BLOCK_DURATION_SEC
+        _blocked_ips_log.append({
+            "ip": ip,
+            "blocked_at": datetime.now(timezone.utc).isoformat(),
+            "attempts": tracker.failed_count,
+            "last_username": username,
+        })
+        logger.warning(
+            "IP %s blocked for 60 min after %d failed login attempts (last user: %r).",
+            ip, tracker.failed_count, username,
+        )
+        return True
+    return False
+
+
+def _clear_failed_logins(ip: str) -> None:
+    """Clear tracker on successful login."""
+    _login_attempts.pop(ip, None)
+
+
+def _pop_blocked_ips_for_admin() -> list[dict]:
+    """Return and clear all blocked IP notifications for admin display."""
+    if not _blocked_ips_log:
+        return []
+    items = list(_blocked_ips_log)
+    _blocked_ips_log.clear()
+    return items
+
+
+# ---------------------------------------------------------------------------
 # Startup / Shutdown
 # ---------------------------------------------------------------------------
+
+def _reset_wiki_cache_if_no_images() -> None:
+    """One-time migration: clear stale wiki cache so it is rebuilt with image_url.
+
+    Runs only when wiki_cache contains rows but NONE have image_url populated —
+    i.e. the first startup after the image pipeline was added.  Subsequent
+    startups are no-ops because at least one row will have image_url set.
+    """
+    from db.connection import get_connection  # noqa: PLC0415
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM wiki_cache")
+        total = cursor.fetchone()[0]
+        if total == 0:
+            cursor.close()
+            logger.info("Wiki cache is empty – no reset needed.")
+            return
+        cursor.execute("SELECT COUNT(*) FROM wiki_cache WHERE image_url IS NOT NULL")
+        with_image = cursor.fetchone()[0]
+        cursor.close()
+
+    if with_image > 0:
+        logger.info(
+            "Wiki cache already has %d/%d entries with image_url – skipping one-time reset.",
+            with_image, total,
+        )
+        return
+
+    logger.info(
+        "Wiki cache has %d entries but none have image_url – clearing for rebuild.", total
+    )
+    try:
+        from db.connection import get_connection as _gc  # noqa: PLC0415
+        with _gc() as conn:
+            cursor = conn.cursor()
+            # wiki_chunks has no FK cascade, delete explicitly first
+            cursor.execute("DELETE FROM wiki_chunks")
+            cursor.execute("DELETE FROM wiki_cache")
+            # Reset enrichment flags so the enrichment worker rebuilds the cache
+            cursor.execute("UPDATE user_memory SET enriched = FALSE, enriched_at = NULL")
+            cursor.execute("UPDATE relation_memory SET enriched = FALSE, enriched_at = NULL")
+            conn.commit()
+            cursor.close()
+        logger.info("Wiki cache cleared and enrichment flags reset – rebuild will start automatically.")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Wiki cache reset failed: %s", exc)
+
 
 @app.on_event("startup")
 async def startup() -> None:
@@ -218,6 +348,14 @@ async def startup() -> None:
         logger.error(
             "The server will run without database support until MySQL is reachable."
         )
+
+    # 4b. One-time wiki cache rebuild: clear old entries that have no image_url so
+    #     the enrichment worker re-fetches them with the new image pipeline.
+    #     Only runs when wiki_cache rows exist but NONE have image_url populated yet.
+    try:
+        _reset_wiki_cache_if_no_images()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Wiki cache reset check failed (non-fatal): %s", exc)
 
     # 5. Ensure admin user exists
     try:
@@ -299,13 +437,32 @@ async def health() -> dict:
 # ---------------------------------------------------------------------------
 
 @app.post("/auth/login", response_model=LoginResponse)
-async def auth_login(req: LoginRequest) -> LoginResponse:
+async def auth_login(req: LoginRequest, request: Request) -> LoginResponse:
     from db.users import authenticate  # noqa: PLC0415
     from db.connection import get_connection  # noqa: PLC0415
 
+    client_ip = _get_client_ip(request)
+
+    # Check if IP is blocked
+    if _is_ip_blocked(client_ip):
+        logger.warning("Blocked IP %s tried to login as %r.", client_ip, req.username)
+        return JSONResponse(
+            status_code=429,
+            content={"error": "Zu viele fehlgeschlagene Anmeldeversuche. IP für 60 Minuten gesperrt."},
+        )
+
     result = authenticate(req.username, req.password)
     if result is None:
+        now_blocked = _record_failed_login(client_ip, req.username)
+        if now_blocked:
+            return JSONResponse(
+                status_code=429,
+                content={"error": "Zu viele fehlgeschlagene Anmeldeversuche. IP für 60 Minuten gesperrt."},
+            )
         return JSONResponse(status_code=401, content={"error": "Ungültiger Benutzername oder Passwort."})
+
+    # Success – clear attempts
+    _clear_failed_logins(client_ip)
 
     user_id, first_login = result
 
@@ -320,6 +477,13 @@ async def auth_login(req: LoginRequest) -> LoginResponse:
     except Exception:  # noqa: BLE001
         role = "user"
 
+    # Check for blocked IP notifications if user is admin
+    blocked_notifications = None
+    if role == "admin":
+        alerts = _pop_blocked_ips_for_admin()
+        if alerts:
+            blocked_notifications = alerts
+
     token = None if first_login else _new_token(user_id)
     return LoginResponse(
         user_id=user_id,
@@ -327,6 +491,7 @@ async def auth_login(req: LoginRequest) -> LoginResponse:
         role=role,
         first_login=first_login,
         token=token,
+        security_alerts=blocked_notifications,
     )
 
 
@@ -451,6 +616,36 @@ _ANTI_HALLUCINATION_NOTE = (
     "\n  Wenn er englisch schreibt, antworte auf englisch. Passe dich dynamisch an."
 )
 
+# Detects a pasted German (or generic) Wikipedia article URL.
+# Captures the URL-encoded article title from the path.
+# Examples:
+#   https://de.wikipedia.org/wiki/Dinslaken
+#   https://de.wikipedia.org/wiki/Bürgermeister
+#   http://de.wikipedia.org/wiki/Some_Article
+_WIKI_URL_RE = re.compile(
+    r"https?://(?:[a-z]{2}\.)?wikipedia\.org/wiki/([^\s\"'<>]+)",
+    re.IGNORECASE,
+)
+
+
+def _extract_wiki_url_title(message: str) -> str | None:
+    """Return the article title when the message contains a Wikipedia URL.
+
+    The URL-encoded title (e.g. 'B%C3%BCrgermeister' or 'Dinslaken') is
+    decoded and underscores are replaced with spaces.  Returns None when no
+    Wikipedia URL is found.
+    """
+    m = _WIKI_URL_RE.search(message)
+    if not m:
+        return None
+    try:
+        from urllib.parse import unquote  # noqa: PLC0415
+        raw = m.group(1)
+        return unquote(raw).replace("_", " ").strip()
+    except Exception:  # noqa: BLE001
+        return None
+
+
 # Phrases that signal the user is correcting the AI (German + common English)
 _CORRECTION_RE = re.compile(
     r"(?:"
@@ -505,6 +700,11 @@ _STOPWORDS = frozenset({
     "musst", "muss", "müssen", "soll", "sollst", "sollen",
     "darf", "darfst", "dürfen", "magst", "möchte", "möchtest",
     "stimmt", "stimmen", "stimmst",
+    "erzähl", "erzähle", "erzählen", "erzählst",
+    "funktioniert", "funktionieren", "funktionierst",
+    "bedeutet", "bedeuten", "heißt", "heißen",
+    "kennt", "kennst", "kennen", "kenne",
+    "erkläre", "erklär", "erklären",
     # Prepositions / conjunctions
     "über", "unter", "nach", "vor", "mit", "ohne", "von", "beim",
     "aus", "bei", "für", "an", "auf", "in", "zu", "zum", "zur",
@@ -522,9 +722,14 @@ _STOPWORDS = frozenset({
     # Generic nouns that are not useful as search topics
     "informationen", "infos", "info", "angaben", "daten", "aussage",
     "fakt", "fakten", "sache", "sachen", "zeug",
-    # Correction-related words
-    "aktualisier", "informier", "schlag", "nach", "check",
-    "wiki", "update", "korrigier",
+    # Correction / update verbs (full conjugated forms too)
+    "aktualisier", "aktualisiere", "aktualisierst", "aktualisieren",
+    "informier", "informiere", "informierst", "informieren",
+    "schlag", "check", "wiki", "update", "korrigier",
+    # Life-status verbs that carry no search value
+    "lebt", "lebst", "leben", "lebte", "lebten", "lebend",
+    "gestorben", "starb", "starben", "verstorben",
+    "tot",
 })
 
 # Phrases that signal the user wants a refresh/update of information
@@ -592,19 +797,15 @@ def _extract_correction_topic(message: str) -> str:
 def _extract_topic(message: str) -> str:
     """Extract a short search topic from any user message (not just corrections).
 
-    Used for proactive wiki lookups when no cached chunks are found.
-    Returns up to 4 meaningful words, preferring capitalised German nouns.
+    Strips German/English question filler words (stopwords) and returns the
+    remaining meaningful words in their **original order** (up to 4 words).
+    This ensures "chuck norris" stays "chuck norris", not "norris chuck".
     """
     raw_tokens = re.findall(r"[A-Za-zÄÖÜäöüß0-9]+", message)
     meaningful = [t for t in raw_tokens if t.lower() not in _STOPWORDS and len(t) > 2]
     if not meaningful:
         return ""
-    caps = [t for t in meaningful if t[0].isupper()]
-    lower = [t for t in meaningful if not t[0].isupper()]
-    caps.sort(key=len, reverse=True)
-    lower.sort(key=len, reverse=True)
-    combined = caps + lower
-    return " ".join(combined[:4])
+    return " ".join(meaningful[:4])
 
 
 # Patterns that suggest the user is asking about a specific topic
@@ -634,6 +835,23 @@ _TOPIC_QUESTION_RE = re.compile(
     r"|such\s+(?:mir|mal)?"
     r"|info(?:rmation(?:en)?)?\s+(?:über|zu|von)"
     r"|\?\s*$"
+    r")",
+    re.IGNORECASE,
+)
+
+# Present-tense "who is" questions about current role holders — ALWAYS trigger a
+# live Wikipedia lookup regardless of whether cached data already exists, because
+# the cached article might have been written before the current person took office.
+_LIVE_ALWAYS_RE = re.compile(
+    r"(?:"
+    # German present tense: "wer ist [der/die] [role]"
+    r"wer\s+(?:ist|sind)\b"
+    r"|wer\s+(?:war\s+)?(?:der|die)\s+(?:aktuelle?|derzeitige?|jetzige?)\b"
+    r"|(?:der|die)\s+(?:aktuelle?|derzeitige?|jetzige?|neue?)\s+\w+\s+(?:ist|heißt|war|lautet)\b"
+    # English present tense
+    r"|who\s+is\b"
+    r"|who\s+are\b"
+    r"|who\s+(?:is|are)\s+(?:the\s+)?(?:current|new|latest)\b"
     r")",
     re.IGNORECASE,
 )
@@ -674,11 +892,57 @@ def _live_wiki_context_for_correction(message: str, limit: int = 2, prior_contex
             snippet = (r.get("full_text") or r.get("summary", ""))[:1200].replace("\n", " ").strip()
             lines.append(f"[{r['title']}] {snippet}")
             if r.get("source_url"):
-                lines.append(f"  Quelle: {r['source_url']}")
+                title = r.get("title", "Wikipedia")
+                lines.append(f"  Quelle: [{title} – Wikipedia]({r['source_url']})")
+            if r.get("image_url"):
+                img_src = _img_src_for_result(r)
+                if img_src:
+                    lines.append(f"  Bild: ![{r.get('title', '')}]({img_src})")
         return "\n".join(lines)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Live wiki lookup failed (non-fatal): %s", exc)
         return ""
+
+
+def _live_wiki_context_for_url(title: str) -> str:
+    """Fetch a specific Wikipedia article by exact title and return it as a
+    highest-priority FAKTENKORREKTUR block.
+
+    Called when the user pastes a direct Wikipedia URL into the chat — they are
+    explicitly pointing to an authoritative source so we must use that exact
+    article, not a search result.
+    """
+    logger.info("Wikipedia URL detected – fetching article %r directly.", title)
+    try:
+        from tools.wikipedia import wiki_live_lookup_by_title  # noqa: PLC0415
+        results = wiki_live_lookup_by_title(title)
+        if not results:
+            logger.info("wiki_live_lookup_by_title: article %r not found.", title)
+            return ""
+        lines = [
+            "⚠️ FAKTENKORREKTUR – WIKIPEDIA LIVE (HÖCHSTE PRIORITÄT):",
+            "Der Benutzer hat dir diesen Wikipedia-Artikel als Quelle angegeben.",
+            "Du MUSST die folgenden Fakten als korrekt akzeptieren.",
+            "Diese Daten wurden soeben live von Wikipedia abgerufen.",
+            "Sie überschreiben dein Trainingswissen vollständig.",
+            "Antworte AUSSCHLIESSLICH auf Basis dieser Daten.",
+            "",
+        ]
+        for r in results:
+            snippet = (r.get("full_text") or r.get("summary", ""))[:1200].replace("\n", " ").strip()
+            lines.append(f"[{r['title']}] {snippet}")
+            if r.get("source_url"):
+                t = r.get("title", "Wikipedia")
+                lines.append(f"  Quelle: [{t} – Wikipedia]({r['source_url']})")
+            if r.get("image_url"):
+                img_src = _img_src_for_result(r)
+                if img_src:
+                    lines.append(f"  Bild: ![{r.get('title', '')}]({img_src})")
+        return "\n".join(lines)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("wiki_live_lookup_by_title failed (non-fatal): %s", exc)
+        return ""
+
 
 
 def _live_wiki_context_proactive(message: str, limit: int = 2) -> str:
@@ -689,15 +953,20 @@ def _live_wiki_context_proactive(message: str, limit: int = 2) -> str:
     information is background context rather than a verified correction.
     Returns an empty string when the lookup fails or yields nothing.
     """
-    topic = _extract_topic(message)
-    if not topic:
+    # Extract the actual search topic – never pass the raw user sentence to
+    # Wikipedia, which would match on unrelated filler words and return wrong
+    # articles (e.g. "lebt chuck norris noch ?" → "Joe Lewis", "Delta Force 2").
+    query = _extract_topic(message) or message.strip()
+    if not query:
         return ""
-    logger.info("Proactive live wiki lookup (no cached data). Query: %r", topic)
+    logger.info("Proactive live wiki lookup. Query: %r", query)
     try:
         from tools.wikipedia import wiki_live_lookup  # noqa: PLC0415
-        results = wiki_live_lookup(topic, limit=limit)
+        # Pass the full original message to wiki_live_lookup so that person
+        # follow-up logic can detect role keywords (Bürgermeister etc.).
+        results = wiki_live_lookup(query, limit=limit)
         if not results:
-            logger.info("Proactive live wiki lookup: no results for %r.", topic)
+            logger.info("Proactive live wiki lookup: no results for %r.", query)
             return ""
         lines = [
             "📡 WIKIPEDIA-HINTERGRUNDWISSEN (live abgerufen, da kein lokaler Cache vorhanden):"
@@ -706,7 +975,12 @@ def _live_wiki_context_proactive(message: str, limit: int = 2) -> str:
             snippet = (r.get("full_text") or r.get("summary", ""))[:1000].replace("\n", " ").strip()
             lines.append(f"[{r['title']}] {snippet}")
             if r.get("source_url"):
-                lines.append(f"  Quelle: {r['source_url']}")
+                title = r.get("title", "Wikipedia")
+                lines.append(f"  Quelle: [{title} – Wikipedia]({r['source_url']})")
+            if r.get("image_url"):
+                img_src = _img_src_for_result(r)
+                if img_src:
+                    lines.append(f"  Bild: ![{r.get('title', '')}]({img_src})")
         return "\n".join(lines)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Proactive live wiki lookup failed (non-fatal): %s", exc)
@@ -721,6 +995,48 @@ _TOOL_CALL_RE = re.compile(
     r"\[(SEARCH_MEMORY|SEARCH_RELATION|WIKI_SEARCH|WEATHER|WEB_SEARCH|NEWS_SEARCH)\s*:\s*([^\]]{1,256})\]",
     re.IGNORECASE,
 )
+
+_IMG_MARKDOWN_RE = re.compile(r'!\[[^\]]*\]\((?:/api/image/|https?://)[^)]+\)')
+
+
+def _img_src_for_result(r: dict) -> str | None:
+    """Return the best image src for a wiki result dict.
+
+    Tries to fetch-and-cache the image locally (returns /api/image/{id}).
+    Falls back to the original Wikipedia URL when local caching fails so the
+    image always renders for the user.  Returns None when no image is available.
+    """
+    image_url = r.get("image_url")
+    if not image_url:
+        return None
+    try:
+        from db.images import fetch_and_cache_url, link_image  # noqa: PLC0415
+        img_id = fetch_and_cache_url(
+            image_url, "wikipedia", r.get("title", "unknown"),
+            alt_text=r.get("title", ""),
+        )
+        if img_id is not None:
+            cache_id = r.get("id") or r.get("article_id")
+            if cache_id is not None:
+                link_image(img_id, "wiki_cache", cache_id)
+            return f"/api/image/{img_id}?thumb=true"
+    except Exception as exc_img:  # noqa: BLE001
+        logger.warning("Wiki image caching failed (non-fatal): %s", exc_img)
+    # Fallback: use original Wikipedia URL directly
+    return image_url
+
+
+def _extract_pending_images(*sections: str) -> list[str]:
+    """Extract all /api/image/ Markdown snippets from context sections (deduplicated)."""
+    seen: set[str] = set()
+    images: list[str] = []
+    for s in sections:
+        for m in _IMG_MARKDOWN_RE.finditer(s):
+            img = m.group()
+            if img not in seen:
+                seen.add(img)
+                images.append(img)
+    return images
 
 
 def _parse_tool_calls(text: str) -> list[tuple[str, str]]:
@@ -766,6 +1082,13 @@ def _execute_tool_calls(
                     for r in results:
                         snippet = (r.get("full_text") or r.get("summary", ""))[:600].replace("\n", " ")
                         lines.append(f"  [{r['title']}] {snippet}")
+                        if r.get("source_url"):
+                            title = r.get("title", "Wikipedia")
+                            lines.append(f"  Quelle: [{title} – Wikipedia]({r['source_url']})")
+                        if r.get("image_url"):
+                            img_src = _img_src_for_result(r)
+                            if img_src:
+                                lines.append(f"  Bild: ![{r.get('title', '')}]({img_src})")
                     parts.append("\n".join(lines))
             elif tool_name == "WEATHER":
                 from tools.weather import get_weather_for_user  # noqa: PLC0415
@@ -901,7 +1224,22 @@ def _wiki_context_for_message(message: str, limit: int = 3, min_score: float = 0
                 results[0]["score"] if results else 0.0,
                 results[0]["title"] if results else "",
             )
-            return ""
+            # Title-based fallback: when the embedding fails to surface the
+            # right article (common for proper-name queries buried in meta-
+            # questions), do a direct SQL title match.  This reliably finds
+            # e.g. "Martin Schindler" even when cosine similarity scores it
+            # below threshold.
+            from db.wiki import search_wiki_chunks_by_title  # noqa: PLC0415
+            title_hits = search_wiki_chunks_by_title(message, limit=limit)
+            if title_hits:
+                logger.debug(
+                    "Wiki search: title-based fallback found %d chunk(s): %s",
+                    len(title_hits),
+                    ", ".join(f"{r['title']!r}" for r in title_hits),
+                )
+                relevant = title_hits
+            else:
+                return ""
 
         # Relevanzfilter: Prüfen ob signifikante Wörter der Nachricht in Chunk-Titeln vorkommen
         sig_words = [
@@ -917,6 +1255,18 @@ def _wiki_context_for_message(message: str, limit: int = 3, min_score: float = 0
                 )
                 return ""
 
+        # Sort chunks: the article whose title most closely matches the query comes first.
+        # We score by (matching entity-word count) / (title word count) so that "Chuck Norris"
+        # ranks above "Chuck Norris Facts" when searching for "chuck norris".
+        if sig_words and len(relevant) > 1:
+            def _title_specificity(r: dict) -> float:
+                title_words = re.findall(r"[A-Za-zÄÖÜäöüß0-9]+", r["title"].lower())
+                if not title_words:
+                    return 0.0
+                matches = sum(1 for w in sig_words if w in title_words)
+                return matches / len(title_words)
+            relevant.sort(key=_title_specificity, reverse=True)
+
         logger.debug(
             "Wiki search: %d relevant chunk(s) injected into prompt: %s",
             len(relevant),
@@ -926,13 +1276,29 @@ def _wiki_context_for_message(message: str, limit: int = 3, min_score: float = 0
             "📚 Relevantes Wikipedia-Hintergrundwissen "
             "(nutze es in deiner Antwort wenn passend, aber nur wenn es wirklich hilft):"
         ]
-        for r in relevant:
+        for idx, r in enumerate(relevant):
             snippet = r["content"][:_WIKI_SNIPPET_MAX_CHARS].replace("\n", " ").strip()
-            lines.append(f"[{r['title']}] {snippet}")
+            if idx == 0:
+                lines.append(f"[{r['title']}] (Hauptartikel – Fakten wie Geburtsdaten, Sterbedaten etc. aus diesem Artikel haben Vorrang) {snippet}")
+            else:
+                lines.append(f"[{r['title']}] (Zusatzartikel) {snippet}")
+
+        # Inject cached images for each unique article (deduplicated by article_id)
+        seen_article_ids: set[int] = set()
+        for r in relevant:
+            article_id = r.get("article_id")
+            if not r.get("image_url") or not article_id or article_id in seen_article_ids:
+                continue
+            seen_article_ids.add(article_id)
+            img_src = _img_src_for_result(r)
+            if img_src:
+                lines.append(f"  Bild: ![{r['title']}]({img_src})")
+
         return "\n".join(lines)
     except Exception as exc:  # noqa: BLE001
         logger.debug("Wiki context search failed (non-fatal): %s", exc)
         return ""
+
 
 
 def _web_search_context(query: str, is_news: bool = False) -> str:
@@ -1104,17 +1470,32 @@ async def chat_completion(
     # 2c. Live Wikipedia lookup
     #
     # Priority order (mutually exclusive, first match wins):
-    #   1. Correction signal → authoritative live lookup (highest priority).
-    #   2. Router classified intent as "wiki" → always do live lookup, because
-    #      cached chunks may be irrelevant (semantic search can return off-topic
-    #      results when the topic is not yet in the local index).
-    #   3. Short follow-up / clarification message → combine with the previous
-    #      user turn to build the topic; do a live lookup when there is no good
-    #      cached data.
-    #   4. Topical question with no cached data → proactive live lookup.
+    #   1. User pasted a Wikipedia URL → fetch that exact article (highest priority).
+    #   2. Correction signal → authoritative live lookup.
+    #   3. Router classified intent as "wiki":
+    #       - Skip live lookup when local cached data exists AND is fresh (< 14 days).
+    #       - Always fetch when no local data or article is stale.
+    #   4. Short follow-up / clarification message → extend with prior turn.
+    #   5. Topical question → proactive live lookup.
     live_wiki_section = ""
-    _correction_live = False  # True when live section came from a correction signal
-    if _detect_correction(last_message):
+    _correction_live = False  # True when live section came from a correction/URL signal
+    # Initialised here so _sse_gen closure can always reference them regardless of intent.
+    _wiki_lookup_query: str = ""
+    # Background web-search task: started when wiki returns nothing (typo fallback).
+    # Runs concurrently with LLM generation; result is appended after the response.
+    _bg_web_task: "asyncio.Task[str] | None" = None
+    _wiki_url_title = _extract_wiki_url_title(last_message)
+    if _wiki_url_title:
+        logger.info("Wikipedia URL in message – fetching article %r directly.", _wiki_url_title)
+        live_wiki_section = await asyncio.get_running_loop().run_in_executor(
+            None, _live_wiki_context_for_url, _wiki_url_title
+        )
+        if live_wiki_section:
+            _correction_live = True
+            logger.info("Live wiki section (from URL) injected (%d chars).", len(live_wiki_section))
+        else:
+            logger.info("wiki_live_lookup_by_title returned no results for %r.", _wiki_url_title)
+    elif _detect_correction(last_message):
         logger.info("Correction signal detected – performing live Wikipedia lookup.")
         # Build a prior-context string from the last few user messages so that
         # topic-less corrections like "Er ist gestorben" can still find the subject.
@@ -1129,46 +1510,89 @@ async def chat_completion(
         else:
             logger.info("Live wiki lookup returned no results for correction message.")
     elif _UPDATE_RE.search(last_message):
-        # Benutzer möchte aktualisierte Informationen – Live-Lookup mit dem vorherigen Thema
+        # Benutzer möchte aktualisierte Informationen – Live-Lookup mit dem vorherigen Thema.
+        # Extract the actual search topic from the current message first; fall back to prior
+        # user messages (also topic-extracted) so we never pass a raw full sentence to Wikipedia.
         logger.info("Update-Signal erkannt – Live-Wikipedia-Lookup mit vorherigem Thema.")
-        _prior_msgs = [m.content for m in request.messages[:-1] if m.role == "user"]
-        _update_ctx = " ".join(_prior_msgs[-3:]) if _prior_msgs else last_message
-        live_wiki_section = await asyncio.get_running_loop().run_in_executor(
-            None, _live_wiki_context_proactive, _update_ctx
-        )
+        _update_topic = _extract_topic(last_message)
+        if not _update_topic:
+            _prior_msgs = [m.content for m in request.messages[:-1] if m.role == "user"]
+            _prior_ctx = " ".join(_prior_msgs[-3:]) if _prior_msgs else ""
+            _update_topic = _extract_topic(_prior_ctx) if _prior_ctx else ""
+        if _update_topic:
+            live_wiki_section = await asyncio.get_running_loop().run_in_executor(
+                None, _live_wiki_context_for_correction, _update_topic
+            )
         if live_wiki_section:
             logger.info("Live wiki section (Update) injected (%d chars).", len(live_wiki_section))
         else:
             logger.info("Live wiki lookup (Update) returned no results.")
     elif intent_str == "wiki":
-        # Router explicitly recognised a wiki intent.  Only do a live lookup
-        # when the cached data for this topic is stale (older than 7 days) or
-        # does not exist yet.  Fresh cache is good enough – no extra network
-        # request needed.
-        wiki_topic = _extract_topic(last_message)
-        is_stale = True  # default: assume stale so we do a lookup when unsure
-        if wiki_topic:
+        # Router explicitly recognised a wiki intent.
+        # Prefer a named entity extracted by the router (person, place, topic,
+        # etc.) as the lookup query – it has correct capitalisation and word
+        # order.  Fall back to _extract_topic() on the raw message only when no
+        # entity was provided.
+        _router_entities = router_result.entities if router_result else {}
+        _entity_query = next(
+            (str(v) for v in _router_entities.values() if isinstance(v, str) and v.strip()),
+            None,
+        )
+        # Use the router entity as the canonical topic; fall back to
+        # _extract_topic() which strips question filler words ("was weißt du über",
+        # "wie funktioniert", etc.) and returns only the searched entity in original
+        # word order.
+        wiki_topic = _entity_query or _extract_topic(last_message) or last_message
+        _wiki_lookup_query = _entity_query or _extract_topic(last_message) or last_message
+        # If the standard local search (min_score=0.55) returned nothing, retry
+        # with a softer threshold (0.40).  Use the router entity when available,
+        # otherwise the extracted topic — the router has already confirmed the intent
+        # so we trust near-miss results rather than discarding relevant chunks.
+        if not wiki_section:
+            _retry_query = _entity_query or _extract_topic(last_message) or last_message
+            wiki_section = _wiki_context_for_message(_retry_query, min_score=0.40)
+            if wiki_section:
+                logger.debug(
+                    "Wiki intent: local cache hit for %r (threshold=0.40, %d chars).",
+                    _retry_query, len(wiki_section),
+                )
+        # Live lookup gate: only fetch from Wikipedia when
+        #   a) no local chunks exist, OR
+        #   b) the cached article is stale (> 14 days).
+        # Correction signals are handled earlier (before this branch) and always
+        # trigger a live lookup regardless of cache age.
+        _needs_live_lookup = True
+        if wiki_section:
             try:
                 from tools.wikipedia import wiki_topic_is_stale  # noqa: PLC0415
-                is_stale = wiki_topic_is_stale(wiki_topic)
-            except Exception as exc_stale:  # noqa: BLE001
-                logger.warning("wiki_topic_is_stale check failed (assuming stale): %s", exc_stale)
-        if is_stale:
-            logger.info(
-                "Wiki intent detected and cache is stale/missing for topic %r – live lookup.",
-                wiki_topic,
-            )
+                _needs_live_lookup = wiki_topic_is_stale(wiki_topic, max_age_days=14)
+                if not _needs_live_lookup:
+                    logger.info(
+                        "Wiki intent: local cache is fresh (< 14 days) for %r – skipping live lookup.",
+                        wiki_topic,
+                    )
+            except Exception as _exc_stale:  # noqa: BLE001
+                logger.debug("wiki_topic_is_stale check failed (%s) – assuming stale.", _exc_stale)
+        if _needs_live_lookup:
+            logger.info("Wiki intent detected – performing live lookup for topic %r.", wiki_topic)
             live_wiki_section = await asyncio.get_running_loop().run_in_executor(
-                None, _live_wiki_context_proactive, last_message
+                None, _live_wiki_context_proactive, _wiki_lookup_query
             )
             if live_wiki_section:
                 logger.info("Live wiki section injected for wiki intent (%d chars).", len(live_wiki_section))
             else:
                 logger.info("Proactive live wiki lookup (wiki intent) returned no results.")
-        else:
-            logger.debug(
-                "Wiki intent detected but cache is fresh for topic %r – skipping live lookup.",
-                wiki_topic,
+        # If we still have no wiki data at all (local + live), the user's query
+        # may contain a typo that the Wikipedia search engine couldn't handle.
+        # Start a background DuckDuckGo web search in parallel with the LLM so
+        # we can append the result after the response without adding latency.
+        if not wiki_section and not live_wiki_section:
+            logger.info(
+                "Wiki intent: no wiki data found – starting background web search for %r (typo fallback).",
+                _wiki_lookup_query,
+            )
+            _bg_web_task = asyncio.create_task(
+                asyncio.to_thread(_web_search_context, _wiki_lookup_query)
             )
     else:
         # Build the effective query: if the current message is very short (likely a
@@ -1185,33 +1609,34 @@ async def chat_completion(
             )
         else:
             _effective_query = last_message
-        if not wiki_section and bool(_TOPIC_QUESTION_RE.search(_effective_query)):
-            # No cached data and the effective query looks like a topical question →
-            # proactively fetch fresh Wikipedia data.
-            logger.info("No cached wiki data and topical question detected – proactive live lookup.")
+
+        if bool(_TOPIC_QUESTION_RE.search(_effective_query)):
+            # Any topical question → always fetch fresh Wikipedia data.
+            # We never rely solely on cached chunks or the LLM's training data;
+            # the answer might have changed since either was written.
+            # NOTE: Use last_message (not _effective_query) for the actual lookup
+            # so that an unrelated prior turn (e.g. weather question) doesn't
+            # pollute the Wikipedia search and cause wrong article results.
+            logger.info("Topical question detected – proactive live lookup.")
             live_wiki_section = await asyncio.get_running_loop().run_in_executor(
-                None, _live_wiki_context_proactive, _effective_query
+                None, _live_wiki_context_proactive, last_message
             )
             if live_wiki_section:
                 logger.info("Proactive wiki section injected (%d chars).", len(live_wiki_section))
             else:
                 logger.info("Proactive live wiki lookup returned no results.")
-        elif not wiki_section and len(last_message.split()) <= 8 and _prior_user_messages:
-            # Short follow-up with no cached data and no question pattern either –
-            # still worth a live lookup using the extended query.
+        elif _prior_user_messages and _extract_topic(_effective_query):
+            # Short follow-up with no explicit question pattern – still worth
+            # trying a live lookup with the extended query.
             _topic = _extract_topic(_effective_query)
-            if _topic:
-                logger.info(
-                    "Short follow-up with no cached wiki data – proactive live lookup for topic %r.",
-                    _topic,
-                )
-                live_wiki_section = await asyncio.get_running_loop().run_in_executor(
-                    None, _live_wiki_context_proactive, _effective_query
-                )
-                if live_wiki_section:
-                    logger.info("Follow-up wiki section injected (%d chars).", len(live_wiki_section))
-                else:
-                    logger.info("Follow-up live wiki lookup returned no results.")
+            logger.info("Follow-up – proactive live lookup for topic %r.", _topic)
+            live_wiki_section = await asyncio.get_running_loop().run_in_executor(
+                None, _live_wiki_context_proactive, last_message
+            )
+            if live_wiki_section:
+                logger.info("Follow-up wiki section injected (%d chars).", len(live_wiki_section))
+            else:
+                logger.info("Follow-up live wiki lookup returned no results.")
 
     # 2d. Proactive web search for news / sports / web_search intents
     #
@@ -1235,6 +1660,49 @@ async def chat_completion(
             logger.info("Web search section injected (%d chars).", len(web_search_section))
         else:
             logger.info("Proactive web search returned no results for intent %r.", intent_str)
+
+    # 2e. Proactive weather lookup for weather intent
+    #
+    # When the router identifies a weather query, directly call the weather
+    # tool and inject the result so the LLM doesn't need to emit [WEATHER: ...]
+    # tags itself (which can lead to hallucination loops).
+    weather_section = ""
+    if intent_str == "weather":
+        _weather_location = _extract_topic(last_message) or None
+        # Guard: if the "location" extracted from the message is also the
+        # title of an already-injected wiki article (i.e. it's a person or
+        # topic, not a real place), skip the weather lookup entirely.  This
+        # prevents "lebt Chuck Norris noch?" from geocoding "chuck norris".
+        _wiki_titles_lower = ""
+        if wiki_section or live_wiki_section:
+            import re as _re_w  # noqa: PLC0415
+            _wiki_titles_lower = " ".join(
+                t.lower()
+                for t in _re_w.findall(r"\[([^\]]+)\]", (wiki_section or "") + (live_wiki_section or ""))
+            )
+        _location_is_wiki_topic = bool(
+            _weather_location
+            and _wiki_titles_lower
+            and _weather_location.lower() in _wiki_titles_lower
+        )
+        if _location_is_wiki_topic:
+            logger.info(
+                "Weather intent: skipping geocoding – %r is a wiki article topic, not a place.",
+                _weather_location,
+            )
+        else:
+            logger.info("Weather intent detected – proactive weather lookup for location %r.", _weather_location)
+            try:
+                from tools.weather import get_weather_for_user  # noqa: PLC0415
+                weather_section = await asyncio.get_running_loop().run_in_executor(
+                    None, get_weather_for_user, user_id, _weather_location
+                )
+                if weather_section:
+                    logger.info("Proactive weather section injected (%d chars).", len(weather_section))
+                else:
+                    logger.info("Proactive weather lookup returned no results.")
+            except Exception as exc_weather:  # noqa: BLE001
+                logger.warning("Proactive weather lookup failed (non-fatal): %s", exc_weather)
 
     # 3. Main LLM response (P100)
     if not llm_manager.is_ready("main"):
@@ -1302,7 +1770,12 @@ async def chat_completion(
             "6. Bei Fragen über Personen (Wer ist X?, Was macht X?) → [WIKI_SEARCH: Name].\n"
             "7. Wenn du Informationen aus Tools verwendest, zitiere die Quelle mit einem Markdown-Link.\n"
             "8. ANTWORTE IMMER IN DER SPRACHE, IN DER DER BENUTZER SCHREIBT. "
-            "Deutsch → Deutsch, Englisch → Englisch, andere Sprache → dieselbe Sprache."
+            "Deutsch → Deutsch, Englisch → Englisch, andere Sprache → dieselbe Sprache.\n"
+            "9. Wenn du Wikipedia-Quellen zitierst, formatiere sie IMMER als klickbare Markdown-Links: [Titel – Wikipedia](URL).\n"
+            "10. Bilder anzeigen: Wenn im Kontext eine Zeile 'Bild: ![Titel](URL)' steht, "
+            "kopiere diese Zeile EXAKT in deine Antwort – sie wird als Bild gerendert. "
+            "WICHTIG: Schreibe NIEMALS 'Bild:' ohne eine vollständige Markdown-URL dahinter. "
+            "NIEMALS erfundene Bild-Referenzen – nur Bilder die dir explizit im Kontext übergeben wurden."
         )
     # Inject pending disambiguation question if any
     disambig_section = ""
@@ -1344,6 +1817,8 @@ async def chat_completion(
             system_additions = f"{system_additions}\n\n{wiki_section}"
         if web_search_section:
             system_additions = f"{system_additions}\n\n{web_search_section}"
+        if weather_section:
+            system_additions = f"{system_additions}\n\n{weather_section}"
     else:
         system_additions = f"{time_note}{tool_note}{lang_note}{_ANTI_HALLUCINATION_NOTE}"
         if memory_section:
@@ -1356,6 +1831,8 @@ async def chat_completion(
             system_additions = f"{system_additions}\n\n{wiki_section}"
         if web_search_section:
             system_additions = f"{system_additions}\n\n{web_search_section}"
+        if weather_section:
+            system_additions = f"{system_additions}\n\n{weather_section}"
 
     messages = list(request.messages)
     if messages and messages[0].role == "system":
@@ -1382,6 +1859,8 @@ async def chat_completion(
             # LLM is generating (especially useful when a web/wiki search was done).
             if _did_web_search:
                 _status_text = "🔍 Ich habe das Web durchsucht – hier ist was ich gefunden habe:\n\n"
+            elif weather_section:
+                _status_text = "🌤️ Ich habe die aktuellen Wetterdaten abgerufen:\n\n"
             elif live_wiki_section or wiki_section:
                 _status_text = "📚 Einen Moment, ich schaue nach...\n\n"
             else:
@@ -1438,8 +1917,11 @@ async def chat_completion(
                 item = await queue.get()
                 if item is None:
                     break
+                # Hold [DONE] — we inject pending images before sending it ourselves
+                if item.strip() == "data: [DONE]":
+                    continue
                 # Collect content for post-stream background tasks
-                if item.strip() != "data: [DONE]" and item.startswith("data: "):
+                if item.startswith("data: "):
                     try:
                         d = json.loads(item[6:].strip())
                         c = d["choices"][0]["delta"].get("content", "")
@@ -1448,10 +1930,42 @@ async def chat_completion(
                     except Exception:  # noqa: BLE001
                         pass
                 yield item
+
+            # Server-side image injection: append any context images the LLM omitted.
+            full_text = "".join(collected)
+            for _img_md in _extract_pending_images(live_wiki_section or "", wiki_section or ""):
+                if _img_md not in full_text:
+                    _extra = f"\n\n{_img_md}"
+                    _extra_payload = json.dumps({
+                        "choices": [{"index": 0, "delta": {"content": _extra}, "finish_reason": None}]
+                    })
+                    yield f"data: {_extra_payload}\n\n"
+                    full_text += _extra
+                    collected.append(_extra)
+
+            # Background web search result (typo fallback for wiki intent).
+            # If a background web task was started, wait up to 8 s for the
+            # result and stream it as a short follow-up paragraph.
+            if _bg_web_task is not None:
+                try:
+                    _bg_web_result = await asyncio.wait_for(_bg_web_task, timeout=8.0)
+                    if _bg_web_result:
+                        _follow_up = (
+                            "\n\n💡 *Moment – ich habe noch etwas im Web dazu gefunden:*\n\n"
+                            + _bg_web_result
+                        )
+                        _fu_payload = json.dumps({
+                            "choices": [{"index": 0, "delta": {"content": _follow_up}, "finish_reason": None}]
+                        })
+                        yield f"data: {_fu_payload}\n\n"
+                        full_text += _follow_up
+                        collected.append(_follow_up)
+                except (asyncio.TimeoutError, Exception) as _bg_exc:  # noqa: BLE001
+                    logger.debug("Background web task not available in time: %s", _bg_exc)
+
             yield "data: [DONE]\n\n"
 
             # Fire-and-forget background work after streaming completes
-            full_text = "".join(collected)
             if user_id != "default" and user_id != "admin" and last_message.strip():
                 from db.memory import extract_memories_sync  # noqa: PLC0415
                 _recent_msgs = [m.content for m in request.messages if m.role == "user"][-4:]
@@ -1493,6 +2007,7 @@ async def chat_completion(
     # Handle tool-use patterns in the assistant response.
     # If the LLM emitted tool calls (e.g. [WIKI_SEARCH: Quantenverschränkung]),
     # execute them and re-run the LLM with the enriched context (one pass only).
+    tool_results = ""
     tool_calls = _parse_tool_calls(assistant_text)
     if tool_calls and user_id != "default":
         tool_results = _execute_tool_calls(tool_calls, user_id)
@@ -1517,6 +2032,25 @@ async def chat_completion(
                 logger.warning("Tool-use re-run failed: %s", exc)
         # Always remove tool call markers from the response shown to the user
         assistant_text = _TOOL_CALL_RE.sub("", assistant_text).strip()
+
+    # Server-side image injection: append any context images the LLM omitted.
+    _pending_imgs = _extract_pending_images(
+        live_wiki_section or "", wiki_section or "", tool_results
+    )
+    for _img_md in _pending_imgs:
+        if _img_md not in assistant_text:
+            assistant_text += f"\n\n{_img_md}"
+
+    # Background web search result (typo fallback, non-streaming path).
+    if _bg_web_task is not None:
+        try:
+            _bg_web_result = await asyncio.wait_for(_bg_web_task, timeout=10.0)
+            if _bg_web_result:
+                assistant_text += (
+                    "\n\n💡 *Ich habe noch etwas im Web dazu gefunden:*\n\n" + _bg_web_result
+                )
+        except (asyncio.TimeoutError, Exception) as _bg_exc:  # noqa: BLE001
+            logger.debug("Background web task timed out or failed (non-streaming): %s", _bg_exc)
 
     # 4. Async memory extraction (background task, zero user latency)
     # The built-in "admin" account is excluded – it is a shared system account
@@ -1626,8 +2160,8 @@ async def serve_image(image_id: int, thumb: bool = False) -> StreamingResponse:
             raise HTTPException(status_code=404, detail="Bilddaten nicht verfügbar.")
         media_type = record.get("mime_type", "application/octet-stream")
 
-    return StreamingResponse(
-        iter([bytes(data)]),
+    return Response(
+        content=bytes(data),
         media_type=media_type,
         headers={"Cache-Control": "public, max-age=86400"},
     )
