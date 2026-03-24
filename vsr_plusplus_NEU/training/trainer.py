@@ -320,6 +320,10 @@ class VSRTrainer:
         # so the display always shows a full set of same-resolution files.
         display_files = []   # list[str]: file paths from the last complete window
         display_fps = {'720': 0, '540': 0, '720_169': 0}
+
+        # Cumulative per-size file counter for the current epoch (used by WebUI).
+        # This is a local variable – reset automatically on each call to train_epoch.
+        epoch_files_per_size = {'720': 0, '540': 0, '720_169': 0}
         
         # Initialize loop timing
         loop_start_time = time.time()
@@ -438,6 +442,8 @@ class VSRTrainer:
             # Track batch files for WebUI display — always update counters, filenames when available
             if hasattr(self, 'web_monitor') and self.web_monitor:
                 batch_size_val = lr_stack.size(0)
+                # Accumulate per-size file usage for the current epoch
+                epoch_files_per_size[size_key] = epoch_files_per_size.get(size_key, 0) + batch_size_val
                 # files_used: sum of all images seen so far this epoch across all
                 # forward passes (batch_idx counts forward passes, not optimizer steps)
                 files_used_in_epoch = (batch_idx + 1) * batch_size_val
@@ -486,6 +492,7 @@ class VSRTrainer:
                         'files_used_in_epoch': files_used_in_epoch,
                         'total_files_in_epoch': total_files_in_epoch,
                         'files_per_size': display_fps,
+                        'epoch_files_per_size': dict(epoch_files_per_size),
                         'accumulation_steps': current_accum_steps,
                         'accum_step': accum_counter + 1,
                     }
@@ -744,6 +751,36 @@ class VSRTrainer:
                         # Print to console every 500 steps
                         if self.global_step % 500 == 0:
                             print(f"  📊 VRAM: {allocated:.2f}GB allocated, {reserved:.2f}GB reserved, {max_allocated:.2f}GB peak")
+
+                    # ── Mid-epoch data strategy update (every 100 steps) ─────────
+                    # Re-apply the sampler distribution so that phase transitions
+                    # (warmup → crop_introduction → stable) take effect immediately
+                    # within the epoch instead of waiting until the next epoch start.
+                    if self.data_strategy_scheduler is not None:
+                        _mid_sampler = getattr(self.train_loader, 'sampler', None)
+                        _mid_crop_counts = self._get_crop_file_counts()
+                        if _mid_sampler is not None and hasattr(_mid_sampler, 'set_distribution'):
+                            _mid_dist = self.data_strategy_scheduler.get_distribution(
+                                self.global_step,
+                                available_sizes=getattr(_mid_sampler, 'active_sizes', None),
+                                crop_file_counts=_mid_crop_counts,
+                            )
+                            _mid_sampler.set_distribution(_mid_dist)
+                        # Log phase transition if one occurred
+                        self.data_strategy_scheduler.check_phase_transition(
+                            self.global_step,
+                            log_fn=self.train_logger.log_event,
+                            crop_file_counts=_mid_crop_counts,
+                        )
+                        # Push current phase name to WebUI
+                        _current_phase = self.data_strategy_scheduler.get_phase(
+                            self.global_step, crop_file_counts=_mid_crop_counts
+                        )
+                        if hasattr(self, 'web_monitor') and self.web_monitor is not None:
+                            self.web_monitor.data_store.update_all_metrics(
+                                data_strategy_phase=_current_phase,
+                            )
+                    # ── End mid-epoch data strategy update ───────────────────────
                 
                 # Status file update (every 5 steps)
                 if self.global_step % 5 == 0:

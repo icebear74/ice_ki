@@ -94,6 +94,9 @@ class CompleteTrainingDataStore:
             # Lernrate
             'learning_rate_value': 0.0,
             'lr_phase_name': 'warmup',
+
+            # DataStrategy phase (warmup / crop_introduction / stable)
+            'data_strategy_phase': 'warmup',
             
             # Performance
             'iteration_duration': 0.0,
@@ -1457,15 +1460,26 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         </div>
         
         <div class="section-header">📂 Datensatz-Dateien</div>
-        
+
         <div class="layer-activity-container">
+            <!-- DataStrategy phase display -->
+            <div style="display: flex; align-items: center; justify-content: space-between; padding: 10px 0; margin-bottom: 12px; border-bottom: 1px solid var(--border-color);">
+                <span style="color: var(--text-secondary); font-size: 1.0em;">DataStrategy-Phase</span>
+                <span id="dataStrategyPhase" style="font-weight: bold; font-size: 1.0em; padding: 3px 10px; border-radius: 12px; background: rgba(56, 189, 248, 0.15); color: #38bdf8;">🔵 warmup</span>
+            </div>
+
             <!-- Training Datasets -->
             <div style="margin-bottom: 20px;">
-                <h3 style="color: var(--accent-blue); margin-bottom: 10px; font-size: 1.1em;">🎯 Trainings-Datensätze</h3>
+                <h3 style="color: var(--accent-blue); margin-bottom: 4px; font-size: 1.1em;">🎯 Trainings-Datensätze</h3>
+                <div style="font-size: 0.78em; color: var(--text-secondary); margin-bottom: 8px; text-align: right;">
+                    <span style="color: var(--accent-orange);">verwendet</span> / <span style="color: var(--text-primary);">gesamt</span>
+                </div>
                 
                 <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border-color);">
                     <span style="color: var(--text-secondary);">720×720</span>
-                    <span style="color: var(--text-primary); font-weight: bold;" id="train720Count">0</span>
+                    <span style="font-family: 'Courier New', monospace;">
+                        <span style="color: var(--accent-orange); font-weight: bold;" id="train720Used">0</span><span style="color: var(--text-secondary);"> / </span><span style="color: var(--text-primary); font-weight: bold;" id="train720Count">0</span>
+                    </span>
                 </div>
                 <div id="train720NewFiles" style="display: none; margin-top: 5px; margin-bottom: 8px; padding: 6px; background: rgba(34, 197, 94, 0.1); border-left: 3px solid #22c55e; border-radius: 4px; font-size: 0.85em;">
                     <span style="color: #22c55e;">✨ +<strong id="train720NewCount">0</strong> reloaded</span>
@@ -1473,7 +1487,9 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 
                 <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border-color);">
                     <span style="color: var(--text-secondary);">540×540</span>
-                    <span style="color: var(--text-primary); font-weight: bold;" id="train540Count">0</span>
+                    <span style="font-family: 'Courier New', monospace;">
+                        <span style="color: var(--accent-orange); font-weight: bold;" id="train540Used">0</span><span style="color: var(--text-secondary);"> / </span><span style="color: var(--text-primary); font-weight: bold;" id="train540Count">0</span>
+                    </span>
                 </div>
                 <div id="train540NewFiles" style="display: none; margin-top: 5px; margin-bottom: 8px; padding: 6px; background: rgba(34, 197, 94, 0.1); border-left: 3px solid #22c55e; border-radius: 4px; font-size: 0.85em;">
                     <span style="color: #22c55e;">✨ +<strong id="train540NewCount">0</strong> reloaded</span>
@@ -1481,7 +1497,9 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 
                 <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border-color);">
                     <span style="color: var(--text-secondary);">720×405 (16:9)</span>
-                    <span style="color: var(--text-primary); font-weight: bold;" id="train720_169Count">0</span>
+                    <span style="font-family: 'Courier New', monospace;">
+                        <span style="color: var(--accent-orange); font-weight: bold;" id="train720_169Used">0</span><span style="color: var(--text-secondary);"> / </span><span style="color: var(--text-primary); font-weight: bold;" id="train720_169Count">0</span>
+                    </span>
                 </div>
                 <div id="train720_169NewFiles" style="display: none; margin-top: 5px; margin-bottom: 8px; padding: 6px; background: rgba(34, 197, 94, 0.1); border-left: 3px solid #22c55e; border-radius: 4px; font-size: 0.85em;">
                     <span style="color: #22c55e;">✨ +<strong id="train720_169NewCount">0</strong> reloaded</span>
@@ -2354,13 +2372,32 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         
         function updateDatasetFiles(data) {
             const dsFiles = data.dataset_files || {};
+
+            // Update DataStrategy phase display
+            const phase = data.data_strategy_phase || 'warmup';
+            const phaseEl = document.getElementById('dataStrategyPhase');
+            if (phaseEl) {
+                const phaseConfig = {
+                    'warmup':            { label: '🔵 warmup',            color: '#38bdf8', bg: 'rgba(56, 189, 248, 0.15)' },
+                    'crop_introduction': { label: '🟠 crop_introduction', color: '#f97316', bg: 'rgba(249, 115, 22, 0.15)' },
+                    'stable':            { label: '🟢 stable',            color: '#22c55e', bg: 'rgba(34, 197, 94, 0.15)'  },
+                };
+                const cfg = phaseConfig[phase] || phaseConfig['warmup'];
+                phaseEl.textContent = cfg.label;
+                phaseEl.style.color = cfg.color;
+                phaseEl.style.background = cfg.bg;
+            }
             
+            // Per-size epoch usage counters
+            const epochFilesPerSize = (data.current_batch || {}).epoch_files_per_size || {};
+
             // Update training datasets (per-size)
             const trainPerSize = dsFiles.train_per_size || {};
             
             // 720 training
             const train720 = trainPerSize['720'] || {};
             document.getElementById('train720Count').textContent = train720.count || 0;
+            document.getElementById('train720Used').textContent = epochFilesPerSize['720'] || 0;
             if (train720.has_new && train720.new_count > 0) {
                 document.getElementById('train720NewFiles').style.display = 'block';
                 document.getElementById('train720NewCount').textContent = train720.new_count;
@@ -2371,6 +2408,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             // 540 training
             const train540 = trainPerSize['540'] || {};
             document.getElementById('train540Count').textContent = train540.count || 0;
+            document.getElementById('train540Used').textContent = epochFilesPerSize['540'] || 0;
             if (train540.has_new && train540.new_count > 0) {
                 document.getElementById('train540NewFiles').style.display = 'block';
                 document.getElementById('train540NewCount').textContent = train540.new_count;
@@ -2381,6 +2419,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             // 720_169 training
             const train720_169 = trainPerSize['720_169'] || {};
             document.getElementById('train720_169Count').textContent = train720_169.count || 0;
+            document.getElementById('train720_169Used').textContent = epochFilesPerSize['720_169'] || 0;
             if (train720_169.has_new && train720_169.new_count > 0) {
                 document.getElementById('train720_169NewFiles').style.display = 'block';
                 document.getElementById('train720_169NewCount').textContent = train720_169.new_count;
