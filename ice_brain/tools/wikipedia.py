@@ -17,6 +17,7 @@ wiki_refresh(title) -> dict | None
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,45 @@ _UMLAUT_TABLE = str.maketrans({
     "Ä": "Ae", "Ö": "Oe", "Ü": "Ue",
     "ß": "ss",
 })
+
+# Role keywords that indicate the user is asking about a current officeholder.
+# When we fetch a city/place article for such a query we also try to find the
+# person's own Wikipedia article (which typically has their portrait photo).
+_ROLE_KEYWORDS_RE = re.compile(
+    r"\b(?:"
+    r"b[uü]rgermeister(?:in)?"
+    r"|ob[eü]rb[uü]rgermeister(?:in)?"
+    r"|ministerpr[äa]sident(?:in)?"
+    r"|bundeskanzler(?:in)?"
+    r"|bundespr[äa]sident(?:in)?"
+    r"|landrat|landrätin"
+    r"|gouverneur|gouverneurin"
+    r"|senator|senatorin"
+    r"|pr[äa]sident(?:in)?"
+    r"|premierminister(?:in)?"
+    r"|prime\s+minister"
+    r"|mayor|governor|president|chancellor"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Patterns used to extract a person's name from article full_text when the
+# article is about a place.  We look for: "Bürgermeisterin ist/war/heißt Name"
+# or "Bürgermeister Name" (name in lead section).
+_PERSON_IN_TEXT_RE = re.compile(
+    r'(?:'
+    r'b[uü]rgermeister(?:in)?\s+(?:ist|war|heißt|lautet|:\s*)?'
+    r'|ob[eü]rb[uü]rgermeister(?:in)?\s+(?:ist|war|heißt|lautet|:\s*)?'
+    r'|ministerpr[äa]sident(?:in)?\s+(?:ist|war|heißt|lautet|:\s*)?'
+    r'|bundeskanzler(?:in)?\s+(?:ist|war|heißt|lautet|:\s*)?'
+    r'|bundespr[äa]sident(?:in)?\s+(?:ist|war|heißt|lautet|:\s*)?'
+    r'|pr[äa]sident(?:in)?\s+(?:ist|war|heißt|lautet|:\s*)?'
+    r')'
+    r'(?:der\s+Stadt\s+\w+\s+(?:ist|war)\s+)?'  # optional "der Stadt X ist"
+    r'([A-ZÄÖÜ][a-zäöüß]+'                       # first name
+    r'(?:\s+[A-ZÄÖÜ][a-zäöüß]+){1,3})',           # up to 3 more capitalized words
+    re.IGNORECASE,
+)
 
 
 def _transliterate_umlauts(text: str) -> str:
@@ -338,6 +378,63 @@ def wiki_search(query: str, limit: int = 3) -> list[dict]:
     return results
 
 
+def _try_person_followup(query: str, results: list[dict]) -> list[dict]:
+    """When *query* is about a role holder and results contain place articles,
+    try to find and add the person's own Wikipedia article.
+
+    Strategy:
+    1. Check whether the query contains a role keyword (Bürgermeister etc.).
+    2. If so, scan the full_text of each result for a person's name following
+       that role keyword.
+    3. For the first name found, do a targeted Wikipedia search so we can
+       include their portrait photo alongside the city images.
+
+    Returns the *results* list, possibly extended with the person article.
+    Non-fatal: any error is swallowed and the original list returned unchanged.
+    """
+    if not _ROLE_KEYWORDS_RE.search(query):
+        return results
+    try:
+        # Collect all full_text snippets to search through
+        combined_text = " ".join(
+            (r.get("full_text") or r.get("summary", ""))[:2000] for r in results
+        )
+        m = _PERSON_IN_TEXT_RE.search(combined_text)
+        if not m:
+            return results
+        person_name = m.group(1).strip()
+        # Sanity check: must look like a real name (2+ capitalised words, not a
+        # common German noun that happens to be capitalised)
+        name_words = person_name.split()
+        if len(name_words) < 2:
+            return results
+        # Avoid duplicates – skip if we already have a result for this person
+        existing_titles = {r.get("title", "").lower() for r in results}
+        if any(person_name.lower() in t for t in existing_titles):
+            return results
+        logger.info("Person follow-up: found name %r in results – looking up Wikipedia article.", person_name)
+        person_data = _api_summary(person_name)
+        if person_data is None:
+            # Try with search instead of direct title lookup
+            person_results = _api_search(person_name, limit=1)
+            if not person_results:
+                return results
+            person_entry = person_results[0]
+        else:
+            full_text = _api_full_text(person_name)
+            person_entry = _normalise_summary(person_data, query=person_name, full_text=full_text)
+        # Only add if the article is actually about the person (not another place)
+        person_title = person_entry.get("title", "").lower()
+        if any(t in person_title for t in ("liste", "wahl", "stadtrat", "kommunal")):
+            return results
+        _cache_set(person_entry)
+        logger.info("Person follow-up: added article %r.", person_entry.get("title"))
+        return results + [person_entry]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Person follow-up lookup failed (non-fatal): %s", exc)
+        return results
+
+
 def wiki_live_lookup(query: str, limit: int = 2) -> list[dict]:
     """Fetch fresh Wikipedia results for *query*, bypassing the local cache.
 
@@ -390,6 +487,9 @@ def wiki_live_lookup(query: str, limit: int = 2) -> list[dict]:
                 logger.warning("wiki_live_lookup: chunk refresh failed for %r: %s", title, exc)
 
     logger.info("wiki_live_lookup: refreshed %d article(s) for query %r.", len(results), query)
+    # For role queries (Bürgermeister etc.) try to find the person's own article
+    # so their portrait photo is available alongside the place images.
+    results = _try_person_followup(query, results)
     return results
 
 

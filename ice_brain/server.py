@@ -803,6 +803,23 @@ _TOPIC_QUESTION_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Present-tense "who is" questions about current role holders — ALWAYS trigger a
+# live Wikipedia lookup regardless of whether cached data already exists, because
+# the cached article might have been written before the current person took office.
+_LIVE_ALWAYS_RE = re.compile(
+    r"(?:"
+    # German present tense: "wer ist [der/die] [role]"
+    r"wer\s+(?:ist|sind)\b"
+    r"|wer\s+(?:war\s+)?(?:der|die)\s+(?:aktuelle?|derzeitige?|jetzige?)\b"
+    r"|(?:der|die)\s+(?:aktuelle?|derzeitige?|jetzige?|neue?)\s+\w+\s+(?:ist|heißt|war|lautet)\b"
+    # English present tense
+    r"|who\s+is\b"
+    r"|who\s+are\b"
+    r"|who\s+(?:is|are)\s+(?:the\s+)?(?:current|new|latest)\b"
+    r")",
+    re.IGNORECASE,
+)
+
 
 def _live_wiki_context_for_correction(message: str, limit: int = 2, prior_context: str = "") -> str:
     """Fetch fresh Wikipedia data for the topic being corrected.
@@ -862,10 +879,12 @@ def _live_wiki_context_proactive(message: str, limit: int = 2) -> str:
     topic = _extract_topic(message)
     if not topic:
         return ""
-    logger.info("Proactive live wiki lookup (no cached data). Query: %r", topic)
+    logger.info("Proactive live wiki lookup. Query: %r", topic)
     try:
         from tools.wikipedia import wiki_live_lookup  # noqa: PLC0415
-        results = wiki_live_lookup(topic, limit=limit)
+        # Pass the full original message to wiki_live_lookup so that person
+        # follow-up logic can detect role keywords (Bürgermeister etc.).
+        results = wiki_live_lookup(message, limit=limit)
         if not results:
             logger.info("Proactive live wiki lookup: no results for %r.", topic)
             return ""
@@ -1384,7 +1403,9 @@ async def chat_completion(
         # request needed.
         wiki_topic = _extract_topic(last_message)
         is_stale = True  # default: assume stale so we do a lookup when unsure
-        if wiki_topic:
+        # "wer ist" / "who is" questions are ALWAYS treated as stale because
+        # the cached article may predate a change in the current officeholder.
+        if not _LIVE_ALWAYS_RE.search(last_message) and wiki_topic:
             try:
                 from tools.wikipedia import wiki_topic_is_stale  # noqa: PLC0415
                 is_stale = wiki_topic_is_stale(wiki_topic)
@@ -1422,10 +1443,18 @@ async def chat_completion(
             )
         else:
             _effective_query = last_message
-        if not wiki_section and bool(_TOPIC_QUESTION_RE.search(_effective_query)):
-            # No cached data and the effective query looks like a topical question →
-            # proactively fetch fresh Wikipedia data.
-            logger.info("No cached wiki data and topical question detected – proactive live lookup.")
+
+        # "wer ist / who is" queries ALWAYS need a live lookup — the answer may
+        # have changed since the cached article was written, even if the cache is
+        # technically "fresh" (e.g., the city article was cached yesterday but the
+        # mayor changed a year ago and the article already reflects that).
+        _live_always = bool(_LIVE_ALWAYS_RE.search(_effective_query))
+
+        if _live_always or (not wiki_section and bool(_TOPIC_QUESTION_RE.search(_effective_query))):
+            # Present-tense person question OR no cached data with a topical question
+            # → proactively fetch fresh Wikipedia data.
+            _reason = "present-tense person question" if _live_always else "no cached wiki data + topical question"
+            logger.info("Proactive live lookup triggered (%s).", _reason)
             live_wiki_section = await asyncio.get_running_loop().run_in_executor(
                 None, _live_wiki_context_proactive, _effective_query
             )
