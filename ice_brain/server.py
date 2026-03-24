@@ -37,7 +37,7 @@ import secrets
 from dataclasses import dataclass, field
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from db.connection import init_db
@@ -842,19 +842,9 @@ def _live_wiki_context_for_correction(message: str, limit: int = 2, prior_contex
                 title = r.get("title", "Wikipedia")
                 lines.append(f"  Quelle: [{title} – Wikipedia]({r['source_url']})")
             if r.get("image_url"):
-                try:
-                    from db.images import fetch_and_cache_url, link_image  # noqa: PLC0415
-                    img_id = fetch_and_cache_url(
-                        r["image_url"], "wikipedia", r.get("title", "unknown"),
-                        alt_text=r.get("title", ""),
-                    )
-                    if img_id is not None:
-                        cache_id = r.get("id")
-                        if cache_id is not None:
-                            link_image(img_id, "wiki_cache", cache_id)
-                        lines.append(f"  Bild: ![{r.get('title', '')}](/api/image/{img_id}?thumb=true)")
-                except Exception as exc_img:  # noqa: BLE001
-                    logger.warning("Wiki image caching failed (non-fatal): %s", exc_img)
+                img_src = _img_src_for_result(r)
+                if img_src:
+                    lines.append(f"  Bild: ![{r.get('title', '')}]({img_src})")
         return "\n".join(lines)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Live wiki lookup failed (non-fatal): %s", exc)
@@ -889,19 +879,9 @@ def _live_wiki_context_proactive(message: str, limit: int = 2) -> str:
                 title = r.get("title", "Wikipedia")
                 lines.append(f"  Quelle: [{title} – Wikipedia]({r['source_url']})")
             if r.get("image_url"):
-                try:
-                    from db.images import fetch_and_cache_url, link_image  # noqa: PLC0415
-                    img_id = fetch_and_cache_url(
-                        r["image_url"], "wikipedia", r.get("title", "unknown"),
-                        alt_text=r.get("title", ""),
-                    )
-                    if img_id is not None:
-                        cache_id = r.get("id")
-                        if cache_id is not None:
-                            link_image(img_id, "wiki_cache", cache_id)
-                        lines.append(f"  Bild: ![{r.get('title', '')}](/api/image/{img_id}?thumb=true)")
-                except Exception as exc_img:  # noqa: BLE001
-                    logger.warning("Wiki image caching failed (non-fatal): %s", exc_img)
+                img_src = _img_src_for_result(r)
+                if img_src:
+                    lines.append(f"  Bild: ![{r.get('title', '')}]({img_src})")
         return "\n".join(lines)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Proactive live wiki lookup failed (non-fatal): %s", exc)
@@ -917,7 +897,34 @@ _TOOL_CALL_RE = re.compile(
     re.IGNORECASE,
 )
 
-_IMG_MARKDOWN_RE = re.compile(r'!\[[^\]]*\]\(/api/image/[^)]+\)')
+_IMG_MARKDOWN_RE = re.compile(r'!\[[^\]]*\]\((?:/api/image/|https?://)[^)]+\)')
+
+
+def _img_src_for_result(r: dict) -> str | None:
+    """Return the best image src for a wiki result dict.
+
+    Tries to fetch-and-cache the image locally (returns /api/image/{id}).
+    Falls back to the original Wikipedia URL when local caching fails so the
+    image always renders for the user.  Returns None when no image is available.
+    """
+    image_url = r.get("image_url")
+    if not image_url:
+        return None
+    try:
+        from db.images import fetch_and_cache_url, link_image  # noqa: PLC0415
+        img_id = fetch_and_cache_url(
+            image_url, "wikipedia", r.get("title", "unknown"),
+            alt_text=r.get("title", ""),
+        )
+        if img_id is not None:
+            cache_id = r.get("id") or r.get("article_id")
+            if cache_id is not None:
+                link_image(img_id, "wiki_cache", cache_id)
+            return f"/api/image/{img_id}?thumb=true"
+    except Exception as exc_img:  # noqa: BLE001
+        logger.warning("Wiki image caching failed (non-fatal): %s", exc_img)
+    # Fallback: use original Wikipedia URL directly
+    return image_url
 
 
 def _extract_pending_images(*sections: str) -> list[str]:
@@ -980,19 +987,9 @@ def _execute_tool_calls(
                             title = r.get("title", "Wikipedia")
                             lines.append(f"  Quelle: [{title} – Wikipedia]({r['source_url']})")
                         if r.get("image_url"):
-                            try:
-                                from db.images import fetch_and_cache_url, link_image  # noqa: PLC0415
-                                img_id = fetch_and_cache_url(
-                                    r["image_url"], "wikipedia", r.get("title", "unknown"),
-                                    alt_text=r.get("title", ""),
-                                )
-                                if img_id is not None:
-                                    cache_id = r.get("id")
-                                    if cache_id is not None:
-                                        link_image(img_id, "wiki_cache", cache_id)
-                                    lines.append(f"  Bild: ![{r.get('title', '')}](/api/image/{img_id}?thumb=true)")
-                            except Exception as exc_img:  # noqa: BLE001
-                                logger.warning("Wiki image caching failed (non-fatal): %s", exc_img)
+                            img_src = _img_src_for_result(r)
+                            if img_src:
+                                lines.append(f"  Bild: ![{r.get('title', '')}]({img_src})")
                     parts.append("\n".join(lines))
             elif tool_name == "WEATHER":
                 from tools.weather import get_weather_for_user  # noqa: PLC0415
@@ -1161,21 +1158,12 @@ def _wiki_context_for_message(message: str, limit: int = 3, min_score: float = 0
         seen_article_ids: set[int] = set()
         for r in relevant:
             article_id = r.get("article_id")
-            image_url = r.get("image_url")
-            if not image_url or not article_id or article_id in seen_article_ids:
+            if not r.get("image_url") or not article_id or article_id in seen_article_ids:
                 continue
             seen_article_ids.add(article_id)
-            try:
-                from db.images import fetch_and_cache_url, link_image  # noqa: PLC0415
-                img_id = fetch_and_cache_url(
-                    image_url, "wikipedia", r["title"],
-                    alt_text=r["title"],
-                )
-                if img_id is not None:
-                    link_image(img_id, "wiki_cache", article_id)
-                    lines.append(f"  Bild: ![{r['title']}](/api/image/{img_id}?thumb=true)")
-            except Exception as exc_img:  # noqa: BLE001
-                logger.warning("Wiki chunk image caching failed (non-fatal): %s", exc_img)
+            img_src = _img_src_for_result(r)
+            if img_src:
+                lines.append(f"  Bild: ![{r['title']}]({img_src})")
 
         return "\n".join(lines)
     except Exception as exc:  # noqa: BLE001
@@ -1574,9 +1562,10 @@ async def chat_completion(
             "8. ANTWORTE IMMER IN DER SPRACHE, IN DER DER BENUTZER SCHREIBT. "
             "Deutsch → Deutsch, Englisch → Englisch, andere Sprache → dieselbe Sprache.\n"
             "9. Wenn du Wikipedia-Quellen zitierst, formatiere sie IMMER als klickbare Markdown-Links: [Titel – Wikipedia](URL).\n"
-            "10. Du KANNST und SOLLST Bilder anzeigen! Wenn im Kontext eine Zeile 'Bild: ![Titel](/api/image/...)' "
-            "vorhanden ist, bette dieses Bild IMMER und AUTOMATISCH in deine Antwort ein – auch ohne explizite Anfrage. "
-            "Verwende GENAU die /api/image/-URL aus dem Kontext. Erfinde NIEMALS eigene Bild-URLs."
+            "10. Bilder anzeigen: Wenn im Kontext eine Zeile 'Bild: ![Titel](URL)' steht, "
+            "kopiere diese Zeile EXAKT in deine Antwort – sie wird als Bild gerendert. "
+            "WICHTIG: Schreibe NIEMALS 'Bild:' ohne eine vollständige Markdown-URL dahinter. "
+            "NIEMALS erfundene Bild-Referenzen – nur Bilder die dir explizit im Kontext übergeben wurden."
         )
     # Inject pending disambiguation question if any
     disambig_section = ""
@@ -1930,8 +1919,8 @@ async def serve_image(image_id: int, thumb: bool = False) -> StreamingResponse:
             raise HTTPException(status_code=404, detail="Bilddaten nicht verfügbar.")
         media_type = record.get("mime_type", "application/octet-stream")
 
-    return StreamingResponse(
-        iter([bytes(data)]),
+    return Response(
+        content=bytes(data),
         media_type=media_type,
         headers={"Cache-Control": "public, max-age=86400"},
     )
