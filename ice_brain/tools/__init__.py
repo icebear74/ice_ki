@@ -38,3 +38,10 @@ def call_tool(name: str, **kwargs: Any) -> Any:
     if name not in _REGISTRY:
         raise KeyError(f"Unknown tool: '{name}'. Available: {list(_REGISTRY)}")
     return _REGISTRY[name](**kwargs)
+
+
+# Register built-in tools (import triggers @register_tool decorators)
+try:
+    from tools import websearch as _websearch  # noqa: F401, PLC0415
+except Exception:  # noqa: BLE001
+    pass

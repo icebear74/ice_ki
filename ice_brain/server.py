@@ -442,6 +442,9 @@ _ANTI_HALLUCINATION_NOTE = (
     "\n- Wenn du etwas nicht weißt, sage es ehrlich. Halluziniere keine Fakten."
     "\n- Nutze [WIKI_SEARCH: ...] wenn du Fakten nachschlagen musst."
     "\n- Wenn du Wikipedia-Daten erhältst, nutze NUR diese als Faktenquelle."
+    "\n- Nutze [WEB_SEARCH: ...] oder [NEWS_SEARCH: ...] für aktuelle Infos, Nachrichten und Sport."
+    "\n- Wenn du Informationen aus Tools (Web, Wiki) verwendest, zitiere die Quelle immer"
+    " mit einem Markdown-Link, z.B. [Artikelname](https://...) oder [Quelle](https://...)."
     "\n- Gib KEINE erfundenen Quellenangaben oder Links an."
     "\n- Antworte IMMER in der Sprache, in der der Benutzer schreibt."
     "\n  Wenn er deutsch schreibt, antworte auf deutsch."
@@ -715,7 +718,7 @@ def _live_wiki_context_proactive(message: str, limit: int = 2) -> str:
 # ---------------------------------------------------------------------------
 
 _TOOL_CALL_RE = re.compile(
-    r"\[(SEARCH_MEMORY|SEARCH_RELATION|WIKI_SEARCH|WEATHER)\s*:\s*([^\]]{1,256})\]",
+    r"\[(SEARCH_MEMORY|SEARCH_RELATION|WIKI_SEARCH|WEATHER|WEB_SEARCH|NEWS_SEARCH)\s*:\s*([^\]]{1,256})\]",
     re.IGNORECASE,
 )
 
@@ -769,65 +772,28 @@ def _execute_tool_calls(
                 result = get_weather_for_user(user_id, location_name=query if query else None)
                 if result:
                     parts.append(f"[WEATHER: {query}]\n{result}")
+            elif tool_name in ("WEB_SEARCH", "NEWS_SEARCH"):
+                from tools.websearch import news_search, web_search  # noqa: PLC0415
+                if tool_name == "NEWS_SEARCH":
+                    results = news_search(query, max_results=5, timelimit="w")
+                else:
+                    results = web_search(query, max_results=5)
+                if results:
+                    lines = [f"[{tool_name}: {query}]"]
+                    for r in results:
+                        title = r.get("title", "")
+                        url = r.get("url", "")
+                        snippet = r.get("snippet", "")
+                        date = r.get("date", "")
+                        source = r.get("source", "")
+                        entry = f"  [{title}]({url}) – {snippet}"
+                        if date or source:
+                            entry += f" ({source}, {date})" if source and date else f" ({source or date})"
+                        lines.append(entry)
+                    parts.append("\n".join(lines))
         except Exception as exc:  # noqa: BLE001
             logger.warning("Tool call %s(%r) failed: %s", tool_name, query, exc)
     return "\n\n".join(parts)
-
-
-
-    """State machine that removes ``<think>…</think>`` blocks from a token
-    stream when *strip* is True.
-
-    Feed tokens one at a time via :meth:`feed`; call :meth:`flush` after the
-    last token to drain any bytes buffered for boundary detection.
-    """
-
-    _OPEN = "<think>"
-    _CLOSE = "</think>"
-
-    def __init__(self, strip: bool) -> None:
-        self._strip = strip
-        self._buf: str = ""
-        self._in_think: bool = False
-
-    def feed(self, token: str) -> str:  # noqa: C901
-        if not self._strip:
-            return token
-        self._buf += token
-        out_parts: list[str] = []
-        while self._buf:
-            if self._in_think:
-                idx = self._buf.find(self._CLOSE)
-                if idx >= 0:
-                    self._buf = self._buf[idx + len(self._CLOSE):]
-                    self._in_think = False
-                else:
-                    keep = len(self._CLOSE) - 1
-                    self._buf = self._buf[-keep:] if len(self._buf) > keep else self._buf
-                    break
-            else:
-                idx = self._buf.find(self._OPEN)
-                if idx >= 0:
-                    out_parts.append(self._buf[:idx])
-                    self._buf = self._buf[idx + len(self._OPEN):]
-                    self._in_think = True
-                else:
-                    keep = len(self._OPEN) - 1
-                    safe = len(self._buf) - keep
-                    if safe > 0:
-                        out_parts.append(self._buf[:safe])
-                        self._buf = self._buf[safe:]
-                    break
-        return "".join(out_parts)
-
-    def flush(self) -> str:
-        """Return any buffered content held for boundary detection."""
-        if self._strip and self._in_think:
-            self._buf = ""
-            return ""
-        out = self._buf
-        self._buf = ""
-        return out
 
 
 # ---------------------------------------------------------------------------
@@ -966,6 +932,45 @@ def _wiki_context_for_message(message: str, limit: int = 3, min_score: float = 0
         return "\n".join(lines)
     except Exception as exc:  # noqa: BLE001
         logger.debug("Wiki context search failed (non-fatal): %s", exc)
+        return ""
+
+
+def _web_search_context(query: str, is_news: bool = False) -> str:
+    """Perform a DuckDuckGo search and format the results as a prompt section.
+
+    Returns a formatted string to be injected into the system prompt, or ""
+    on error / when the package is not installed.
+    """
+    try:
+        from tools.websearch import news_search, web_search  # noqa: PLC0415
+        if is_news:
+            results = news_search(query, max_results=5, timelimit="w")
+            header = "📰 AKTUELLE NACHRICHTEN (DuckDuckGo, live abgerufen):"
+        else:
+            results = web_search(query, max_results=5)
+            header = "🌐 WEB-SUCHERGEBNISSE (DuckDuckGo, live abgerufen):"
+        if not results:
+            logger.info("Web search returned no results for query %r.", query)
+            return ""
+        lines = [
+            header,
+            "Nutze diese Ergebnisse als Grundlage deiner Antwort und zitiere die Quellen mit Markdown-Links.",
+            "",
+        ]
+        for r in results:
+            title = r.get("title", "")
+            url = r.get("url", "")
+            snippet = r.get("snippet", "")
+            date = r.get("date", "")
+            source = r.get("source", "")
+            meta = f" ({source}, {date})" if source and date else (f" ({source})" if source else (f" ({date})" if date else ""))
+            if url:
+                lines.append(f"- **[{title}]({url})**{meta}: {snippet}")
+            else:
+                lines.append(f"- **{title}**{meta}: {snippet}")
+        return "\n".join(lines)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Web search context failed (non-fatal): %s", exc)
         return ""
 
 
@@ -1208,6 +1213,29 @@ async def chat_completion(
                 else:
                     logger.info("Follow-up live wiki lookup returned no results.")
 
+    # 2d. Proactive web search for news / sports / web_search intents
+    #
+    # When the router identifies a time-sensitive query (news, sports scores,
+    # current events), perform a DuckDuckGo search and inject the results so
+    # the LLM can answer with up-to-date information.
+    web_search_section = ""
+    _did_web_search = False
+    if intent_str in ("news", "sports", "web_search"):
+        _web_query = _extract_topic(last_message) or last_message
+        _is_news = intent_str in ("news", "sports")
+        logger.info(
+            "Web search intent %r detected – proactive %s search for query %r.",
+            intent_str, "news" if _is_news else "web", _web_query,
+        )
+        web_search_section = await asyncio.get_running_loop().run_in_executor(
+            None, _web_search_context, _web_query, _is_news
+        )
+        if web_search_section:
+            _did_web_search = True
+            logger.info("Web search section injected (%d chars).", len(web_search_section))
+        else:
+            logger.info("Proactive web search returned no results for intent %r.", intent_str)
+
     # 3. Main LLM response (P100)
     if not llm_manager.is_ready("main"):
         return JSONResponse(
@@ -1260,17 +1288,20 @@ async def chat_completion(
             "\n\nVerfügbare Werkzeuge (nutze sie wenn nötig, indem du sie in deiner Antwort einbettest):\n"
             "  [SEARCH_MEMORY: Suchanfrage] – Semantische Suche in gespeicherten Erinnerungen\n"
             "  [SEARCH_RELATION: Name] – Alle gespeicherten Fakten über eine bekannte Person abrufen\n"
-            "  [WIKI_SEARCH: Suchanfrage] – Wikipedia on-demand abfragen\n"
+            "  [WIKI_SEARCH: Suchanfrage] – Wikipedia on-demand abfragen (enzyklopädisches Wissen)\n"
+            "  [WEB_SEARCH: Suchanfrage] – Aktuelle Websuche (Preise, Rezepte, Software, Echtzeit-Daten)\n"
+            "  [NEWS_SEARCH: Suchanfrage] – Aktuelle Nachrichten und Sportergebnisse suchen\n"
             "  [WEATHER: Ort] – Aktuelles Wetter und Vorhersage abrufen (Ort optional, nutzt gespeicherten Standort)\n"
             "\n"
             "WICHTIGE REGELN für Werkzeug-Nutzung:\n"
             "1. Du hast KEINEN Zugang zu Suchmaschinen (Google, Bing etc.) und KEINEN Internetzugang.\n"
-            "2. Wenn du Fakten über Personen, Orte, Ereignisse oder Themen brauchst, "
-            "nutze IMMER [WIKI_SEARCH: ...] – das ist deine EINZIGE Quelle für aktuelles Wissen.\n"
-            "3. Erfinde NIEMALS Suchergebnisse oder tue so, als hättest du im Internet gesucht.\n"
-            "4. Wenn du dir bei Fakten unsicher bist, nutze [WIKI_SEARCH: ...] BEVOR du antwortest.\n"
-            "5. Bei Fragen über Personen (Wer ist X?, Was macht X?) → IMMER [WIKI_SEARCH: Name].\n"
-            "6. ANTWORTE IMMER IN DER SPRACHE, IN DER DER BENUTZER SCHREIBT. "
+            "2. Für enzyklopädische Fakten (Personen, Orte, Geschichte, Konzepte) → [WIKI_SEARCH: ...]\n"
+            "3. Für aktuelle Infos (Nachrichten, Sport, Preise, neue Releases, Echtzeit-Daten) → [WEB_SEARCH: ...] oder [NEWS_SEARCH: ...]\n"
+            "4. Erfinde NIEMALS Suchergebnisse oder tue so, als hättest du im Internet gesucht.\n"
+            "5. Wenn du dir bei Fakten unsicher bist, nutze ein Werkzeug BEVOR du antwortest.\n"
+            "6. Bei Fragen über Personen (Wer ist X?, Was macht X?) → [WIKI_SEARCH: Name].\n"
+            "7. Wenn du Informationen aus Tools verwendest, zitiere die Quelle mit einem Markdown-Link.\n"
+            "8. ANTWORTE IMMER IN DER SPRACHE, IN DER DER BENUTZER SCHREIBT. "
             "Deutsch → Deutsch, Englisch → Englisch, andere Sprache → dieselbe Sprache."
         )
     # Inject pending disambiguation question if any
@@ -1311,6 +1342,8 @@ async def chat_completion(
             system_additions = f"{system_additions}{disambig_section}"
         if wiki_section:
             system_additions = f"{system_additions}\n\n{wiki_section}"
+        if web_search_section:
+            system_additions = f"{system_additions}\n\n{web_search_section}"
     else:
         system_additions = f"{time_note}{tool_note}{lang_note}{_ANTI_HALLUCINATION_NOTE}"
         if memory_section:
@@ -1321,6 +1354,8 @@ async def chat_completion(
             system_additions = f"{system_additions}\n\n{_WIKI_PRIORITY_NOTE}\n\n{live_wiki_section}"
         if wiki_section:
             system_additions = f"{system_additions}\n\n{wiki_section}"
+        if web_search_section:
+            system_additions = f"{system_additions}\n\n{web_search_section}"
 
     messages = list(request.messages)
     if messages and messages[0].role == "system":
@@ -1342,6 +1377,20 @@ async def chat_completion(
             queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=256)
             filt = _StreamThinkingFilter(strip=strip)
             collected: list[str] = []
+
+            # Send an immediate status event so the user sees feedback while the
+            # LLM is generating (especially useful when a web/wiki search was done).
+            if _did_web_search:
+                _status_text = "🔍 Ich habe das Web durchsucht – hier ist was ich gefunden habe:\n\n"
+            elif live_wiki_section or wiki_section:
+                _status_text = "📚 Einen Moment, ich schaue nach...\n\n"
+            else:
+                _status_text = ""
+            if _status_text:
+                _status_payload = json.dumps(
+                    {"choices": [{"index": 0, "delta": {"content": _status_text}, "finish_reason": None}]}
+                )
+                yield f"data: {_status_payload}\n\n"
 
             def _produce() -> None:
                 try:
@@ -1405,8 +1454,9 @@ async def chat_completion(
             full_text = "".join(collected)
             if user_id != "default" and user_id != "admin" and last_message.strip():
                 from db.memory import extract_memories_sync  # noqa: PLC0415
+                _recent_msgs = [m.content for m in request.messages if m.role == "user"][-4:]
                 asyncio.ensure_future(
-                    asyncio.to_thread(extract_memories_sync, user_id, last_message, llm_manager)
+                    asyncio.to_thread(extract_memories_sync, user_id, last_message, llm_manager, _recent_msgs)
                 )
             asyncio.ensure_future(
                 asyncio.to_thread(_log_conversation_sync, user_id, last_message, full_text, intent_str)
@@ -1473,8 +1523,9 @@ async def chat_completion(
     # and should not accumulate personal memories.
     if user_id != "default" and user_id != "admin" and last_message.strip():
         from db.memory import extract_memories_sync  # noqa: PLC0415
+        _recent_user_msgs = [m.content for m in request.messages if m.role == "user"][-4:]
         background_tasks.add_task(
-            extract_memories_sync, user_id, last_message, llm_manager
+            extract_memories_sync, user_id, last_message, llm_manager, _recent_user_msgs
         )
 
     # 5. Log conversation to DB (fire-and-forget)

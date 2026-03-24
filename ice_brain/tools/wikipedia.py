@@ -141,7 +141,7 @@ def _api_search(query: str, limit: int = 3) -> list[dict]:
 
 def _normalise_summary(data: dict, query: str = "", full_text: str = "") -> dict:
     """Extract relevant fields from a Wikipedia REST summary response."""
-    return {
+    result = {
         "title": data.get("title", ""),
         "query": query,
         "summary": data.get("extract", ""),
@@ -149,6 +149,13 @@ def _normalise_summary(data: dict, query: str = "", full_text: str = "") -> dict
         "source_url": data.get("content_urls", {}).get("desktop", {}).get("page", ""),
         "lang": "de",
     }
+    # Extract thumbnail image URL when available
+    thumbnail = data.get("thumbnail") or data.get("originalimage")
+    if isinstance(thumbnail, dict):
+        image_url = thumbnail.get("source", "")
+        if image_url:
+            result["image_url"] = image_url
+    return result
 
 
 # ---------------------------------------------------------------------------
