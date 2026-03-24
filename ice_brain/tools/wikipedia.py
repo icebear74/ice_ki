@@ -190,6 +190,7 @@ def _cache_get(title: str, lang: str = "de") -> dict | None:
             "lang": row[6],
             "fetched_at": str(row[7]),
             "ttl_days": row[8],
+            "image_url": row[9] or None,
         }
     except Exception as exc:  # noqa: BLE001
         logger.warning("wiki_cache read error: %s", exc)
@@ -203,13 +204,14 @@ def _cache_set(entry: dict) -> None:
         with get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "INSERT INTO wiki_cache (title, query, summary, full_text, source_url, lang, fetched_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s, NOW()) "
+                "INSERT INTO wiki_cache (title, query, summary, full_text, source_url, lang, image_url, fetched_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, NOW()) "
                 "ON DUPLICATE KEY UPDATE "
                 "query = VALUES(query), "
                 "summary = VALUES(summary), "
                 "full_text = VALUES(full_text), "
                 "source_url = VALUES(source_url), "
+                "image_url = COALESCE(VALUES(image_url), image_url), "
                 "fetched_at = NOW()",
                 (
                     entry.get("title", ""),
@@ -218,6 +220,7 @@ def _cache_set(entry: dict) -> None:
                     entry.get("full_text", "") or "",
                     entry.get("source_url", ""),
                     entry.get("lang", "de"),
+                    entry.get("image_url") or None,
                 ),
             )
             conn.commit()
