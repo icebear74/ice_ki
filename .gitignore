@@ -65,3 +65,9 @@ vsr_plusplus_NEU/config.py
 # ice_brain
 ice_brain/config.py
 ice_brain/*.gguf
+
+# SSL certificates (self-signed, auto-generated)
+ice_brain/certs/
+*.pem
+*.crt
+*.key

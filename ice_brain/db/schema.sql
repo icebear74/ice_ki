@@ -154,3 +154,33 @@ CREATE TABLE IF NOT EXISTS relation_knowledge_link (
     FOREIGN KEY (memory_id) REFERENCES relation_memory(id) ON DELETE CASCADE,
     FOREIGN KEY (cache_id) REFERENCES wiki_cache(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS image_cache (
+    id             BIGINT AUTO_INCREMENT PRIMARY KEY,
+    source         VARCHAR(64)   NOT NULL                    COMMENT 'Herkunft: wikipedia, openstreetmap, user, …',
+    source_key     VARCHAR(512)  NOT NULL                    COMMENT 'Eindeutiger Schlüssel innerhalb der Quelle (z. B. Wiki-Titel, URL)',
+    mime_type      VARCHAR(64)   NOT NULL,
+    image_data     MEDIUMBLOB    NOT NULL                    COMMENT 'Rohe Bilddaten (max ~16 MB)',
+    thumb_data     BLOB          NULL                        COMMENT 'WebP-Vorschaubild, auto-generiert (max ~64 KB)',
+    width          INT           NULL,
+    height         INT           NULL,
+    alt_text       VARCHAR(512)  NULL,
+    original_url   VARCHAR(1024) NULL,
+    fetched_at     TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+    ttl_days       INT           DEFAULT 90,
+    access_count   INT           DEFAULT 0,
+    last_accessed  TIMESTAMP     NULL,
+    UNIQUE INDEX idx_source (source, source_key(200))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS image_reference (
+    id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+    image_id    BIGINT        NOT NULL,
+    ref_table   VARCHAR(64)   NOT NULL                       COMMENT 'Ziel-Tabelle: user_memory, wiki_cache, …',
+    ref_id      BIGINT        NOT NULL                       COMMENT 'ID in der Ziel-Tabelle',
+    context     VARCHAR(128)  NULL                           COMMENT 'header, inline, thumbnail, …',
+    created_at  TIMESTAMP     DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (image_id) REFERENCES image_cache(id) ON DELETE CASCADE,
+    INDEX idx_ref (ref_table, ref_id),
+    INDEX idx_image (image_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

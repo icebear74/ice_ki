@@ -34,6 +34,8 @@ _EXPECTED_TABLES = {
     "relations",
     "relation_memory",
     "relation_knowledge_link",
+    "image_cache",
+    "image_reference",
 }
 
 _SCHEMA_FILE = Path(__file__).parent / "schema.sql"
@@ -162,6 +164,16 @@ _EXTRA_COLUMNS: list[tuple[str, str, str]] = [
         "user_memory",
         "temporal",
         "VARCHAR(16) DEFAULT 'permanent' COMMENT 'permanent | current | past'",
+    ),
+    (
+        "user_memory",
+        "latitude",
+        "DECIMAL(9,6) NULL COMMENT 'Breitengrad des gespeicherten Standorts'",
+    ),
+    (
+        "user_memory",
+        "longitude",
+        "DECIMAL(9,6) NULL COMMENT 'Längengrad des gespeicherten Standorts'",
     ),
 ]
 
