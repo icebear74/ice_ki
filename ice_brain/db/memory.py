@@ -106,6 +106,25 @@ CRITICAL RULES:
 - Also extract facts from INDIRECT or QUESTION-FORM statements. "wusstest du dass ich Kaffee mag?" still reveals "Mag Kaffee" – extract it.
 - Possessives ("mein", "meine", "my") reveal ownership/preferences – always extract them.
 
+PRONOUN RESOLUTION:
+- "ihre/sein/ihren/seinen/ihrem/seinem/ihrer/seines" (her/his) → fact about the LAST MENTIONED PERSON, NOT the user.
+- "unser/unsere/unserem/unseren" (our/shared) → extract for BOTH the user AND the mentioned relation person.
+- "mein/meine/meinen/meinem" (my) → user fact only.
+
+CORRECTIONS:
+- "nicht nur X, sondern Y" / "eigentlich Y, nicht X" / "sie ist nicht X, sie ist Y" → use Y as the correct value.
+  Extract the corrected type for that person, discard the wrong label.
+
+RELATION FACTS – NAME IN CONTENT:
+- Content of relation facts MUST include the person's name.
+  BAD: "Kocht gerne"           →  GOOD: "Melanie kocht gerne"
+  BAD: "Hat Kinder"            →  GOOD: "Melanie hat Kinder namens Timo und Sarah"
+  BAD: "Ist Kind des Benutzers" →  GOOD: subject="emily", content="Emily ist Kind des Benutzers"
+
+OWNERSHIP / POSSESSION:
+- "auf unserem X" / "unser X" / "unsere X" → user owns X AND the mentioned relation person owns X (shared).
+  Extract a personal fact for the user AND a personal fact for the relation person.
+
 DO NOT EXTRACT:
 - Weather/environment observations ("Es regnet", "Es wird wärmer").
 - Third-party states attributed to the user ("Susanne is sick" must NOT be stored as user fact).
@@ -128,7 +147,7 @@ JSON schema:
     {
       "subject": "susanne",
       "relation_type": "friend",
-      "content": "<fact about susanne in third person>",
+      "content": "<Name + fact about susanne in third person>",
       "category": "personal",
       "importance": 0.6,
       "temporal": "permanent",
@@ -149,14 +168,14 @@ Message: "Susanne habe ich in die Firma gebracht, sie arbeitet als DevOps Engine
 Output:
 {"facts": [
   {"subject": "user", "content": "Arbeitet als DevOps Engineer", "category": "personal", "importance": 0.8, "temporal": "permanent", "ttl": null},
-  {"subject": "susanne", "relation_type": "acquaintance", "content": "Arbeitet als DevOps Engineer", "category": "personal", "importance": 0.6, "temporal": "permanent", "ttl": null},
-  {"subject": "susanne", "relation_type": "acquaintance", "content": "Arbeitet in derselben Firma wie User", "category": "personal", "importance": 0.6, "temporal": "permanent", "ttl": null}
+  {"subject": "susanne", "relation_type": "acquaintance", "content": "Susanne arbeitet als DevOps Engineer", "category": "personal", "importance": 0.6, "temporal": "permanent", "ttl": null},
+  {"subject": "susanne", "relation_type": "acquaintance", "content": "Susanne arbeitet in derselben Firma wie User", "category": "personal", "importance": 0.6, "temporal": "permanent", "ttl": null}
 ], "ambiguities": []}
 
 Message: "Meine Bekannte Susanne legt sich hin, die ist krank"
 Output:
 {"facts": [
-  {"subject": "susanne", "relation_type": "acquaintance", "content": "Ist gerade krank", "category": "mood", "importance": 0.5, "temporal": "current", "ttl": "24h"}
+  {"subject": "susanne", "relation_type": "acquaintance", "content": "Susanne ist gerade krank", "category": "mood", "importance": 0.5, "temporal": "current", "ttl": "24h"}
 ], "ambiguities": []}
 
 Message: "Ich trinke gerne abends mal einen Espresso"
@@ -165,13 +184,28 @@ Output:
   {"subject": "user", "content": "Trinkt gerne abends Espresso", "category": "preference", "importance": 0.7, "temporal": "permanent", "ttl": null}
 ], "ambiguities": []}
 
-Message: "meine Freundin Susanne hat heute Geburtstag"
+Message: "Du solltest wissen, das Melanie nicht nur Freundin, sondern meine Partnerin ist, mit der ich zusammen wohne"
 Output:
 {"facts": [
-  {"subject": "susanne", "relation_type": "friend", "content": "Hat heute Geburtstag", "category": "personal", "importance": 0.7, "temporal": "current", "ttl": "24h"}
-], "ambiguities": [
-  {"question": "Ist Susanne deine Partnerin oder eine (platonische) Freundin?", "context": "meine Freundin kann Lebensgefährtin oder platonische Freundin bedeuten"}
-]}
+  {"subject": "user", "content": "Lebt mit Partnerin Melanie zusammen", "category": "personal", "importance": 0.8, "temporal": "permanent", "ttl": null},
+  {"subject": "melanie", "relation_type": "partner", "content": "Melanie ist die Partnerin des Benutzers", "category": "relationship", "importance": 0.9, "temporal": "permanent", "ttl": null},
+  {"subject": "melanie", "relation_type": "partner", "content": "Melanie wohnt mit dem Benutzer zusammen", "category": "personal", "importance": 0.7, "temporal": "permanent", "ttl": null}
+], "ambiguities": []}
+
+Message: "Wir darten gerne auf unserem Dartautomaten"
+Output:
+{"facts": [
+  {"subject": "user", "content": "Spielt gerne Dart", "category": "hobby", "importance": 0.7, "temporal": "permanent", "ttl": null},
+  {"subject": "user", "content": "Besitzt einen Dartautomaten", "category": "personal", "importance": 0.6, "temporal": "permanent", "ttl": null}
+], "ambiguities": []}
+
+Message: "Ihre Kinder heißen Timo und Sarah, meine heißen Emily und Tony"
+Output:
+{"facts": [
+  {"subject": "user", "content": "Hat Kinder namens Emily und Tony", "category": "relationship", "importance": 0.9, "temporal": "permanent", "ttl": null},
+  {"subject": "emily", "relation_type": "family", "content": "Emily ist Kind des Benutzers", "category": "personal", "importance": 0.8, "temporal": "permanent", "ttl": null},
+  {"subject": "tony", "relation_type": "family", "content": "Tony ist Kind des Benutzers", "category": "personal", "importance": 0.8, "temporal": "permanent", "ttl": null}
+], "ambiguities": [{"question": "Wessen Kinder sind Timo und Sarah? Sind das die Kinder deiner Partnerin?", "context": "'ihre Kinder' – Pronomen bezieht sich auf eine zuvor genannte Person"}]}
 
 Message: "ok"
 Output:

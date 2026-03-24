@@ -101,7 +101,8 @@ def find_or_create_relation(
 ) -> tuple[int, bool]:
     """Return (relation_id, created).
 
-    If a relation with the same name (case-insensitive) exists, return it.
+    If a relation with the same name (case-insensitive) exists, return it and
+    update its relation_type if the new type differs (e.g. friend → partner).
     Otherwise create a new one (unconfirmed by default).
     """
     if relation_type not in _VALID_RELATION_TYPES:
@@ -111,13 +112,28 @@ def find_or_create_relation(
         with get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT id FROM relations WHERE user_id = %s AND LOWER(name) = LOWER(%s) LIMIT 1",
+                "SELECT id, relation_type FROM relations "
+                "WHERE user_id = %s AND LOWER(name) = LOWER(%s) LIMIT 1",
                 (user_id, name),
             )
             row = cursor.fetchone()
             if row:
+                relation_id, existing_type = row[0], row[1]
+                # Update relation_type when the new info is more specific or corrective.
+                # We do NOT update TO "other" because that is the fallback for unrecognised
+                # types – it should never overwrite a previously confirmed specific type.
+                if existing_type != relation_type and relation_type != "other":
+                    cursor.execute(
+                        "UPDATE relations SET relation_type = %s, updated_at = NOW() WHERE id = %s",
+                        (relation_type, relation_id),
+                    )
+                    conn.commit()
+                    logger.info(
+                        "Updated relation_type for %r (id=%d): %s → %s (user %r).",
+                        name, relation_id, existing_type, relation_type, user_id,
+                    )
                 cursor.close()
-                return row[0], False
+                return relation_id, False
             cursor.execute(
                 "INSERT INTO relations (user_id, name, relation_type, relation_detail, confirmed) "
                 "VALUES (%s, %s, %s, %s, FALSE)",
@@ -445,6 +461,48 @@ def get_all_relation_facts_for_user(user_id: str) -> list[dict]:
     except Exception as exc:  # noqa: BLE001
         logger.warning("get_all_relation_facts_for_user error: %s", exc)
         return []
+
+
+# ---------------------------------------------------------------------------
+# Delete relation_memory
+# ---------------------------------------------------------------------------
+
+def delete_relation_memory(memory_id: int, user_id: str | None = None) -> bool:
+    """Delete a relation_memory row.
+
+    If *user_id* is given the deletion is scoped to that user (ownership check
+    via the parent relations row).
+
+    Returns True on success, False when the row was not found or not owned.
+    """
+    try:
+        from db.connection import get_connection  # noqa: PLC0415
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            if user_id is not None:
+                cursor.execute(
+                    "SELECT rm.id FROM relation_memory rm "
+                    "JOIN relations r ON r.id = rm.relation_id "
+                    "WHERE rm.id = %s AND r.user_id = %s",
+                    (memory_id, user_id),
+                )
+            else:
+                cursor.execute(
+                    "SELECT id FROM relation_memory WHERE id = %s",
+                    (memory_id,),
+                )
+            if cursor.fetchone() is None:
+                cursor.close()
+                logger.info("delete_relation_memory: id=%d not found (or wrong user).", memory_id)
+                return False
+            cursor.execute("DELETE FROM relation_memory WHERE id = %s", (memory_id,))
+            conn.commit()
+            cursor.close()
+        logger.info("delete_relation_memory: memory id=%d deleted.", memory_id)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.error("delete_relation_memory error for id=%d: %s", memory_id, exc)
+        return False
 
 
 # ---------------------------------------------------------------------------
