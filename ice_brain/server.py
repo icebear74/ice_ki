@@ -36,7 +36,7 @@ import re
 import secrets
 from dataclasses import dataclass, field
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -159,6 +159,89 @@ def _get_user_role(user_id: str) -> str:
         return row[0] if row else "user"
     except Exception:  # noqa: BLE001
         return "user"
+
+
+# ---------------------------------------------------------------------------
+# Brute-force protection
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _LoginAttemptTracker:
+    """Tracks failed login attempts per IP address."""
+    failed_count: int = 0
+    first_attempt: float = field(default_factory=time.time)
+    blocked_until: float = 0.0
+
+
+_login_attempts: dict[str, _LoginAttemptTracker] = {}
+_blocked_ips_log: list[dict] = []  # Global memory for admin notifications
+
+_MAX_FAILED_ATTEMPTS = 5
+_BLOCK_DURATION_SEC = 60 * 60  # 60 minutes
+
+
+def _get_client_ip(request: Request) -> str:
+    """Extract client IP, respecting X-Forwarded-For behind a reverse proxy."""
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+def _is_ip_blocked(ip: str) -> bool:
+    tracker = _login_attempts.get(ip)
+    if tracker is None:
+        return False
+    if tracker.blocked_until > time.time():
+        return True
+    # Block expired – reset
+    if tracker.blocked_until > 0:
+        del _login_attempts[ip]
+    return False
+
+
+def _record_failed_login(ip: str, username: str) -> bool:
+    """Record a failed attempt. Returns True if the IP is now blocked."""
+    now = time.time()
+    tracker = _login_attempts.get(ip)
+    if tracker is None:
+        tracker = _LoginAttemptTracker(failed_count=1, first_attempt=now)
+        _login_attempts[ip] = tracker
+        return False
+    # Reset if older than block duration
+    if now - tracker.first_attempt > _BLOCK_DURATION_SEC:
+        tracker.failed_count = 1
+        tracker.first_attempt = now
+        return False
+    tracker.failed_count += 1
+    if tracker.failed_count >= _MAX_FAILED_ATTEMPTS:
+        tracker.blocked_until = now + _BLOCK_DURATION_SEC
+        _blocked_ips_log.append({
+            "ip": ip,
+            "blocked_at": datetime.now(timezone.utc).isoformat(),
+            "attempts": tracker.failed_count,
+            "last_username": username,
+        })
+        logger.warning(
+            "IP %s blocked for 60 min after %d failed login attempts (last user: %r).",
+            ip, tracker.failed_count, username,
+        )
+        return True
+    return False
+
+
+def _clear_failed_logins(ip: str) -> None:
+    """Clear tracker on successful login."""
+    _login_attempts.pop(ip, None)
+
+
+def _pop_blocked_ips_for_admin() -> list[dict]:
+    """Return and clear all blocked IP notifications for admin display."""
+    if not _blocked_ips_log:
+        return []
+    items = list(_blocked_ips_log)
+    _blocked_ips_log.clear()
+    return items
 
 
 # ---------------------------------------------------------------------------
@@ -299,13 +382,32 @@ async def health() -> dict:
 # ---------------------------------------------------------------------------
 
 @app.post("/auth/login", response_model=LoginResponse)
-async def auth_login(req: LoginRequest) -> LoginResponse:
+async def auth_login(req: LoginRequest, request: Request) -> LoginResponse:
     from db.users import authenticate  # noqa: PLC0415
     from db.connection import get_connection  # noqa: PLC0415
 
+    client_ip = _get_client_ip(request)
+
+    # Check if IP is blocked
+    if _is_ip_blocked(client_ip):
+        logger.warning("Blocked IP %s tried to login as %r.", client_ip, req.username)
+        return JSONResponse(
+            status_code=429,
+            content={"error": "Zu viele fehlgeschlagene Anmeldeversuche. IP für 60 Minuten gesperrt."},
+        )
+
     result = authenticate(req.username, req.password)
     if result is None:
+        now_blocked = _record_failed_login(client_ip, req.username)
+        if now_blocked:
+            return JSONResponse(
+                status_code=429,
+                content={"error": "Zu viele fehlgeschlagene Anmeldeversuche. IP für 60 Minuten gesperrt."},
+            )
         return JSONResponse(status_code=401, content={"error": "Ungültiger Benutzername oder Passwort."})
+
+    # Success – clear attempts
+    _clear_failed_logins(client_ip)
 
     user_id, first_login = result
 
@@ -320,6 +422,13 @@ async def auth_login(req: LoginRequest) -> LoginResponse:
     except Exception:  # noqa: BLE001
         role = "user"
 
+    # Check for blocked IP notifications if user is admin
+    blocked_notifications = None
+    if role == "admin":
+        alerts = _pop_blocked_ips_for_admin()
+        if alerts:
+            blocked_notifications = alerts
+
     token = None if first_login else _new_token(user_id)
     return LoginResponse(
         user_id=user_id,
@@ -327,6 +436,7 @@ async def auth_login(req: LoginRequest) -> LoginResponse:
         role=role,
         first_login=first_login,
         token=token,
+        security_alerts=blocked_notifications,
     )
 
 
@@ -674,7 +784,22 @@ def _live_wiki_context_for_correction(message: str, limit: int = 2, prior_contex
             snippet = (r.get("full_text") or r.get("summary", ""))[:1200].replace("\n", " ").strip()
             lines.append(f"[{r['title']}] {snippet}")
             if r.get("source_url"):
-                lines.append(f"  Quelle: {r['source_url']}")
+                title = r.get("title", "Wikipedia")
+                lines.append(f"  Quelle: [{title} – Wikipedia]({r['source_url']})")
+            if r.get("image_url"):
+                try:
+                    from db.images import fetch_and_cache_url, link_image  # noqa: PLC0415
+                    img_id = fetch_and_cache_url(
+                        r["image_url"], "wikipedia", r.get("title", "unknown"),
+                        alt_text=r.get("title", ""),
+                    )
+                    if img_id is not None:
+                        cache_id = r.get("id")
+                        if cache_id is not None:
+                            link_image(img_id, "wiki_cache", cache_id)
+                        lines.append(f"  Bild: ![{r.get('title', '')}](/api/image/{img_id}?thumb=true)")
+                except Exception as exc_img:  # noqa: BLE001
+                    logger.warning("Wiki image caching failed (non-fatal): %s", exc_img)
         return "\n".join(lines)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Live wiki lookup failed (non-fatal): %s", exc)
@@ -706,7 +831,22 @@ def _live_wiki_context_proactive(message: str, limit: int = 2) -> str:
             snippet = (r.get("full_text") or r.get("summary", ""))[:1000].replace("\n", " ").strip()
             lines.append(f"[{r['title']}] {snippet}")
             if r.get("source_url"):
-                lines.append(f"  Quelle: {r['source_url']}")
+                title = r.get("title", "Wikipedia")
+                lines.append(f"  Quelle: [{title} – Wikipedia]({r['source_url']})")
+            if r.get("image_url"):
+                try:
+                    from db.images import fetch_and_cache_url, link_image  # noqa: PLC0415
+                    img_id = fetch_and_cache_url(
+                        r["image_url"], "wikipedia", r.get("title", "unknown"),
+                        alt_text=r.get("title", ""),
+                    )
+                    if img_id is not None:
+                        cache_id = r.get("id")
+                        if cache_id is not None:
+                            link_image(img_id, "wiki_cache", cache_id)
+                        lines.append(f"  Bild: ![{r.get('title', '')}](/api/image/{img_id}?thumb=true)")
+                except Exception as exc_img:  # noqa: BLE001
+                    logger.warning("Wiki image caching failed (non-fatal): %s", exc_img)
         return "\n".join(lines)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Proactive live wiki lookup failed (non-fatal): %s", exc)
@@ -1236,6 +1376,27 @@ async def chat_completion(
         else:
             logger.info("Proactive web search returned no results for intent %r.", intent_str)
 
+    # 2e. Proactive weather lookup for weather intent
+    #
+    # When the router identifies a weather query, directly call the weather
+    # tool and inject the result so the LLM doesn't need to emit [WEATHER: ...]
+    # tags itself (which can lead to hallucination loops).
+    weather_section = ""
+    if intent_str == "weather":
+        _weather_location = _extract_topic(last_message) or None
+        logger.info("Weather intent detected – proactive weather lookup for location %r.", _weather_location)
+        try:
+            from tools.weather import get_weather_for_user  # noqa: PLC0415
+            weather_section = await asyncio.get_running_loop().run_in_executor(
+                None, get_weather_for_user, user_id, _weather_location
+            )
+            if weather_section:
+                logger.info("Proactive weather section injected (%d chars).", len(weather_section))
+            else:
+                logger.info("Proactive weather lookup returned no results.")
+        except Exception as exc_weather:  # noqa: BLE001
+            logger.warning("Proactive weather lookup failed (non-fatal): %s", exc_weather)
+
     # 3. Main LLM response (P100)
     if not llm_manager.is_ready("main"):
         return JSONResponse(
@@ -1302,7 +1463,9 @@ async def chat_completion(
             "6. Bei Fragen über Personen (Wer ist X?, Was macht X?) → [WIKI_SEARCH: Name].\n"
             "7. Wenn du Informationen aus Tools verwendest, zitiere die Quelle mit einem Markdown-Link.\n"
             "8. ANTWORTE IMMER IN DER SPRACHE, IN DER DER BENUTZER SCHREIBT. "
-            "Deutsch → Deutsch, Englisch → Englisch, andere Sprache → dieselbe Sprache."
+            "Deutsch → Deutsch, Englisch → Englisch, andere Sprache → dieselbe Sprache.\n"
+            "9. Wenn du Wikipedia-Quellen zitierst, formatiere sie IMMER als klickbare Markdown-Links: [Titel – Wikipedia](URL).\n"
+            "10. Wenn Wikipedia-Bilder als Markdown bereitgestellt werden (z. B. ![Titel](URL)), bette sie in deine Antwort ein."
         )
     # Inject pending disambiguation question if any
     disambig_section = ""
@@ -1344,6 +1507,8 @@ async def chat_completion(
             system_additions = f"{system_additions}\n\n{wiki_section}"
         if web_search_section:
             system_additions = f"{system_additions}\n\n{web_search_section}"
+        if weather_section:
+            system_additions = f"{system_additions}\n\n{weather_section}"
     else:
         system_additions = f"{time_note}{tool_note}{lang_note}{_ANTI_HALLUCINATION_NOTE}"
         if memory_section:
@@ -1356,6 +1521,8 @@ async def chat_completion(
             system_additions = f"{system_additions}\n\n{wiki_section}"
         if web_search_section:
             system_additions = f"{system_additions}\n\n{web_search_section}"
+        if weather_section:
+            system_additions = f"{system_additions}\n\n{weather_section}"
 
     messages = list(request.messages)
     if messages and messages[0].role == "system":
@@ -1382,6 +1549,8 @@ async def chat_completion(
             # LLM is generating (especially useful when a web/wiki search was done).
             if _did_web_search:
                 _status_text = "🔍 Ich habe das Web durchsucht – hier ist was ich gefunden habe:\n\n"
+            elif weather_section:
+                _status_text = "🌤️ Ich habe die aktuellen Wetterdaten abgerufen:\n\n"
             elif live_wiki_section or wiki_section:
                 _status_text = "📚 Einen Moment, ich schaue nach...\n\n"
             else:

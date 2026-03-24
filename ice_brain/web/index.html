@@ -530,6 +530,13 @@
         showSetPw();
       } else {
         hideOverlay({ token: data.token, user_id: data.user_id, username: data.username, role: data.role });
+        if (data.security_alerts && data.security_alerts.length > 0) {
+          let alertMsg = '🚨 **Sicherheitswarnung:**\n\n';
+          for (const alert of data.security_alerts) {
+            alertMsg += `IP **${alert.ip}** wurde am ${alert.blocked_at} nach ${alert.attempts} fehlgeschlagenen Anmeldeversuchen gesperrt (letzter Benutzername: "${alert.last_username}").\n`;
+          }
+          appendMessage('bot', alertMsg);
+        }
       }
     } catch (e) {
       loginErr.textContent = 'Netzwerkfehler: ' + e.message;

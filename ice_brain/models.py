@@ -27,6 +27,7 @@ class LoginResponse(BaseModel):
     role: str
     first_login: bool
     token: Optional[str] = None  # None when first_login=True (must set password first)
+    security_alerts: Optional[List[Dict[str, Any]]] = None  # blocked IP notifications for admins
 
 
 class SetPasswordRequest(BaseModel):
