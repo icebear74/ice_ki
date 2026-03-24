@@ -95,6 +95,7 @@ def _get_client():
             base_url=_BASE_URL,
             headers={"User-Agent": _USER_AGENT},
             timeout=_TIMEOUT,
+            follow_redirects=True,
         )
     except ImportError:
         raise RuntimeError("httpx is not installed. Run: pip install httpx")

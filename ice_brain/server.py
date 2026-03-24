@@ -947,17 +947,17 @@ def _live_wiki_context_proactive(message: str, limit: int = 2) -> str:
     information is background context rather than a verified correction.
     Returns an empty string when the lookup fails or yields nothing.
     """
-    topic = _extract_topic(message)
-    if not topic:
+    query = message.strip()
+    if not query:
         return ""
-    logger.info("Proactive live wiki lookup. Query: %r", topic)
+    logger.info("Proactive live wiki lookup. Query: %r", query)
     try:
         from tools.wikipedia import wiki_live_lookup  # noqa: PLC0415
         # Pass the full original message to wiki_live_lookup so that person
         # follow-up logic can detect role keywords (Bürgermeister etc.).
-        results = wiki_live_lookup(message, limit=limit)
+        results = wiki_live_lookup(query, limit=limit)
         if not results:
-            logger.info("Proactive live wiki lookup: no results for %r.", topic)
+            logger.info("Proactive live wiki lookup: no results for %r.", query)
             return ""
         lines = [
             "📡 WIKIPEDIA-HINTERGRUNDWISSEN (live abgerufen, da kein lokaler Cache vorhanden):"
