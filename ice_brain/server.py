@@ -34,6 +34,7 @@ if str(_HERE) not in sys.path:
 
 import re
 import secrets
+from dataclasses import dataclass, field
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -79,8 +80,26 @@ logger = logging.getLogger("ice_brain")
 # ---------------------------------------------------------------------------
 app = FastAPI(title="ice_brain", version="0.1.0")
 
-# token → user_id  (in-memory; cleared on restart)
-_sessions: dict[str, str] = {}
+
+# ---------------------------------------------------------------------------
+# Session management mit Timeout
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _Session:
+    user_id: str
+    created_at: float = field(default_factory=time.time)
+    last_active: float = field(default_factory=time.time)
+
+    def is_expired(self, timeout_min: int = 30) -> bool:
+        return (time.time() - self.last_active) > (timeout_min * 60)
+
+    def touch(self) -> None:
+        self.last_active = time.time()
+
+
+# token → Session  (in-memory; cleared on restart)
+_sessions: dict[str, _Session] = {}
 
 # Globals – populated during startup
 llm_manager: LLMManager = LLMManager()
@@ -89,15 +108,43 @@ intent_router: IntentRouter | None = None
 
 def _new_token(user_id: str) -> str:
     token = secrets.token_hex(32)
-    _sessions[token] = user_id
+    _sessions[token] = _Session(user_id=user_id)
     return token
 
 
 def _resolve_token(token: str | None) -> str | None:
-    """Return user_id for *token*, or None if invalid/missing."""
+    """Return user_id for *token*, or None if invalid/missing/expired."""
     if not token:
         return None
-    return _sessions.get(token)
+    session = _sessions.get(token)
+    if session is None:
+        return None
+    # Timeout aus config lesen (Standard: 30 Minuten)
+    try:
+        import config as _cfg  # noqa: PLC0415
+        timeout = getattr(_cfg, "SESSION_TIMEOUT_MIN", 30)
+    except ImportError:
+        timeout = 30
+    if session.is_expired(timeout):
+        del _sessions[token]
+        logger.debug("Session %s...%s für user %r abgelaufen und entfernt.", token[:8], token[-4:], session.user_id)
+        return None
+    session.touch()
+    return session.user_id
+
+
+def _cleanup_expired_sessions() -> None:
+    """Abgelaufene Sessions aus dem Speicher entfernen."""
+    try:
+        import config as _cfg  # noqa: PLC0415
+        timeout = getattr(_cfg, "SESSION_TIMEOUT_MIN", 30)
+    except ImportError:
+        timeout = 30
+    expired = [t for t, s in _sessions.items() if s.is_expired(timeout)]
+    for t in expired:
+        del _sessions[t]
+    if expired:
+        logger.debug("Cleanup: %d abgelaufene Session(s) entfernt.", len(expired))
 
 
 def _get_user_role(user_id: str) -> str:
@@ -387,6 +434,20 @@ class _StreamThinkingFilter:
 # Correction detection + live Wikipedia lookup
 # ---------------------------------------------------------------------------
 
+# Anti-Halluzinations-Hinweis für den System-Prompt
+_ANTI_HALLUCINATION_NOTE = (
+    "\n\n⚠️ WICHTIGE REGELN:"
+    "\n- Du hast KEINEN Internetzugang und kannst KEINE Websuchen durchführen."
+    "\n- Erfinde NIEMALS URLs, Links, Webseiten oder Suchergebnisse."
+    "\n- Wenn du etwas nicht weißt, sage es ehrlich. Halluziniere keine Fakten."
+    "\n- Nutze [WIKI_SEARCH: ...] wenn du Fakten nachschlagen musst."
+    "\n- Wenn du Wikipedia-Daten erhältst, nutze NUR diese als Faktenquelle."
+    "\n- Gib KEINE erfundenen Quellenangaben oder Links an."
+    "\n- Antworte IMMER in der Sprache, in der der Benutzer schreibt."
+    "\n  Wenn er deutsch schreibt, antworte auf deutsch."
+    "\n  Wenn er englisch schreibt, antworte auf englisch. Passe dich dynamisch an."
+)
+
 # Phrases that signal the user is correcting the AI (German + common English)
 _CORRECTION_RE = re.compile(
     r"(?:"
@@ -462,6 +523,28 @@ _STOPWORDS = frozenset({
     "aktualisier", "informier", "schlag", "nach", "check",
     "wiki", "update", "korrigier",
 })
+
+# Phrases that signal the user wants a refresh/update of information
+_UPDATE_RE = re.compile(
+    r"(?:"
+    r"aktualisier"
+    r"|update"
+    r"|refresh"
+    r"|neu\s+laden"
+    r"|lad(?:e)?\s+neu"
+    r"|frisch(?:e|es)?\s+(?:daten|infos|wissen)"
+    r"|hol\s+(?:dir\s+)?(?:neue|aktuelle)"
+    r")",
+    re.IGNORECASE,
+)
+
+# Einfache Begrüßungen / Small-Talk – keine Wiki-Suche nötig
+_GREETING_RE = re.compile(
+    r"^\s*(?:hallo|hi|hey|moin|guten\s+(?:morgen|tag|abend)|gute\s+nacht|"
+    r"servus|grüß\s+(?:gott|dich)|tschüss?|bye|ciao|danke|bitte|ja|nein|ok(?:ay)?|"
+    r"good\s+(?:morning|evening|night)|hello|thanks?|yes|no)\s*[!.?]*\s*$",
+    re.IGNORECASE,
+)
 
 
 def _detect_correction(message: str) -> bool:
@@ -632,7 +715,7 @@ def _live_wiki_context_proactive(message: str, limit: int = 2) -> str:
 # ---------------------------------------------------------------------------
 
 _TOOL_CALL_RE = re.compile(
-    r"\[(SEARCH_MEMORY|SEARCH_RELATION|WIKI_SEARCH)\s*:\s*([^\]]{1,256})\]",
+    r"\[(SEARCH_MEMORY|SEARCH_RELATION|WIKI_SEARCH|WEATHER)\s*:\s*([^\]]{1,256})\]",
     re.IGNORECASE,
 )
 
@@ -681,6 +764,11 @@ def _execute_tool_calls(
                         snippet = (r.get("full_text") or r.get("summary", ""))[:600].replace("\n", " ")
                         lines.append(f"  [{r['title']}] {snippet}")
                     parts.append("\n".join(lines))
+            elif tool_name == "WEATHER":
+                from tools.weather import get_weather_for_user  # noqa: PLC0415
+                result = get_weather_for_user(user_id, location_name=query if query else None)
+                if result:
+                    parts.append(f"[WEATHER: {query}]\n{result}")
         except Exception as exc:  # noqa: BLE001
             logger.warning("Tool call %s(%r) failed: %s", tool_name, query, exc)
     return "\n\n".join(parts)
@@ -814,7 +902,7 @@ def _query_gpu_stats() -> dict:
 
 
 
-def _wiki_context_for_message(message: str, limit: int = 3, min_score: float = 0.35) -> str:
+def _wiki_context_for_message(message: str, limit: int = 3, min_score: float = 0.55) -> str:
     """Search cached wiki chunks for *message* and format as a prompt section.
 
     Returns an empty string when no relevant chunks are found, when the
@@ -822,6 +910,11 @@ def _wiki_context_for_message(message: str, limit: int = 3, min_score: float = 0
     """
     if not message or len(message.strip()) < 4:
         return ""
+
+    # Begrüßungen und Small-Talk überspringen – keine Wiki-Suche nötig
+    if _GREETING_RE.match(message):
+        return ""
+
     try:
         from db.wiki import search_wiki_chunks  # noqa: PLC0415
         logger.debug("Wiki search: querying chunks for message %r (limit=%d, min_score=%.2f)", message, limit, min_score)
@@ -843,6 +936,21 @@ def _wiki_context_for_message(message: str, limit: int = 3, min_score: float = 0
                 results[0]["title"] if results else "",
             )
             return ""
+
+        # Relevanzfilter: Prüfen ob signifikante Wörter der Nachricht in Chunk-Titeln vorkommen
+        sig_words = [
+            w.lower() for w in re.findall(r"[A-Za-zÄÖÜäöüß]{4,}", message)
+            if w.lower() not in _STOPWORDS
+        ]
+        if sig_words:
+            titles_lower = " ".join(r["title"].lower() for r in relevant)
+            if not any(w in titles_lower for w in sig_words):
+                logger.debug(
+                    "Wiki search: Relevanztreffer-Titel passen nicht zur Anfrage (Wörter: %s) – verworfen.",
+                    ", ".join(sig_words[:5]),
+                )
+                return ""
+
         logger.debug(
             "Wiki search: %d relevant chunk(s) injected into prompt: %s",
             len(relevant),
@@ -878,6 +986,9 @@ async def chat_completion(
     request: ChatCompletionRequest,
     background_tasks: BackgroundTasks,
 ) -> ChatCompletionResponse:
+    # Abgelaufene Sessions periodisch bereinigen
+    _cleanup_expired_sessions()
+
     # Resolve authenticated user from session token (preferred) or fallback field.
     authed_user_id = _resolve_token(request.session_token)
     user_id = authed_user_id or request.user or "default"
@@ -1012,6 +1123,18 @@ async def chat_completion(
             logger.info("Live wiki section injected (%d chars).", len(live_wiki_section))
         else:
             logger.info("Live wiki lookup returned no results for correction message.")
+    elif _UPDATE_RE.search(last_message):
+        # Benutzer möchte aktualisierte Informationen – Live-Lookup mit dem vorherigen Thema
+        logger.info("Update-Signal erkannt – Live-Wikipedia-Lookup mit vorherigem Thema.")
+        _prior_msgs = [m.content for m in request.messages[:-1] if m.role == "user"]
+        _update_ctx = " ".join(_prior_msgs[-3:]) if _prior_msgs else last_message
+        live_wiki_section = await asyncio.get_running_loop().run_in_executor(
+            None, _live_wiki_context_proactive, _update_ctx
+        )
+        if live_wiki_section:
+            logger.info("Live wiki section (Update) injected (%d chars).", len(live_wiki_section))
+        else:
+            logger.info("Live wiki lookup (Update) returned no results.")
     elif intent_str == "wiki":
         # Router explicitly recognised a wiki intent.  Only do a live lookup
         # when the cached data for this topic is stale (older than 7 days) or
@@ -1134,10 +1257,11 @@ async def chat_completion(
     tool_note = ""
     if user_id != "default":
         tool_note = (
-            "\n\nVerfügbare Werkzeuge (nutze sie indem du sie in deiner Antwort einbettest):\n"
+            "\n\nVerfügbare Werkzeuge (nutze sie wenn nötig, indem du sie in deiner Antwort einbettest):\n"
             "  [SEARCH_MEMORY: Suchanfrage] – Semantische Suche in gespeicherten Erinnerungen\n"
             "  [SEARCH_RELATION: Name] – Alle gespeicherten Fakten über eine bekannte Person abrufen\n"
             "  [WIKI_SEARCH: Suchanfrage] – Wikipedia on-demand abfragen\n"
+            "  [WEATHER: Ort] – Aktuelles Wetter und Vorhersage abrufen (Ort optional, nutzt gespeicherten Standort)\n"
             "\n"
             "WICHTIGE REGELN für Werkzeug-Nutzung:\n"
             "1. Du hast KEINEN Zugang zu Suchmaschinen (Google, Bing etc.) und KEINEN Internetzugang.\n"
@@ -1180,7 +1304,7 @@ async def chat_completion(
     )
 
     if _correction_live:
-        system_additions = f"{live_wiki_section}\n\n{_WIKI_PRIORITY_NOTE}\n\n{time_note}{tool_note}{lang_note}"
+        system_additions = f"{live_wiki_section}\n\n{_WIKI_PRIORITY_NOTE}\n\n{time_note}{tool_note}{lang_note}{_ANTI_HALLUCINATION_NOTE}"
         if memory_section:
             system_additions = f"{system_additions}\n\n{memory_section}"
         if disambig_section:
@@ -1188,7 +1312,7 @@ async def chat_completion(
         if wiki_section:
             system_additions = f"{system_additions}\n\n{wiki_section}"
     else:
-        system_additions = f"{time_note}{tool_note}{lang_note}"
+        system_additions = f"{time_note}{tool_note}{lang_note}{_ANTI_HALLUCINATION_NOTE}"
         if memory_section:
             system_additions = f"{system_additions}\n\n{memory_section}"
         if disambig_section:

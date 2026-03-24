@@ -130,6 +130,17 @@ DO NOT EXTRACT:
 - Third-party states attributed to the user ("Susanne is sick" must NOT be stored as user fact).
 - AI corrections about third parties ("Er ist gestorben" = THIRD PARTY FACT, NOT user fact).
 - Pure information requests with no personal disclosure.
+- IGNORE code-specific implementation details: variable names, function signatures, API endpoints, pin assignments, buffer sizes, class names, method names.
+- Only extract PERSONAL facts about the user: tools/languages they use, projects they work on, hardware they own.
+- Do NOT store code snippets, technical implementation details, or debugging context as personal facts.
+- "I use an ESP32 with PSRAM" → EXTRACT (personal tool/hardware fact)
+- "The buffer is 16KB" → IGNORE (implementation detail)
+- "I want SPI on pin 18" → IGNORE (implementation detail)
+
+LOCATION FACTS:
+- For location/travel mentions, set category to "location" and include "latitude" and "longitude" fields if you can identify a specific place.
+- For temporary stays ("Ich bin 3 Tage in Berlin", "Ich fahre morgen nach Paris"), set "ttl" to the appropriate duration (e.g. "72h" for 3 days).
+- For permanent moves ("Ich bin nach München gezogen"), set "temporal" to "permanent" with no TTL and category "location".
 
 AMBIGUITY: When a relation type is unclear (e.g. "meine Freundin" could be partner or friend), add an entry to "ambiguities".
 
