@@ -1465,7 +1465,9 @@ async def chat_completion(
             "8. ANTWORTE IMMER IN DER SPRACHE, IN DER DER BENUTZER SCHREIBT. "
             "Deutsch → Deutsch, Englisch → Englisch, andere Sprache → dieselbe Sprache.\n"
             "9. Wenn du Wikipedia-Quellen zitierst, formatiere sie IMMER als klickbare Markdown-Links: [Titel – Wikipedia](URL).\n"
-            "10. Wenn Wikipedia-Bilder als Markdown bereitgestellt werden (z. B. ![Titel](URL)), bette sie in deine Antwort ein."
+            "10. Wenn im Kontext ein Bild als Markdown bereitgestellt wird (z. B. ![Titel](/api/image/42?thumb=true)), "
+            "bette es DIREKT in deine Antwort ein – verwende GENAU diese URL, KEINE eigenen Wikipedia-Bild-URLs. "
+            "Erfinde NIEMALS Bild-URLs. Nutze NUR die /api/image/-URLs die dir im Kontext gegeben werden."
         )
     # Inject pending disambiguation question if any
     disambig_section = ""
