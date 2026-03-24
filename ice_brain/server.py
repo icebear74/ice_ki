@@ -700,6 +700,11 @@ _STOPWORDS = frozenset({
     "musst", "muss", "müssen", "soll", "sollst", "sollen",
     "darf", "darfst", "dürfen", "magst", "möchte", "möchtest",
     "stimmt", "stimmen", "stimmst",
+    "erzähl", "erzähle", "erzählen", "erzählst",
+    "funktioniert", "funktionieren", "funktionierst",
+    "bedeutet", "bedeuten", "heißt", "heißen",
+    "kennt", "kennst", "kennen", "kenne",
+    "erkläre", "erklär", "erklären",
     # Prepositions / conjunctions
     "über", "unter", "nach", "vor", "mit", "ohne", "von", "beim",
     "aus", "bei", "für", "an", "auf", "in", "zu", "zum", "zur",
@@ -787,19 +792,15 @@ def _extract_correction_topic(message: str) -> str:
 def _extract_topic(message: str) -> str:
     """Extract a short search topic from any user message (not just corrections).
 
-    Used for proactive wiki lookups when no cached chunks are found.
-    Returns up to 4 meaningful words, preferring capitalised German nouns.
+    Strips German/English question filler words (stopwords) and returns the
+    remaining meaningful words in their **original order** (up to 4 words).
+    This ensures "chuck norris" stays "chuck norris", not "norris chuck".
     """
     raw_tokens = re.findall(r"[A-Za-zÄÖÜäöüß0-9]+", message)
     meaningful = [t for t in raw_tokens if t.lower() not in _STOPWORDS and len(t) > 2]
     if not meaningful:
         return ""
-    caps = [t for t in meaningful if t[0].isupper()]
-    lower = [t for t in meaningful if not t[0].isupper()]
-    caps.sort(key=len, reverse=True)
-    lower.sort(key=len, reverse=True)
-    combined = caps + lower
-    return " ".join(combined[:4])
+    return " ".join(meaningful[:4])
 
 
 # Patterns that suggest the user is asking about a specific topic
@@ -1508,16 +1509,18 @@ async def chat_completion(
             (str(v) for v in _router_entities.values() if isinstance(v, str) and v.strip()),
             None,
         )
-        # Use the router entity as the canonical topic; fall back to the raw
-        # message (never to _extract_topic which reverses word order).
-        wiki_topic = _entity_query or last_message
-        _wiki_lookup_query = _entity_query or last_message
+        # Use the router entity as the canonical topic; fall back to
+        # _extract_topic() which strips question filler words ("was weißt du über",
+        # "wie funktioniert", etc.) and returns only the searched entity in original
+        # word order.
+        wiki_topic = _entity_query or _extract_topic(last_message) or last_message
+        _wiki_lookup_query = _entity_query or _extract_topic(last_message) or last_message
         # If the standard local search (min_score=0.55) returned nothing, retry
         # with a softer threshold (0.40).  Use the router entity when available,
-        # otherwise the raw message — the router has already confirmed the intent
+        # otherwise the extracted topic — the router has already confirmed the intent
         # so we trust near-miss results rather than discarding relevant chunks.
         if not wiki_section:
-            _retry_query = _entity_query or last_message
+            _retry_query = _entity_query or _extract_topic(last_message) or last_message
             wiki_section = _wiki_context_for_message(_retry_query, min_score=0.40)
             if wiki_section:
                 logger.debug(
