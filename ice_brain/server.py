@@ -1507,9 +1507,12 @@ async def chat_completion(
             # Any topical question → always fetch fresh Wikipedia data.
             # We never rely solely on cached chunks or the LLM's training data;
             # the answer might have changed since either was written.
+            # NOTE: Use last_message (not _effective_query) for the actual lookup
+            # so that an unrelated prior turn (e.g. weather question) doesn't
+            # pollute the Wikipedia search and cause wrong article results.
             logger.info("Topical question detected – proactive live lookup.")
             live_wiki_section = await asyncio.get_running_loop().run_in_executor(
-                None, _live_wiki_context_proactive, _effective_query
+                None, _live_wiki_context_proactive, last_message
             )
             if live_wiki_section:
                 logger.info("Proactive wiki section injected (%d chars).", len(live_wiki_section))
@@ -1521,7 +1524,7 @@ async def chat_completion(
             _topic = _extract_topic(_effective_query)
             logger.info("Follow-up – proactive live lookup for topic %r.", _topic)
             live_wiki_section = await asyncio.get_running_loop().run_in_executor(
-                None, _live_wiki_context_proactive, _effective_query
+                None, _live_wiki_context_proactive, last_message
             )
             if live_wiki_section:
                 logger.info("Follow-up wiki section injected (%d chars).", len(live_wiki_section))
