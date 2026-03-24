@@ -607,6 +607,9 @@ _ANTI_HALLUCINATION_NOTE = (
     "\n- Wenn du etwas nicht weißt, sage es ehrlich. Halluziniere keine Fakten."
     "\n- Nutze [WIKI_SEARCH: ...] wenn du Fakten nachschlagen musst."
     "\n- Wenn du Wikipedia-Daten erhältst, nutze NUR diese als Faktenquelle."
+    "\n- LEBENSTATUS: Falls Wikipedia-Daten ein Sterbedatum oder einen Tod für eine Person enthalten,"
+    " ist diese Person VERSTORBEN. Behaupte NIEMALS, dass sie noch lebt – auch nicht wenn dein"
+    " Trainingswissen anderes nahelegt. Das Sterbedatum aus Wikipedia hat absolute Priorität."
     "\n- Nutze [WEB_SEARCH: ...] oder [NEWS_SEARCH: ...] für aktuelle Infos, Nachrichten und Sport."
     "\n- Wenn du Informationen aus Tools (Web, Wiki) verwendest, zitiere die Quelle immer"
     " mit einem Markdown-Link, z.B. [Artikelname](https://...) oder [Quelle](https://...)."
@@ -614,6 +617,31 @@ _ANTI_HALLUCINATION_NOTE = (
     "\n- Antworte IMMER in der Sprache, in der der Benutzer schreibt."
     "\n  Wenn er deutsch schreibt, antworte auf deutsch."
     "\n  Wenn er englisch schreibt, antworte auf englisch. Passe dich dynamisch an."
+)
+
+# Detects death mentions in wiki content (German + English).
+# Used to add an explicit DECEASED notice so small models don't contradict
+# a death date with "still alive" statements from their training data.
+_DEATH_RE = re.compile(
+    r"(?:"
+    r"\bgestorben\b"
+    r"|\bstarb\b"
+    r"|\bverstorben\b"
+    r"|\bTodesdatum\b"
+    r"|\bTod(?:estag)?\b"
+    r"|\bdied\b"
+    r"|\bdeath\b"
+    r"|\bdeceased\b"
+    r"|\bpassed away\b"
+    r"|†"
+    r")",
+    re.IGNORECASE,
+)
+
+# Inserted into the prompt when death is detected in injected wiki content.
+_DEATH_NOTICE = (
+    "⚠️ LEBENSTATUS: Laut Wikipedia ist die unten beschriebene Person VERSTORBEN."
+    " Behaupte NIEMALS, dass sie noch lebt."
 )
 
 # Detects a pasted German (or generic) Wikipedia article URL.
@@ -968,11 +996,23 @@ def _live_wiki_context_proactive(message: str, limit: int = 2) -> str:
         if not results:
             logger.info("Proactive live wiki lookup: no results for %r.", query)
             return ""
-        lines = [
-            "📡 WIKIPEDIA-HINTERGRUNDWISSEN (live abgerufen, da kein lokaler Cache vorhanden):"
+        # Collect all snippet text up front so we can check for death mentions.
+        snippets = [
+            (r.get("full_text") or r.get("summary", ""))[:1000].replace("\n", " ").strip()
+            for r in results
         ]
-        for r in results:
-            snippet = (r.get("full_text") or r.get("summary", ""))[:1000].replace("\n", " ").strip()
+        combined_text = " ".join(snippets)
+        lines = [
+            "📡 WIKIPEDIA-FAKTEN (live abgerufen, VORRANG vor Trainingswissen – diese Fakten sind verbindlich):",
+            "Nutze AUSSCHLIESSLICH diese Daten für Faktenantworten.",
+        ]
+        # When the Wikipedia content explicitly mentions a death, add a prominent
+        # notice so small models don't contradict the death date with a "still
+        # alive" claim sourced from their (now outdated) training data.
+        if _DEATH_RE.search(combined_text):
+            lines.append(_DEATH_NOTICE)
+        lines.append("")  # blank separator before article content
+        for r, snippet in zip(results, snippets):
             lines.append(f"[{r['title']}] {snippet}")
             if r.get("source_url"):
                 title = r.get("title", "Wikipedia")
@@ -1272,12 +1312,21 @@ def _wiki_context_for_message(message: str, limit: int = 3, min_score: float = 0
             len(relevant),
             ", ".join(f"{r['title']!r} (score={r['score']:.3f})" for r in relevant),
         )
-        lines = [
-            "📚 Relevantes Wikipedia-Hintergrundwissen "
-            "(nutze es in deiner Antwort wenn passend, aber nur wenn es wirklich hilft):"
+        # Collect all snippet text up front so we can check for death mentions.
+        snippets = [
+            r["content"][:_WIKI_SNIPPET_MAX_CHARS].replace("\n", " ").strip()
+            for r in relevant
         ]
-        for idx, r in enumerate(relevant):
-            snippet = r["content"][:_WIKI_SNIPPET_MAX_CHARS].replace("\n", " ").strip()
+        combined_text = " ".join(snippets)
+        lines = [
+            "📚 Wikipedia-Fakten (VORRANG vor Trainingswissen – diese Fakten sind verbindlich):"
+        ]
+        # When the Wikipedia content explicitly mentions a death, add a prominent
+        # notice so small models don't contradict the death date with a "still
+        # alive" claim sourced from their (now outdated) training data.
+        if _DEATH_RE.search(combined_text):
+            lines.append(_DEATH_NOTICE)
+        for idx, (r, snippet) in enumerate(zip(relevant, snippets)):
             if idx == 0:
                 lines.append(f"[{r['title']}] (Hauptartikel – Fakten wie Geburtsdaten, Sterbedaten etc. aus diesem Artikel haben Vorrang) {snippet}")
             else:
