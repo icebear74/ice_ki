@@ -722,9 +722,14 @@ _STOPWORDS = frozenset({
     # Generic nouns that are not useful as search topics
     "informationen", "infos", "info", "angaben", "daten", "aussage",
     "fakt", "fakten", "sache", "sachen", "zeug",
-    # Correction-related words
-    "aktualisier", "informier", "schlag", "nach", "check",
-    "wiki", "update", "korrigier",
+    # Correction / update verbs (full conjugated forms too)
+    "aktualisier", "aktualisiere", "aktualisierst", "aktualisieren",
+    "informier", "informiere", "informierst", "informieren",
+    "schlag", "check", "wiki", "update", "korrigier",
+    # Life-status verbs that carry no search value
+    "lebt", "lebst", "leben", "lebte", "lebten", "lebend",
+    "gestorben", "starb", "starben", "verstorben",
+    "tot",
 })
 
 # Phrases that signal the user wants a refresh/update of information
@@ -1247,6 +1252,18 @@ def _wiki_context_for_message(message: str, limit: int = 3, min_score: float = 0
                 )
                 return ""
 
+        # Sort chunks: the article whose title most closely matches the query comes first.
+        # We score by (matching entity-word count) / (title word count) so that "Chuck Norris"
+        # ranks above "Chuck Norris Facts" when searching for "chuck norris".
+        if sig_words and len(relevant) > 1:
+            def _title_specificity(r: dict) -> float:
+                title_words = re.findall(r"[A-Za-zÄÖÜäöüß0-9]+", r["title"].lower())
+                if not title_words:
+                    return 0.0
+                matches = sum(1 for w in sig_words if w in title_words)
+                return matches / len(title_words)
+            relevant.sort(key=_title_specificity, reverse=True)
+
         logger.debug(
             "Wiki search: %d relevant chunk(s) injected into prompt: %s",
             len(relevant),
@@ -1256,9 +1273,12 @@ def _wiki_context_for_message(message: str, limit: int = 3, min_score: float = 0
             "📚 Relevantes Wikipedia-Hintergrundwissen "
             "(nutze es in deiner Antwort wenn passend, aber nur wenn es wirklich hilft):"
         ]
-        for r in relevant:
+        for idx, r in enumerate(relevant):
             snippet = r["content"][:_WIKI_SNIPPET_MAX_CHARS].replace("\n", " ").strip()
-            lines.append(f"[{r['title']}] {snippet}")
+            if idx == 0:
+                lines.append(f"[{r['title']}] (Hauptartikel – Fakten wie Geburtsdaten, Sterbedaten etc. aus diesem Artikel haben Vorrang) {snippet}")
+            else:
+                lines.append(f"[{r['title']}] (Zusatzartikel) {snippet}")
 
         # Inject cached images for each unique article (deduplicated by article_id)
         seen_article_ids: set[int] = set()
@@ -1487,13 +1507,19 @@ async def chat_completion(
         else:
             logger.info("Live wiki lookup returned no results for correction message.")
     elif _UPDATE_RE.search(last_message):
-        # Benutzer möchte aktualisierte Informationen – Live-Lookup mit dem vorherigen Thema
+        # Benutzer möchte aktualisierte Informationen – Live-Lookup mit dem vorherigen Thema.
+        # Extract the actual search topic from the current message first; fall back to prior
+        # user messages (also topic-extracted) so we never pass a raw full sentence to Wikipedia.
         logger.info("Update-Signal erkannt – Live-Wikipedia-Lookup mit vorherigem Thema.")
-        _prior_msgs = [m.content for m in request.messages[:-1] if m.role == "user"]
-        _update_ctx = " ".join(_prior_msgs[-3:]) if _prior_msgs else last_message
-        live_wiki_section = await asyncio.get_running_loop().run_in_executor(
-            None, _live_wiki_context_proactive, _update_ctx
-        )
+        _update_topic = _extract_topic(last_message)
+        if not _update_topic:
+            _prior_msgs = [m.content for m in request.messages[:-1] if m.role == "user"]
+            _prior_ctx = " ".join(_prior_msgs[-3:]) if _prior_msgs else ""
+            _update_topic = _extract_topic(_prior_ctx) if _prior_ctx else ""
+        if _update_topic:
+            live_wiki_section = await asyncio.get_running_loop().run_in_executor(
+                None, _live_wiki_context_for_correction, _update_topic
+            )
         if live_wiki_section:
             logger.info("Live wiki section (Update) injected (%d chars).", len(live_wiki_section))
         else:
