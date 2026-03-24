@@ -1397,37 +1397,17 @@ async def chat_completion(
         else:
             logger.info("Live wiki lookup (Update) returned no results.")
     elif intent_str == "wiki":
-        # Router explicitly recognised a wiki intent.  Only do a live lookup
-        # when the cached data for this topic is stale (older than 7 days) or
-        # does not exist yet.  Fresh cache is good enough – no extra network
-        # request needed.
+        # Router explicitly recognised a wiki intent → always do a live lookup
+        # for fresh data, regardless of cache age.
         wiki_topic = _extract_topic(last_message)
-        is_stale = True  # default: assume stale so we do a lookup when unsure
-        # "wer ist" / "who is" questions are ALWAYS treated as stale because
-        # the cached article may predate a change in the current officeholder.
-        if not _LIVE_ALWAYS_RE.search(last_message) and wiki_topic:
-            try:
-                from tools.wikipedia import wiki_topic_is_stale  # noqa: PLC0415
-                is_stale = wiki_topic_is_stale(wiki_topic)
-            except Exception as exc_stale:  # noqa: BLE001
-                logger.warning("wiki_topic_is_stale check failed (assuming stale): %s", exc_stale)
-        if is_stale:
-            logger.info(
-                "Wiki intent detected and cache is stale/missing for topic %r – live lookup.",
-                wiki_topic,
-            )
-            live_wiki_section = await asyncio.get_running_loop().run_in_executor(
-                None, _live_wiki_context_proactive, last_message
-            )
-            if live_wiki_section:
-                logger.info("Live wiki section injected for wiki intent (%d chars).", len(live_wiki_section))
-            else:
-                logger.info("Proactive live wiki lookup (wiki intent) returned no results.")
+        logger.info("Wiki intent detected – performing live lookup for topic %r.", wiki_topic)
+        live_wiki_section = await asyncio.get_running_loop().run_in_executor(
+            None, _live_wiki_context_proactive, last_message
+        )
+        if live_wiki_section:
+            logger.info("Live wiki section injected for wiki intent (%d chars).", len(live_wiki_section))
         else:
-            logger.debug(
-                "Wiki intent detected but cache is fresh for topic %r – skipping live lookup.",
-                wiki_topic,
-            )
+            logger.info("Proactive live wiki lookup (wiki intent) returned no results.")
     else:
         # Build the effective query: if the current message is very short (likely a
         # follow-up or clarification), extend it with the last user turn from the
@@ -1444,17 +1424,11 @@ async def chat_completion(
         else:
             _effective_query = last_message
 
-        # "wer ist / who is" queries ALWAYS need a live lookup — the answer may
-        # have changed since the cached article was written, even if the cache is
-        # technically "fresh" (e.g., the city article was cached yesterday but the
-        # mayor changed a year ago and the article already reflects that).
-        _live_always = bool(_LIVE_ALWAYS_RE.search(_effective_query))
-
-        if _live_always or (not wiki_section and bool(_TOPIC_QUESTION_RE.search(_effective_query))):
-            # Present-tense person question OR no cached data with a topical question
-            # → proactively fetch fresh Wikipedia data.
-            _reason = "present-tense person question" if _live_always else "no cached wiki data + topical question"
-            logger.info("Proactive live lookup triggered (%s).", _reason)
+        if bool(_TOPIC_QUESTION_RE.search(_effective_query)):
+            # Any topical question → always fetch fresh Wikipedia data.
+            # We never rely solely on cached chunks or the LLM's training data;
+            # the answer might have changed since either was written.
+            logger.info("Topical question detected – proactive live lookup.")
             live_wiki_section = await asyncio.get_running_loop().run_in_executor(
                 None, _live_wiki_context_proactive, _effective_query
             )
@@ -1462,22 +1436,18 @@ async def chat_completion(
                 logger.info("Proactive wiki section injected (%d chars).", len(live_wiki_section))
             else:
                 logger.info("Proactive live wiki lookup returned no results.")
-        elif not wiki_section and len(last_message.split()) <= 8 and _prior_user_messages:
-            # Short follow-up with no cached data and no question pattern either –
-            # still worth a live lookup using the extended query.
+        elif _prior_user_messages and _extract_topic(_effective_query):
+            # Short follow-up with no explicit question pattern – still worth
+            # trying a live lookup with the extended query.
             _topic = _extract_topic(_effective_query)
-            if _topic:
-                logger.info(
-                    "Short follow-up with no cached wiki data – proactive live lookup for topic %r.",
-                    _topic,
-                )
-                live_wiki_section = await asyncio.get_running_loop().run_in_executor(
-                    None, _live_wiki_context_proactive, _effective_query
-                )
-                if live_wiki_section:
-                    logger.info("Follow-up wiki section injected (%d chars).", len(live_wiki_section))
-                else:
-                    logger.info("Follow-up live wiki lookup returned no results.")
+            logger.info("Follow-up – proactive live lookup for topic %r.", _topic)
+            live_wiki_section = await asyncio.get_running_loop().run_in_executor(
+                None, _live_wiki_context_proactive, _effective_query
+            )
+            if live_wiki_section:
+                logger.info("Follow-up wiki section injected (%d chars).", len(live_wiki_section))
+            else:
+                logger.info("Follow-up live wiki lookup returned no results.")
 
     # 2d. Proactive web search for news / sports / web_search intents
     #
