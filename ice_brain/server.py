@@ -607,6 +607,9 @@ _ANTI_HALLUCINATION_NOTE = (
     "\n- Wenn du etwas nicht weißt, sage es ehrlich. Halluziniere keine Fakten."
     "\n- Nutze [WIKI_SEARCH: ...] wenn du Fakten nachschlagen musst."
     "\n- Wenn du Wikipedia-Daten erhältst, nutze NUR diese als Faktenquelle."
+    "\n- LEBENSTATUS: Falls Wikipedia-Daten ein Sterbedatum oder einen Tod für eine Person enthalten,"
+    " ist diese Person VERSTORBEN. Behaupte NIEMALS, dass sie noch lebt – auch nicht wenn dein"
+    " Trainingswissen anderes nahelegt. Das Sterbedatum aus Wikipedia hat absolute Priorität."
     "\n- Nutze [WEB_SEARCH: ...] oder [NEWS_SEARCH: ...] für aktuelle Infos, Nachrichten und Sport."
     "\n- Wenn du Informationen aus Tools (Web, Wiki) verwendest, zitiere die Quelle immer"
     " mit einem Markdown-Link, z.B. [Artikelname](https://...) oder [Quelle](https://...)."
@@ -614,6 +617,31 @@ _ANTI_HALLUCINATION_NOTE = (
     "\n- Antworte IMMER in der Sprache, in der der Benutzer schreibt."
     "\n  Wenn er deutsch schreibt, antworte auf deutsch."
     "\n  Wenn er englisch schreibt, antworte auf englisch. Passe dich dynamisch an."
+)
+
+# Detects death mentions in wiki content (German + English).
+# Used to add an explicit DECEASED notice so small models don't contradict
+# a death date with "still alive" statements from their training data.
+_DEATH_RE = re.compile(
+    r"(?:"
+    r"\bgestorben\b"
+    r"|\bstarb\b"
+    r"|\bverstorben\b"
+    r"|\bTodesdatum\b"
+    r"|\bTod(?:estag)?\b"
+    r"|\bdied\b"
+    r"|\bdeath\b"
+    r"|\bdeceased\b"
+    r"|\bpassed away\b"
+    r"|†"
+    r")",
+    re.IGNORECASE,
+)
+
+# Inserted into the prompt when death is detected in injected wiki content.
+_DEATH_NOTICE = (
+    "⚠️ LEBENSTATUS: Laut Wikipedia ist die unten beschriebene Person VERSTORBEN."
+    " Behaupte NIEMALS, dass sie noch lebt."
 )
 
 # Detects a pasted German (or generic) Wikipedia article URL.
@@ -787,9 +815,9 @@ def _extract_correction_topic(message: str) -> str:
     caps = [t for t in meaningful if t[0].isupper()]
     lower = [t for t in meaningful if not t[0].isupper()]
 
-    # Build query: capitalized tokens first (sorted by length desc), then others
-    caps.sort(key=len, reverse=True)
-    lower.sort(key=len, reverse=True)
+    # Build query: capitalized tokens first (in original order), then lowercase
+    # tokens (in original order).  We no longer sort by length so that proper
+    # names like "Chuck Norris" keep their natural word order.
     combined = caps + lower
     return " ".join(combined[:_MAX_TOPIC_WORDS])
 
@@ -968,11 +996,23 @@ def _live_wiki_context_proactive(message: str, limit: int = 2) -> str:
         if not results:
             logger.info("Proactive live wiki lookup: no results for %r.", query)
             return ""
-        lines = [
-            "📡 WIKIPEDIA-HINTERGRUNDWISSEN (live abgerufen, da kein lokaler Cache vorhanden):"
+        # Collect all snippet text up front so we can check for death mentions.
+        snippets = [
+            (r.get("full_text") or r.get("summary", ""))[:1000].replace("\n", " ").strip()
+            for r in results
         ]
-        for r in results:
-            snippet = (r.get("full_text") or r.get("summary", ""))[:1000].replace("\n", " ").strip()
+        combined_text = " ".join(snippets)
+        lines = [
+            "📡 WIKIPEDIA-FAKTEN (live abgerufen, VORRANG vor Trainingswissen – diese Fakten sind verbindlich):",
+            "Nutze AUSSCHLIESSLICH diese Daten für Faktenantworten.",
+        ]
+        # When the Wikipedia content explicitly mentions a death, add a prominent
+        # notice so small models don't contradict the death date with a "still
+        # alive" claim sourced from their (now outdated) training data.
+        if _DEATH_RE.search(combined_text):
+            lines.append(_DEATH_NOTICE)
+        lines.append("")  # blank separator before article content
+        for r, snippet in zip(results, snippets):
             lines.append(f"[{r['title']}] {snippet}")
             if r.get("source_url"):
                 title = r.get("title", "Wikipedia")
@@ -1272,12 +1312,21 @@ def _wiki_context_for_message(message: str, limit: int = 3, min_score: float = 0
             len(relevant),
             ", ".join(f"{r['title']!r} (score={r['score']:.3f})" for r in relevant),
         )
-        lines = [
-            "📚 Relevantes Wikipedia-Hintergrundwissen "
-            "(nutze es in deiner Antwort wenn passend, aber nur wenn es wirklich hilft):"
+        # Collect all snippet text up front so we can check for death mentions.
+        snippets = [
+            r["content"][:_WIKI_SNIPPET_MAX_CHARS].replace("\n", " ").strip()
+            for r in relevant
         ]
-        for idx, r in enumerate(relevant):
-            snippet = r["content"][:_WIKI_SNIPPET_MAX_CHARS].replace("\n", " ").strip()
+        combined_text = " ".join(snippets)
+        lines = [
+            "📚 Wikipedia-Fakten (VORRANG vor Trainingswissen – diese Fakten sind verbindlich):"
+        ]
+        # When the Wikipedia content explicitly mentions a death, add a prominent
+        # notice so small models don't contradict the death date with a "still
+        # alive" claim sourced from their (now outdated) training data.
+        if _DEATH_RE.search(combined_text):
+            lines.append(_DEATH_NOTICE)
+        for idx, (r, snippet) in enumerate(zip(relevant, snippets)):
             if idx == 0:
                 lines.append(f"[{r['title']}] (Hauptartikel – Fakten wie Geburtsdaten, Sterbedaten etc. aus diesem Artikel haben Vorrang) {snippet}")
             else:
@@ -1529,14 +1578,17 @@ async def chat_completion(
             logger.info("Live wiki lookup (Update) returned no results.")
     elif intent_str == "wiki":
         # Router explicitly recognised a wiki intent.
-        # Prefer a named entity extracted by the router (person, place, topic,
-        # etc.) as the lookup query – it has correct capitalisation and word
-        # order.  Fall back to _extract_topic() on the raw message only when no
-        # entity was provided.
+        # Prefer entities.topic extracted by the router as the lookup query –
+        # it has correct capitalisation and word order.  Fall back to the
+        # generic first-string entity value, then to _extract_topic() on the
+        # raw message only when no entity was provided.
         _router_entities = router_result.entities if router_result else {}
-        _entity_query = next(
-            (str(v) for v in _router_entities.values() if isinstance(v, str) and v.strip()),
-            None,
+        _entity_query = (
+            _router_entities.get("topic", "").strip()
+            or next(
+                (str(v) for v in _router_entities.values() if isinstance(v, str) and v.strip()),
+                None,
+            )
         )
         # Use the router entity as the canonical topic; fall back to
         # _extract_topic() which strips question filler words ("was weißt du über",
@@ -1646,7 +1698,9 @@ async def chat_completion(
     web_search_section = ""
     _did_web_search = False
     if intent_str in ("news", "sports", "web_search"):
-        _web_query = _extract_topic(last_message) or last_message
+        _router_entities = router_result.entities if router_result else {}
+        _entity_topic = _router_entities.get("topic", "").strip() if _router_entities else ""
+        _web_query = _entity_topic or _extract_topic(last_message) or last_message
         _is_news = intent_str in ("news", "sports")
         logger.info(
             "Web search intent %r detected – proactive %s search for query %r.",
@@ -1668,7 +1722,9 @@ async def chat_completion(
     # tags itself (which can lead to hallucination loops).
     weather_section = ""
     if intent_str == "weather":
-        _weather_location = _extract_topic(last_message) or None
+        _router_entities = router_result.entities if router_result else {}
+        _entity_topic = _router_entities.get("topic", "").strip() if _router_entities else ""
+        _weather_location = _entity_topic or _extract_topic(last_message) or None
         # Guard: if the "location" extracted from the message is also the
         # title of an already-injected wiki article (i.e. it's a person or
         # topic, not a real place), skip the weather lookup entirely.  This

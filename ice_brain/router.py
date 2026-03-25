@@ -45,8 +45,76 @@ JSON schema:
 {
   "intent": "<one of the intents above>",
   "confidence": <float 0.0-1.0>,
-  "entities": {}
+  "entities": {
+    "topic": "<main topic or search term extracted from the message, or empty string if none>"
+  }
 }
+
+The "topic" field should contain the core subject the user is asking about, stripped of question
+words and filler phrases. Examples: "Albert Einstein", "Berlin", "Bayern München", "Bitcoin Kurs".
+Leave it empty ("") for general chat, memory operations, or when no specific topic is identifiable.
+
+Few-shot examples:
+---
+User: Was weißt du über Albert Einstein?
+{"intent": "wiki", "confidence": 0.98, "entities": {"topic": "Albert Einstein"}}
+---
+User: Who was Marie Curie?
+{"intent": "wiki", "confidence": 0.97, "entities": {"topic": "Marie Curie"}}
+---
+User: Wie ist das Wetter in Berlin?
+{"intent": "weather", "confidence": 0.99, "entities": {"topic": "Berlin"}}
+---
+User: What's the weather like in London tomorrow?
+{"intent": "weather", "confidence": 0.98, "entities": {"topic": "London"}}
+---
+User: Was gibt es heute Neues in den Nachrichten?
+{"intent": "news", "confidence": 0.96, "entities": {"topic": ""}}
+---
+User: What's in the news today?
+{"intent": "news", "confidence": 0.95, "entities": {"topic": ""}}
+---
+User: Wie hat Bayern München gespielt?
+{"intent": "sports", "confidence": 0.97, "entities": {"topic": "Bayern München"}}
+---
+User: How did Real Madrid do last night?
+{"intent": "sports", "confidence": 0.96, "entities": {"topic": "Real Madrid"}}
+---
+User: Was kostet Bitcoin aktuell?
+{"intent": "web_search", "confidence": 0.94, "entities": {"topic": "Bitcoin Kurs"}}
+---
+User: What's the current price of Apple stock?
+{"intent": "web_search", "confidence": 0.93, "entities": {"topic": "Apple stock price"}}
+---
+User: Kannst du mir ein Rezept für Pasta machen?
+{"intent": "recipe", "confidence": 0.98, "entities": {"topic": "Pasta"}}
+---
+User: Give me a recipe for pizza.
+{"intent": "recipe", "confidence": 0.97, "entities": {"topic": "Pizza"}}
+---
+User: Empfiehl mir einen Film.
+{"intent": "movie", "confidence": 0.95, "entities": {"topic": ""}}
+---
+User: Recommend a good movie.
+{"intent": "movie", "confidence": 0.94, "entities": {"topic": ""}}
+---
+User: Ich heiße Max Mustermann.
+{"intent": "memory_store", "confidence": 0.97, "entities": {"topic": ""}}
+---
+User: My name is John Smith.
+{"intent": "memory_store", "confidence": 0.96, "entities": {"topic": ""}}
+---
+User: Wie heiße ich?
+{"intent": "memory_recall", "confidence": 0.98, "entities": {"topic": ""}}
+---
+User: What's my name?
+{"intent": "memory_recall", "confidence": 0.97, "entities": {"topic": ""}}
+---
+User: Hallo, wie geht es dir?
+{"intent": "general", "confidence": 0.99, "entities": {"topic": ""}}
+---
+User: Hello, how are you?
+{"intent": "general", "confidence": 0.99, "entities": {"topic": ""}}
 """
 
 
