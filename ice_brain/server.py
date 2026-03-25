@@ -333,6 +333,11 @@ async def startup() -> None:
     # 2. Load LLMs (failures are logged but don't abort startup)
     if models_cfg:
         llm_manager.load_all(models_cfg)
+        if not llm_manager.is_ready("main"):
+            logger.critical(
+                "FATAL: Main model failed to load! The server cannot handle chat requests. "
+                "Check model path and GPU VRAM availability."
+            )
     else:
         logger.warning("No model config – server starts without LLMs.")
 

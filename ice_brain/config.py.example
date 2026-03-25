@@ -24,10 +24,17 @@
 # Du kannst Router und Main unabhängig mischen – z.B. Non-Thinking-Router
 # (schnelle Klassifikation) + Thinking-Main (falls du die Qualität brauchst).
 # Einfach die gewünschten Blöcke einkommentieren.
+#
+# 'chat_format' – Nur setzen wenn Auto-Detection fehlschlägt!
+#   Qwen-Modelle:   nicht nötig (auto-detected als 'chatml')
+#   Llama-Modelle:  'llama-3'
+#   Mistral-Modelle: 'mistral-instruct'
+#   Wenn das Modell Endlosschleifen produziert → chat_format ist falsch.
 
 MODELS = {
     # ── Router-Modell (Intent-Klassifikation, läuft auf P4) ──────────────
     # Non-Thinking (empfohlen – reicht für JSON-Klassifikation, spart VRAM auf P4)
+    # ~2 GB VRAM
     'router': {
         'path': '/models/qwen2.5-3b-instruct-q4_k_m.gguf',
         'hf_repo': 'Qwen/Qwen2.5-3B-Instruct-GGUF',
@@ -36,7 +43,8 @@ MODELS = {
         'n_ctx': 4096,
         'n_gpu_layers': -1,  # -1 = alle Layer auf GPU
     },
-    # Thinking-Alternative (auskommentieren zum Aktivieren):
+    # Thinking-Alternative für Router (auskommentieren zum Aktivieren):
+    # ~3 GB VRAM
     # 'router': {
     #     'path': '/models/Qwen3-4B-Q4_K_M.gguf',
     #     'hf_repo': 'Qwen/Qwen3-4B-GGUF',
@@ -48,6 +56,7 @@ MODELS = {
 
     # ── Main-Modell (Chat + Memory-Extraction, läuft auf P100) ───────────
     # Non-Thinking (empfohlen – deutlich schnellere Antworten ohne Think-Overhead)
+    # ~5 GB VRAM – gut für 8 GB GPUs
     'main': {
         'path': '/models/qwen2.5-7b-instruct-q4_k_m.gguf',
         'hf_repo': 'Qwen/Qwen2.5-7B-Instruct-GGUF',
@@ -56,7 +65,18 @@ MODELS = {
         'n_ctx': 8192,
         'n_gpu_layers': -1,
     },
-    # Thinking-Alternative (auskommentieren zum Aktivieren):
+    # Qwen2.5-14B (auskommentieren zum Aktivieren):
+    # ~9 GB VRAM – für P100 16 GB empfohlen
+    # 'main': {
+    #     'path': '/models/Qwen2.5-14B-Instruct-Q4_K_M.gguf',
+    #     'hf_repo': 'bartowski/Qwen2.5-14B-Instruct-GGUF',
+    #     'hf_file': 'Qwen2.5-14B-Instruct-Q4_K_M.gguf',
+    #     'gpu': 0,
+    #     'n_ctx': 10000,
+    #     'n_gpu_layers': -1,
+    # },
+    # Thinking-Alternative: Qwen3-8B (auskommentieren zum Aktivieren):
+    # ~5 GB VRAM
     # 'main': {
     #     'path': '/models/Qwen3-8B-Q4_K_M.gguf',
     #     'hf_repo': 'Qwen/Qwen3-8B-GGUF',
@@ -64,6 +84,38 @@ MODELS = {
     #     'gpu': 0,
     #     'n_ctx': 8192,
     #     'n_gpu_layers': -1,
+    # },
+    # Thinking-Alternative: Qwen3-14B (auskommentieren zum Aktivieren):
+    # ~9 GB VRAM – für P100 16 GB
+    # 'main': {
+    #     'path': '/models/Qwen3-14B-Q4_K_M.gguf',
+    #     'hf_repo': 'Qwen/Qwen3-14B-GGUF',
+    #     'hf_file': 'Qwen3-14B-Q4_K_M.gguf',
+    #     'gpu': 0,
+    #     'n_ctx': 10000,
+    #     'n_gpu_layers': -1,
+    # },
+    # Llama-3.1-8B (auskommentieren zum Aktivieren):
+    # ~5 GB VRAM – chat_format MUSS auf 'llama-3' gesetzt werden!
+    # 'main': {
+    #     'path': '/models/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf',
+    #     'hf_repo': 'bartowski/Meta-Llama-3.1-8B-Instruct-GGUF',
+    #     'hf_file': 'Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf',
+    #     'gpu': 0,
+    #     'n_ctx': 8192,
+    #     'n_gpu_layers': -1,
+    #     'chat_format': 'llama-3',  # Pflicht für Llama-Modelle
+    # },
+    # Mistral-Small-3.1-24B (auskommentieren zum Aktivieren):
+    # ~10 GB VRAM – für P100 16 GB (Q3_K_M)
+    # 'main': {
+    #     'path': '/models/Mistral-Small-3.1-24B-Instruct-2503-Q3_K_M.gguf',
+    #     'hf_repo': 'bartowski/Mistral-Small-3.1-24B-Instruct-2503-GGUF',
+    #     'hf_file': 'Mistral-Small-3.1-24B-Instruct-2503-Q3_K_M.gguf',
+    #     'gpu': 0,
+    #     'n_ctx': 8192,
+    #     'n_gpu_layers': -1,
+    #     'chat_format': 'mistral-instruct',  # Pflicht für Mistral-Modelle
     # },
 }
 

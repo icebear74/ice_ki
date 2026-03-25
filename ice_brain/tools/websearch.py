@@ -1,7 +1,8 @@
 """
 DuckDuckGo web search and news search tools for ice_brain.
 
-Uses the ``duckduckgo-search`` package (no API key required).
+Uses the ``ddgs`` package (v9+, formerly ``duckduckgo-search``).
+No API key required.
 
 Public API
 ----------
@@ -27,7 +28,10 @@ def web_search(query: str, max_results: int = 5) -> list[dict]:
     Returns an empty list on error.
     """
     try:
-        from duckduckgo_search import DDGS  # noqa: PLC0415
+        try:
+            from ddgs import DDGS  # ddgs v9+ (renamed package)  # noqa: PLC0415
+        except ImportError:
+            from duckduckgo_search import DDGS  # noqa: PLC0415  # fallback for older installs
         results = DDGS().text(query, max_results=max_results, region="de-de")
         return [
             {
@@ -56,7 +60,10 @@ def news_search(
     Returns an empty list on error.
     """
     try:
-        from duckduckgo_search import DDGS  # noqa: PLC0415
+        try:
+            from ddgs import DDGS  # ddgs v9+ (renamed package)  # noqa: PLC0415
+        except ImportError:
+            from duckduckgo_search import DDGS  # noqa: PLC0415  # fallback for older installs
         kwargs: dict = {"max_results": max_results, "region": "de-de"}
         if timelimit:
             kwargs["timelimit"] = timelimit

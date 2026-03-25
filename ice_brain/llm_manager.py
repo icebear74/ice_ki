@@ -163,6 +163,8 @@ class LLMManager:
         else:
             effective_gpu_layers = n_gpu_layers
 
+        chat_format = cfg.get("chat_format")  # None = auto-detect from GGUF metadata
+
         logger.info(
             "Loading model '%s' from %s  →  GPU %d, n_gpu_layers=%s …",
             name, path, gpu_index,
@@ -177,13 +179,16 @@ class LLMManager:
                 # This is the correct parameter for single-GPU assignment;
                 # tensor_split is only for splitting ONE model across GPUs.
                 main_gpu=gpu_index,
+                chat_format=chat_format,  # explicit chat format when configured; None = auto-detect
                 verbose=False,
             )
             self._models[name] = _ModelHandle(name, llm)
+            effective_format = chat_format or "auto-detected"
             logger.info(
-                "Model '%s' loaded.  GPU offload: %s",
+                "Model '%s' loaded.  GPU offload: %s, chat_format: %s",
                 name,
                 "yes (GPU %d)" % gpu_index if effective_gpu_layers != 0 else "no (CPU)",
+                effective_format,
             )
             return True
         except Exception as exc:  # noqa: BLE001
@@ -252,6 +257,41 @@ class LLMManager:
         """Load all models defined in the MODELS config dict."""
         for name, cfg in models_cfg.items():
             self.load_model(name, cfg)
+
+        # Startup validation: verify all configured models loaded successfully
+        failed = [name for name in models_cfg if name not in self._models]
+        if failed:
+            logger.error(
+                "CRITICAL: %d model(s) failed to load: %s\n"
+                "The server will start but these features will not work.\n"
+                "Check the log messages above for details.",
+                len(failed), ", ".join(failed),
+            )
+
+        # Quick inference smoke test for loaded models
+        for name in list(self._models):
+            try:
+                handle = self._models[name]
+                with handle.lock:
+                    # Minimal completion to verify the model responds
+                    handle.llm.create_chat_completion(
+                        messages=[{"role": "user", "content": "Hi"}],
+                        temperature=0.0,
+                        max_tokens=1,
+                    )
+                detected_format = getattr(handle.llm, "chat_format", "unknown")
+                logger.info(
+                    "✅ Model '%s' smoke test passed. Chat format: %s",
+                    name, detected_format,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "❌ Model '%s' smoke test FAILED: %s\n"
+                    "  → The model loaded but cannot generate responses.\n"
+                    "  → This often means the chat_format is wrong.\n"
+                    "  → Try adding 'chat_format': 'chatml' (Qwen) or 'llama-3' (Llama) to config.",
+                    name, exc,
+                )
 
     # ------------------------------------------------------------------
     # Inference

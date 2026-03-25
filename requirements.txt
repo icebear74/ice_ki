@@ -26,4 +26,4 @@ psutil
 rich
 
 # Web search (DuckDuckGo, no API key required)
-duckduckgo-search
+ddgs
