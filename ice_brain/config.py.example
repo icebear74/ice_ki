@@ -36,9 +36,9 @@ MODELS = {
     # Non-Thinking (empfohlen – reicht für JSON-Klassifikation, spart VRAM auf P4)
     # ~2 GB VRAM
     'router': {
-        'path': '/models/qwen2.5-3b-instruct-q4_k_m.gguf',
-        'hf_repo': 'Qwen/Qwen2.5-3B-Instruct-GGUF',
-        'hf_file': 'qwen2.5-3b-instruct-q4_k_m.gguf',
+        'path': '/models/Qwen2.5-3B-Instruct-Q4_K_M.gguf',
+        'hf_repo': 'bartowski/Qwen2.5-3B-Instruct-GGUF',
+        'hf_file': 'Qwen2.5-3B-Instruct-Q4_K_M.gguf',
         'gpu': 1,            # GPU-Index: 1 = P4
         'n_ctx': 4096,
         'n_gpu_layers': -1,  # -1 = alle Layer auf GPU
@@ -58,9 +58,9 @@ MODELS = {
     # Non-Thinking (empfohlen – deutlich schnellere Antworten ohne Think-Overhead)
     # ~5 GB VRAM – gut für 8 GB GPUs
     'main': {
-        'path': '/models/qwen2.5-7b-instruct-q4_k_m.gguf',
-        'hf_repo': 'Qwen/Qwen2.5-7B-Instruct-GGUF',
-        'hf_file': 'qwen2.5-7b-instruct-q4_k_m.gguf',
+        'path': '/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf',
+        'hf_repo': 'bartowski/Qwen2.5-7B-Instruct-GGUF',
+        'hf_file': 'Qwen2.5-7B-Instruct-Q4_K_M.gguf',
         'gpu': 0,            # GPU-Index: 0 = P100
         'n_ctx': 8192,
         'n_gpu_layers': -1,

@@ -330,14 +330,16 @@ async def startup() -> None:
     except ImportError:
         pass
 
-    # 2. Load LLMs (failures are logged but don't abort startup)
+    # 2. Load LLMs – abort if any model fails to load or smoke-test
     if models_cfg:
-        llm_manager.load_all(models_cfg)
-        if not llm_manager.is_ready("main"):
+        failed = llm_manager.load_all(models_cfg)
+        if failed:
             logger.critical(
-                "FATAL: Main model failed to load! The server cannot handle chat requests. "
-                "Check model path and GPU VRAM availability."
+                "ABORTING: %d model(s) could not be loaded: %s. "
+                "Fix the errors above and restart the server.",
+                len(failed), ", ".join(failed),
             )
+            sys.exit(1)
     else:
         logger.warning("No model config – server starts without LLMs.")
 
