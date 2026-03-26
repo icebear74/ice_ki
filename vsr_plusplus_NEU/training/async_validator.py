@@ -75,6 +75,7 @@ def _find_safe_batch_size(model, val_dataset, device, config_snapshot):
 
     model.eval()
     while probe_batch >= 1:
+        lr_batch = None
         try:
             # Build a dummy batch of the right spatial size from dataset[0].
             sample = val_dataset[0]
@@ -87,7 +88,8 @@ def _find_safe_batch_size(model, val_dataset, device, config_snapshot):
             print(f"[AsyncVal] Probe succeeded: batch_size={probe_batch}")
             return probe_batch
         except torch.cuda.OutOfMemoryError:
-            del lr_batch
+            if lr_batch is not None:
+                del lr_batch
             torch.cuda.empty_cache()
             probe_batch //= 2
             if probe_batch < 1:
@@ -95,6 +97,8 @@ def _find_safe_batch_size(model, val_dataset, device, config_snapshot):
             print(f"[AsyncVal] OOM at probe batch, retrying with batch_size={probe_batch}")
         except Exception as e:
             # Non-OOM errors should not silently swallow – fall back to 1.
+            if lr_batch is not None:
+                del lr_batch
             print(f"[AsyncVal] Probe error ({e}), using batch_size=1")
             torch.cuda.empty_cache()
             return 1
@@ -451,8 +455,11 @@ def run_async_validator(checkpoint_dir, data_root, dataset_name, log_dir, gpu_in
         # ── Write results for training process ───────────────────────────────
         serialisable = {k: v for k, v in metrics.items()
                         if k not in ('labeled_images', 'per_size_metrics')}
-        serialisable['step']      = step
-        serialisable['timestamp'] = time.time()
+        serialisable['step']                = step
+        serialisable['timestamp']           = time.time()
+        # Include total elapsed time so the training process can update its
+        # validation-speed tracker (samples/s incl. TensorBoard I/O).
+        serialisable['val_elapsed_seconds'] = elapsed
 
         # Write per-size metrics (scalars only) for detailed logging
         if 'per_size_metrics' in metrics:

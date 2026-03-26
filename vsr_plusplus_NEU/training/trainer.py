@@ -75,7 +75,17 @@ class VSRTrainer:
         self.last_validation_quality = None
         
         # Performance tracking
-        self.step_times = []
+        # Rolling window of the last 200 optimizer-step durations (seconds each).
+        # Using 200 steps gives a stable, representative average without
+        # over-weighting stale measurements from many steps ago.
+        self.step_times = []   # max 200 entries
+        
+        # Rolling window of per-sample validation durations (seconds per sample).
+        # Validation speed includes the full cycle: model forward pass + metric
+        # computation + TensorBoard image logging + disk writes.
+        # 1 entry = 1 GT/LR pair processed.  Kept to the last 200 samples.
+        self._val_sample_timings = []   # max 200 entries
+        self.last_val_iter_per_sec = 0.0  # published to UI / WebMonitor
         
         # EMA for GUI smoothing (factor 0.95)
         self.ema_loss = None
@@ -626,7 +636,7 @@ class VSRTrainer:
                     torch.cuda.synchronize()
                 step_time = time.time() - loop_start_time
                 self.step_times.append(step_time)
-                if len(self.step_times) > 100:
+                if len(self.step_times) > 200:
                     self.step_times.pop(0)
                 
                 avg_time = sum(self.step_times) / len(self.step_times)
@@ -794,112 +804,129 @@ class VSRTrainer:
                 if self.global_step % self.config.get('VAL_STEP_EVERY', 500) == 0:
                     self.train_logger.log_event(f"Running validation at step {self.global_step}")
                     
-                    metrics = self._run_multi_size_validation()
-                    self.last_metrics = metrics
-
-                    # Bug 1 fix: keep last_validation_quality in sync so the plateau
-                    # tracker receives the real quality on every update_plateau_tracker call.
-                    self.last_validation_quality = metrics.get('ki_quality', None)
-
-                    # Bug 5 fix: feed validation loss into the validation plateau tracker.
-                    self.adaptive_system.update_validation_tracker(
-                        metrics.get('val_loss'),
-                        metrics.get('ki_quality')
-                    )
-                    
-                    # Pass improvement to adaptive system for logging
-                    adaptive_status = self.adaptive_system.get_status()
-                    adaptive_status['ki_improvement'] = metrics.get('improvement', 0)
-                    
-                    # Log to TensorBoard with dashboards
-                    self.tb_logger.log_quality(self.global_step, metrics)
-                    self.tb_logger.log_metrics(self.global_step, metrics)
-                    self.tb_logger.log_validation_loss(self.global_step, metrics.get('val_loss', 0.0))
-                    self.tb_logger.log_adaptive(self.global_step, adaptive_status)
-                    
-                    # Log validation event
-                    self.tb_logger.log_validation_event(self.global_step, metrics)
-                    
-                    # Log ALL images (like in original)
-                    labeled_images = metrics.get('labeled_images')
-                    if labeled_images is not None and len(labeled_images) > 0:
-                        print(f"📊 Logging {len(labeled_images)} validation images to TensorBoard...")
-                        logged_count = 0
-                        failed_count = 0
-                        
-                        for tag, img_tensor in labeled_images:
-                            try:
-                                # Ensure tensor is in correct format for TensorBoard
-                                if img_tensor.device.type != 'cpu':
-                                    img_tensor = img_tensor.cpu()
-                                if not img_tensor.is_contiguous():
-                                    img_tensor = img_tensor.contiguous()
-                                
-                                self.tb_logger.writer.add_image(
-                                    tag, 
-                                    img_tensor, 
-                                    self.global_step
-                                )
-                                logged_count += 1
-                            except Exception as e:
-                                failed_count += 1
-                                print(f"⚠️  Failed to log validation image {tag}: {e}")
-                                self.train_logger.log_event(
-                                    f"Warning: Failed to log validation image {tag}: {e}"
-                                )
-                                # Continue with other images even if one fails
-                                continue
-                        
-                        # Flush to ensure images are written
-                        self.tb_logger.writer.flush()
-                        
-                        # Summary
-                        if failed_count == 0:
-                            print(f"✅ Successfully logged all {logged_count} validation images to TensorBoard")
-                        else:
-                            print(f"⚠️  Logged {logged_count}/{len(labeled_images)} images ({failed_count} failed)")
-                        
-                        # CRITICAL: Remove labeled_images from metrics to prevent memory leak
-                        # These images can be 2GB+ and were being held in self.last_metrics
-                        del labeled_images
-                        metrics.pop('labeled_images', None)
-                        
-                        # Force garbage collection and GPU memory cleanup
-                        import gc
-                        gc.collect()
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
+                    if getattr(self, 'use_async_validation', False):
+                        # Async path: save weights-only checkpoint and signal the
+                        # async validator process.  Training continues immediately.
+                        self._request_async_validation()
                     else:
-                        print("⚠️  No labeled images to log to TensorBoard")
-                    
-                    self.train_logger.log_event(
-                        f"Step {self.global_step} | Validation | "
-                        f"KI Quality: {metrics['ki_quality']*100:.1f}%"
-                    )
-                    
-                    # Check for best checkpoint
-                    if self.checkpoint_mgr.should_check_best(self.global_step):
-                        print(f"\n💾 Checking if this is a new best checkpoint...")
-                        is_new_best = self.checkpoint_mgr.update_best_checkpoint(
-                            self.model, self.optimizer, self.lr_scheduler, 
-                            self.global_step, metrics['ki_quality'], metrics,
-                            self.train_logger.log_file
+                        # Synchronous path (default): block until validation completes.
+                        # --- timing start: covers forward pass + all I/O incl. TensorBoard ---
+                        _val_cycle_start = time.time()
+                        
+                        metrics = self._run_multi_size_validation()
+                        self.last_metrics = metrics
+
+                        # Bug 1 fix: keep last_validation_quality in sync so the plateau
+                        # tracker receives the real quality on every update_plateau_tracker call.
+                        self.last_validation_quality = metrics.get('ki_quality', None)
+
+                        # Bug 5 fix: feed validation loss into the validation plateau tracker.
+                        self.adaptive_system.update_validation_tracker(
+                            metrics.get('val_loss'),
+                            metrics.get('ki_quality')
                         )
                         
-                        if is_new_best:
-                            print(f"✅ New best checkpoint saved!")
-                            self.tb_logger.log_checkpoint(self.global_step, 'best')
+                        # Pass improvement to adaptive system for logging
+                        adaptive_status = self.adaptive_system.get_status()
+                        adaptive_status['ki_improvement'] = metrics.get('improvement', 0)
+                        
+                        # Log to TensorBoard with dashboards
+                        self.tb_logger.log_quality(self.global_step, metrics)
+                        self.tb_logger.log_metrics(self.global_step, metrics)
+                        self.tb_logger.log_validation_loss(self.global_step, metrics.get('val_loss', 0.0))
+                        self.tb_logger.log_adaptive(self.global_step, adaptive_status)
+                        
+                        # Log validation event
+                        self.tb_logger.log_validation_event(self.global_step, metrics)
+                        
+                        # Log ALL images (like in original)
+                        labeled_images = metrics.get('labeled_images')
+                        if labeled_images is not None and len(labeled_images) > 0:
+                            print(f"📊 Logging {len(labeled_images)} validation images to TensorBoard...")
+                            logged_count = 0
+                            failed_count = 0
+                            
+                            for tag, img_tensor in labeled_images:
+                                try:
+                                    # Ensure tensor is in correct format for TensorBoard
+                                    if img_tensor.device.type != 'cpu':
+                                        img_tensor = img_tensor.cpu()
+                                    if not img_tensor.is_contiguous():
+                                        img_tensor = img_tensor.contiguous()
+                                    
+                                    self.tb_logger.writer.add_image(
+                                        tag, 
+                                        img_tensor, 
+                                        self.global_step
+                                    )
+                                    logged_count += 1
+                                except Exception as e:
+                                    failed_count += 1
+                                    print(f"⚠️  Failed to log validation image {tag}: {e}")
+                                    self.train_logger.log_event(
+                                        f"Warning: Failed to log validation image {tag}: {e}"
+                                    )
+                                    # Continue with other images even if one fails
+                                    continue
+                            
+                            # Flush to ensure images are written
+                            self.tb_logger.writer.flush()
+                            
+                            # Summary
+                            if failed_count == 0:
+                                print(f"✅ Successfully logged all {logged_count} validation images to TensorBoard")
+                            else:
+                                print(f"⚠️  Logged {logged_count}/{len(labeled_images)} images ({failed_count} failed)")
+                            
+                            # CRITICAL: Remove labeled_images from metrics to prevent memory leak
+                            # These images can be 2GB+ and were being held in self.last_metrics
+                            del labeled_images
+                            metrics.pop('labeled_images', None)
+                            
+                            # Force garbage collection and GPU memory cleanup
+                            import gc
+                            gc.collect()
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
                         else:
-                            print(f"   (Not better than current best)")
-                    
-                    # Reset timing after validation
-                    loop_start_time = time.time()
-                    
-                    # Redraw UI after validation completes
-                    self._update_gui()
-                    
-                    # Schedule JSON save for 2 steps later (so web_monitor gets updated with fresh loss data)
-                    self.pending_json_save_step = self.global_step + 2
+                            print("⚠️  No labeled images to log to TensorBoard")
+                        
+                        # --- timing end: full cycle including TensorBoard flush ---
+                        _val_cycle_elapsed = time.time() - _val_cycle_start
+                        self._update_val_speed(_val_cycle_elapsed)
+
+                        self.train_logger.log_event(
+                            f"Step {self.global_step} | Validation | "
+                            f"KI Quality: {metrics['ki_quality']*100:.1f}%"
+                        )
+                        
+                        # Check for best checkpoint
+                        if self.checkpoint_mgr.should_check_best(self.global_step):
+                            print(f"\n💾 Checking if this is a new best checkpoint...")
+                            is_new_best = self.checkpoint_mgr.update_best_checkpoint(
+                                self.model, self.optimizer, self.lr_scheduler, 
+                                self.global_step, metrics['ki_quality'], metrics,
+                                self.train_logger.log_file
+                            )
+                            
+                            if is_new_best:
+                                print(f"✅ New best checkpoint saved!")
+                                self.tb_logger.log_checkpoint(self.global_step, 'best')
+                            else:
+                                print(f"   (Not better than current best)")
+                        
+                        # Reset timing after validation
+                        loop_start_time = time.time()
+                        
+                        # Redraw UI after validation completes
+                        self._update_gui()
+                        
+                        # Schedule JSON save for 2 steps later (so web_monitor gets updated with fresh loss data)
+                        self.pending_json_save_step = self.global_step + 2
+
+                # Poll for async validation results (every step, cheap file-existence check)
+                if getattr(self, 'use_async_validation', False):
+                    self._poll_async_val_result()
                 
                 # Check dataset files every 100 steps
                 if self.global_step % 100 == 0:
@@ -1061,7 +1088,8 @@ class VSRTrainer:
             lr_info=lr_info,
             total_eta=total_eta,
             epoch_eta=epoch_eta,
-            adam_momentum=adam_momentum
+            adam_momentum=adam_momentum,
+            val_iter_per_sec=self.last_val_iter_per_sec
         )
         
         # Update web monitor with COMPLETE training state (ALL data)
@@ -1150,6 +1178,7 @@ class VSRTrainer:
                 iteration_duration=avg_time,
                 vram_usage_gb=gpu_mem,
                 adam_momentum_avg=adam_momentum,
+                val_iter_per_sec=self.last_val_iter_per_sec,
                 
                 # Zeitschätzungen
                 eta_total_formatted=total_eta,
@@ -1323,10 +1352,27 @@ class VSRTrainer:
     
     def _get_adam_momentum(self):
         """
-        Extract average momentum (exp_avg) from AdamW optimizer state
-        
+        Extract average momentum (exp_avg) from AdamW optimizer state.
+
         Returns:
-            float: Average momentum magnitude across all parameters
+            float: Average L2-norm of the first moment (exp_avg) across all
+                   parameter tensors that currently have a gradient.
+
+        Why is this value typically very small (e.g. 0.0002)?
+        -------------------------------------------------------
+        AdamW stores exp_avg[i] = β₁ · exp_avg[i-1] + (1-β₁) · grad[i],
+        i.e. a per-parameter exponential moving average of raw gradients.
+        The L2 norm of a single parameter tensor's exp_avg reflects the
+        *magnitude* of the gradients for that tensor only.
+
+        In a stable training phase the raw gradients are small (the model
+        has converged to a local minimum and makes only tiny corrections),
+        so their EMA is likewise small.  Averaging the L2 norm over all
+        parameter tensors (many of which are large weight matrices with
+        many near-zero entries) produces a value that is typically several
+        orders of magnitude below 1.  A reading of ~0.0003 is therefore
+        expected and correct — it indicates that training is stable, NOT
+        that the optimizer is broken or that momentum is not being tracked.
         """
         total_momentum = 0.0
         count = 0
@@ -1345,7 +1391,7 @@ class VSRTrainer:
                     total_momentum += momentum_mag
                     count += 1
         
-        # Return average momentum
+        # Return average momentum magnitude
         return total_momentum / count if count > 0 else 0.0
     
     def _check_keyboard_input(self, epoch, steps_per_epoch, current_epoch_step):
@@ -1424,11 +1470,252 @@ class VSRTrainer:
             self.train_logger.log_event(f"Manual checkpoint saved at step {self.global_step}")
         except Exception as e:
             self.train_logger.log_event(f"Failed to save checkpoint: {str(e)}")
-    
+
+    # ------------------------------------------------------------------
+    # Async validation helpers
+    # ------------------------------------------------------------------
+
+    def enable_async_validation(self, checkpoint_dir, val_sizes, log_dir):
+        """
+        Switch the trainer to asynchronous validation mode.
+
+        In this mode the scheduled validation (every VAL_STEP_EVERY steps)
+        no longer blocks the training loop.  Instead the trainer:
+          1. Saves a lightweight model-weights-only checkpoint.
+          2. Writes an ``async_val_request.json`` sentinel file.
+          3. Continues training immediately.
+
+        The separate AsyncValidationProcess (running on a second GPU) picks up
+        the sentinel, runs full validation (including TensorBoard image writes),
+        and writes ``async_val_result.json``.  The trainer polls for that file
+        at every step and ingests the results when they arrive.
+
+        Manual validation (key 'v' / WebUI button) always runs synchronously so
+        the user can get immediate feedback on demand.
+
+        Args:
+            checkpoint_dir: Directory shared with the async validator process
+                            (used for IPC sentinel files and weights checkpoints).
+            val_sizes:      List of size-key strings that the async validator
+                            should validate (e.g. ['540', '720']).
+            log_dir:        TensorBoard log directory forwarded to the async
+                            validator so it can write events to the same run.
+        """
+        self.use_async_validation = True
+        self._async_val_checkpoint_dir = checkpoint_dir
+        self._async_val_sizes = val_sizes
+        self._async_val_log_dir = log_dir
+        self._async_val_last_ingested_step = -1
+        self.train_logger.log_event(
+            f"Async validation enabled (checkpoint_dir={checkpoint_dir})"
+        )
+
+    def _request_async_validation(self):
+        """
+        Save a model-weights-only checkpoint and write the async_val_request
+        sentinel so the secondary validation process picks it up.
+
+        This is a fast operation (just one torch.save + one JSON write) and
+        returns immediately so the training loop is not blocked.
+        """
+        checkpoint_dir = self._async_val_checkpoint_dir
+        step = self.global_step
+
+        # Save weights-only checkpoint (much smaller than full checkpoint)
+        weights_path = os.path.join(checkpoint_dir, f'async_val_weights_{step:07d}.pth')
+        try:
+            torch.save(self.model.state_dict(), weights_path)
+        except Exception as e:
+            self.train_logger.log_event(
+                f"⚠ Async val: failed to save weights checkpoint: {e}"
+            )
+            return
+
+        # Determine data root and dataset name from config
+        data_root = self.config.get('DATA_ROOT', '')
+        dataset_name = self.config.get('DEFAULT_DATASET_NAME', 'master')
+
+        # Build config snapshot (only the fields needed by the async validator)
+        config_snapshot = {
+            'N_FEATS':            self.config.get('N_FEATS', 72),
+            'N_BLOCKS':           self.config.get('N_BLOCKS', 28),
+            'USE_CHECKPOINTING':  self.config.get('USE_CHECKPOINTING', False),
+            'L1_WEIGHT':          self.config.get('L1_WEIGHT', 0.60),
+            'MS_WEIGHT':          self.config.get('MS_WEIGHT', 0.20),
+            'GRAD_WEIGHT':        self.config.get('GRAD_WEIGHT', 0.20),
+            'PERCEPTUAL_WEIGHT':  self.config.get('PERCEPTUAL_WEIGHT', 0.0),
+        }
+
+        request = {
+            'step':            step,
+            'checkpoint_path': weights_path,
+            'data_root':       data_root,
+            'dataset_name':    dataset_name,
+            'val_sizes':       getattr(self, '_async_val_sizes', ['540']),
+            'log_dir':         getattr(self, '_async_val_log_dir', ''),
+            'config_snapshot': config_snapshot,
+        }
+
+        request_file = os.path.join(checkpoint_dir, 'async_val_request.json')
+        tmp_file = request_file + '.tmp'
+        try:
+            with open(tmp_file, 'w') as f:
+                json.dump(request, f)
+            os.replace(tmp_file, request_file)
+            self.train_logger.log_event(
+                f"Async val request written for step {step}"
+            )
+        except Exception as e:
+            self.train_logger.log_event(
+                f"⚠ Async val: failed to write request file: {e}"
+            )
+
+    def _poll_async_val_result(self):
+        """
+        Check for a completed async validation result and ingest it.
+
+        Reads ``async_val_result.json`` from the checkpoint directory.  If the
+        file is present and contains results for a step that has not yet been
+        ingested, the metrics are applied to the adaptive system and logged to
+        TensorBoard — exactly as the synchronous path would do.
+
+        The result file is removed after successful ingestion to avoid double-
+        processing.
+        """
+        checkpoint_dir = getattr(self, '_async_val_checkpoint_dir', None)
+        if checkpoint_dir is None:
+            return
+
+        result_file = os.path.join(checkpoint_dir, 'async_val_result.json')
+        if not os.path.exists(result_file):
+            return
+
+        try:
+            with open(result_file, 'r') as f:
+                result = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return  # File might still be written — retry next step
+
+        step = result.get('step', -1)
+        if step <= self._async_val_last_ingested_step:
+            return  # Already processed
+
+        # Consume the file immediately
+        try:
+            os.unlink(result_file)
+        except OSError:
+            pass
+
+        # Clean up the weights-only checkpoint for this step (no longer needed)
+        weights_path = os.path.join(checkpoint_dir, f'async_val_weights_{step:07d}.pth')
+        if os.path.exists(weights_path):
+            try:
+                os.unlink(weights_path)
+            except OSError:
+                pass
+
+        self._async_val_last_ingested_step = step
+
+        # --- Feed metrics into adaptive system (same as synchronous path) ---
+        self.last_metrics = result
+        ki_quality = result.get('ki_quality')
+        self.last_validation_quality = ki_quality
+
+        self.adaptive_system.update_validation_tracker(
+            result.get('val_loss'),
+            ki_quality
+        )
+
+        # Log to TensorBoard (images are already written by the async process)
+        self.tb_logger.log_quality(step, result)
+        self.tb_logger.log_metrics(step, result)
+        self.tb_logger.log_validation_loss(step, result.get('val_loss', 0.0))
+
+        adaptive_status = self.adaptive_system.get_status()
+        adaptive_status['ki_improvement'] = result.get('improvement', 0)
+        self.tb_logger.log_adaptive(step, adaptive_status)
+
+        # Check for best checkpoint (same window logic)
+        if self.checkpoint_mgr.should_check_best(step):
+            if ki_quality is not None:
+                is_new_best = self.checkpoint_mgr.update_best_checkpoint(
+                    self.model, self.optimizer, self.lr_scheduler,
+                    step, ki_quality, result,
+                    self.train_logger.log_file
+                )
+                if is_new_best:
+                    print(f"\n✅ [AsyncVal] New best checkpoint at step {step}!")
+                    self.tb_logger.log_checkpoint(step, 'best')
+
+        # Update val-speed tracker using the val_elapsed_seconds if available.
+        # If the async process doesn't report elapsed time we skip speed update
+        # for this cycle (it will be estimated in future manual-val runs).
+        val_elapsed = result.get('val_elapsed_seconds')
+        if val_elapsed is not None and val_elapsed > 0:
+            self._update_val_speed(val_elapsed)
+
+        # Schedule JSON save
+        self.pending_json_save_step = self.global_step + 2
+
+        ki_pct = ki_quality * 100 if ki_quality is not None else 0.0
+        self.train_logger.log_event(
+            f"[AsyncVal] Ingested step {step} | KI Quality: {ki_pct:.1f}%"
+        )
+        print(f"\n📥 [AsyncVal] Results ingested for step {step} | "
+              f"KI Quality: {ki_pct:.1f}%")
+
+    def _count_val_samples(self):
+        """Return total number of validation samples across all loaded val datasets."""
+        total = 0
+        val_loaders = getattr(self, 'val_loaders', None)
+        if val_loaders:
+            for _, loader in val_loaders:
+                if hasattr(loader, 'dataset'):
+                    total += len(loader.dataset)
+        elif hasattr(self, 'val_loader') and self.val_loader is not None:
+            if hasattr(self.val_loader, 'dataset'):
+                total += len(self.val_loader.dataset)
+        return max(total, 1)
+
+    def _update_val_speed(self, elapsed_seconds):
+        """
+        Update the rolling validation-speed tracker.
+
+        elapsed_seconds is the wall-clock time for a full validation cycle
+        (forward pass + metric computation + TensorBoard writes).
+        We spread it evenly over all validated samples and append one
+        per-sample duration to the rolling window of 200 entries.
+
+        The resulting ``last_val_iter_per_sec`` gives the average throughput
+        over the last 200 GT/LR pairs processed, *including* all I/O time.
+        """
+        total_samples = self._count_val_samples()
+        if elapsed_seconds <= 0 or total_samples <= 0:
+            return
+
+        per_sample_sec = elapsed_seconds / total_samples
+
+        # Extend the rolling window with one entry per sample (or up to 200 new
+        # entries so we don't blow up the list if the dataset is very large).
+        entries_to_add = min(total_samples, 200)
+        for _ in range(entries_to_add):
+            self._val_sample_timings.append(per_sample_sec)
+        # Trim to keep only the last 200 entries
+        if len(self._val_sample_timings) > 200:
+            self._val_sample_timings = self._val_sample_timings[-200:]
+
+        # Compute speed from the window
+        if self._val_sample_timings:
+            avg_per_sample = sum(self._val_sample_timings) / len(self._val_sample_timings)
+            self.last_val_iter_per_sec = 1.0 / avg_per_sample if avg_per_sample > 0 else 0.0
+
     def _run_validation(self):
         """Run validation immediately"""
         self.train_logger.log_event(f"Manual validation triggered at step {self.global_step}")
         
+        # --- timing start: covers forward pass + all I/O incl. TensorBoard ---
+        _val_cycle_start = time.time()
+
         metrics = self._run_multi_size_validation()
 
         # Bug 1 fix: update last_validation_quality so the plateau tracker uses it.
@@ -1454,6 +1741,7 @@ class VSRTrainer:
                     img_tensor, 
                     self.global_step
                 )
+            self.tb_logger.writer.flush()
             
             # CRITICAL: Remove labeled_images to prevent memory leak
             del labeled_images
@@ -1465,6 +1753,10 @@ class VSRTrainer:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
         
+        # --- timing end: full cycle including TensorBoard flush ---
+        _val_cycle_elapsed = time.time() - _val_cycle_start
+        self._update_val_speed(_val_cycle_elapsed)
+
         # Store metrics WITHOUT labeled_images
         self.last_metrics = metrics
         

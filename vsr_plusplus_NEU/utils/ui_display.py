@@ -206,7 +206,8 @@ def get_activity_data(model):
 def draw_ui(step, epoch, losses, it_time, activities, config, num_images, 
             steps_per_epoch, current_epoch_step, adaptive_status=None, 
             paused=False, quality_metrics=None, lr_info=None, 
-            total_eta="Calculating...", epoch_eta="Calculating...", adam_momentum=0.0):
+            total_eta="Calculating...", epoch_eta="Calculating...", adam_momentum=0.0,
+            val_iter_per_sec=0.0):
     """
     Draw the complete training UI
     
@@ -225,6 +226,7 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
         quality_metrics: Dict with quality info (optional)
         lr_info: Dict with LR info ('lr', 'phase') (optional)
         adam_momentum: AdamW momentum value (optional)
+        val_iter_per_sec: Validation throughput in samples/s (optional)
     """
     global last_term_size, last_display_mode
     
@@ -471,11 +473,20 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
         'plateau_reduced': f'{C_RED}PLATEAU{C_RESET}'
     }.get(lr_phase, lr_phase)
     
+    # Training speed: iter/s derived from the rolling 200-step average
+    train_iter_per_sec = 1.0 / it_time if it_time > 0 else 0.0
     print_two_columns(
         f"LR: {C_GREEN}{current_lr:.6f}{C_RESET} ({lr_phase_str})",
-        f"Speed: {C_CYAN}{it_time:.2f}s/it{C_RESET}",
+        f"Train: {C_CYAN}{train_iter_per_sec:.2f} it/s{C_RESET} ({it_time:.2f}s/it)",
         ui_w
     )
+    # Validation speed (samples/s, last 200 samples, incl. I/O)
+    if val_iter_per_sec > 0:
+        print_line(
+            f"Val Speed: {C_CYAN}{val_iter_per_sec:.2f} spl/s{C_RESET}"
+            f"  (last 200 samples incl. TensorBoard I/O)",
+            ui_w
+        )
     
     # Convergence status
     convergence = calculate_convergence_status(loss_history)

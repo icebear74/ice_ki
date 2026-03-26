@@ -102,6 +102,7 @@ class CompleteTrainingDataStore:
             'iteration_duration': 0.0,
             'vram_usage_gb': 0.0,
             'adam_momentum_avg': 0.0,
+            'val_iter_per_sec': 0.0,
             
             # Zeitschätzungen
             'eta_total_formatted': 'N/A',
@@ -1305,10 +1306,16 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 <div class="card-subtitle">Epoche: <span id="etaEpoch">--:--:--</span></div>
             </div>
             
-            <div class="info-card" title="Anzahl der Optimizer-Schritte pro Sekunde">
-                <div class="card-title">Geschwindigkeit</div>
+            <div class="info-card" title="Anzahl der Optimizer-Schritte pro Sekunde (Ø letzte 200 Iterationen)">
+                <div class="card-title">Training-Speed</div>
                 <div class="card-value" id="iterSpeed">0.00</div>
-                <div class="card-subtitle">Iter./s</div>
+                <div class="card-subtitle">Iter./s (Ø 200)</div>
+            </div>
+            
+            <div class="info-card" title="Validierungs-Durchsatz: GT/LR-Paare pro Sekunde inkl. Speichern (Ø letzte 200 Samples)">
+                <div class="card-title">Val-Speed</div>
+                <div class="card-value" id="valIterSpeed">0.00</div>
+                <div class="card-subtitle">Samples/s (Ø 200)</div>
             </div>
             
             <div class="info-card" title="Aktuell belegter GPU-Speicher (Video RAM)">
@@ -1683,6 +1690,8 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             document.getElementById('iterSpeed').textContent = iterSpeed.toFixed(2);
             document.getElementById('vramUsage').textContent = data.vram_usage_gb.toFixed(1);
             document.getElementById('adamMomentum').textContent = data.adam_momentum_avg.toFixed(3);
+            const valIterSpeed = data.val_iter_per_sec || 0;
+            document.getElementById('valIterSpeed').textContent = valIterSpeed > 0 ? valIterSpeed.toFixed(2) : '--';
             
             // Header iteration bar (sticky top)
             document.getElementById('hdrStep').textContent = data.step_current.toLocaleString('de-DE');
