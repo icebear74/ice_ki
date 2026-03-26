@@ -1698,7 +1698,12 @@ class VSRTrainer:
                 cmd,
                 stdout=fh,
                 stderr=subprocess.STDOUT,
-                cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                # trainer.py lives at <repo>/vsr_plusplus_NEU/training/trainer.py
+                # so we need three dirname() calls to reach the repo root where
+                # the vsr_plusplus_NEU package is importable.
+                cwd=os.path.dirname(
+                    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                ),
             )
             fh.close()
             self._async_val_proc = proc

@@ -335,6 +335,18 @@ def run_async_validator(checkpoint_dir, data_root, dataset_name, log_dir, gpu_in
     stop_file    = os.path.join(checkpoint_dir, 'async_val_stop')
     done_file    = os.path.join(checkpoint_dir, 'async_val_done.json')
 
+    # Remove a stale stop file that may have been left behind by a crashed
+    # previous training session (where the finally-block cleanup did not run).
+    # Without this the process would immediately exit on the first loop iteration
+    # and then be restarted in an infinite loop.
+    if os.path.exists(stop_file):
+        try:
+            os.unlink(stop_file)
+            print(f"[AsyncVal] Removed stale stop file from previous session.",
+                  flush=True)
+        except OSError:
+            pass
+
     try:
         tb_logger = TensorBoardLogger(log_dir)
     except Exception as e:
