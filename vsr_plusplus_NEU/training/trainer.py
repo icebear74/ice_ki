@@ -1663,8 +1663,13 @@ class VSRTrainer:
         ingested, the metrics are applied to the adaptive system and logged to
         TensorBoard — exactly as the synchronous path would do.
 
-        The result file is removed after successful ingestion to avoid double-
-        processing.
+        If the result file contains an ``'error'`` key (written by the async
+        validator when model loading or inference fails), the error is logged
+        visibly so the user knows what went wrong.  Quality metrics are NOT
+        updated in the error case so the data store retains the last valid
+        values.
+
+        The result file is removed after ingestion to avoid double-processing.
         """
         checkpoint_dir = getattr(self, '_async_val_checkpoint_dir', None)
         if checkpoint_dir is None:
@@ -1690,6 +1695,18 @@ class VSRTrainer:
         except OSError:
             pass
 
+        self._async_val_last_ingested_step = step
+
+        # ── Error result: the async validator failed — log and bail out ───────
+        if 'error' in result:
+            error_msg = result['error']
+            print(f"\n❌ [AsyncVal] Validation for step {step} FAILED: {error_msg}")
+            self.train_logger.log_event(
+                f"[AsyncVal] ERROR at step {step}: {error_msg}"
+            )
+            # Do NOT update quality metrics — keep previous valid values.
+            return
+
         # Clean up the weights-only checkpoint for this step (no longer needed)
         weights_path = os.path.join(checkpoint_dir, f'async_val_weights_{step:07d}.pth')
         if os.path.exists(weights_path):
@@ -1697,8 +1714,6 @@ class VSRTrainer:
                 os.unlink(weights_path)
             except OSError:
                 pass
-
-        self._async_val_last_ingested_step = step
 
         # --- Feed metrics into adaptive system (same as synchronous path) ---
         self.last_metrics = result

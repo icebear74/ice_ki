@@ -270,6 +270,34 @@ def _run_validation_on_device(model, val_loaders, loss_fn, device, global_step):
 
 
 # ---------------------------------------------------------------------------
+# Error-result helper
+# ---------------------------------------------------------------------------
+
+def _write_error_result(result_file: str, step: int, error_message: str) -> None:
+    """
+    Write an error sentinel to ``result_file`` so the training process can
+    detect and report failures instead of silently ignoring them.
+
+    The training process recognises an error result by the presence of the
+    ``'error'`` key.  It logs the message and does **not** update quality
+    metrics (which must remain at their last valid values).
+    """
+    payload = {
+        'step':       step,
+        'error':      error_message,
+        'timestamp':  time.time(),
+    }
+    tmp = result_file + '.tmp'
+    try:
+        with open(tmp, 'w') as f:
+            json.dump(payload, f, indent=2)
+        os.replace(tmp, result_file)
+        print(f"[AsyncVal] Error result written for step {step}: {error_message}")
+    except OSError as e:
+        print(f"[AsyncVal] ⚠ Could not write error result file: {e}")
+
+
+# ---------------------------------------------------------------------------
 # Main async-validator loop
 # ---------------------------------------------------------------------------
 
@@ -352,6 +380,14 @@ def run_async_validator(checkpoint_dir, data_root, dataset_name, log_dir, gpu_in
 
         print(f"[AsyncVal] Processing step {step}  checkpoint={checkpoint_path}")
 
+        # ── Verify checkpoint file exists before loading ──────────────────────
+        if not os.path.exists(checkpoint_path):
+            err_msg = f"Checkpoint file not found: {checkpoint_path}"
+            print(f"[AsyncVal] ❌ {err_msg}")
+            _write_error_result(result_file, step, err_msg)
+            time.sleep(2.0)
+            continue
+
         # ── Load model ───────────────────────────────────────────────────────
         try:
             n_feats  = req_config.get('N_FEATS',  72)
@@ -362,20 +398,25 @@ def run_async_validator(checkpoint_dir, data_root, dataset_name, log_dir, gpu_in
             if req_config.get('USE_CHECKPOINTING', False) and hasattr(model, 'enable_checkpointing'):
                 model.enable_checkpointing()
 
-            # Load weights only (map to current device)
-            ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
+            # Use weights_only=False for compatibility with PyTorch 2.6+.
+            # The training process also uses weights_only=False (see train.py).
+            # weights_only=True would reject some tensor types present in model
+            # state dicts saved by PyTorch 2.6+ and cause a silent failure.
+            ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
             if 'model_state_dict' in ckpt:
                 model.load_state_dict(ckpt['model_state_dict'])
             else:
-                # Lightweight weights-only checkpoint saved by the async path
+                # Lightweight weights-only state dict saved by _request_async_validation
                 model.load_state_dict(ckpt)
 
             model = model.to(device)
             model.eval()
             print(f"[AsyncVal] Model loaded from {os.path.basename(checkpoint_path)}")
         except Exception as e:
-            print(f"[AsyncVal] ❌ Failed to load model: {e}")
+            err_msg = f"Failed to load model: {e}"
+            print(f"[AsyncVal] ❌ {err_msg}")
             traceback.print_exc()
+            _write_error_result(result_file, step, err_msg)
             time.sleep(5.0)
             continue
 
@@ -386,11 +427,12 @@ def run_async_validator(checkpoint_dir, data_root, dataset_name, log_dir, gpu_in
                 ms_weight=req_config.get('MS_WEIGHT', 0.20),
                 grad_weight=req_config.get('GRAD_WEIGHT', 0.20),
                 perceptual_weight=req_config.get('PERCEPTUAL_WEIGHT', 0.0),
-                device=device,
             ).to(device)
         except Exception as e:
-            print(f"[AsyncVal] ❌ Failed to create loss fn: {e}")
+            err_msg = f"Failed to create loss function: {e}"
+            print(f"[AsyncVal] ❌ {err_msg}")
             traceback.print_exc()
+            _write_error_result(result_file, step, err_msg)
             time.sleep(5.0)
             continue
 
@@ -425,13 +467,21 @@ def run_async_validator(checkpoint_dir, data_root, dataset_name, log_dir, gpu_in
                 val_loaders.append((size_key, loader))
                 print(f"[AsyncVal]   {size_key}: {len(val_ds)} samples, batch_size={bs}")
         except Exception as e:
-            print(f"[AsyncVal] ❌ Failed to build val loaders: {e}")
+            err_msg = f"Failed to build validation datasets: {e}"
+            print(f"[AsyncVal] ❌ {err_msg}")
             traceback.print_exc()
+            _write_error_result(result_file, step, err_msg)
+            del model, loss_fn
+            torch.cuda.empty_cache()
             time.sleep(5.0)
             continue
 
         if not val_loaders:
-            print("[AsyncVal] No validation datasets available – skipping.")
+            err_msg = "No validation datasets available (0 samples in all size keys)"
+            print(f"[AsyncVal] ⚠ {err_msg}")
+            _write_error_result(result_file, step, err_msg)
+            del model, loss_fn
+            torch.cuda.empty_cache()
             time.sleep(5.0)
             continue
 
@@ -440,8 +490,10 @@ def run_async_validator(checkpoint_dir, data_root, dataset_name, log_dir, gpu_in
         try:
             metrics = _run_validation_on_device(model, val_loaders, loss_fn, device, step)
         except Exception as e:
-            print(f"[AsyncVal] ❌ Validation failed: {e}")
+            err_msg = f"Validation inference failed: {e}"
+            print(f"[AsyncVal] ❌ {err_msg}")
             traceback.print_exc()
+            _write_error_result(result_file, step, err_msg)
             # Clean up model to free VRAM before retrying
             del model, loss_fn
             torch.cuda.empty_cache()
