@@ -32,12 +32,15 @@ class VSRValidator:
         self.loss_fn = loss_fn
         self.device = device
     
-    def validate(self, global_step):
+    def validate(self, global_step, progress_callback=None):
         """
         Run validation
-        
+
         Args:
             global_step: Current training step
+            progress_callback: Optional callable(done, total, size_key) called
+                               after each batch so callers can publish live
+                               progress to the WebUI.
             
         Returns:
             Dict with validation metrics:
@@ -199,6 +202,13 @@ class VSRValidator:
                 del lr_stack, gt, ki_output, lr_upscaled
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()  # Force GPU to release memory NOW
+
+                # Progress callback for live WebUI updates
+                if progress_callback is not None:
+                    try:
+                        progress_callback(batch_idx + 1, val_total)
+                    except Exception:
+                        pass
         
         # Clear progress line
         print()  # New line after progress bar

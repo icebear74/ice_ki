@@ -166,6 +166,17 @@ class CompleteTrainingDataStore:
             'validation_running': False,
             'training_paused': False,
 
+            # Validation progress (updated during a running validation cycle)
+            # phase: 'idle' | 'validating' | 'saving' | 'done'
+            'val_status': {
+                'running': False,
+                'phase': 'idle',   # 'validating' | 'saving' | 'done'
+                'done': 0,
+                'total': 0,
+                'pct': 0.0,
+                'size_key': '',
+            },
+
             # Crop-wait status (system pause waiting for enough crop GT images)
             'crop_wait_active': False,
             'crop_wait_current_count': 0,

@@ -214,63 +214,122 @@ class VSRTrainer:
         # uses the most current images (covers periodic, manual, web-UI and snapshot calls).
         self._reload_val_datasets_if_needed()
 
-        if not hasattr(self, 'val_loaders') or not self.val_loaders:
-            # Fallback to single-size validation
-            return self.validator.validate(self.global_step)
-        
-        print(f"\n{C_CYAN}Running multi-size validation on {len(self.val_loaders)} sizes...{C_RESET}")
-        
-        # Run validation on each size
-        all_metrics = []
-        all_labeled_images = []
-        
-        for size_key, val_loader in self.val_loaders:
-            print(f"  Validating {size_key}...")
-            
-            # Temporarily swap loader
-            original_loader = self.validator.val_loader
-            self.validator.val_loader = val_loader
-            
-            # Run validation
-            metrics = self.validator.validate(self.global_step)
-            
-            # Restore original loader
-            self.validator.val_loader = original_loader
-            
-            # Collect labeled images with size prefix
-            if 'labeled_images' in metrics and metrics['labeled_images'] is not None:
-                # Build tag as val_{size_key}/{filename_stem}
-                for name, img in metrics['labeled_images']:
-                    all_labeled_images.append((f"val_{size_key}/{name}", img))
-            
-            # Store metrics
-            all_metrics.append((size_key, metrics))
-            print(f"    ✓ {size_key}: KI Quality {metrics['ki_quality']*100:.1f}%, PSNR {metrics['ki_psnr']:.2f}dB")
-        
-        # Combine metrics by averaging
-        combined_metrics = {
-            'val_loss': sum(m['val_loss'] for _, m in all_metrics) / len(all_metrics),
-            'lr_quality': sum(m['lr_quality'] for _, m in all_metrics) / len(all_metrics),
-            'ki_quality': sum(m['ki_quality'] for _, m in all_metrics) / len(all_metrics),
-            'improvement': sum(m['improvement'] for _, m in all_metrics) / len(all_metrics),
-            'lr_psnr': sum(m['lr_psnr'] for _, m in all_metrics) / len(all_metrics),
-            'lr_ssim': sum(m['lr_ssim'] for _, m in all_metrics) / len(all_metrics),
-            'ki_psnr': sum(m['ki_psnr'] for _, m in all_metrics) / len(all_metrics),
-            'ki_ssim': sum(m['ki_ssim'] for _, m in all_metrics) / len(all_metrics),
-            'ki_to_gt': sum(m.get('ki_to_gt', 0) for _, m in all_metrics) / len(all_metrics),
-            'lr_to_gt': sum(m.get('lr_to_gt', 0) for _, m in all_metrics) / len(all_metrics),
-        }
-        
-        # Include all labeled images from all sizes (list of (tag, tensor) tuples)
-        if all_labeled_images:
-            combined_metrics['labeled_images'] = all_labeled_images
-        
-        # Store per-size metrics for detailed logging
-        combined_metrics['per_size_metrics'] = {size_key: m for size_key, m in all_metrics}
-        
-        print(f"{C_GREEN}✅ Multi-size validation complete - Average KI Quality: {combined_metrics['ki_quality']*100:.1f}%{C_RESET}\n")
-        
-        return combined_metrics
+        # ── Signal validation start to WebUI ─────────────────────────────────
+        self.web_monitor.data_store.update_all_metrics(
+            validation_running=True,
+            val_status={'running': True, 'phase': 'validating',
+                        'done': 0, 'total': 0, 'pct': 0.0, 'size_key': ''},
+        )
+
+        try:
+            if not hasattr(self, 'val_loaders') or not self.val_loaders:
+                # Fallback to single-size validation
+                total_batches = len(self.validator.val_loader) if self.validator.val_loader else 0
+                self.web_monitor.data_store.update_all_metrics(
+                    val_status={'running': True, 'phase': 'validating',
+                                'done': 0, 'total': total_batches, 'pct': 0.0, 'size_key': 'default'},
+                )
+                def _cb(done, total):
+                    pct = done / total * 100 if total else 0.0
+                    self.web_monitor.data_store.update_all_metrics(
+                        val_status={'running': True, 'phase': 'validating',
+                                    'done': done, 'total': total, 'pct': pct, 'size_key': 'default'},
+                    )
+                return self.validator.validate(self.global_step, progress_callback=_cb)
+
+            print(f"\n{C_CYAN}Running multi-size validation on {len(self.val_loaders)} sizes...{C_RESET}")
+
+            # Pre-calculate total batches across all sizes for global progress
+            size_batch_counts = [(sk, len(loader)) for sk, loader in self.val_loaders]
+            global_total = sum(n for _, n in size_batch_counts)
+            global_done = 0
+
+            # Run validation on each size
+            all_metrics = []
+            all_labeled_images = []
+
+            for size_key, val_loader in self.val_loaders:
+                print(f"  Validating {size_key}...")
+                size_total = len(val_loader)
+                size_done_offset = global_done
+
+                # Build per-size callback that updates the global counter
+                def _make_cb(sk, offset):
+                    def _cb(done, _total):
+                        nonlocal global_done
+                        # global_done = offset + done (avoid double-counting)
+                        global_done = offset + done
+                        pct = global_done / global_total * 100 if global_total else 0.0
+                        self.web_monitor.data_store.update_all_metrics(
+                            val_status={'running': True, 'phase': 'validating',
+                                        'done': global_done, 'total': global_total,
+                                        'pct': pct, 'size_key': sk},
+                        )
+                    return _cb
+
+                progress_cb = _make_cb(size_key, size_done_offset)
+
+                # Temporarily swap loader
+                original_loader = self.validator.val_loader
+                self.validator.val_loader = val_loader
+
+                # Run validation
+                metrics = self.validator.validate(self.global_step, progress_callback=progress_cb)
+
+                # Restore original loader
+                self.validator.val_loader = original_loader
+
+                global_done = size_done_offset + size_total  # mark size as fully done
+
+                # Collect labeled images with size prefix
+                if 'labeled_images' in metrics and metrics['labeled_images'] is not None:
+                    # Build tag as val_{size_key}/{filename_stem}
+                    for name, img in metrics['labeled_images']:
+                        all_labeled_images.append((f"val_{size_key}/{name}", img))
+
+                # Store metrics
+                all_metrics.append((size_key, metrics))
+                print(f"    ✓ {size_key}: KI Quality {metrics['ki_quality']*100:.1f}%, PSNR {metrics['ki_psnr']:.2f}dB")
+
+            # ── Signal "saving" phase (TensorBoard image write) ───────────────
+            self.web_monitor.data_store.update_all_metrics(
+                val_status={'running': True, 'phase': 'saving',
+                            'done': global_total, 'total': global_total,
+                            'pct': 100.0, 'size_key': ''},
+            )
+
+            # Combine metrics by averaging
+            combined_metrics = {
+                'val_loss': sum(m['val_loss'] for _, m in all_metrics) / len(all_metrics),
+                'lr_quality': sum(m['lr_quality'] for _, m in all_metrics) / len(all_metrics),
+                'ki_quality': sum(m['ki_quality'] for _, m in all_metrics) / len(all_metrics),
+                'improvement': sum(m['improvement'] for _, m in all_metrics) / len(all_metrics),
+                'lr_psnr': sum(m['lr_psnr'] for _, m in all_metrics) / len(all_metrics),
+                'lr_ssim': sum(m['lr_ssim'] for _, m in all_metrics) / len(all_metrics),
+                'ki_psnr': sum(m['ki_psnr'] for _, m in all_metrics) / len(all_metrics),
+                'ki_ssim': sum(m['ki_ssim'] for _, m in all_metrics) / len(all_metrics),
+                'ki_to_gt': sum(m.get('ki_to_gt', 0) for _, m in all_metrics) / len(all_metrics),
+                'lr_to_gt': sum(m.get('lr_to_gt', 0) for _, m in all_metrics) / len(all_metrics),
+            }
+
+            # Include all labeled images from all sizes (list of (tag, tensor) tuples)
+            if all_labeled_images:
+                combined_metrics['labeled_images'] = all_labeled_images
+
+            # Store per-size metrics for detailed logging
+            combined_metrics['per_size_metrics'] = {size_key: m for size_key, m in all_metrics}
+
+            print(f"{C_GREEN}✅ Multi-size validation complete - Average KI Quality: {combined_metrics['ki_quality']*100:.1f}%{C_RESET}\n")
+
+            return combined_metrics
+
+        finally:
+            # ── Always clear validation-running flag ──────────────────────────
+            self.web_monitor.data_store.update_all_metrics(
+                validation_running=False,
+                val_status={'running': False, 'phase': 'idle',
+                            'done': 0, 'total': 0, 'pct': 0.0, 'size_key': ''},
+            )
     
     def train_epoch(self, epoch):
         """
@@ -406,10 +465,18 @@ class VSRTrainer:
             
             # Manual validation trigger
             if self.do_manual_val:
-                self._run_validation()
+                if getattr(self, 'use_async_validation', False):
+                    # Async path: just like the scheduled trigger – saves a
+                    # weights-only checkpoint and signals the async validator.
+                    # Training continues unblocked after this call.
+                    self._request_async_validation()
+                else:
+                    # Synchronous path (default or no second GPU): blocks until
+                    # the full validation cycle (incl. TensorBoard writes) is done.
+                    self._run_validation()
+                    # Reset timing after the blocking validation
+                    loop_start_time = time.time()
                 self.do_manual_val = False
-                # Reset timing after validation
-                loop_start_time = time.time()
             
             # Handle both single-size (tuple) and multi-size (dict) batches
             if isinstance(batch, dict):
@@ -478,8 +545,8 @@ class VSRTrainer:
                         'size_key': size_key,
                         'files': formatted_files,
                     })
-                    # When the window is complete, snapshot it for display and
-                    # reset so the next window starts fresh.
+                    # When the window is complete, snapshot it as the *committed*
+                    # display and reset so the next window starts fresh.
                     if len(current_window_batches) >= current_accum_steps:
                         display_files = [
                             f for item in current_window_batches for f in item['files']
@@ -489,19 +556,38 @@ class VSRTrainer:
                             sk = item['size_key']
                             display_fps[sk] = display_fps.get(sk, 0) + len(item['files'])
                         current_window_batches = []  # ready for next window
-                
+
+                # Always show the CURRENT iteration's files: merge the committed
+                # display_files with any in-progress batches from the current
+                # (not-yet-complete) accumulation window so that every forward
+                # pass appears in the WebUI immediately, regardless of batch size
+                # or accumulation depth.
+                live_files = display_files + [
+                    f for item in current_window_batches for f in item['files']
+                ]
+                live_fps = {'720': 0, '540': 0, '720_169': 0}
+                if live_files:
+                    # Recompute per-size counts from live_files list
+                    for item in ([{'size_key': _sk, 'files': [ff for ff in display_files if ff.startswith(_sk + '/')]}
+                                   for _sk in ['720', '540', '720_169']]):
+                        live_fps[item['size_key']] = len(item['files'])
+                    # Also count in-progress batches
+                    for item in current_window_batches:
+                        sk_item = item['size_key']
+                        live_fps[sk_item] = live_fps.get(sk_item, 0) + len(item['files'])
+
                 # Update web_monitor with current batch info.
-                # display_files/display_fps hold the last complete window so the
-                # list is always either empty (epoch start, before first complete
-                # window) or exactly current_accum_steps files of the same size.
+                # live_files always reflects ALL files of the current iteration
+                # (complete windows + the in-progress window), so the display is
+                # never blank mid-accumulation.
                 self.web_monitor.data_store.update_all_metrics(
                     current_batch={
-                        'files': display_files,
+                        'files': live_files,
                         'size_key': size_key,
                         'batch_size': batch_size_val,
                         'files_used_in_epoch': files_used_in_epoch,
                         'total_files_in_epoch': total_files_in_epoch,
-                        'files_per_size': display_fps,
+                        'files_per_size': live_fps,
                         'epoch_files_per_size': dict(epoch_files_per_size),
                         'accumulation_steps': current_accum_steps,
                         'accum_step': accum_counter + 1,
