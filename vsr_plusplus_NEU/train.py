@@ -716,9 +716,11 @@ def main():
 
         tb_log_dir = os.path.join(DATASET_SPECIFIC_ROOT, "logs")
 
-        # Build the subprocess command
+        # Build the subprocess command.  -u = unbuffered so every print()
+        # appears in async_val.log immediately (Python uses block buffering
+        # when stdout is redirected to a file).
         async_val_cmd = [
-            sys.executable, '-m', 'vsr_plusplus_NEU.training.async_validator',
+            sys.executable, '-u', '-m', 'vsr_plusplus_NEU.training.async_validator',
             '--checkpoint-dir', DATASET_SPECIFIC_ROOT,
             '--data-root',      data_root,
             '--dataset-name',   dataset_name,
@@ -755,6 +757,9 @@ def main():
                 checkpoint_dir=DATASET_SPECIFIC_ROOT,
                 val_sizes=val_sizes_with_data,
                 log_dir=tb_log_dir,
+                proc=async_val_proc,
+                restart_cmd=async_val_cmd,
+                log_path=_async_val_log_path,
             )
     # ── End async validation setup ────────────────────────────────────────────
 

@@ -13,6 +13,8 @@ Coordinates all training components:
 import time
 import os
 import json
+import subprocess
+import sys
 from collections import deque
 import torch
 from torch.amp import autocast
@@ -1559,7 +1561,8 @@ class VSRTrainer:
     # Async validation helpers
     # ------------------------------------------------------------------
 
-    def enable_async_validation(self, checkpoint_dir, val_sizes, log_dir):
+    def enable_async_validation(self, checkpoint_dir, val_sizes, log_dir,
+                                proc=None, restart_cmd=None, log_path=None):
         """
         Switch the trainer to asynchronous validation mode.
 
@@ -1574,6 +1577,9 @@ class VSRTrainer:
         and writes ``async_val_result.json``.  The trainer polls for that file
         at every step and ingests the results when they arrive.
 
+        If the subprocess crashes it is automatically restarted by
+        ``_poll_async_val_result`` the next time that method is called.
+
         Manual validation (key 'v' / WebUI button) always runs synchronously so
         the user can get immediate feedback on demand.
 
@@ -1584,15 +1590,28 @@ class VSRTrainer:
                             should validate (e.g. ['540', '720']).
             log_dir:        TensorBoard log directory forwarded to the async
                             validator so it can write events to the same run.
+            proc:           ``subprocess.Popen`` instance of the already-started
+                            validator process (used for liveness monitoring).
+            restart_cmd:    Command list (as passed to ``Popen``) used to restart
+                            the validator if it crashes.
+            log_path:       Path of the validator's stdout/stderr log file.
+                            Logged to training.log so the user knows where to look.
         """
         self.use_async_validation = True
         self._async_val_checkpoint_dir = checkpoint_dir
         self._async_val_sizes = val_sizes
         self._async_val_log_dir = log_dir
         self._async_val_last_ingested_step = -1
-        self.train_logger.log_event(
-            f"Async validation enabled (checkpoint_dir={checkpoint_dir})"
-        )
+        self._async_val_proc = proc
+        self._async_val_restart_cmd = restart_cmd
+        self._async_val_log_path = log_path
+
+        pid_str = f"PID {proc.pid}" if proc is not None else "no process"
+        log_str = f"  log → {log_path}" if log_path else ""
+        msg = (f"Async validation enabled: {pid_str}{log_str}  "
+               f"checkpoint_dir={checkpoint_dir}")
+        self.train_logger.log_event(msg)
+        print(f"[AsyncVal] {msg}")
 
     def _request_async_validation(self):
         """
@@ -1654,9 +1673,55 @@ class VSRTrainer:
                 f"⚠ Async val: failed to write request file: {e}"
             )
 
+    def _restart_async_validator(self):
+        """
+        Start (or restart) the async validator subprocess.
+
+        Uses the command stored in ``_async_val_restart_cmd`` and appends
+        stdout/stderr to ``_async_val_log_path``.  Updates
+        ``_async_val_proc`` with the new ``Popen`` object and logs the new
+        PID to both training.log and the console.
+
+        Returns True on success, False if the command is not available or
+        if ``Popen`` raises.
+        """
+        cmd = getattr(self, '_async_val_restart_cmd', None)
+        log_path = getattr(self, '_async_val_log_path', None)
+        if not cmd:
+            self.train_logger.log_event(
+                "[AsyncVal] Cannot restart: restart_cmd not set"
+            )
+            return False
+        try:
+            fh = open(log_path, 'a') if log_path else open(os.devnull, 'w')
+            proc = subprocess.Popen(
+                cmd,
+                stdout=fh,
+                stderr=subprocess.STDOUT,
+                cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            )
+            fh.close()
+            self._async_val_proc = proc
+            msg = (f"[AsyncVal] Subprocess (re)started  PID {proc.pid}"
+                   + (f"  log → {log_path}" if log_path else ""))
+            self.train_logger.log_event(msg)
+            print(f"\n{msg}")
+            return True
+        except Exception as exc:
+            self.train_logger.log_event(
+                f"[AsyncVal] Failed to (re)start subprocess: {exc}"
+            )
+            print(f"\n❌ [AsyncVal] Failed to (re)start subprocess: {exc}")
+            return False
+
     def _poll_async_val_result(self):
         """
         Check for a completed async validation result and ingest it.
+
+        Also monitors the async validator subprocess: if it has exited
+        unexpectedly the exit code is logged to training.log and to the
+        console, and the subprocess is automatically restarted so that
+        pending request files are processed.
 
         Reads ``async_val_result.json`` from the checkpoint directory.  If the
         file is present and contains results for a step that has not yet been
@@ -1674,6 +1739,21 @@ class VSRTrainer:
         checkpoint_dir = getattr(self, '_async_val_checkpoint_dir', None)
         if checkpoint_dir is None:
             return
+
+        # ── Subprocess liveness check ─────────────────────────────────────────
+        proc = getattr(self, '_async_val_proc', None)
+        if proc is not None:
+            exit_code = proc.poll()
+            if exit_code is not None:
+                # Subprocess has terminated unexpectedly.
+                log_path = getattr(self, '_async_val_log_path', None)
+                log_hint = f"  (see {log_path})" if log_path else ""
+                msg = (f"[AsyncVal] Subprocess exited with code {exit_code}"
+                       f"{log_hint} — restarting …")
+                self.train_logger.log_event(msg)
+                print(f"\n⚠ {msg}")
+                self._async_val_proc = None
+                self._restart_async_validator()
 
         result_file = os.path.join(checkpoint_dir, 'async_val_result.json')
         if not os.path.exists(result_file):

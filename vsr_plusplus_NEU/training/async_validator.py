@@ -27,6 +27,8 @@ checkpoint directory (written by the training process on exit).
 """
 
 import argparse
+import builtins as _builtins
+builtins_print = _builtins.print   # saved before any local shadowing
 import json
 import os
 import sys
@@ -326,21 +328,26 @@ def run_async_validator(checkpoint_dir, data_root, dataset_name, log_dir, gpu_in
     from vsr_plusplus_NEU.systems.logger import TensorBoardLogger
 
     device = torch.device(f'cuda:{gpu_index}' if torch.cuda.is_available() else 'cpu')
-    print(f"[AsyncVal] Starting on {device}  (checkpoint_dir={checkpoint_dir})")
+    print(f"[AsyncVal] Starting on {device}  (checkpoint_dir={checkpoint_dir})", flush=True)
 
     request_file = os.path.join(checkpoint_dir, 'async_val_request.json')
     result_file  = os.path.join(checkpoint_dir, 'async_val_result.json')
     stop_file    = os.path.join(checkpoint_dir, 'async_val_stop')
     done_file    = os.path.join(checkpoint_dir, 'async_val_done.json')
 
-    tb_logger = TensorBoardLogger(log_dir)
+    try:
+        tb_logger = TensorBoardLogger(log_dir)
+    except Exception as e:
+        print(f"[AsyncVal] ❌ Failed to create TensorBoardLogger: {e}", flush=True)
+        traceback.print_exc()
+        raise  # propagate so __main__ catches it and writes the error result
 
     last_processed_step = -1
 
     while True:
         # ── Stop signal ──────────────────────────────────────────────────────
         if os.path.exists(stop_file):
-            print("[AsyncVal] Stop signal received – shutting down.")
+            print("[AsyncVal] Stop signal received – shutting down.", flush=True)
             try:
                 os.unlink(stop_file)
             except OSError:
@@ -378,12 +385,12 @@ def run_async_validator(checkpoint_dir, data_root, dataset_name, log_dir, gpu_in
         except OSError:
             pass
 
-        print(f"[AsyncVal] Processing step {step}  checkpoint={checkpoint_path}")
+        print(f"[AsyncVal] Processing step {step}  checkpoint={checkpoint_path}", flush=True)
 
         # ── Verify checkpoint file exists before loading ──────────────────────
         if not os.path.exists(checkpoint_path):
             err_msg = f"Checkpoint file not found: {checkpoint_path}"
-            print(f"[AsyncVal] ❌ {err_msg}")
+            print(f"[AsyncVal] ❌ {err_msg}", flush=True)
             _write_error_result(result_file, step, err_msg)
             time.sleep(2.0)
             continue
@@ -411,10 +418,10 @@ def run_async_validator(checkpoint_dir, data_root, dataset_name, log_dir, gpu_in
 
             model = model.to(device)
             model.eval()
-            print(f"[AsyncVal] Model loaded from {os.path.basename(checkpoint_path)}")
+            print(f"[AsyncVal] Model loaded from {os.path.basename(checkpoint_path)}", flush=True)
         except Exception as e:
             err_msg = f"Failed to load model: {e}"
-            print(f"[AsyncVal] ❌ {err_msg}")
+            print(f"[AsyncVal] ❌ {err_msg}", flush=True)
             traceback.print_exc()
             _write_error_result(result_file, step, err_msg)
             time.sleep(5.0)
@@ -430,7 +437,7 @@ def run_async_validator(checkpoint_dir, data_root, dataset_name, log_dir, gpu_in
             ).to(device)
         except Exception as e:
             err_msg = f"Failed to create loss function: {e}"
-            print(f"[AsyncVal] ❌ {err_msg}")
+            print(f"[AsyncVal] ❌ {err_msg}", flush=True)
             traceback.print_exc()
             _write_error_result(result_file, step, err_msg)
             time.sleep(5.0)
@@ -465,10 +472,10 @@ def run_async_validator(checkpoint_dir, data_root, dataset_name, log_dir, gpu_in
                     shuffle=False, num_workers=2, pin_memory=False,
                 )
                 val_loaders.append((size_key, loader))
-                print(f"[AsyncVal]   {size_key}: {len(val_ds)} samples, batch_size={bs}")
+                print(f"[AsyncVal]   {size_key}: {len(val_ds)} samples, batch_size={bs}", flush=True)
         except Exception as e:
             err_msg = f"Failed to build validation datasets: {e}"
-            print(f"[AsyncVal] ❌ {err_msg}")
+            print(f"[AsyncVal] ❌ {err_msg}", flush=True)
             traceback.print_exc()
             _write_error_result(result_file, step, err_msg)
             del model, loss_fn
@@ -478,7 +485,7 @@ def run_async_validator(checkpoint_dir, data_root, dataset_name, log_dir, gpu_in
 
         if not val_loaders:
             err_msg = "No validation datasets available (0 samples in all size keys)"
-            print(f"[AsyncVal] ⚠ {err_msg}")
+            print(f"[AsyncVal] ⚠ {err_msg}", flush=True)
             _write_error_result(result_file, step, err_msg)
             del model, loss_fn
             torch.cuda.empty_cache()
@@ -491,7 +498,7 @@ def run_async_validator(checkpoint_dir, data_root, dataset_name, log_dir, gpu_in
             metrics = _run_validation_on_device(model, val_loaders, loss_fn, device, step)
         except Exception as e:
             err_msg = f"Validation inference failed: {e}"
-            print(f"[AsyncVal] ❌ {err_msg}")
+            print(f"[AsyncVal] ❌ {err_msg}", flush=True)
             traceback.print_exc()
             _write_error_result(result_file, step, err_msg)
             # Clean up model to free VRAM before retrying
@@ -502,7 +509,8 @@ def run_async_validator(checkpoint_dir, data_root, dataset_name, log_dir, gpu_in
 
         elapsed = time.time() - t_start
         ki_q = metrics.get('ki_quality', 0.0)
-        print(f"[AsyncVal] ✅ Step {step} done in {elapsed:.1f}s – KI Quality {ki_q*100:.1f}%")
+        print(f"[AsyncVal] ✅ Step {step} done in {elapsed:.1f}s – KI Quality {ki_q*100:.1f}%",
+              flush=True)
 
         # ── Write results for training process ───────────────────────────────
         serialisable = {k: v for k, v in metrics.items()
@@ -527,9 +535,9 @@ def run_async_validator(checkpoint_dir, data_root, dataset_name, log_dir, gpu_in
             with open(tmp_result, 'w') as f:
                 json.dump(serialisable, f, indent=2)
             os.replace(tmp_result, result_file)
-            print(f"[AsyncVal] Results written to {result_file}")
+            print(f"[AsyncVal] Results written to {result_file}", flush=True)
         except OSError as e:
-            print(f"[AsyncVal] ⚠ Could not write result file: {e}")
+            print(f"[AsyncVal] ⚠ Could not write result file: {e}", flush=True)
 
         # ── Log to TensorBoard ───────────────────────────────────────────────
         try:
@@ -544,9 +552,10 @@ def run_async_validator(checkpoint_dir, data_root, dataset_name, log_dir, gpu_in
                 tb_logger.writer.add_image(tag, img_tensor, step)
             if labeled_images:
                 tb_logger.writer.flush()
-                print(f"[AsyncVal] Logged {len(labeled_images)} images to TensorBoard")
+                print(f"[AsyncVal] Logged {len(labeled_images)} images to TensorBoard",
+                      flush=True)
         except Exception as e:
-            print(f"[AsyncVal] ⚠ TensorBoard logging error: {e}")
+            print(f"[AsyncVal] ⚠ TensorBoard logging error: {e}", flush=True)
 
         # ── Clean up GPU memory for next round ───────────────────────────────
         del model, loss_fn, metrics
@@ -554,7 +563,7 @@ def run_async_validator(checkpoint_dir, data_root, dataset_name, log_dir, gpu_in
 
         last_processed_step = step
 
-    print("[AsyncVal] Process exiting.")
+    print("[AsyncVal] Process exiting.", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -576,16 +585,51 @@ def _parse_args():
 if __name__ == '__main__':
     args = _parse_args()
 
+    # Flush stdout immediately so every print appears in async_val.log
+    # without waiting for the block buffer to fill.  (Python uses block
+    # buffering when stdout is redirected to a file.)
+    import functools
+    print = functools.partial(builtins_print, flush=True)
+
     config_snapshot = {}
     if args.config_json and os.path.exists(args.config_json):
-        with open(args.config_json, 'r') as f:
-            config_snapshot = json.load(f)
+        try:
+            with open(args.config_json, 'r') as f:
+                config_snapshot = json.load(f)
+        except Exception as e:
+            print(f"[AsyncVal] ⚠ Could not read config JSON "
+                  f"{args.config_json}: {e}")
 
-    run_async_validator(
-        checkpoint_dir=args.checkpoint_dir,
-        data_root=args.data_root,
-        dataset_name=args.dataset_name,
-        log_dir=args.log_dir,
-        gpu_index=args.gpu,
-        config_snapshot=config_snapshot,
-    )
+    try:
+        run_async_validator(
+            checkpoint_dir=args.checkpoint_dir,
+            data_root=args.data_root,
+            dataset_name=args.dataset_name,
+            log_dir=args.log_dir,
+            gpu_index=args.gpu,
+            config_snapshot=config_snapshot,
+        )
+    except Exception:
+        # Capture the full traceback — it goes to async_val.log via the
+        # Popen stdout redirect, and also to an error-result file so the
+        # training process is notified on the next poll.
+        tb_text = traceback.format_exc()
+        print(f"\n[AsyncVal] ❌ FATAL CRASH:\n{tb_text}")
+
+        # Write error result so the trainer detects the crash via
+        # _poll_async_val_result even when the result file is from step -1.
+        result_file = os.path.join(args.checkpoint_dir, 'async_val_result.json')
+        try:
+            last_line = [l for l in tb_text.splitlines() if l.strip()][-1]
+            payload = {
+                'step':      -1,
+                'error':     f'Async validator process crashed: {last_line}',
+                'timestamp': time.time(),
+            }
+            tmp = result_file + '.tmp'
+            with open(tmp, 'w') as f:
+                json.dump(payload, f)
+            os.replace(tmp, result_file)
+        except Exception:
+            pass  # If this also fails the traceback in the log is enough
+        sys.exit(1)
