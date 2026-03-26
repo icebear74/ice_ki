@@ -197,6 +197,9 @@ class CompleteTrainingDataStore:
             'async_val_request_step': None,
             'async_val_last_step':    None,
             'async_val_last_ki':      None,
+            # Live progress parsed from async_val.log (0-100 float and label string)
+            'async_val_progress_pct':   0.0,
+            'async_val_progress_label': '',
 
             # Crop-wait status (system pause waiting for enough crop GT images)
             'crop_wait_active': False,
@@ -1191,7 +1194,15 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             <!-- Async-Val status bar: visible only when async validation is configured -->
             <div id="asyncValBar" class="async-val-bar">
                 <div id="asyncValDot" class="async-val-dot"></div>
-                <span id="asyncValText">Async-Val aktiv</span>
+                <div style="flex:1; min-width:0;">
+                    <span id="asyncValText">Async-Val aktiv</span>
+                    <div id="asyncValProgressWrap" style="display:none; margin-top:5px;">
+                        <div style="background:rgba(255,255,255,0.12); border-radius:4px; height:8px; overflow:hidden;">
+                            <div id="asyncValProgressFill" style="height:100%; width:0%; background:#7c3aed; border-radius:4px; transition:width 0.4s ease;"></div>
+                        </div>
+                        <div id="asyncValProgressLabel" style="font-size:0.82em; color:var(--text-secondary); margin-top:3px;"></div>
+                    </div>
+                </div>
             </div>
             
             <!-- Kompakte Iterationszeile – immer sichtbar -->
@@ -2685,11 +2696,14 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         }
 
         function updateAsyncValBar(data) {
-            const bar  = document.getElementById('asyncValBar');
-            const dot  = document.getElementById('asyncValDot');
-            const txt  = document.getElementById('asyncValText');
-            const btn  = document.getElementById('valBtn');
-            const hint = document.getElementById('valStepHint');
+            const bar      = document.getElementById('asyncValBar');
+            const dot      = document.getElementById('asyncValDot');
+            const txt      = document.getElementById('asyncValText');
+            const btn      = document.getElementById('valBtn');
+            const hint     = document.getElementById('valStepHint');
+            const progWrap = document.getElementById('asyncValProgressWrap');
+            const progFill = document.getElementById('asyncValProgressFill');
+            const progLbl  = document.getElementById('asyncValProgressLabel');
 
             if (!data.async_val_enabled) {
                 bar.classList.remove('visible');
@@ -2707,6 +2721,15 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 txt.textContent = reqStep != null
                     ? `🔮 Async-Val läuft – Schritt ${reqStep.toLocaleString('de-DE')} wird validiert …`
                     : '🔮 Async-Val läuft …';
+                // Progress bar
+                const pct = data.async_val_progress_pct || 0;
+                if (pct > 0 && progWrap) {
+                    progWrap.style.display = 'block';
+                    progFill.style.width   = pct.toFixed(1) + '%';
+                    progLbl.textContent    = data.async_val_progress_label || '';
+                } else if (progWrap) {
+                    progWrap.style.display = 'none';
+                }
                 // Lock the manual-validation button while a result is pending
                 if (btn) { btn.disabled = true; btn.classList.add('btn-disabled'); }
             } else {
@@ -2719,6 +2742,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 } else {
                     txt.textContent = '✅ Async-Val bereit – noch kein Ergebnis';
                 }
+                if (progWrap) progWrap.style.display = 'none';
                 if (btn) { btn.disabled = false; btn.classList.remove('btn-disabled'); }
             }
 

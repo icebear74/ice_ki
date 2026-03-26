@@ -1737,6 +1737,49 @@ class VSRTrainer:
             print(f"\n❌ [AsyncVal] Failed to (re)start subprocess: {exc}")
             return False
 
+    def _push_async_val_log_tail(self, n_lines: int = 8) -> None:
+        """
+        Tail the last ``n_lines`` of ``async_val.log``, parse the most recent
+        progress line (e.g. ``[AsyncVal]   540: 48% (41/85) ETA 17s``) and push
+        ``async_val_progress_pct`` (0-100) + ``async_val_progress_label`` into
+        the web-monitor data store.
+
+        Uses a backwards seek — never reads the whole log file.
+        Safe to call on every training step.
+        """
+        import re as _re
+        log_path = getattr(self, '_async_val_log_path', None)
+        if not log_path:
+            return
+        try:
+            with open(log_path, 'rb') as fh:
+                fh.seek(0, 2)
+                file_size = fh.tell()
+                fh.seek(max(0, file_size - 4096))
+                raw = fh.read().decode('utf-8', errors='replace')
+        except OSError:
+            return
+
+        # Match lines like:  [AsyncVal]   540: 48% (41/85) ETA 17s
+        _PROG_RE = _re.compile(
+            r'\[AsyncVal\]\s+(\S+):\s+(\d+)%\s+\((\d+)/(\d+)\)(?:\s+ETA\s+(\S+))?'
+        )
+        pct, label = 0.0, ''
+        for line in raw.splitlines():
+            m = _PROG_RE.search(line)
+            if m:
+                size_key = m.group(1)
+                pct      = float(m.group(2))
+                done     = m.group(3)
+                total    = m.group(4)
+                eta      = m.group(5) or ''
+                eta_str  = f'  ETA {eta}' if eta else ''
+                label    = f'{size_key}: {int(pct)}% ({done}/{total}){eta_str}'
+        self.web_monitor.data_store.update_all_metrics(
+            async_val_progress_pct=pct,
+            async_val_progress_label=label,
+        )
+
     def _poll_async_val_result(self):
         """
         Check for a completed async validation result and ingest it.
@@ -1762,6 +1805,10 @@ class VSRTrainer:
         checkpoint_dir = getattr(self, '_async_val_checkpoint_dir', None)
         if checkpoint_dir is None:
             return
+
+        # ── Log-tail: push last N lines of async_val.log to the web UI ────────
+        # Runs on every poll so the progress panel refreshes at monitoring rate.
+        self._push_async_val_log_tail()
 
         # ── Subprocess liveness check ─────────────────────────────────────────
         proc = getattr(self, '_async_val_proc', None)
@@ -1810,6 +1857,8 @@ class VSRTrainer:
             # Clear pending flag so the web UI stops showing "running"
             self.web_monitor.data_store.update_all_metrics(
                 async_val_pending=False,
+                async_val_progress_pct=0.0,
+                async_val_progress_label='',
             )
             # Also remove the weights file so it doesn't accumulate as a .BAK
             _weights_err = os.path.join(checkpoint_dir, f'async_val_weights_{step:07d}.pth')
@@ -1879,6 +1928,8 @@ class VSRTrainer:
             async_val_pending=False,
             async_val_last_step=step,
             async_val_last_ki=ki_quality,
+            async_val_progress_pct=0.0,
+            async_val_progress_label='',
         )
 
         # Write Statistik_<step>.json immediately.
