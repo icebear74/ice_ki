@@ -186,6 +186,18 @@ class CompleteTrainingDataStore:
             # which model snapshot the quality values belong to.
             'last_validation_step': None,
 
+            # Async validation state
+            # async_val_enabled  : True when the trainer runs with a secondary GPU validator.
+            # async_val_pending  : True while a request has been sent but no result yet received.
+            # async_val_request_step : step for which a request is currently pending (or None).
+            # async_val_last_step    : step whose result was last ingested (or None).
+            # async_val_last_ki      : KI quality (0-1) from the last ingested result.
+            'async_val_enabled':      False,
+            'async_val_pending':      False,
+            'async_val_request_step': None,
+            'async_val_last_step':    None,
+            'async_val_last_ki':      None,
+
             # Crop-wait status (system pause waiting for enough crop GT images)
             'crop_wait_active': False,
             'crop_wait_current_count': 0,
@@ -463,6 +475,41 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         .status-training { background: var(--accent-green); color: #000; }
         .status-validating { background: var(--accent-orange); color: #000; }
         .status-paused { background: var(--accent-red); color: #fff; }
+        .status-async-pending { background: #7c3aed; color: #fff; }
+
+        .btn:disabled, .btn.btn-disabled {
+            opacity: 0.55;
+            cursor: not-allowed;
+            transform: none !important;
+            pointer-events: none;
+        }
+
+        .async-val-bar {
+            display: none;
+            align-items: center;
+            gap: 12px;
+            margin-top: 10px;
+            padding: 8px 14px;
+            background: rgba(124, 58, 237, 0.12);
+            border: 1px solid #7c3aed;
+            border-radius: 8px;
+            font-size: 0.92em;
+            color: var(--text-primary);
+            flex-wrap: wrap;
+        }
+        .async-val-bar.visible { display: flex; }
+        .async-val-dot {
+            width: 10px; height: 10px;
+            border-radius: 50%;
+            background: #7c3aed;
+            animation: pulse-async 1.2s ease-in-out infinite;
+            flex-shrink: 0;
+        }
+        .async-val-dot.done { background: var(--accent-green); animation: none; }
+        @keyframes pulse-async {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50%       { opacity: 0.4; transform: scale(0.75); }
+        }
         
         .grid-container {
             display: grid;
@@ -1113,7 +1160,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 <button class="btn btn-primary" onclick="downloadDataAsJSON()" title="Alle aktuellen Trainingsdaten als JSON-Datei herunterladen">
                     📥 Daten herunterladen (JSON)
                 </button>
-                <button class="btn btn-success" onclick="requestValidation()" title="Validierungsdurchlauf manuell starten">
+                <button class="btn btn-success" id="valBtn" onclick="requestValidation()" title="Validierungsdurchlauf manuell starten">
                     🔍 Validierung starten
                 </button>
                 <button class="btn btn-success" id="checkpointBtn" onclick="triggerCheckpoint()" title="Aktuellen Modellzustand sofort speichern">
@@ -1128,6 +1175,23 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 <button class="btn btn-primary" onclick="exportLogs()" title="Trainingsmetriken als JSON exportieren">
                     📊 Logs exportieren
                 </button>
+                <a id="tensorboardLink" href="#" class="btn btn-primary" target="_blank" title="TensorBoard im Browser öffnen" style="text-decoration:none;">
+                    📈 TensorBoard
+                </a>
+                <div class="refresh-control" style="display:inline-flex; align-items:center; gap:6px; margin-left:4px;">
+                    <label for="refreshInterval" style="font-size:0.88em; color:var(--text-secondary); white-space:nowrap;">Auto-Update:</label>
+                    <input type="number" id="refreshInterval" value="5" min="1" max="60" step="1" style="width:52px;">
+                    <span style="color: var(--text-secondary); font-size:0.88em;">s</span>
+                    <button class="btn btn-success" onclick="updateRefreshRate()" style="padding:6px 12px; font-size:0.88em;">
+                        ✔
+                    </button>
+                </div>
+            </div>
+
+            <!-- Async-Val status bar: visible only when async validation is configured -->
+            <div id="asyncValBar" class="async-val-bar">
+                <div id="asyncValDot" class="async-val-dot"></div>
+                <span id="asyncValText">Async-Val aktiv</span>
             </div>
             
             <!-- Kompakte Iterationszeile – immer sichtbar -->
@@ -1405,6 +1469,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 <div class="card-title">KI-Qualität</div>
                 <div class="card-value" id="kiQuality">0.0%</div>
                 <div class="card-subtitle">Bestes: <span id="bestQuality">0.0%</span></div>
+                <div class="card-subtitle" id="valStepHint" style="display:none; color: #7c3aed; margin-top:4px;"></div>
             </div>
             
             <div class="info-card" title="Wie viel besser die KI-Ausgabe im Vergleich zum LR-Eingangsbild ist (positiv = KI besser als LR)">
@@ -1693,27 +1758,6 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             </table>
         </div>
         
-        <div class="section-header">🎮 Steuerung</div>
-        
-        <div class="controls-section">
-            <button class="btn btn-primary" onclick="triggerValidation()">
-                🔍 Validation starten
-            </button>
-            
-            <a id="tensorboardLink" href="#" class="link-box" target="_blank">
-                📈 TensorBoard öffnen
-            </a>
-            
-            <div class="refresh-control">
-                <label for="refreshInterval">Auto-Aktualisierung:</label>
-                <input type="number" id="refreshInterval" value="5" min="1" max="60" step="1">
-                <span style="color: var(--text-secondary); margin-left: 5px;">Sekunden</span>
-                <button class="btn btn-success" onclick="updateRefreshRate()" style="margin-left: 10px;">
-                    Speichern
-                </button>
-            </div>
-        </div>
-        
         <div class="footer-info">
             Letzte Aktualisierung: <span id="lastUpdate">--</span>
         </div>
@@ -1881,6 +1925,9 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             if (data.validation_running) {
                 badge.textContent = 'Validierung';
                 badge.className = 'status-indicator status-validating';
+            } else if (data.async_val_pending) {
+                badge.textContent = '🔮 Async-Val läuft';
+                badge.className = 'status-indicator status-async-pending';
             } else if (data.crop_wait_active) {
                 badge.textContent = 'Warte auf Crops';
                 badge.className = 'status-indicator status-crop-wait';
@@ -1891,6 +1938,9 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 badge.textContent = 'Training';
                 badge.className = 'status-indicator status-training';
             }
+
+            // Async-Val status bar + button lock
+            updateAsyncValBar(data);
 
             // Crop-wait banner
             updateCropWaitBanner(data);
@@ -2633,7 +2683,57 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         function requestValidation() {
             triggerValidation();
         }
-        
+
+        function updateAsyncValBar(data) {
+            const bar  = document.getElementById('asyncValBar');
+            const dot  = document.getElementById('asyncValDot');
+            const txt  = document.getElementById('asyncValText');
+            const btn  = document.getElementById('valBtn');
+            const hint = document.getElementById('valStepHint');
+
+            if (!data.async_val_enabled) {
+                bar.classList.remove('visible');
+                if (btn) { btn.disabled = false; btn.classList.remove('btn-disabled'); }
+                if (hint) hint.style.display = 'none';
+                return;
+            }
+
+            // Always show the bar when async val is configured
+            bar.classList.add('visible');
+
+            if (data.async_val_pending) {
+                dot.className = 'async-val-dot';          // pulsing purple
+                const reqStep = data.async_val_request_step;
+                txt.textContent = reqStep != null
+                    ? `🔮 Async-Val läuft – Schritt ${reqStep.toLocaleString('de-DE')} wird validiert …`
+                    : '🔮 Async-Val läuft …';
+                // Lock the manual-validation button while a result is pending
+                if (btn) { btn.disabled = true; btn.classList.add('btn-disabled'); }
+            } else {
+                dot.className = 'async-val-dot done';     // solid green
+                const lastStep = data.async_val_last_step;
+                const lastKi   = data.async_val_last_ki;
+                if (lastStep != null) {
+                    const kiStr = lastKi != null ? ` – KI ${(lastKi * 100).toFixed(1)}%` : '';
+                    txt.textContent = `✅ Async-Val bereit (letztes Ergebnis: Schritt ${lastStep.toLocaleString('de-DE')}${kiStr})`;
+                } else {
+                    txt.textContent = '✅ Async-Val bereit – noch kein Ergebnis';
+                }
+                if (btn) { btn.disabled = false; btn.classList.remove('btn-disabled'); }
+            }
+
+            // Show which async-val step the quality numbers belong to
+            if (hint) {
+                const lastStep = data.async_val_last_step;
+                if (lastStep != null) {
+                    hint.textContent = `📡 Async-Val Schritt ${lastStep.toLocaleString('de-DE')}`;
+                    hint.style.display = 'block';
+                } else {
+                    hint.style.display = 'none';
+                }
+            }
+        }
+
         function triggerCheckpoint() {
             // Send command to save checkpoint
             fetch('/monitoring/command', {

@@ -1606,6 +1606,15 @@ class VSRTrainer:
         self._async_val_restart_cmd = restart_cmd
         self._async_val_log_path = log_path
 
+        # Inform the web UI that async validation is active
+        self.web_monitor.data_store.update_all_metrics(
+            async_val_enabled=True,
+            async_val_pending=False,
+            async_val_request_step=None,
+            async_val_last_step=None,
+            async_val_last_ki=None,
+        )
+
         pid_str = f"PID {proc.pid}" if proc is not None else "no process"
         log_str = f"  log → {log_path}" if log_path else ""
         msg = (f"Async validation enabled: {pid_str}{log_str}  "
@@ -1671,6 +1680,11 @@ class VSRTrainer:
             os.replace(tmp_file, request_file)
             self.train_logger.log_event(
                 f"Async val request written for step {step}"
+            )
+            # Mark pending in the web UI data store so the status bar updates
+            self.web_monitor.data_store.update_all_metrics(
+                async_val_pending=True,
+                async_val_request_step=step,
             )
         except Exception as e:
             self.train_logger.log_event(
@@ -1778,9 +1792,9 @@ class VSRTrainer:
         if step <= self._async_val_last_ingested_step:
             return  # Already processed
 
-        # Consume the file immediately
+        # Consume the file — rename to .bak so the user can inspect the last result
         try:
-            os.unlink(result_file)
+            os.replace(result_file, result_file + '.bak')
         except OSError:
             pass
 
@@ -1793,6 +1807,17 @@ class VSRTrainer:
             self.train_logger.log_event(
                 f"[AsyncVal] ERROR at step {step}: {error_msg}"
             )
+            # Clear pending flag so the web UI stops showing "running"
+            self.web_monitor.data_store.update_all_metrics(
+                async_val_pending=False,
+            )
+            # Also remove the weights file so it doesn't accumulate as a .BAK
+            _weights_err = os.path.join(checkpoint_dir, f'async_val_weights_{step:07d}.pth')
+            if os.path.exists(_weights_err):
+                try:
+                    os.unlink(_weights_err)
+                except OSError:
+                    pass
             # Do NOT update quality metrics — keep previous valid values.
             return
 
@@ -1847,6 +1872,14 @@ class VSRTrainer:
         # step, e.g. 15000) as last_validation_step so the export snapshot
         # correctly identifies which model the quality numbers belong to.
         self._push_val_metrics_to_store(result, step)
+
+        # Clear pending flag and record the ingested step / quality so the
+        # web UI can show "last result: step N, KI Q%" in the async-val bar.
+        self.web_monitor.data_store.update_all_metrics(
+            async_val_pending=False,
+            async_val_last_step=step,
+            async_val_last_ki=ki_quality,
+        )
 
         # Write Statistik_<step>.json immediately.
         # No delay needed: _push_val_metrics_to_store already flushed all quality
