@@ -177,6 +177,15 @@ class CompleteTrainingDataStore:
                 'size_key': '',
             },
 
+            # Set to True once the first validation has ever completed.
+            # Allows export code to distinguish "no validation yet" (0.0 defaults)
+            # from "validation ran and the model really scored 0.0".
+            'has_validation_data': False,
+            # Training step at which the last validation was triggered.
+            # Written alongside quality metrics so Statistik files always show
+            # which model snapshot the quality values belong to.
+            'last_validation_step': None,
+
             # Crop-wait status (system pause waiting for enough crop GT images)
             'crop_wait_active': False,
             'crop_wait_current_count': 0,
@@ -217,9 +226,13 @@ class CompleteTrainingDataStore:
         Liefert eine Kopie aller stabilen Trainingsdaten für den Dateiexport.
 
         Im Gegensatz zu ``get_complete_snapshot()`` werden transiente Laufzeit-
-        felder entfernt, die nur für die Live-WebUI relevant sind.  Außerdem kann
-        ``override_step`` gesetzt werden, damit ``step_current`` im Snapshot mit
-        dem Dateinamen (Validierungsschritt) übereinstimmt.
+        felder entfernt, die nur für die Live-WebUI relevant sind.
+
+        ``override_step`` wird auf den Validierungs-Step gesetzt, damit
+        ``step_current`` im Snapshot mit dem Dateinamen (Statistik_N.json)
+        übereinstimmt.  Zusätzlich wird ein explizites ``validation_step``-Feld
+        gesetzt, das immer den Step der letzten Validierung enthält – unabhängig
+        davon, ob override_step verwendet wird.
 
         Args:
             override_step: Wenn angegeben, wird ``step_current`` im Snapshot auf
@@ -231,6 +244,11 @@ class CompleteTrainingDataStore:
         # Strip transient runtime fields
         for k in self._TRANSIENT_FIELDS:
             snapshot.pop(k, None)
+
+        # Always expose the step that the quality metrics belong to.
+        # For async validation this differs from step_current (the current
+        # training step at the moment the file is written).
+        snapshot['validation_step'] = snapshot.get('last_validation_step')
 
         # Align step_current with the validation step so filename and field match
         if override_step is not None:

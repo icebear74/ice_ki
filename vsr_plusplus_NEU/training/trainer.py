@@ -101,9 +101,6 @@ class VSRTrainer:
         self._crop_wait_next_check = 0.0   # monotonic timestamp of next auto-rescan
         self._crop_wait_current_count = 0  # last known combined 540+720 count
         
-        # Pending JSON save tracking (save after validation + N steps)
-        self.pending_json_save_step = None
-        
         # Adaptive mode change tracking for TensorBoard phase transition logging
         self._last_adaptive_mode = 'Stable'
         
@@ -759,11 +756,6 @@ class VSRTrainer:
                 # Update GUI with smoothed values
                 self._update_gui(epoch, smoothed_loss_dict, avg_time, steps_per_epoch, current_epoch_step, adam_momentum=adam_momentum)
                 
-                # Check if we need to save JSON (delayed save after validation)
-                if self.pending_json_save_step is not None and self.global_step >= self.pending_json_save_step:
-                    self._save_statistics_json(self.pending_json_save_step - 2)  # Save with original validation step
-                    self.pending_json_save_step = None  # Clear pending save
-                
                 # TensorBoard logging (use RAW values, not smoothed)
                 if self.global_step % self.config.get('LOG_TBOARD_EVERY', 100) == 0:
                     self.tb_logger.log_losses(self.global_step, loss_dict)
@@ -902,11 +894,11 @@ class VSRTrainer:
                         metrics = self._run_multi_size_validation()
                         self.last_metrics = metrics
 
-                        # Bug 1 fix: keep last_validation_quality in sync so the plateau
-                        # tracker receives the real quality on every update_plateau_tracker call.
+                        # Keep last_validation_quality in sync so the plateau
+                        # tracker receives the real quality on every update call.
                         self.last_validation_quality = metrics.get('ki_quality', None)
 
-                        # Bug 5 fix: feed validation loss into the validation plateau tracker.
+                        # Feed validation loss into the validation plateau tracker.
                         self.adaptive_system.update_validation_tracker(
                             metrics.get('val_loss'),
                             metrics.get('ki_quality')
@@ -952,24 +944,20 @@ class VSRTrainer:
                                     self.train_logger.log_event(
                                         f"Warning: Failed to log validation image {tag}: {e}"
                                     )
-                                    # Continue with other images even if one fails
                                     continue
                             
                             # Flush to ensure images are written
                             self.tb_logger.writer.flush()
                             
-                            # Summary
                             if failed_count == 0:
                                 print(f"✅ Successfully logged all {logged_count} validation images to TensorBoard")
                             else:
                                 print(f"⚠️  Logged {logged_count}/{len(labeled_images)} images ({failed_count} failed)")
                             
                             # CRITICAL: Remove labeled_images from metrics to prevent memory leak
-                            # These images can be 2GB+ and were being held in self.last_metrics
                             del labeled_images
                             metrics.pop('labeled_images', None)
                             
-                            # Force garbage collection and GPU memory cleanup
                             import gc
                             gc.collect()
                             if torch.cuda.is_available():
@@ -986,7 +974,8 @@ class VSRTrainer:
                             f"KI Quality: {metrics['ki_quality']*100:.1f}%"
                         )
                         
-                        # Check for best checkpoint
+                        # Best-checkpoint check (must precede _push_val_metrics_to_store
+                        # so best_quality_ever is final before the atomic write).
                         if self.checkpoint_mgr.should_check_best(self.global_step):
                             print(f"\n💾 Checking if this is a new best checkpoint...")
                             is_new_best = self.checkpoint_mgr.update_best_checkpoint(
@@ -994,21 +983,30 @@ class VSRTrainer:
                                 self.global_step, metrics['ki_quality'], metrics,
                                 self.train_logger.log_file
                             )
-                            
                             if is_new_best:
                                 print(f"✅ New best checkpoint saved!")
                                 self.tb_logger.log_checkpoint(self.global_step, 'best')
                             else:
                                 print(f"   (Not better than current best)")
-                        
+
+                        # Single atomic write of all quality metrics to the data store.
+                        # Must happen BEFORE _update_gui() (which is called with no
+                        # loss_dict and would zero out loss values in the store).
+                        self._push_val_metrics_to_store(metrics, self.global_step)
+
+                        # Write Statistik_<step>.json immediately – while the data
+                        # store still holds the real training losses from the last
+                        # training step.  The no-arg _update_gui() call below would
+                        # overwrite those losses with 0.0, which is why we save here.
+                        self._save_statistics_json(self.global_step)
+
                         # Reset timing after validation
                         loop_start_time = time.time()
                         
-                        # Redraw UI after validation completes
+                        # Redraw terminal UI (called with no loss_dict → losses show
+                        # as 0 in the terminal display until the next real step, but
+                        # the data store / JSON are already correct).
                         self._update_gui()
-                        
-                        # Schedule JSON save for 2 steps later (so web_monitor gets updated with fresh loss data)
-                        self.pending_json_save_step = self.global_step + 2
 
                 # Poll for async validation results (every step, cheap file-existence check)
                 if getattr(self, 'use_async_validation', False):
@@ -1707,32 +1705,6 @@ class VSRTrainer:
         ki_quality = result.get('ki_quality')
         self.last_validation_quality = ki_quality
 
-        # Push validation quality metrics to web_monitor IMMEDIATELY.
-        # Without this, the data store would keep stale values until the NEXT
-        # _update_gui() call (which runs at the START of each training iteration,
-        # *before* _poll_async_val_result).  Any download or Statistik JSON save
-        # that happens in that 1-step window would therefore report the previous
-        # validation's numbers.
-        #
-        # Scaling note: web_monitor stores quality values as raw fractions (0-1),
-        # exactly as the validator returns them.  _update_gui multiplies by 100
-        # for display and then divides back by 100 before storing, so the net
-        # stored value is identical to the raw validator output.  We follow the
-        # same convention here.
-        best_quality_now = (
-            self.checkpoint_mgr.best_quality
-            if self.checkpoint_mgr.best_quality > 0 else 0.0
-        )
-        self.web_monitor.data_store.update_all_metrics(
-            quality_lr_value=result.get('lr_quality', 0.0),
-            quality_ki_value=ki_quality if ki_quality is not None else 0.0,
-            quality_improvement_value=result.get('improvement', 0.0),
-            quality_ki_to_gt_value=result.get('ki_to_gt', 0.0),
-            quality_lr_to_gt_value=result.get('lr_to_gt', 0.0),
-            validation_loss_value=result.get('val_loss', 0.0),
-            best_quality_ever=best_quality_now,
-        )
-
         self.adaptive_system.update_validation_tracker(
             result.get('val_loss'),
             ki_quality
@@ -1747,7 +1719,8 @@ class VSRTrainer:
         adaptive_status['ki_improvement'] = result.get('improvement', 0)
         self.tb_logger.log_adaptive(step, adaptive_status)
 
-        # Check for best checkpoint (same window logic)
+        # Best-checkpoint check (must precede _push_val_metrics_to_store so
+        # best_quality_ever is final before the atomic write to the data store).
         if self.checkpoint_mgr.should_check_best(step):
             if ki_quality is not None:
                 is_new_best = self.checkpoint_mgr.update_best_checkpoint(
@@ -1759,15 +1732,24 @@ class VSRTrainer:
                     print(f"\n✅ [AsyncVal] New best checkpoint at step {step}!")
                     self.tb_logger.log_checkpoint(step, 'best')
 
-        # Update val-speed tracker using the val_elapsed_seconds if available.
-        # If the async process doesn't report elapsed time we skip speed update
-        # for this cycle (it will be estimated in future manual-val runs).
+        # Update val-speed tracker.
         val_elapsed = result.get('val_elapsed_seconds')
         if val_elapsed is not None and val_elapsed > 0:
             self._update_val_speed(val_elapsed)
 
-        # Schedule JSON save
-        self.pending_json_save_step = self.global_step + 2
+        # Single atomic write of all quality metrics to the data store.
+        # Called here – after the best-checkpoint check – so best_quality_ever
+        # is already the final value.  Using `step` (the original validation
+        # step, e.g. 15000) as last_validation_step so the export snapshot
+        # correctly identifies which model the quality numbers belong to.
+        self._push_val_metrics_to_store(result, step)
+
+        # Write Statistik_<step>.json immediately.
+        # No delay needed: _push_val_metrics_to_store already flushed all quality
+        # data to the store, and _update_gui (which runs at the TOP of each loop
+        # iteration, before _poll_async_val_result) has already refreshed the
+        # training-loss fields with this iteration's real values.
+        self._save_statistics_json(step)
 
         ki_pct = ki_quality * 100 if ki_quality is not None else 0.0
         self.train_logger.log_event(
@@ -1821,6 +1803,47 @@ class VSRTrainer:
             avg_per_sample = sum(self._val_sample_timings) / len(self._val_sample_timings)
             self.last_val_iter_per_sec = 1.0 / avg_per_sample if avg_per_sample > 0 else 0.0
 
+    def _push_val_metrics_to_store(self, metrics: dict, val_step: int) -> None:
+        """
+        Atomically write completed validation metrics into the web-monitor data store.
+
+        This is the **single authoritative write point** for all quality / validation
+        fields.  It must be called only *after* all post-validation processing has
+        finished (including ``checkpoint_mgr.update_best_checkpoint``) so that
+        ``best_quality_ever`` is already up to date before the atomic write.
+
+        Scaling convention (matches ``_update_gui``):
+          - ``quality_*_value`` : raw 0-1 fraction as returned by the validator.
+          - ``quality_improvement_value`` / ``*_to_gt_value`` : raw sums from validator.
+          - ``validation_loss_value`` : raw float loss.
+          - ``best_quality_ever`` : read from ``checkpoint_mgr`` after checkpoint check.
+
+        The call also sets ``has_validation_data = True`` and
+        ``last_validation_step = val_step`` so that ``get_export_snapshot()``
+        can expose a ``validation_step`` field that clearly shows which model
+        snapshot the quality numbers belong to.
+        """
+        best_quality = (
+            self.checkpoint_mgr.best_quality
+            if self.checkpoint_mgr.best_quality > 0 else 0.0
+        )
+        self.web_monitor.data_store.update_all_metrics(
+            # Quality fractions (0-1, raw validator output)
+            quality_lr_value=metrics.get('lr_quality', 0.0),
+            quality_ki_value=metrics.get('ki_quality', 0.0),
+            # Raw sums (not per-image averages – match existing web_monitor convention)
+            quality_improvement_value=metrics.get('improvement', 0.0),
+            quality_ki_to_gt_value=metrics.get('ki_to_gt', 0.0),
+            quality_lr_to_gt_value=metrics.get('lr_to_gt', 0.0),
+            # Scalar loss
+            validation_loss_value=metrics.get('val_loss', 0.0),
+            # Best-ever quality (read after checkpoint update so it is final)
+            best_quality_ever=best_quality,
+            # Provenance: mark that real data is present and record the step
+            has_validation_data=True,
+            last_validation_step=val_step,
+        )
+
     def _run_validation(self):
         """Run validation immediately"""
         self.train_logger.log_event(f"Manual validation triggered at step {self.global_step}")
@@ -1871,21 +1894,25 @@ class VSRTrainer:
 
         # Store metrics WITHOUT labeled_images
         self.last_metrics = metrics
-        
-        # Update web_monitor with validation metrics before scheduling JSON save
-        # This ensures the saved JSON includes the fresh validation data
-        if self.last_metrics:
-            self.web_monitor.update(
-                quality_lr_value=self.last_metrics.get('lr_quality', 0.0),
-                quality_ki_value=self.last_metrics.get('ki_quality', 0.0),
-                quality_improvement_value=self.last_metrics.get('improvement', 0.0) / 100.0,
-                quality_ki_to_gt_value=self.last_metrics.get('ki_to_gt', 0.0) / 100.0,
-                quality_lr_to_gt_value=self.last_metrics.get('lr_to_gt', 0.0) / 100.0,
-                validation_loss_value=self.last_metrics.get('val_loss', 0.0),
+
+        # Best checkpoint check (must happen before _push_val_metrics_to_store
+        # so that best_quality_ever is up to date when we do the atomic write).
+        if self.checkpoint_mgr.should_check_best(self.global_step):
+            self.checkpoint_mgr.update_best_checkpoint(
+                self.model, self.optimizer, self.lr_scheduler,
+                self.global_step, metrics['ki_quality'], metrics,
+                self.train_logger.log_file
             )
-        
-        # Schedule JSON save for 2 steps later (so web_monitor gets updated with fresh loss data)
-        self.pending_json_save_step = self.global_step + 2
+
+        # Single atomic write of all validation metrics to the data store.
+        # Called AFTER the best-checkpoint check so best_quality_ever is final.
+        self._push_val_metrics_to_store(metrics, self.global_step)
+
+        # Write Statistik_<step>.json immediately.
+        # The JSON is written BEFORE the no-arg _update_gui() call that follows
+        # in the training loop so the snapshot still contains the real training
+        # losses from the last training step (the no-arg call would zero them out).
+        self._save_statistics_json(self.global_step)
         
         self.train_logger.log_event(
             f"Manual Validation | KI Quality: {metrics['ki_quality']*100:.1f}%"
