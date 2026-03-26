@@ -8,8 +8,8 @@ Two memory tiers
                 relationship, hobby, experience)
 
 Extraction runs as a BACKGROUND TASK after every assistant response so the
-user sees zero added latency.  The main model (8B) is used for extraction
-to ensure high-quality fact parsing.
+user sees zero added latency.  The router model is used for extraction to
+keep the main GPU free for chat responses.
 
 Public API
 ----------
@@ -763,8 +763,8 @@ def extract_memories_sync(
         return
 
     try:
-        if not llm_manager.is_ready("main"):
-            logger.info("Memory extraction skipped – main model not loaded.")
+        if not llm_manager.is_ready("router") and not llm_manager.is_ready("main"):
+            logger.info("Memory extraction skipped – no model available.")
             return
 
         from models import ChatMessage  # noqa: PLC0415
@@ -788,8 +788,11 @@ def extract_memories_sync(
             ChatMessage(role="user", content=f"{extraction_input}\n/no_think"),
         ]
 
+        # Use router model for extraction to keep P100 free for chat responses.
+        # The router (4B) handles structured JSON extraction well enough.
+        _extraction_model = "router" if llm_manager.is_ready("router") else "main"
         raw = llm_manager.chat_completion(
-            model_name="main",
+            model_name=_extraction_model,
             messages=messages,
             temperature=0.0,
             max_tokens=4096,

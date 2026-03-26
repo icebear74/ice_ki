@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import time
 import uuid
@@ -80,6 +81,25 @@ def _check_cuda_build() -> bool:
         return True
     except Exception:  # noqa: BLE001
         return False
+
+
+# Matches sharded GGUF filenames, e.g. "model-00001-of-00003.gguf"
+_SHARD_RE = re.compile(r"^(.*)-(\d{5})-of-(\d{5})(\.gguf)$", re.IGNORECASE)
+
+
+def _expand_shard_list(hf_file: str) -> list[str]:
+    """Return the full list of shard filenames for a sharded GGUF.
+
+    If *hf_file* matches the ``name-NNNNN-of-MMMMM.gguf`` pattern all M shard
+    names are returned.  For ordinary single-file names ``[hf_file]`` is
+    returned unchanged.
+    """
+    m = _SHARD_RE.match(hf_file)
+    if not m:
+        return [hf_file]
+    base, _shard_idx, total_str, ext = m.groups()
+    total = int(total_str)
+    return [f"{base}-{i:05d}-of-{total_str}{ext}" for i in range(1, total + 1)]
 
 
 class _ModelHandle:
@@ -137,12 +157,19 @@ class LLMManager:
         n_ctx = cfg.get("n_ctx", 8192)
         n_gpu_layers = cfg.get("n_gpu_layers", -1)
 
-        # Auto-download from HuggingFace if the file is missing
+        # Auto-download from HuggingFace if the file is missing.
+        # Supports both single-file ('hf_file') and multi-shard ('hf_files' list)
+        # configs.  A single hf_file that matches the shard pattern
+        # (*-00001-of-NNNNN.gguf) is automatically expanded to all N shards.
         if path and not Path(path).exists():
             hf_repo = cfg.get("hf_repo", "")
-            hf_file = cfg.get("hf_file", "")
-            if hf_repo and hf_file:
-                path = self._download_from_hf(name, path, hf_repo, hf_file)
+            hf_files: list[str] = list(cfg.get("hf_files") or [])
+            if not hf_files:
+                single = cfg.get("hf_file", "")
+                if single:
+                    hf_files = _expand_shard_list(single)
+            if hf_repo and hf_files:
+                path = self._download_from_hf(name, path, hf_repo, hf_files)
                 if path is None:
                     return False
             else:
@@ -163,6 +190,8 @@ class LLMManager:
         else:
             effective_gpu_layers = n_gpu_layers
 
+        chat_format = cfg.get("chat_format")  # None = auto-detect from GGUF metadata
+
         logger.info(
             "Loading model '%s' from %s  →  GPU %d, n_gpu_layers=%s …",
             name, path, gpu_index,
@@ -177,13 +206,16 @@ class LLMManager:
                 # This is the correct parameter for single-GPU assignment;
                 # tensor_split is only for splitting ONE model across GPUs.
                 main_gpu=gpu_index,
+                chat_format=chat_format,  # explicit chat format when configured; None = auto-detect
                 verbose=False,
             )
             self._models[name] = _ModelHandle(name, llm)
+            effective_format = chat_format or "auto-detected"
             logger.info(
-                "Model '%s' loaded.  GPU offload: %s",
+                "Model '%s' loaded.  GPU offload: %s, chat_format: %s",
                 name,
                 "yes (GPU %d)" % gpu_index if effective_gpu_layers != 0 else "no (CPU)",
+                effective_format,
             )
             return True
         except Exception as exc:  # noqa: BLE001
@@ -194,10 +226,16 @@ class LLMManager:
             )
             return False
 
-    def _download_from_hf(self, name: str, path: str, hf_repo: str, hf_file: str) -> str | None:
-        """Download *hf_file* from *hf_repo* into the directory of *path*.
+    def _download_from_hf(
+        self, name: str, path: str, hf_repo: str, hf_files: list[str]
+    ) -> str | None:
+        """Download one or more files from *hf_repo* into the directory of *path*.
 
-        Returns the local file path on success, None on failure.
+        *hf_files* is a list of filenames to download (all must belong to the
+        same repo).  For multi-shard GGUFs, pass all shard names; llama-cpp-python
+        will find the remaining shards automatically when given the first one.
+
+        Returns the local path of the **first** file on success, None on failure.
         """
         try:
             from huggingface_hub import hf_hub_download  # noqa: PLC0415
@@ -211,47 +249,104 @@ class LLMManager:
 
         target_dir = str(Path(path).parent)
         os.makedirs(target_dir, exist_ok=True)
-        logger.info(
-            "Model '%s' not found at '%s' – downloading from HuggingFace: %s / %s …",
-            name, path, hf_repo, hf_file,
-        )
+
+        if len(hf_files) == 1:
+            logger.info(
+                "Model '%s' not found at '%s' – downloading from HuggingFace: %s / %s …",
+                name, path, hf_repo, hf_files[0],
+            )
+        else:
+            logger.info(
+                "Model '%s' not found at '%s' – downloading %d shards from HuggingFace: %s …",
+                name, path, len(hf_files), hf_repo,
+            )
+
         hf_token = os.getenv("HF_TOKEN") or None
         if not hf_token:
             logger.warning(
                 "HF_TOKEN is not set. Downloads may fail for gated or rate-limited "
                 "repositories. Set HF_TOKEN in config.py or as an environment variable."
             )
-        try:
-            local_path = hf_hub_download(
-                repo_id=hf_repo,
-                filename=hf_file,
-                local_dir=target_dir,
-                token=hf_token,
-            )
-            logger.info("Model '%s' downloaded to '%s'.", name, local_path)
-            return local_path
-        except Exception as exc:  # noqa: BLE001
-            exc_str = str(exc)
-            if "404" in exc_str or "Entry Not Found" in exc_str:
-                logger.error(
-                    "Failed to download model '%s' from HuggingFace (%s/%s): %s\n"
-                    "  → Verify the repo and filename are correct at "
-                    "https://huggingface.co/%s\n"
-                    "  → If the repo is gated, set HF_TOKEN in config.py after "
-                    "accepting the model terms at https://huggingface.co/%s",
-                    name, hf_repo, hf_file, exc, hf_repo, hf_repo,
-                )
-            else:
-                logger.error(
-                    "Failed to download model '%s' from HuggingFace (%s/%s): %s",
-                    name, hf_repo, hf_file, exc,
-                )
-            return None
 
-    def load_all(self, models_cfg: dict) -> None:
-        """Load all models defined in the MODELS config dict."""
+        first_local_path: str | None = None
+        for hf_file in hf_files:
+            try:
+                local_path = hf_hub_download(
+                    repo_id=hf_repo,
+                    filename=hf_file,
+                    local_dir=target_dir,
+                    token=hf_token,
+                )
+                logger.info("  Downloaded shard '%s' → '%s'.", hf_file, local_path)
+                if first_local_path is None:
+                    first_local_path = local_path
+            except Exception as exc:  # noqa: BLE001
+                exc_str = str(exc)
+                if "404" in exc_str or "Entry Not Found" in exc_str:
+                    logger.error(
+                        "Failed to download model '%s' from HuggingFace (%s/%s): %s\n"
+                        "  → Verify the repo and filename are correct at "
+                        "https://huggingface.co/%s\n"
+                        "  → If the repo is gated, set HF_TOKEN in config.py after "
+                        "accepting the model terms at https://huggingface.co/%s",
+                        name, hf_repo, hf_file, exc, hf_repo, hf_repo,
+                    )
+                else:
+                    logger.error(
+                        "Failed to download model '%s' from HuggingFace (%s/%s): %s",
+                        name, hf_repo, hf_file, exc,
+                    )
+                return None
+
+        if first_local_path:
+            logger.info("Model '%s' download complete.", name)
+        return first_local_path
+
+    def load_all(self, models_cfg: dict) -> list[str]:
+        """Load all models defined in the MODELS config dict.
+
+        Returns a list of model names that failed to load (empty = all OK).
+        """
         for name, cfg in models_cfg.items():
             self.load_model(name, cfg)
+
+        # Report any models that did not make it into self._models
+        failed = [name for name in models_cfg if name not in self._models]
+        if failed:
+            logger.error(
+                "CRITICAL: %d model(s) failed to load: %s\n"
+                "Check the log messages above for details.",
+                len(failed), ", ".join(failed),
+            )
+
+        # Quick inference smoke test for loaded models
+        for name in list(self._models):
+            try:
+                handle = self._models[name]
+                with handle.lock:
+                    # Minimal completion to verify the model responds
+                    handle.llm.create_chat_completion(
+                        messages=[{"role": "user", "content": "Hi"}],
+                        temperature=0.0,
+                        max_tokens=1,
+                    )
+                detected_format = getattr(handle.llm, "chat_format", "not available")
+                logger.info(
+                    "✅ Model '%s' smoke test passed. Chat format: %s",
+                    name, detected_format,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "❌ Model '%s' smoke test FAILED: %s\n"
+                    "  → The model loaded but cannot generate responses.\n"
+                    "  → This often means the chat_format is wrong.\n"
+                    "  → Try adding 'chat_format': 'chatml' (Qwen) or 'llama-3' (Llama) to config.",
+                    name, exc,
+                )
+                if name not in failed:
+                    failed.append(name)
+
+        return failed
 
     # ------------------------------------------------------------------
     # Inference
