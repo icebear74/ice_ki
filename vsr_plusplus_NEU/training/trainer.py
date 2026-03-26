@@ -1634,8 +1634,12 @@ class VSRTrainer:
             )
             return
 
-        # Determine data root and dataset name from config
-        data_root = self.config.get('DATA_ROOT', '')
+        # Determine data root and dataset name from config.
+        # DATASET_ROOT is the parent directory (without dataset_name appended).
+        # DATA_ROOT = DATASET_ROOT/DEFAULT_DATASET_NAME, so using it would
+        # cause a doubled sub-folder (e.g. …/master/master/val/…).
+        data_root = self.config.get('DATASET_ROOT',
+                                    self.config.get('DATA_ROOT', ''))
         dataset_name = self.config.get('DEFAULT_DATASET_NAME', 'master')
 
         # Build config snapshot (only the fields needed by the async validator)
