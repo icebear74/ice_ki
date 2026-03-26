@@ -201,9 +201,42 @@ class CompleteTrainingDataStore:
             self._full_state['last_update_time'] = time.time()
     
     def get_complete_snapshot(self):
-        """Liefert vollständige Kopie aller Daten"""
+        """Liefert vollständige Kopie aller Daten (inkl. transiente Felder für die Live-UI)."""
         with self._data_lock:
             return self._full_state.copy()
+
+    # Fields that only make sense while a validation cycle is actively running.
+    # They MUST NOT appear in persistent export files (Statistik_*.json) because:
+    #  - val_status reflects in-flight UI progress, not stable training state.
+    #  - validation_running is always False at the point any file is saved; keeping
+    #    it would just add noise that could confuse automated analysis scripts.
+    _TRANSIENT_FIELDS = ('val_status', 'validation_running')
+
+    def get_export_snapshot(self, override_step=None):
+        """
+        Liefert eine Kopie aller stabilen Trainingsdaten für den Dateiexport.
+
+        Im Gegensatz zu ``get_complete_snapshot()`` werden transiente Laufzeit-
+        felder entfernt, die nur für die Live-WebUI relevant sind.  Außerdem kann
+        ``override_step`` gesetzt werden, damit ``step_current`` im Snapshot mit
+        dem Dateinamen (Validierungsschritt) übereinstimmt.
+
+        Args:
+            override_step: Wenn angegeben, wird ``step_current`` im Snapshot auf
+                           diesen Wert gesetzt (Validierungsschritt).
+        """
+        with self._data_lock:
+            snapshot = self._full_state.copy()
+
+        # Strip transient runtime fields
+        for k in self._TRANSIENT_FIELDS:
+            snapshot.pop(k, None)
+
+        # Align step_current with the validation step so filename and field match
+        if override_step is not None:
+            snapshot['step_current'] = override_step
+
+        return snapshot
 
 
 class WebMonitorRequestProcessor(BaseHTTPRequestHandler):

@@ -1707,6 +1707,32 @@ class VSRTrainer:
         ki_quality = result.get('ki_quality')
         self.last_validation_quality = ki_quality
 
+        # Push validation quality metrics to web_monitor IMMEDIATELY.
+        # Without this, the data store would keep stale values until the NEXT
+        # _update_gui() call (which runs at the START of each training iteration,
+        # *before* _poll_async_val_result).  Any download or Statistik JSON save
+        # that happens in that 1-step window would therefore report the previous
+        # validation's numbers.
+        #
+        # Scaling note: web_monitor stores quality values as raw fractions (0-1),
+        # exactly as the validator returns them.  _update_gui multiplies by 100
+        # for display and then divides back by 100 before storing, so the net
+        # stored value is identical to the raw validator output.  We follow the
+        # same convention here.
+        best_quality_now = (
+            self.checkpoint_mgr.best_quality
+            if self.checkpoint_mgr.best_quality > 0 else 0.0
+        )
+        self.web_monitor.data_store.update_all_metrics(
+            quality_lr_value=result.get('lr_quality', 0.0),
+            quality_ki_value=ki_quality if ki_quality is not None else 0.0,
+            quality_improvement_value=result.get('improvement', 0.0),
+            quality_ki_to_gt_value=result.get('ki_to_gt', 0.0),
+            quality_lr_to_gt_value=result.get('lr_to_gt', 0.0),
+            validation_loss_value=result.get('val_loss', 0.0),
+            best_quality_ever=best_quality_now,
+        )
+
         self.adaptive_system.update_validation_tracker(
             result.get('val_loss'),
             ki_quality
@@ -2261,16 +2287,27 @@ class VSRTrainer:
     
     def _save_statistics_json(self, step):
         """
-        Save complete training statistics as JSON file
-        
-        Saves to DATA_ROOT/Statistik_STEP.json with all data from web monitor
-        
+        Save complete training statistics as JSON file.
+
+        Saves to DATA_ROOT/Statistik_STEP.json.  The snapshot is taken from the
+        web-monitor data store via ``get_export_snapshot()``, which:
+
+          - Strips transient runtime fields (``val_status``, ``validation_running``)
+            that are meaningless in a persisted file and could confuse analysis
+            scripts that read the Statistik files.
+          - Overrides ``step_current`` with *step* so the filename
+            ``Statistik_{step}.json`` and the ``step_current`` field inside the
+            file are always consistent (without the override the field would be
+            2 steps ahead because of the 2-step save delay).
+
         Args:
-            step: Current training step
+            step: The validation step this file belongs to.
         """
         try:
-            # Get complete data snapshot from web monitor (same as web UI download)
-            data_snapshot = self.web_monitor.data_store.get_complete_snapshot()
+            # Use the export snapshot (strips transient fields, aligns step_current)
+            data_snapshot = self.web_monitor.data_store.get_export_snapshot(
+                override_step=step
+            )
             
             # Get DATA_ROOT from config (Learning directory)
             data_root = self.config.get('DATA_ROOT', './Learn')
