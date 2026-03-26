@@ -733,13 +733,17 @@ def main():
         print(f"   Sizes: {val_sizes_with_data}")
         print(f"{C_CYAN}{'='*60}{C_RESET}\n")
 
+        _async_val_log_path = os.path.join(DATASET_SPECIFIC_ROOT, 'async_val.log')
         try:
+            _async_val_log_fh = open(_async_val_log_path, 'a')
             async_val_proc = subprocess.Popen(
                 async_val_cmd,
-                stdout=open(os.path.join(DATASET_SPECIFIC_ROOT, 'async_val.log'), 'a'),
+                stdout=_async_val_log_fh,
                 stderr=subprocess.STDOUT,
                 cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             )
+            # Close our copy of the file handle – the child process has its own.
+            _async_val_log_fh.close()
             print(f"{C_GREEN}✓ Async validator PID {async_val_proc.pid}{C_RESET}\n")
         except Exception as e:
             print(f"{C_YELLOW}⚠ Failed to start async validator: {e}{C_RESET}")

@@ -13,6 +13,7 @@ Coordinates all training components:
 import time
 import os
 import json
+from collections import deque
 import torch
 from torch.amp import autocast
 from ..utils.ui_display import draw_ui, get_activity_data
@@ -78,13 +79,14 @@ class VSRTrainer:
         # Rolling window of the last 200 optimizer-step durations (seconds each).
         # Using 200 steps gives a stable, representative average without
         # over-weighting stale measurements from many steps ago.
-        self.step_times = []   # max 200 entries
+        # deque(maxlen=200) gives O(1) append + automatic eviction of old entries.
+        self.step_times = deque(maxlen=200)
         
         # Rolling window of per-sample validation durations (seconds per sample).
         # Validation speed includes the full cycle: model forward pass + metric
         # computation + TensorBoard image logging + disk writes.
         # 1 entry = 1 GT/LR pair processed.  Kept to the last 200 samples.
-        self._val_sample_timings = []   # max 200 entries
+        self._val_sample_timings = deque(maxlen=200)
         self.last_val_iter_per_sec = 0.0  # published to UI / WebMonitor
         
         # EMA for GUI smoothing (factor 0.95)
@@ -562,16 +564,16 @@ class VSRTrainer:
                 live_files = display_files + [
                     f for item in current_window_batches for f in item['files']
                 ]
+                # Build per-size counts in a single pass (O(n)) instead of
+                # re-scanning the list once per size key (O(n·m)).
                 live_fps = {'720': 0, '540': 0, '720_169': 0}
-                if live_files:
-                    # Recompute per-size counts from live_files list
-                    for item in ([{'size_key': _sk, 'files': [ff for ff in display_files if ff.startswith(_sk + '/')]}
-                                   for _sk in ['720', '540', '720_169']]):
-                        live_fps[item['size_key']] = len(item['files'])
-                    # Also count in-progress batches
-                    for item in current_window_batches:
-                        sk_item = item['size_key']
-                        live_fps[sk_item] = live_fps.get(sk_item, 0) + len(item['files'])
+                for f in display_files:
+                    sk_prefix = f.split('/', 1)[0]
+                    if sk_prefix in live_fps:
+                        live_fps[sk_prefix] += 1
+                for item in current_window_batches:
+                    sk_item = item['size_key']
+                    live_fps[sk_item] = live_fps.get(sk_item, 0) + len(item['files'])
 
                 # Update web_monitor with current batch info.
                 # live_files always reflects ALL files of the current iteration
@@ -719,8 +721,6 @@ class VSRTrainer:
                     torch.cuda.synchronize()
                 step_time = time.time() - loop_start_time
                 self.step_times.append(step_time)
-                if len(self.step_times) > 200:
-                    self.step_times.pop(0)
                 
                 avg_time = sum(self.step_times) / len(self.step_times)
                 
@@ -1789,14 +1789,15 @@ class VSRTrainer:
 
         per_sample_sec = elapsed_seconds / total_samples
 
-        # Extend the rolling window with one entry per sample (or up to 200 new
-        # entries so we don't blow up the list if the dataset is very large).
+        # Extend the rolling window.  We add one entry per sample (capped at 200)
+        # so each cycle contributes weight proportional to how many samples it
+        # processed.  deque(maxlen=200) evicts old entries automatically.
+        # Adding the same per_sample_sec value multiple times is intentional:
+        # it represents the measured throughput for all validated samples in this
+        # cycle and weights the rolling average accordingly.
         entries_to_add = min(total_samples, 200)
         for _ in range(entries_to_add):
             self._val_sample_timings.append(per_sample_sec)
-        # Trim to keep only the last 200 entries
-        if len(self._val_sample_timings) > 200:
-            self._val_sample_timings = self._val_sample_timings[-200:]
 
         # Compute speed from the window
         if self._val_sample_timings:
