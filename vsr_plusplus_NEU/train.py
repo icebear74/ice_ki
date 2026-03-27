@@ -685,12 +685,102 @@ def main():
     trainer._check_dataset_files()
     print(f"{C_GREEN}✓ Dataset file counts initialized{C_RESET}\n")
     
+    # ── Async validation setup ────────────────────────────────────────────────
+    # Set ASYNC_VAL_GPU in your config.py to the GPU index that should run
+    # validation (e.g. ASYNC_VAL_GPU = 1).  Leave unset (or set to None) to
+    # use the default synchronous validation that runs inline on the training GPU.
+    async_val_gpu = config.get('ASYNC_VAL_GPU', None)
+    async_val_proc = None
+
+    if async_val_gpu is not None:
+        # Determine which size keys have validation data
+        val_sizes_with_data = [sk for sk, _ in val_loaders]
+
+        # Write a config snapshot JSON so the subprocess can reconstruct the model
+        config_json_path = os.path.join(DATASET_SPECIFIC_ROOT, 'async_val_config.json')
+        config_snapshot = {
+            'N_FEATS':           config.get('N_FEATS', 72),
+            'N_BLOCKS':          config.get('N_BLOCKS', 28),
+            'USE_CHECKPOINTING': config.get('USE_CHECKPOINTING', False),
+            'L1_WEIGHT':         config.get('L1_WEIGHT', 0.60),
+            'MS_WEIGHT':         config.get('MS_WEIGHT', 0.20),
+            'GRAD_WEIGHT':       config.get('GRAD_WEIGHT', 0.20),
+            'PERCEPTUAL_WEIGHT': config.get('PERCEPTUAL_WEIGHT', 0.0),
+        }
+        try:
+            with open(config_json_path, 'w') as f:
+                json.dump(config_snapshot, f, indent=2)
+        except Exception as e:
+            print(f"{C_YELLOW}⚠ Could not write async_val_config.json: {e}{C_RESET}")
+            config_json_path = None
+
+        tb_log_dir = os.path.join(DATASET_SPECIFIC_ROOT, "logs")
+
+        # Build the subprocess command.  -u = unbuffered so every print()
+        # appears in async_val.log immediately (Python uses block buffering
+        # when stdout is redirected to a file).
+        async_val_cmd = [
+            sys.executable, '-u', '-m', 'vsr_plusplus_NEU.training.async_validator',
+            '--checkpoint-dir', DATASET_SPECIFIC_ROOT,
+            '--data-root',      data_root,
+            '--dataset-name',   dataset_name,
+            '--log-dir',        tb_log_dir,
+            '--gpu',            str(async_val_gpu),
+        ]
+        if config_json_path:
+            async_val_cmd += ['--config-json', config_json_path]
+
+        print(f"\n{C_CYAN}{'='*60}{C_RESET}")
+        print(f"{C_GREEN}🔀 Starting async validation process on GPU {async_val_gpu}{C_RESET}")
+        print(f"   Sizes: {val_sizes_with_data}")
+        print(f"{C_CYAN}{'='*60}{C_RESET}\n")
+
+        _async_val_log_path = os.path.join(DATASET_SPECIFIC_ROOT, 'async_val.log')
+        try:
+            _async_val_log_fh = open(_async_val_log_path, 'a')
+            async_val_proc = subprocess.Popen(
+                async_val_cmd,
+                stdout=_async_val_log_fh,
+                stderr=subprocess.STDOUT,
+                cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            )
+            # Close our copy of the file handle – the child process has its own.
+            _async_val_log_fh.close()
+            print(f"{C_GREEN}✓ Async validator PID {async_val_proc.pid}{C_RESET}\n")
+        except Exception as e:
+            print(f"{C_YELLOW}⚠ Failed to start async validator: {e}{C_RESET}")
+            print(f"{C_YELLOW}  Falling back to synchronous validation.{C_RESET}\n")
+            async_val_proc = None
+
+        if async_val_proc is not None:
+            trainer.enable_async_validation(
+                checkpoint_dir=DATASET_SPECIFIC_ROOT,
+                val_sizes=val_sizes_with_data,
+                log_dir=tb_log_dir,
+                proc=async_val_proc,
+                restart_cmd=async_val_cmd,
+                log_path=_async_val_log_path,
+            )
+    # ── End async validation setup ────────────────────────────────────────────
+
     # Start training
     print("="*80)
     print("🚀 Starting training...")
     print("="*80 + "\n")
     
-    trainer.run()
+    try:
+        trainer.run()
+    finally:
+        # Signal the async validator to stop when training ends
+        if async_val_proc is not None:
+            stop_file = os.path.join(DATASET_SPECIFIC_ROOT, 'async_val_stop')
+            try:
+                open(stop_file, 'w').close()
+                print(f"{C_CYAN}💬 Async validator stop signal sent.{C_RESET}")
+                async_val_proc.wait(timeout=30)
+                print(f"{C_GREEN}✓ Async validator exited.{C_RESET}")
+            except Exception:
+                async_val_proc.terminate()
     
     print("\n" + "="*80)
     print("✅ Training complete!")

@@ -198,6 +198,25 @@ USE_CHECKPOINTING = True
 
 
 # ============================================================================
+# ASYNC VALIDATION (optional – requires a second GPU)
+# ============================================================================
+
+# GPU index for the async validation process.
+#
+# Set to an integer (e.g. 1) to enable asynchronous validation:
+#   - Training runs uninterrupted on the primary GPU (selected at startup).
+#   - A separate process is launched that uses GPU <ASYNC_VAL_GPU> exclusively
+#     for validation.  It monitors for new model-weights checkpoints written
+#     by the training process, runs full validation (incl. TensorBoard image
+#     writes), and feeds the results back through a shared JSON file.
+#   - Manual validation (key 'v' or WebUI button) still runs synchronously on
+#     demand and is not affected by this setting.
+#
+# Set to None to disable async validation (default synchronous behaviour):
+ASYNC_VAL_GPU = None   # e.g. set to 1 for Tesla P4 on a dual-GPU machine
+
+
+# ============================================================================
 # HELPER FUNCTION
 # ============================================================================
 
@@ -255,6 +274,9 @@ def get_config():
     # Add AMP setting (always include so training code can rely on its presence)
     config['USE_AMP'] = USE_AMP
     config['USE_CHECKPOINTING'] = USE_CHECKPOINTING
+
+    # Async validation GPU (None = synchronous mode)
+    config['ASYNC_VAL_GPU'] = ASYNC_VAL_GPU
     
     return config
 

@@ -13,6 +13,9 @@ Coordinates all training components:
 import time
 import os
 import json
+import subprocess
+import sys
+from collections import deque
 import torch
 from torch.amp import autocast
 from ..utils.ui_display import draw_ui, get_activity_data
@@ -75,7 +78,18 @@ class VSRTrainer:
         self.last_validation_quality = None
         
         # Performance tracking
-        self.step_times = []
+        # Rolling window of the last 200 optimizer-step durations (seconds each).
+        # Using 200 steps gives a stable, representative average without
+        # over-weighting stale measurements from many steps ago.
+        # deque(maxlen=200) gives O(1) append + automatic eviction of old entries.
+        self.step_times = deque(maxlen=200)
+        
+        # Rolling window of per-sample validation durations (seconds per sample).
+        # Validation speed includes the full cycle: model forward pass + metric
+        # computation + TensorBoard image logging + disk writes.
+        # 1 entry = 1 GT/LR pair processed.  Kept to the last 200 samples.
+        self._val_sample_timings = deque(maxlen=200)
+        self.last_val_iter_per_sec = 0.0  # published to UI / WebMonitor
         
         # EMA for GUI smoothing (factor 0.95)
         self.ema_loss = None
@@ -90,9 +104,6 @@ class VSRTrainer:
         self.waiting_for_crops = False
         self._crop_wait_next_check = 0.0   # monotonic timestamp of next auto-rescan
         self._crop_wait_current_count = 0  # last known combined 540+720 count
-        
-        # Pending JSON save tracking (save after validation + N steps)
-        self.pending_json_save_step = None
         
         # Adaptive mode change tracking for TensorBoard phase transition logging
         self._last_adaptive_mode = 'Stable'
@@ -204,63 +215,122 @@ class VSRTrainer:
         # uses the most current images (covers periodic, manual, web-UI and snapshot calls).
         self._reload_val_datasets_if_needed()
 
-        if not hasattr(self, 'val_loaders') or not self.val_loaders:
-            # Fallback to single-size validation
-            return self.validator.validate(self.global_step)
-        
-        print(f"\n{C_CYAN}Running multi-size validation on {len(self.val_loaders)} sizes...{C_RESET}")
-        
-        # Run validation on each size
-        all_metrics = []
-        all_labeled_images = []
-        
-        for size_key, val_loader in self.val_loaders:
-            print(f"  Validating {size_key}...")
-            
-            # Temporarily swap loader
-            original_loader = self.validator.val_loader
-            self.validator.val_loader = val_loader
-            
-            # Run validation
-            metrics = self.validator.validate(self.global_step)
-            
-            # Restore original loader
-            self.validator.val_loader = original_loader
-            
-            # Collect labeled images with size prefix
-            if 'labeled_images' in metrics and metrics['labeled_images'] is not None:
-                # Build tag as val_{size_key}/{filename_stem}
-                for name, img in metrics['labeled_images']:
-                    all_labeled_images.append((f"val_{size_key}/{name}", img))
-            
-            # Store metrics
-            all_metrics.append((size_key, metrics))
-            print(f"    ✓ {size_key}: KI Quality {metrics['ki_quality']*100:.1f}%, PSNR {metrics['ki_psnr']:.2f}dB")
-        
-        # Combine metrics by averaging
-        combined_metrics = {
-            'val_loss': sum(m['val_loss'] for _, m in all_metrics) / len(all_metrics),
-            'lr_quality': sum(m['lr_quality'] for _, m in all_metrics) / len(all_metrics),
-            'ki_quality': sum(m['ki_quality'] for _, m in all_metrics) / len(all_metrics),
-            'improvement': sum(m['improvement'] for _, m in all_metrics) / len(all_metrics),
-            'lr_psnr': sum(m['lr_psnr'] for _, m in all_metrics) / len(all_metrics),
-            'lr_ssim': sum(m['lr_ssim'] for _, m in all_metrics) / len(all_metrics),
-            'ki_psnr': sum(m['ki_psnr'] for _, m in all_metrics) / len(all_metrics),
-            'ki_ssim': sum(m['ki_ssim'] for _, m in all_metrics) / len(all_metrics),
-            'ki_to_gt': sum(m.get('ki_to_gt', 0) for _, m in all_metrics) / len(all_metrics),
-            'lr_to_gt': sum(m.get('lr_to_gt', 0) for _, m in all_metrics) / len(all_metrics),
-        }
-        
-        # Include all labeled images from all sizes (list of (tag, tensor) tuples)
-        if all_labeled_images:
-            combined_metrics['labeled_images'] = all_labeled_images
-        
-        # Store per-size metrics for detailed logging
-        combined_metrics['per_size_metrics'] = {size_key: m for size_key, m in all_metrics}
-        
-        print(f"{C_GREEN}✅ Multi-size validation complete - Average KI Quality: {combined_metrics['ki_quality']*100:.1f}%{C_RESET}\n")
-        
-        return combined_metrics
+        # ── Signal validation start to WebUI ─────────────────────────────────
+        self.web_monitor.data_store.update_all_metrics(
+            validation_running=True,
+            val_status={'running': True, 'phase': 'validating',
+                        'done': 0, 'total': 0, 'pct': 0.0, 'size_key': ''},
+        )
+
+        try:
+            if not hasattr(self, 'val_loaders') or not self.val_loaders:
+                # Fallback to single-size validation
+                total_batches = len(self.validator.val_loader) if self.validator.val_loader else 0
+                self.web_monitor.data_store.update_all_metrics(
+                    val_status={'running': True, 'phase': 'validating',
+                                'done': 0, 'total': total_batches, 'pct': 0.0, 'size_key': 'default'},
+                )
+                def _cb(done, total):
+                    pct = done / total * 100 if total else 0.0
+                    self.web_monitor.data_store.update_all_metrics(
+                        val_status={'running': True, 'phase': 'validating',
+                                    'done': done, 'total': total, 'pct': pct, 'size_key': 'default'},
+                    )
+                return self.validator.validate(self.global_step, progress_callback=_cb)
+
+            print(f"\n{C_CYAN}Running multi-size validation on {len(self.val_loaders)} sizes...{C_RESET}")
+
+            # Pre-calculate total batches across all sizes for global progress
+            size_batch_counts = [(sk, len(loader)) for sk, loader in self.val_loaders]
+            global_total = sum(n for _, n in size_batch_counts)
+            global_done = 0
+
+            # Run validation on each size
+            all_metrics = []
+            all_labeled_images = []
+
+            for size_key, val_loader in self.val_loaders:
+                print(f"  Validating {size_key}...")
+                size_total = len(val_loader)
+                size_done_offset = global_done
+
+                # Build per-size callback that updates the global counter
+                def _make_cb(sk, offset):
+                    def _cb(done, _total):
+                        nonlocal global_done
+                        # global_done = offset + done (avoid double-counting)
+                        global_done = offset + done
+                        pct = global_done / global_total * 100 if global_total else 0.0
+                        self.web_monitor.data_store.update_all_metrics(
+                            val_status={'running': True, 'phase': 'validating',
+                                        'done': global_done, 'total': global_total,
+                                        'pct': pct, 'size_key': sk},
+                        )
+                    return _cb
+
+                progress_cb = _make_cb(size_key, size_done_offset)
+
+                # Temporarily swap loader
+                original_loader = self.validator.val_loader
+                self.validator.val_loader = val_loader
+
+                # Run validation
+                metrics = self.validator.validate(self.global_step, progress_callback=progress_cb)
+
+                # Restore original loader
+                self.validator.val_loader = original_loader
+
+                global_done = size_done_offset + size_total  # mark size as fully done
+
+                # Collect labeled images with size prefix
+                if 'labeled_images' in metrics and metrics['labeled_images'] is not None:
+                    # Build tag as val_{size_key}/{filename_stem}
+                    for name, img in metrics['labeled_images']:
+                        all_labeled_images.append((f"val_{size_key}/{name}", img))
+
+                # Store metrics
+                all_metrics.append((size_key, metrics))
+                print(f"    ✓ {size_key}: KI Quality {metrics['ki_quality']*100:.1f}%, PSNR {metrics['ki_psnr']:.2f}dB")
+
+            # ── Signal "saving" phase (TensorBoard image write) ───────────────
+            self.web_monitor.data_store.update_all_metrics(
+                val_status={'running': True, 'phase': 'saving',
+                            'done': global_total, 'total': global_total,
+                            'pct': 100.0, 'size_key': ''},
+            )
+
+            # Combine metrics by averaging
+            combined_metrics = {
+                'val_loss': sum(m['val_loss'] for _, m in all_metrics) / len(all_metrics),
+                'lr_quality': sum(m['lr_quality'] for _, m in all_metrics) / len(all_metrics),
+                'ki_quality': sum(m['ki_quality'] for _, m in all_metrics) / len(all_metrics),
+                'improvement': sum(m['improvement'] for _, m in all_metrics) / len(all_metrics),
+                'lr_psnr': sum(m['lr_psnr'] for _, m in all_metrics) / len(all_metrics),
+                'lr_ssim': sum(m['lr_ssim'] for _, m in all_metrics) / len(all_metrics),
+                'ki_psnr': sum(m['ki_psnr'] for _, m in all_metrics) / len(all_metrics),
+                'ki_ssim': sum(m['ki_ssim'] for _, m in all_metrics) / len(all_metrics),
+                'ki_to_gt': sum(m.get('ki_to_gt', 0) for _, m in all_metrics) / len(all_metrics),
+                'lr_to_gt': sum(m.get('lr_to_gt', 0) for _, m in all_metrics) / len(all_metrics),
+            }
+
+            # Include all labeled images from all sizes (list of (tag, tensor) tuples)
+            if all_labeled_images:
+                combined_metrics['labeled_images'] = all_labeled_images
+
+            # Store per-size metrics for detailed logging
+            combined_metrics['per_size_metrics'] = {size_key: m for size_key, m in all_metrics}
+
+            print(f"{C_GREEN}✅ Multi-size validation complete - Average KI Quality: {combined_metrics['ki_quality']*100:.1f}%{C_RESET}\n")
+
+            return combined_metrics
+
+        finally:
+            # ── Always clear validation-running flag ──────────────────────────
+            self.web_monitor.data_store.update_all_metrics(
+                validation_running=False,
+                val_status={'running': False, 'phase': 'idle',
+                            'done': 0, 'total': 0, 'pct': 0.0, 'size_key': ''},
+            )
     
     def train_epoch(self, epoch):
         """
@@ -324,7 +394,12 @@ class VSRTrainer:
         # Cumulative per-size file counter for the current epoch (used by WebUI).
         # This is a local variable – reset automatically on each call to train_epoch.
         epoch_files_per_size = {'720': 0, '540': 0, '720_169': 0}
-        
+
+        # AdamW momentum value (updated at every optimizer step).  Initialized
+        # here so _update_gui() can always read a defined value even before the
+        # first optimizer step of the epoch.
+        adam_momentum = 0.0
+
         # Initialize loop timing
         loop_start_time = time.time()
         
@@ -396,10 +471,18 @@ class VSRTrainer:
             
             # Manual validation trigger
             if self.do_manual_val:
-                self._run_validation()
+                if getattr(self, 'use_async_validation', False):
+                    # Async path: just like the scheduled trigger – saves a
+                    # weights-only checkpoint and signals the async validator.
+                    # Training continues unblocked after this call.
+                    self._request_async_validation()
+                else:
+                    # Synchronous path (default or no second GPU): blocks until
+                    # the full validation cycle (incl. TensorBoard writes) is done.
+                    self._run_validation()
+                    # Reset timing after the blocking validation
+                    loop_start_time = time.time()
                 self.do_manual_val = False
-                # Reset timing after validation
-                loop_start_time = time.time()
             
             # Handle both single-size (tuple) and multi-size (dict) batches
             if isinstance(batch, dict):
@@ -468,8 +551,8 @@ class VSRTrainer:
                         'size_key': size_key,
                         'files': formatted_files,
                     })
-                    # When the window is complete, snapshot it for display and
-                    # reset so the next window starts fresh.
+                    # When the window is complete, snapshot it as the *committed*
+                    # display and reset so the next window starts fresh.
                     if len(current_window_batches) >= current_accum_steps:
                         display_files = [
                             f for item in current_window_batches for f in item['files']
@@ -479,19 +562,38 @@ class VSRTrainer:
                             sk = item['size_key']
                             display_fps[sk] = display_fps.get(sk, 0) + len(item['files'])
                         current_window_batches = []  # ready for next window
-                
+
+                # Always show the CURRENT iteration's files: merge the committed
+                # display_files with any in-progress batches from the current
+                # (not-yet-complete) accumulation window so that every forward
+                # pass appears in the WebUI immediately, regardless of batch size
+                # or accumulation depth.
+                live_files = display_files + [
+                    f for item in current_window_batches for f in item['files']
+                ]
+                # Build per-size counts in a single pass (O(n)) instead of
+                # re-scanning the list once per size key (O(n·m)).
+                live_fps = {'720': 0, '540': 0, '720_169': 0}
+                for f in display_files:
+                    sk_prefix = f.split('/', 1)[0]
+                    if sk_prefix in live_fps:
+                        live_fps[sk_prefix] += 1
+                for item in current_window_batches:
+                    sk_item = item['size_key']
+                    live_fps[sk_item] = live_fps.get(sk_item, 0) + len(item['files'])
+
                 # Update web_monitor with current batch info.
-                # display_files/display_fps hold the last complete window so the
-                # list is always either empty (epoch start, before first complete
-                # window) or exactly current_accum_steps files of the same size.
+                # live_files always reflects ALL files of the current iteration
+                # (complete windows + the in-progress window), so the display is
+                # never blank mid-accumulation.
                 self.web_monitor.data_store.update_all_metrics(
                     current_batch={
-                        'files': display_files,
+                        'files': live_files,
                         'size_key': size_key,
                         'batch_size': batch_size_val,
                         'files_used_in_epoch': files_used_in_epoch,
                         'total_files_in_epoch': total_files_in_epoch,
-                        'files_per_size': display_fps,
+                        'files_per_size': live_fps,
                         'epoch_files_per_size': dict(epoch_files_per_size),
                         'accumulation_steps': current_accum_steps,
                         'accum_step': accum_counter + 1,
@@ -626,8 +728,6 @@ class VSRTrainer:
                     torch.cuda.synchronize()
                 step_time = time.time() - loop_start_time
                 self.step_times.append(step_time)
-                if len(self.step_times) > 100:
-                    self.step_times.pop(0)
                 
                 avg_time = sum(self.step_times) / len(self.step_times)
                 
@@ -662,11 +762,6 @@ class VSRTrainer:
                 
                 # Update GUI with smoothed values
                 self._update_gui(epoch, smoothed_loss_dict, avg_time, steps_per_epoch, current_epoch_step, adam_momentum=adam_momentum)
-                
-                # Check if we need to save JSON (delayed save after validation)
-                if self.pending_json_save_step is not None and self.global_step >= self.pending_json_save_step:
-                    self._save_statistics_json(self.pending_json_save_step - 2)  # Save with original validation step
-                    self.pending_json_save_step = None  # Clear pending save
                 
                 # TensorBoard logging (use RAW values, not smoothed)
                 if self.global_step % self.config.get('LOG_TBOARD_EVERY', 100) == 0:
@@ -766,8 +861,8 @@ class VSRTrainer:
                                 crop_file_counts=_mid_crop_counts,
                             )
                             _mid_sampler.set_distribution(_mid_dist)
-                        # Log phase transition if one occurred
-                        self.data_strategy_scheduler.check_phase_transition(
+                        # Log phase transition if one occurred; capture True/False return value.
+                        _phase_changed = self.data_strategy_scheduler.check_phase_transition(
                             self.global_step,
                             log_fn=self.train_logger.log_event,
                             crop_file_counts=_mid_crop_counts,
@@ -780,6 +875,28 @@ class VSRTrainer:
                             self.web_monitor.data_store.update_all_metrics(
                                 data_strategy_phase=_current_phase,
                             )
+                        # ── Phase-transition epoch break ──────────────────────────
+                        # SizeGroupedSampler.__iter__() materialises the full epoch
+                        # schedule once at the START of the epoch.  Calling
+                        # set_distribution() mid-epoch updates num_batches_per_size
+                        # but has no effect on the already-running iterator.
+                        #
+                        # When a transition is detected (e.g. warmup → crop_intro,
+                        # which unlocks 720 and 540 from weight 0 → non-zero), we
+                        # break out of the batch loop immediately.  The outer
+                        # `for epoch` loop in train() calls train_epoch() again,
+                        # which triggers a fresh __iter__ with the updated
+                        # distribution — so the new sizes are picked up within
+                        # at most one training step instead of waiting a full epoch.
+                        if _phase_changed:
+                            msg = (
+                                f"[DataStrategy] Phase → {_current_phase} at step "
+                                f"{self.global_step}: restarting epoch so new "
+                                f"size-group distribution takes effect immediately."
+                            )
+                            self.train_logger.log_event(msg)
+                            print(f"\n🔄 {msg}")
+                            break
                     # ── End mid-epoch data strategy update ───────────────────────
                 
                 # Status file update (every 5 steps)
@@ -794,112 +911,135 @@ class VSRTrainer:
                 if self.global_step % self.config.get('VAL_STEP_EVERY', 500) == 0:
                     self.train_logger.log_event(f"Running validation at step {self.global_step}")
                     
-                    metrics = self._run_multi_size_validation()
-                    self.last_metrics = metrics
-
-                    # Bug 1 fix: keep last_validation_quality in sync so the plateau
-                    # tracker receives the real quality on every update_plateau_tracker call.
-                    self.last_validation_quality = metrics.get('ki_quality', None)
-
-                    # Bug 5 fix: feed validation loss into the validation plateau tracker.
-                    self.adaptive_system.update_validation_tracker(
-                        metrics.get('val_loss'),
-                        metrics.get('ki_quality')
-                    )
-                    
-                    # Pass improvement to adaptive system for logging
-                    adaptive_status = self.adaptive_system.get_status()
-                    adaptive_status['ki_improvement'] = metrics.get('improvement', 0)
-                    
-                    # Log to TensorBoard with dashboards
-                    self.tb_logger.log_quality(self.global_step, metrics)
-                    self.tb_logger.log_metrics(self.global_step, metrics)
-                    self.tb_logger.log_validation_loss(self.global_step, metrics.get('val_loss', 0.0))
-                    self.tb_logger.log_adaptive(self.global_step, adaptive_status)
-                    
-                    # Log validation event
-                    self.tb_logger.log_validation_event(self.global_step, metrics)
-                    
-                    # Log ALL images (like in original)
-                    labeled_images = metrics.get('labeled_images')
-                    if labeled_images is not None and len(labeled_images) > 0:
-                        print(f"📊 Logging {len(labeled_images)} validation images to TensorBoard...")
-                        logged_count = 0
-                        failed_count = 0
-                        
-                        for tag, img_tensor in labeled_images:
-                            try:
-                                # Ensure tensor is in correct format for TensorBoard
-                                if img_tensor.device.type != 'cpu':
-                                    img_tensor = img_tensor.cpu()
-                                if not img_tensor.is_contiguous():
-                                    img_tensor = img_tensor.contiguous()
-                                
-                                self.tb_logger.writer.add_image(
-                                    tag, 
-                                    img_tensor, 
-                                    self.global_step
-                                )
-                                logged_count += 1
-                            except Exception as e:
-                                failed_count += 1
-                                print(f"⚠️  Failed to log validation image {tag}: {e}")
-                                self.train_logger.log_event(
-                                    f"Warning: Failed to log validation image {tag}: {e}"
-                                )
-                                # Continue with other images even if one fails
-                                continue
-                        
-                        # Flush to ensure images are written
-                        self.tb_logger.writer.flush()
-                        
-                        # Summary
-                        if failed_count == 0:
-                            print(f"✅ Successfully logged all {logged_count} validation images to TensorBoard")
-                        else:
-                            print(f"⚠️  Logged {logged_count}/{len(labeled_images)} images ({failed_count} failed)")
-                        
-                        # CRITICAL: Remove labeled_images from metrics to prevent memory leak
-                        # These images can be 2GB+ and were being held in self.last_metrics
-                        del labeled_images
-                        metrics.pop('labeled_images', None)
-                        
-                        # Force garbage collection and GPU memory cleanup
-                        import gc
-                        gc.collect()
-                        if torch.cuda.is_available():
-                            torch.cuda.empty_cache()
+                    if getattr(self, 'use_async_validation', False):
+                        # Async path: save weights-only checkpoint and signal the
+                        # async validator process.  Training continues immediately.
+                        self._request_async_validation()
                     else:
-                        print("⚠️  No labeled images to log to TensorBoard")
-                    
-                    self.train_logger.log_event(
-                        f"Step {self.global_step} | Validation | "
-                        f"KI Quality: {metrics['ki_quality']*100:.1f}%"
-                    )
-                    
-                    # Check for best checkpoint
-                    if self.checkpoint_mgr.should_check_best(self.global_step):
-                        print(f"\n💾 Checking if this is a new best checkpoint...")
-                        is_new_best = self.checkpoint_mgr.update_best_checkpoint(
-                            self.model, self.optimizer, self.lr_scheduler, 
-                            self.global_step, metrics['ki_quality'], metrics,
-                            self.train_logger.log_file
+                        # Synchronous path (default): block until validation completes.
+                        # --- timing start: covers forward pass + all I/O incl. TensorBoard ---
+                        _val_cycle_start = time.time()
+                        
+                        metrics = self._run_multi_size_validation()
+                        self.last_metrics = metrics
+
+                        # Keep last_validation_quality in sync so the plateau
+                        # tracker receives the real quality on every update call.
+                        self.last_validation_quality = metrics.get('ki_quality', None)
+
+                        # Feed validation loss into the validation plateau tracker.
+                        self.adaptive_system.update_validation_tracker(
+                            metrics.get('val_loss'),
+                            metrics.get('ki_quality')
                         )
                         
-                        if is_new_best:
-                            print(f"✅ New best checkpoint saved!")
-                            self.tb_logger.log_checkpoint(self.global_step, 'best')
+                        # Pass improvement to adaptive system for logging
+                        adaptive_status = self.adaptive_system.get_status()
+                        adaptive_status['ki_improvement'] = metrics.get('improvement', 0)
+                        
+                        # Log to TensorBoard with dashboards
+                        self.tb_logger.log_quality(self.global_step, metrics)
+                        self.tb_logger.log_metrics(self.global_step, metrics)
+                        self.tb_logger.log_validation_loss(self.global_step, metrics.get('val_loss', 0.0))
+                        self.tb_logger.log_adaptive(self.global_step, adaptive_status)
+                        
+                        # Log validation event
+                        self.tb_logger.log_validation_event(self.global_step, metrics)
+                        
+                        # Log ALL images (like in original)
+                        labeled_images = metrics.get('labeled_images')
+                        if labeled_images is not None and len(labeled_images) > 0:
+                            print(f"📊 Logging {len(labeled_images)} validation images to TensorBoard...")
+                            logged_count = 0
+                            failed_count = 0
+                            
+                            for tag, img_tensor in labeled_images:
+                                try:
+                                    # Ensure tensor is in correct format for TensorBoard
+                                    if img_tensor.device.type != 'cpu':
+                                        img_tensor = img_tensor.cpu()
+                                    if not img_tensor.is_contiguous():
+                                        img_tensor = img_tensor.contiguous()
+                                    
+                                    self.tb_logger.writer.add_image(
+                                        tag, 
+                                        img_tensor, 
+                                        self.global_step
+                                    )
+                                    logged_count += 1
+                                except Exception as e:
+                                    failed_count += 1
+                                    print(f"⚠️  Failed to log validation image {tag}: {e}")
+                                    self.train_logger.log_event(
+                                        f"Warning: Failed to log validation image {tag}: {e}"
+                                    )
+                                    continue
+                            
+                            # Flush to ensure images are written
+                            self.tb_logger.writer.flush()
+                            
+                            if failed_count == 0:
+                                print(f"✅ Successfully logged all {logged_count} validation images to TensorBoard")
+                            else:
+                                print(f"⚠️  Logged {logged_count}/{len(labeled_images)} images ({failed_count} failed)")
+                            
+                            # CRITICAL: Remove labeled_images from metrics to prevent memory leak
+                            del labeled_images
+                            metrics.pop('labeled_images', None)
+                            
+                            import gc
+                            gc.collect()
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
                         else:
-                            print(f"   (Not better than current best)")
-                    
-                    # Reset timing after validation
-                    loop_start_time = time.time()
-                    
-                    # Redraw UI after validation completes
-                    self._update_gui()
-                    
-                    # Schedule JSON save for 2 steps later (so web_monitor gets updated with fresh loss data)
-                    self.pending_json_save_step = self.global_step + 2
+                            print("⚠️  No labeled images to log to TensorBoard")
+                        
+                        # --- timing end: full cycle including TensorBoard flush ---
+                        _val_cycle_elapsed = time.time() - _val_cycle_start
+                        self._update_val_speed(_val_cycle_elapsed)
+
+                        self.train_logger.log_event(
+                            f"Step {self.global_step} | Validation | "
+                            f"KI Quality: {metrics['ki_quality']*100:.1f}%"
+                        )
+                        
+                        # Best-checkpoint check (must precede _push_val_metrics_to_store
+                        # so best_quality_ever is final before the atomic write).
+                        if self.checkpoint_mgr.should_check_best(self.global_step):
+                            print(f"\n💾 Checking if this is a new best checkpoint...")
+                            is_new_best = self.checkpoint_mgr.update_best_checkpoint(
+                                self.model, self.optimizer, self.lr_scheduler, 
+                                self.global_step, metrics['ki_quality'], metrics,
+                                self.train_logger.log_file
+                            )
+                            if is_new_best:
+                                print(f"✅ New best checkpoint saved!")
+                                self.tb_logger.log_checkpoint(self.global_step, 'best')
+                            else:
+                                print(f"   (Not better than current best)")
+
+                        # Single atomic write of all quality metrics to the data store.
+                        # Must happen BEFORE _update_gui() (which is called with no
+                        # loss_dict and would zero out loss values in the store).
+                        self._push_val_metrics_to_store(metrics, self.global_step)
+
+                        # Write Statistik_<step>.json immediately – while the data
+                        # store still holds the real training losses from the last
+                        # training step.  The no-arg _update_gui() call below would
+                        # overwrite those losses with 0.0, which is why we save here.
+                        self._save_statistics_json(self.global_step)
+
+                        # Reset timing after validation
+                        loop_start_time = time.time()
+                        
+                        # Redraw terminal UI (called with no loss_dict → losses show
+                        # as 0 in the terminal display until the next real step, but
+                        # the data store / JSON are already correct).
+                        self._update_gui()
+
+                # Poll for async validation results (every step, cheap file-existence check)
+                if getattr(self, 'use_async_validation', False):
+                    self._poll_async_val_result()
                 
                 # Check dataset files every 100 steps
                 if self.global_step % 100 == 0:
@@ -1061,7 +1201,8 @@ class VSRTrainer:
             lr_info=lr_info,
             total_eta=total_eta,
             epoch_eta=epoch_eta,
-            adam_momentum=adam_momentum
+            adam_momentum=adam_momentum,
+            val_iter_per_sec=self.last_val_iter_per_sec
         )
         
         # Update web monitor with COMPLETE training state (ALL data)
@@ -1150,6 +1291,7 @@ class VSRTrainer:
                 iteration_duration=avg_time,
                 vram_usage_gb=gpu_mem,
                 adam_momentum_avg=adam_momentum,
+                val_iter_per_sec=self.last_val_iter_per_sec,
                 
                 # Zeitschätzungen
                 eta_total_formatted=total_eta,
@@ -1323,10 +1465,27 @@ class VSRTrainer:
     
     def _get_adam_momentum(self):
         """
-        Extract average momentum (exp_avg) from AdamW optimizer state
-        
+        Extract average momentum (exp_avg) from AdamW optimizer state.
+
         Returns:
-            float: Average momentum magnitude across all parameters
+            float: Average L2-norm of the first moment (exp_avg) across all
+                   parameter tensors that currently have a gradient.
+
+        Why is this value typically very small (e.g. 0.0002)?
+        -------------------------------------------------------
+        AdamW stores exp_avg[i] = β₁ · exp_avg[i-1] + (1-β₁) · grad[i],
+        i.e. a per-parameter exponential moving average of raw gradients.
+        The L2 norm of a single parameter tensor's exp_avg reflects the
+        *magnitude* of the gradients for that tensor only.
+
+        In a stable training phase the raw gradients are small (the model
+        has converged to a local minimum and makes only tiny corrections),
+        so their EMA is likewise small.  Averaging the L2 norm over all
+        parameter tensors (many of which are large weight matrices with
+        many near-zero entries) produces a value that is typically several
+        orders of magnitude below 1.  A reading of ~0.0003 is therefore
+        expected and correct — it indicates that training is stable, NOT
+        that the optimizer is broken or that momentum is not being tracked.
         """
         total_momentum = 0.0
         count = 0
@@ -1345,7 +1504,7 @@ class VSRTrainer:
                     total_momentum += momentum_mag
                     count += 1
         
-        # Return average momentum
+        # Return average momentum magnitude
         return total_momentum / count if count > 0 else 0.0
     
     def _check_keyboard_input(self, epoch, steps_per_epoch, current_epoch_step):
@@ -1424,11 +1583,490 @@ class VSRTrainer:
             self.train_logger.log_event(f"Manual checkpoint saved at step {self.global_step}")
         except Exception as e:
             self.train_logger.log_event(f"Failed to save checkpoint: {str(e)}")
-    
+
+    # ------------------------------------------------------------------
+    # Async validation helpers
+    # ------------------------------------------------------------------
+
+    def enable_async_validation(self, checkpoint_dir, val_sizes, log_dir,
+                                proc=None, restart_cmd=None, log_path=None):
+        """
+        Switch the trainer to asynchronous validation mode.
+
+        In this mode the scheduled validation (every VAL_STEP_EVERY steps)
+        no longer blocks the training loop.  Instead the trainer:
+          1. Saves a lightweight model-weights-only checkpoint.
+          2. Writes an ``async_val_request.json`` sentinel file.
+          3. Continues training immediately.
+
+        The separate AsyncValidationProcess (running on a second GPU) picks up
+        the sentinel, runs full validation (including TensorBoard image writes),
+        and writes ``async_val_result.json``.  The trainer polls for that file
+        at every step and ingests the results when they arrive.
+
+        If the subprocess crashes it is automatically restarted by
+        ``_poll_async_val_result`` the next time that method is called.
+
+        Manual validation (key 'v' / WebUI button) always runs synchronously so
+        the user can get immediate feedback on demand.
+
+        Args:
+            checkpoint_dir: Directory shared with the async validator process
+                            (used for IPC sentinel files and weights checkpoints).
+            val_sizes:      List of size-key strings that the async validator
+                            should validate (e.g. ['540', '720']).
+            log_dir:        TensorBoard log directory forwarded to the async
+                            validator so it can write events to the same run.
+            proc:           ``subprocess.Popen`` instance of the already-started
+                            validator process (used for liveness monitoring).
+            restart_cmd:    Command list (as passed to ``Popen``) used to restart
+                            the validator if it crashes.
+            log_path:       Path of the validator's stdout/stderr log file.
+                            Logged to training.log so the user knows where to look.
+        """
+        self.use_async_validation = True
+        self._async_val_checkpoint_dir = checkpoint_dir
+        self._async_val_sizes = val_sizes
+        self._async_val_log_dir = log_dir
+        self._async_val_last_ingested_step = -1
+        self._async_val_proc = proc
+        self._async_val_restart_cmd = restart_cmd
+        self._async_val_log_path = log_path
+
+        # Inform the web UI that async validation is active
+        self.web_monitor.data_store.update_all_metrics(
+            async_val_enabled=True,
+            async_val_pending=False,
+            async_val_request_step=None,
+            async_val_last_step=None,
+            async_val_last_ki=None,
+        )
+
+        pid_str = f"PID {proc.pid}" if proc is not None else "no process"
+        log_str = f"  log → {log_path}" if log_path else ""
+        msg = (f"Async validation enabled: {pid_str}{log_str}  "
+               f"checkpoint_dir={checkpoint_dir}")
+        self.train_logger.log_event(msg)
+        print(f"[AsyncVal] {msg}")
+
+    def _request_async_validation(self):
+        """
+        Save a model-weights-only checkpoint and write the async_val_request
+        sentinel so the secondary validation process picks it up.
+
+        This is a fast operation (just one torch.save + one JSON write) and
+        returns immediately so the training loop is not blocked.
+        """
+        checkpoint_dir = self._async_val_checkpoint_dir
+        step = self.global_step
+
+        # Save weights-only checkpoint (much smaller than full checkpoint)
+        weights_path = os.path.join(checkpoint_dir, f'async_val_weights_{step:07d}.pth')
+        try:
+            torch.save(self.model.state_dict(), weights_path)
+        except Exception as e:
+            self.train_logger.log_event(
+                f"⚠ Async val: failed to save weights checkpoint: {e}"
+            )
+            return
+
+        # Determine data root and dataset name from config.
+        # DATASET_ROOT is the parent directory (without dataset_name appended).
+        # DATA_ROOT = DATASET_ROOT/DEFAULT_DATASET_NAME, so using it would
+        # cause a doubled sub-folder (e.g. …/master/master/val/…).
+        data_root = self.config.get('DATASET_ROOT',
+                                    self.config.get('DATA_ROOT', ''))
+        dataset_name = self.config.get('DEFAULT_DATASET_NAME', 'master')
+
+        # Build config snapshot (only the fields needed by the async validator)
+        config_snapshot = {
+            'N_FEATS':            self.config.get('N_FEATS', 72),
+            'N_BLOCKS':           self.config.get('N_BLOCKS', 28),
+            'USE_CHECKPOINTING':  self.config.get('USE_CHECKPOINTING', False),
+            'L1_WEIGHT':          self.config.get('L1_WEIGHT', 0.60),
+            'MS_WEIGHT':          self.config.get('MS_WEIGHT', 0.20),
+            'GRAD_WEIGHT':        self.config.get('GRAD_WEIGHT', 0.20),
+            'PERCEPTUAL_WEIGHT':  self.config.get('PERCEPTUAL_WEIGHT', 0.0),
+        }
+
+        request = {
+            'step':            step,
+            'checkpoint_path': weights_path,
+            'data_root':       data_root,
+            'dataset_name':    dataset_name,
+            'val_sizes':       getattr(self, '_async_val_sizes', ['540']),
+            'log_dir':         getattr(self, '_async_val_log_dir', ''),
+            'config_snapshot': config_snapshot,
+        }
+
+        request_file = os.path.join(checkpoint_dir, 'async_val_request.json')
+        tmp_file = request_file + '.tmp'
+        try:
+            with open(tmp_file, 'w') as f:
+                json.dump(request, f)
+            os.replace(tmp_file, request_file)
+            self.train_logger.log_event(
+                f"Async val request written for step {step}"
+            )
+            # Mark pending in the web UI data store so the status bar updates
+            self.web_monitor.data_store.update_all_metrics(
+                async_val_pending=True,
+                async_val_request_step=step,
+            )
+        except Exception as e:
+            self.train_logger.log_event(
+                f"⚠ Async val: failed to write request file: {e}"
+            )
+
+    def _restart_async_validator(self):
+        """
+        Start (or restart) the async validator subprocess.
+
+        Uses the command stored in ``_async_val_restart_cmd`` and appends
+        stdout/stderr to ``_async_val_log_path``.  Updates
+        ``_async_val_proc`` with the new ``Popen`` object and logs the new
+        PID to both training.log and the console.
+
+        Returns True on success, False if the command is not available or
+        if ``Popen`` raises.
+        """
+        cmd = getattr(self, '_async_val_restart_cmd', None)
+        log_path = getattr(self, '_async_val_log_path', None)
+        if not cmd:
+            self.train_logger.log_event(
+                "[AsyncVal] Cannot restart: restart_cmd not set"
+            )
+            return False
+        try:
+            fh = open(log_path, 'a') if log_path else open(os.devnull, 'w')
+            proc = subprocess.Popen(
+                cmd,
+                stdout=fh,
+                stderr=subprocess.STDOUT,
+                # trainer.py lives at <repo>/vsr_plusplus_NEU/training/trainer.py
+                # so we need three dirname() calls to reach the repo root where
+                # the vsr_plusplus_NEU package is importable.
+                cwd=os.path.dirname(
+                    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                ),
+            )
+            fh.close()
+            self._async_val_proc = proc
+            msg = (f"[AsyncVal] Subprocess (re)started  PID {proc.pid}"
+                   + (f"  log → {log_path}" if log_path else ""))
+            self.train_logger.log_event(msg)
+            print(f"\n{msg}")
+            return True
+        except Exception as exc:
+            self.train_logger.log_event(
+                f"[AsyncVal] Failed to (re)start subprocess: {exc}"
+            )
+            print(f"\n❌ [AsyncVal] Failed to (re)start subprocess: {exc}")
+            return False
+
+    def _push_async_val_log_tail(self, n_lines: int = 8) -> None:
+        """
+        Tail the last ``n_lines`` of ``async_val.log``, parse the most recent
+        progress line (e.g. ``[AsyncVal]   540: 48% (41/85) ETA 17s``) and push
+        ``async_val_progress_pct`` (0-100) + ``async_val_progress_label`` into
+        the web-monitor data store.
+
+        Uses a backwards seek — never reads the whole log file.
+        Safe to call on every training step.
+        """
+        import re as _re
+        log_path = getattr(self, '_async_val_log_path', None)
+        if not log_path:
+            return
+        try:
+            with open(log_path, 'rb') as fh:
+                fh.seek(0, 2)
+                file_size = fh.tell()
+                fh.seek(max(0, file_size - 4096))
+                raw = fh.read().decode('utf-8', errors='replace')
+        except OSError:
+            return
+
+        # Match lines like:  [AsyncVal]   540: 48% (41/85) ETA 17s
+        _PROG_RE = _re.compile(
+            r'\[AsyncVal\]\s+(\S+):\s+(\d+)%\s+\((\d+)/(\d+)\)(?:\s+ETA\s+(\S+))?'
+        )
+        pct, label = 0.0, ''
+        for line in raw.splitlines():
+            m = _PROG_RE.search(line)
+            if m:
+                size_key = m.group(1)
+                pct      = float(m.group(2))
+                done     = m.group(3)
+                total    = m.group(4)
+                eta      = m.group(5) or ''
+                eta_str  = f'  ETA {eta}' if eta else ''
+                label    = f'{size_key}: {int(pct)}% ({done}/{total}){eta_str}'
+        self.web_monitor.data_store.update_all_metrics(
+            async_val_progress_pct=pct,
+            async_val_progress_label=label,
+        )
+
+    def _poll_async_val_result(self):
+        """
+        Check for a completed async validation result and ingest it.
+
+        Also monitors the async validator subprocess: if it has exited
+        unexpectedly the exit code is logged to training.log and to the
+        console, and the subprocess is automatically restarted so that
+        pending request files are processed.
+
+        Reads ``async_val_result.json`` from the checkpoint directory.  If the
+        file is present and contains results for a step that has not yet been
+        ingested, the metrics are applied to the adaptive system and logged to
+        TensorBoard — exactly as the synchronous path would do.
+
+        If the result file contains an ``'error'`` key (written by the async
+        validator when model loading or inference fails), the error is logged
+        visibly so the user knows what went wrong.  Quality metrics are NOT
+        updated in the error case so the data store retains the last valid
+        values.
+
+        The result file is removed after ingestion to avoid double-processing.
+        """
+        checkpoint_dir = getattr(self, '_async_val_checkpoint_dir', None)
+        if checkpoint_dir is None:
+            return
+
+        # ── Log-tail: push last N lines of async_val.log to the web UI ────────
+        # Runs on every poll so the progress panel refreshes at monitoring rate.
+        self._push_async_val_log_tail()
+
+        # ── Subprocess liveness check ─────────────────────────────────────────
+        proc = getattr(self, '_async_val_proc', None)
+        if proc is not None:
+            exit_code = proc.poll()
+            if exit_code is not None:
+                # Subprocess has terminated unexpectedly.
+                log_path = getattr(self, '_async_val_log_path', None)
+                log_hint = f"  (see {log_path})" if log_path else ""
+                msg = (f"[AsyncVal] Subprocess exited with code {exit_code}"
+                       f"{log_hint} — restarting …")
+                self.train_logger.log_event(msg)
+                print(f"\n⚠ {msg}")
+                self._async_val_proc = None
+                self._restart_async_validator()
+
+        result_file = os.path.join(checkpoint_dir, 'async_val_result.json')
+        if not os.path.exists(result_file):
+            return
+
+        try:
+            with open(result_file, 'r') as f:
+                result = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return  # File might still be written — retry next step
+
+        step = result.get('step', -1)
+        if step <= self._async_val_last_ingested_step:
+            return  # Already processed
+
+        # Consume the file — rename to .bak so the user can inspect the last result
+        try:
+            os.replace(result_file, result_file + '.bak')
+        except OSError:
+            pass
+
+        self._async_val_last_ingested_step = step
+
+        # ── Error result: the async validator failed — log and bail out ───────
+        if 'error' in result:
+            error_msg = result['error']
+            print(f"\n❌ [AsyncVal] Validation for step {step} FAILED: {error_msg}")
+            self.train_logger.log_event(
+                f"[AsyncVal] ERROR at step {step}: {error_msg}"
+            )
+            # Clear pending flag so the web UI stops showing "running"
+            self.web_monitor.data_store.update_all_metrics(
+                async_val_pending=False,
+                async_val_progress_pct=0.0,
+                async_val_progress_label='',
+            )
+            # Also remove the weights file so it doesn't accumulate as a .BAK
+            _weights_err = os.path.join(checkpoint_dir, f'async_val_weights_{step:07d}.pth')
+            if os.path.exists(_weights_err):
+                try:
+                    os.unlink(_weights_err)
+                except OSError:
+                    pass
+            # Do NOT update quality metrics — keep previous valid values.
+            return
+
+        # Clean up the weights-only checkpoint for this step (no longer needed)
+        weights_path = os.path.join(checkpoint_dir, f'async_val_weights_{step:07d}.pth')
+        if os.path.exists(weights_path):
+            try:
+                os.unlink(weights_path)
+            except OSError:
+                pass
+
+        # --- Feed metrics into adaptive system (same as synchronous path) ---
+        self.last_metrics = result
+        ki_quality = result.get('ki_quality')
+        self.last_validation_quality = ki_quality
+
+        self.adaptive_system.update_validation_tracker(
+            result.get('val_loss'),
+            ki_quality
+        )
+
+        # Log to TensorBoard (images are already written by the async process)
+        self.tb_logger.log_quality(step, result)
+        self.tb_logger.log_metrics(step, result)
+        self.tb_logger.log_validation_loss(step, result.get('val_loss', 0.0))
+
+        adaptive_status = self.adaptive_system.get_status()
+        adaptive_status['ki_improvement'] = result.get('improvement', 0)
+        self.tb_logger.log_adaptive(step, adaptive_status)
+
+        # Best-checkpoint check (must precede _push_val_metrics_to_store so
+        # best_quality_ever is final before the atomic write to the data store).
+        if self.checkpoint_mgr.should_check_best(step):
+            if ki_quality is not None:
+                is_new_best = self.checkpoint_mgr.update_best_checkpoint(
+                    self.model, self.optimizer, self.lr_scheduler,
+                    step, ki_quality, result,
+                    self.train_logger.log_file
+                )
+                if is_new_best:
+                    print(f"\n✅ [AsyncVal] New best checkpoint at step {step}!")
+                    self.tb_logger.log_checkpoint(step, 'best')
+
+        # Update val-speed tracker.
+        val_elapsed = result.get('val_elapsed_seconds')
+        if val_elapsed is not None and val_elapsed > 0:
+            self._update_val_speed(val_elapsed)
+
+        # Single atomic write of all quality metrics to the data store.
+        # Called here – after the best-checkpoint check – so best_quality_ever
+        # is already the final value.  Using `step` (the original validation
+        # step, e.g. 15000) as last_validation_step so the export snapshot
+        # correctly identifies which model the quality numbers belong to.
+        self._push_val_metrics_to_store(result, step)
+
+        # Clear pending flag and record the ingested step / quality so the
+        # web UI can show "last result: step N, KI Q%" in the async-val bar.
+        self.web_monitor.data_store.update_all_metrics(
+            async_val_pending=False,
+            async_val_last_step=step,
+            async_val_last_ki=ki_quality,
+            async_val_progress_pct=0.0,
+            async_val_progress_label='',
+        )
+
+        # Write Statistik_<step>.json immediately.
+        # No delay needed: _push_val_metrics_to_store already flushed all quality
+        # data to the store, and _update_gui (which runs at the TOP of each loop
+        # iteration, before _poll_async_val_result) has already refreshed the
+        # training-loss fields with this iteration's real values.
+        self._save_statistics_json(step)
+
+        ki_pct = ki_quality * 100 if ki_quality is not None else 0.0
+        self.train_logger.log_event(
+            f"[AsyncVal] Ingested step {step} | KI Quality: {ki_pct:.1f}%"
+        )
+        print(f"\n📥 [AsyncVal] Results ingested for step {step} | "
+              f"KI Quality: {ki_pct:.1f}%")
+
+    def _count_val_samples(self):
+        """Return total number of validation samples across all loaded val datasets."""
+        total = 0
+        val_loaders = getattr(self, 'val_loaders', None)
+        if val_loaders:
+            for _, loader in val_loaders:
+                if hasattr(loader, 'dataset'):
+                    total += len(loader.dataset)
+        elif hasattr(self, 'val_loader') and self.val_loader is not None:
+            if hasattr(self.val_loader, 'dataset'):
+                total += len(self.val_loader.dataset)
+        return max(total, 1)
+
+    def _update_val_speed(self, elapsed_seconds):
+        """
+        Update the rolling validation-speed tracker.
+
+        elapsed_seconds is the wall-clock time for a full validation cycle
+        (forward pass + metric computation + TensorBoard writes).
+        We spread it evenly over all validated samples and append one
+        per-sample duration to the rolling window of 200 entries.
+
+        The resulting ``last_val_iter_per_sec`` gives the average throughput
+        over the last 200 GT/LR pairs processed, *including* all I/O time.
+        """
+        total_samples = self._count_val_samples()
+        if elapsed_seconds <= 0 or total_samples <= 0:
+            return
+
+        per_sample_sec = elapsed_seconds / total_samples
+
+        # Extend the rolling window.  We add one entry per sample (capped at 200)
+        # so each cycle contributes weight proportional to how many samples it
+        # processed.  deque(maxlen=200) evicts old entries automatically.
+        # Adding the same per_sample_sec value multiple times is intentional:
+        # it represents the measured throughput for all validated samples in this
+        # cycle and weights the rolling average accordingly.
+        entries_to_add = min(total_samples, 200)
+        for _ in range(entries_to_add):
+            self._val_sample_timings.append(per_sample_sec)
+
+        # Compute speed from the window
+        if self._val_sample_timings:
+            avg_per_sample = sum(self._val_sample_timings) / len(self._val_sample_timings)
+            self.last_val_iter_per_sec = 1.0 / avg_per_sample if avg_per_sample > 0 else 0.0
+
+    def _push_val_metrics_to_store(self, metrics: dict, val_step: int) -> None:
+        """
+        Atomically write completed validation metrics into the web-monitor data store.
+
+        This is the **single authoritative write point** for all quality / validation
+        fields.  It must be called only *after* all post-validation processing has
+        finished (including ``checkpoint_mgr.update_best_checkpoint``) so that
+        ``best_quality_ever`` is already up to date before the atomic write.
+
+        Scaling convention (matches ``_update_gui``):
+          - ``quality_*_value`` : raw 0-1 fraction as returned by the validator.
+          - ``quality_improvement_value`` / ``*_to_gt_value`` : raw sums from validator.
+          - ``validation_loss_value`` : raw float loss.
+          - ``best_quality_ever`` : read from ``checkpoint_mgr`` after checkpoint check.
+
+        The call also sets ``has_validation_data = True`` and
+        ``last_validation_step = val_step`` so that ``get_export_snapshot()``
+        can expose a ``validation_step`` field that clearly shows which model
+        snapshot the quality numbers belong to.
+        """
+        best_quality = (
+            self.checkpoint_mgr.best_quality
+            if self.checkpoint_mgr.best_quality > 0 else 0.0
+        )
+        self.web_monitor.data_store.update_all_metrics(
+            # Quality fractions (0-1, raw validator output)
+            quality_lr_value=metrics.get('lr_quality', 0.0),
+            quality_ki_value=metrics.get('ki_quality', 0.0),
+            # Raw sums (not per-image averages – match existing web_monitor convention)
+            quality_improvement_value=metrics.get('improvement', 0.0),
+            quality_ki_to_gt_value=metrics.get('ki_to_gt', 0.0),
+            quality_lr_to_gt_value=metrics.get('lr_to_gt', 0.0),
+            # Scalar loss
+            validation_loss_value=metrics.get('val_loss', 0.0),
+            # Best-ever quality (read after checkpoint update so it is final)
+            best_quality_ever=best_quality,
+            # Provenance: mark that real data is present and record the step
+            has_validation_data=True,
+            last_validation_step=val_step,
+        )
+
     def _run_validation(self):
         """Run validation immediately"""
         self.train_logger.log_event(f"Manual validation triggered at step {self.global_step}")
         
+        # --- timing start: covers forward pass + all I/O incl. TensorBoard ---
+        _val_cycle_start = time.time()
+
         metrics = self._run_multi_size_validation()
 
         # Bug 1 fix: update last_validation_quality so the plateau tracker uses it.
@@ -1454,6 +2092,7 @@ class VSRTrainer:
                     img_tensor, 
                     self.global_step
                 )
+            self.tb_logger.writer.flush()
             
             # CRITICAL: Remove labeled_images to prevent memory leak
             del labeled_images
@@ -1465,23 +2104,31 @@ class VSRTrainer:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
         
+        # --- timing end: full cycle including TensorBoard flush ---
+        _val_cycle_elapsed = time.time() - _val_cycle_start
+        self._update_val_speed(_val_cycle_elapsed)
+
         # Store metrics WITHOUT labeled_images
         self.last_metrics = metrics
-        
-        # Update web_monitor with validation metrics before scheduling JSON save
-        # This ensures the saved JSON includes the fresh validation data
-        if self.last_metrics:
-            self.web_monitor.update(
-                quality_lr_value=self.last_metrics.get('lr_quality', 0.0),
-                quality_ki_value=self.last_metrics.get('ki_quality', 0.0),
-                quality_improvement_value=self.last_metrics.get('improvement', 0.0) / 100.0,
-                quality_ki_to_gt_value=self.last_metrics.get('ki_to_gt', 0.0) / 100.0,
-                quality_lr_to_gt_value=self.last_metrics.get('lr_to_gt', 0.0) / 100.0,
-                validation_loss_value=self.last_metrics.get('val_loss', 0.0),
+
+        # Best checkpoint check (must happen before _push_val_metrics_to_store
+        # so that best_quality_ever is up to date when we do the atomic write).
+        if self.checkpoint_mgr.should_check_best(self.global_step):
+            self.checkpoint_mgr.update_best_checkpoint(
+                self.model, self.optimizer, self.lr_scheduler,
+                self.global_step, metrics['ki_quality'], metrics,
+                self.train_logger.log_file
             )
-        
-        # Schedule JSON save for 2 steps later (so web_monitor gets updated with fresh loss data)
-        self.pending_json_save_step = self.global_step + 2
+
+        # Single atomic write of all validation metrics to the data store.
+        # Called AFTER the best-checkpoint check so best_quality_ever is final.
+        self._push_val_metrics_to_store(metrics, self.global_step)
+
+        # Write Statistik_<step>.json immediately.
+        # The JSON is written BEFORE the no-arg _update_gui() call that follows
+        # in the training loop so the snapshot still contains the real training
+        # losses from the last training step (the no-arg call would zero them out).
+        self._save_statistics_json(self.global_step)
         
         self.train_logger.log_event(
             f"Manual Validation | KI Quality: {metrics['ki_quality']*100:.1f}%"
@@ -1883,16 +2530,27 @@ class VSRTrainer:
     
     def _save_statistics_json(self, step):
         """
-        Save complete training statistics as JSON file
-        
-        Saves to DATA_ROOT/Statistik_STEP.json with all data from web monitor
-        
+        Save complete training statistics as JSON file.
+
+        Saves to DATA_ROOT/Statistik_STEP.json.  The snapshot is taken from the
+        web-monitor data store via ``get_export_snapshot()``, which:
+
+          - Strips transient runtime fields (``val_status``, ``validation_running``)
+            that are meaningless in a persisted file and could confuse analysis
+            scripts that read the Statistik files.
+          - Overrides ``step_current`` with *step* so the filename
+            ``Statistik_{step}.json`` and the ``step_current`` field inside the
+            file are always consistent (without the override the field would be
+            2 steps ahead because of the 2-step save delay).
+
         Args:
-            step: Current training step
+            step: The validation step this file belongs to.
         """
         try:
-            # Get complete data snapshot from web monitor (same as web UI download)
-            data_snapshot = self.web_monitor.data_store.get_complete_snapshot()
+            # Use the export snapshot (strips transient fields, aligns step_current)
+            data_snapshot = self.web_monitor.data_store.get_export_snapshot(
+                override_step=step
+            )
             
             # Get DATA_ROOT from config (Learning directory)
             data_root = self.config.get('DATA_ROOT', './Learn')
