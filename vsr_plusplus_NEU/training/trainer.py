@@ -394,7 +394,12 @@ class VSRTrainer:
         # Cumulative per-size file counter for the current epoch (used by WebUI).
         # This is a local variable – reset automatically on each call to train_epoch.
         epoch_files_per_size = {'720': 0, '540': 0, '720_169': 0}
-        
+
+        # AdamW momentum value (updated at every optimizer step).  Initialized
+        # here so _update_gui() can always read a defined value even before the
+        # first optimizer step of the epoch.
+        adam_momentum = 0.0
+
         # Initialize loop timing
         loop_start_time = time.time()
         
@@ -856,8 +861,8 @@ class VSRTrainer:
                                 crop_file_counts=_mid_crop_counts,
                             )
                             _mid_sampler.set_distribution(_mid_dist)
-                        # Log phase transition if one occurred
-                        self.data_strategy_scheduler.check_phase_transition(
+                        # Log phase transition if one occurred; capture True/False return value.
+                        _phase_changed = self.data_strategy_scheduler.check_phase_transition(
                             self.global_step,
                             log_fn=self.train_logger.log_event,
                             crop_file_counts=_mid_crop_counts,
@@ -870,6 +875,28 @@ class VSRTrainer:
                             self.web_monitor.data_store.update_all_metrics(
                                 data_strategy_phase=_current_phase,
                             )
+                        # ── Phase-transition epoch break ──────────────────────────
+                        # SizeGroupedSampler.__iter__() materialises the full epoch
+                        # schedule once at the START of the epoch.  Calling
+                        # set_distribution() mid-epoch updates num_batches_per_size
+                        # but has no effect on the already-running iterator.
+                        #
+                        # When a transition is detected (e.g. warmup → crop_intro,
+                        # which unlocks 720 and 540 from weight 0 → non-zero), we
+                        # break out of the batch loop immediately.  The outer
+                        # `for epoch` loop in train() calls train_epoch() again,
+                        # which triggers a fresh __iter__ with the updated
+                        # distribution — so the new sizes are picked up within
+                        # at most one training step instead of waiting a full epoch.
+                        if _phase_changed:
+                            msg = (
+                                f"[DataStrategy] Phase → {_current_phase} at step "
+                                f"{self.global_step}: restarting epoch so new "
+                                f"size-group distribution takes effect immediately."
+                            )
+                            self.train_logger.log_event(msg)
+                            print(f"\n🔄 {msg}")
+                            break
                     # ── End mid-epoch data strategy update ───────────────────────
                 
                 # Status file update (every 5 steps)
