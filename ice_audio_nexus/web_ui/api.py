@@ -87,8 +87,9 @@ async def index(request: Request) -> HTMLResponse:
     finally:
         conn.close()
     return templates.TemplateResponse(
-        "index.html",
-        {"request": request, "identities": identities},
+        request=request,
+        name="index.html",
+        context={"identities": identities},
     )
 
 
