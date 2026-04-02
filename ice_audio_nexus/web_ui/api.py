@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -23,6 +24,7 @@ from fastapi.responses import (
     JSONResponse,
     StreamingResponse,
 )
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from dotenv import load_dotenv
 
@@ -51,14 +53,32 @@ from db.database import (
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
+# h264_nvenc availability is probed once at startup
+_NVENC_AVAILABLE: bool = False
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _NVENC_AVAILABLE
     try:
         ensure_schema()
         logger.info("DB schema verified.")
     except Exception as exc:
         logger.error("DB init failed: %s", exc)
+
+    # Probe whether h264_nvenc is available in the installed ffmpeg
+    try:
+        probe = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-hide_banner", "-encoders",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await probe.communicate()
+        _NVENC_AVAILABLE = b"h264_nvenc" in out
+        logger.info("h264_nvenc encoder: %s", "available" if _NVENC_AVAILABLE else "NOT available – using libx264")
+    except Exception as exc:
+        logger.warning("Could not probe ffmpeg encoders: %s", exc)
+
     yield
 
 
