@@ -27,21 +27,21 @@ fi
 source venv/bin/activate
 
 # pip upgraden
-pip install --upgrade pip --quiet
+pip install --upgrade pip 
 
 echo "📦 Installiere Kern-Abhängigkeiten ..."
 
 # MariaDB-Connector (benötigt libmariadb-dev auf dem System)
-pip install mariadb python-dotenv --quiet
+pip install mariadb python-dotenv 
 
 # PyTorch mit CUDA 12.x (für Tesla P4 / P100)
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121 --quiet
+pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
 
 # Audio-Processing & Diarization
-pip install pyannote.audio faster-whisper librosa soundfile --quiet
+pip install pyannote.audio faster-whisper librosa soundfile
 
 # Web-Interface
-pip install "fastapi[standard]" uvicorn[standard] jinja2 python-multipart aiofiles --quiet
+pip install "fastapi[standard]" uvicorn[standard] jinja2 python-multipart aiofiles
 
 echo ""
 echo "✅ Setup abgeschlossen!"
