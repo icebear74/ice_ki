@@ -3,9 +3,11 @@ ice_audio_nexus – database.py
 Auto-creates all required tables in MariaDB 11.7 on first run.
 
 Schema (Multi-Vector Identity):
-  identities    – one row per person / character (e.g. 'Jean-Luc Picard')
-  voice_samples – n rows per identity; each holds a VECTOR(512) embedding
-                  plus metadata (context, confirmed flag, timestamp)
+  actors           – one row per real-world voice / actor (e.g. 'Patrick Stewart')
+  identities       – one row per character / persona (e.g. 'Jean-Luc Picard'),
+                     linked to an actor via actor_id + context_filter
+  voice_samples    – n rows per identity; each holds a VECTOR(512) embedding
+                     plus metadata (context, confirmed flag, timestamps)
   episode_segments – timeline of detected speaker segments per episode
 """
 
@@ -25,14 +27,33 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _DDL = [
+    # 0. Actors – the real-world voice / person behind the characters
+    """
+    CREATE TABLE IF NOT EXISTS actors (
+        id         INT AUTO_INCREMENT PRIMARY KEY,
+        name       VARCHAR(255) NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                                      ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_actor_name (name)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+
     # 1. Identity anchor – the person / character
     """
     CREATE TABLE IF NOT EXISTS identities (
-        id          INT AUTO_INCREMENT PRIMARY KEY,
-        name        VARCHAR(255) NOT NULL,
-        description TEXT,
-        created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE KEY uq_identity_name (name)
+        id             INT AUTO_INCREMENT PRIMARY KEY,
+        name           VARCHAR(255) NOT NULL,
+        description    TEXT,
+        actor_id       INT DEFAULT NULL,
+        context_filter VARCHAR(255) DEFAULT NULL
+                       COMMENT 'SQL LIKE pattern for context matching, e.g. Star Trek%',
+        created_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                                          ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_identity_name (name),
+        FOREIGN KEY (actor_id) REFERENCES actors(id) ON DELETE SET NULL,
+        INDEX idx_identity_actor (actor_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
 
@@ -44,7 +65,9 @@ _DDL = [
         embedding   VECTOR(512) NOT NULL,
         context     VARCHAR(255) DEFAULT NULL COMMENT 'e.g. TNG Season 1, Picard S3E02',
         is_confirmed BOOLEAN NOT NULL DEFAULT FALSE,
-        created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                                       ON UPDATE CURRENT_TIMESTAMP,
         FOREIGN KEY (identity_id) REFERENCES identities(id) ON DELETE CASCADE,
         INDEX idx_vs_identity (identity_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
@@ -67,7 +90,9 @@ _DDL = [
         confidence      FLOAT DEFAULT NULL,
         is_suggestion   BOOLEAN NOT NULL DEFAULT FALSE
                         COMMENT 'True = proposed match (slightly high distance), needs user confirmation',
-        created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                                           ON UPDATE CURRENT_TIMESTAMP,
         FOREIGN KEY (identity_id)      REFERENCES identities(id)     ON DELETE SET NULL,
         FOREIGN KEY (matched_sample_id) REFERENCES voice_samples(id)  ON DELETE SET NULL,
         INDEX idx_seg_episode (series_name, episode_title),
@@ -170,6 +195,48 @@ def update_identity(conn: mariadb.Connection, identity_id: int, name: str, descr
         "UPDATE identities SET name = ?, description = ? WHERE id = ?",
         (name, description, identity_id),
     )
+    conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Actor CRUD
+# ---------------------------------------------------------------------------
+
+def list_actors(conn: mariadb.Connection) -> list[dict]:
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT a.id, a.name,
+               COUNT(i.id) AS identity_count,
+               a.created_at, a.updated_at
+        FROM actors a
+        LEFT JOIN identities i ON i.actor_id = a.id
+        GROUP BY a.id
+        ORDER BY a.name
+    """)
+    cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def get_actor(conn: mariadb.Connection, actor_id: int) -> dict | None:
+    cur = conn.cursor()
+    cur.execute("SELECT id, name, created_at, updated_at FROM actors WHERE id = ?", (actor_id,))
+    row = cur.fetchone()
+    if row is None:
+        return None
+    cols = [d[0] for d in cur.description]
+    return dict(zip(cols, row))
+
+
+def create_actor(conn: mariadb.Connection, name: str) -> int:
+    cur = conn.cursor()
+    cur.execute("INSERT INTO actors (name) VALUES (?)", (name,))
+    conn.commit()
+    return cur.lastrowid
+
+
+def update_actor(conn: mariadb.Connection, actor_id: int, name: str) -> None:
+    cur = conn.cursor()
+    cur.execute("UPDATE actors SET name = ? WHERE id = ?", (name, actor_id))
     conn.commit()
 
 
