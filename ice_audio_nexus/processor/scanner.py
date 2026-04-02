@@ -38,7 +38,9 @@ import tempfile
 
 from dotenv import load_dotenv
 
-load_dotenv()
+# Load .env from the project root (parent of the processor package), so the
+# script works regardless of the current working directory.
+load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
