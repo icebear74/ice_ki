@@ -1,0 +1,925 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ice_audio_nexus – Sprecher-Analyse</title>
+  <style>
+    /* ================================================================
+       Base & Layout
+       ================================================================ */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #0d0d14;
+      --surface:   #161622;
+      --surface2:  #1e1e2e;
+      --border:    #2a2a3d;
+      --accent:    #6c63ff;
+      --accent2:   #00d4aa;
+      --danger:    #ff4757;
+      --warn:      #ffa502;
+      --text:      #e0e0f0;
+      --text-muted:#8888aa;
+      --radius:    8px;
+      --shadow:    0 4px 24px rgba(0,0,0,0.4);
+    }
+
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ================================================================
+       Header
+       ================================================================ */
+    header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 12px 24px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      box-shadow: var(--shadow);
+    }
+
+    header h1 {
+      font-size: 1.3rem;
+      font-weight: 700;
+      background: linear-gradient(135deg, var(--accent), var(--accent2));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    #status-badge {
+      margin-left: auto;
+      font-size: 0.75rem;
+      padding: 4px 12px;
+      border-radius: 20px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+    }
+
+    #status-badge.connected { border-color: var(--accent2); color: var(--accent2); }
+
+    /* ================================================================
+       Main Layout
+       ================================================================ */
+    .main {
+      display: grid;
+      grid-template-columns: 1fr 340px;
+      grid-template-rows: auto 1fr;
+      gap: 16px;
+      padding: 16px;
+      flex: 1;
+      min-height: 0;
+    }
+
+    /* ================================================================
+       Episode Selector
+       ================================================================ */
+    .episode-bar {
+      grid-column: 1 / -1;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px 16px;
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .episode-bar label { font-size: 0.85rem; color: var(--text-muted); }
+
+    select, input[type="text"] {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: var(--radius);
+      padding: 6px 12px;
+      font-size: 0.9rem;
+      outline: none;
+      transition: border-color .2s;
+    }
+
+    select:focus, input:focus { border-color: var(--accent); }
+
+    button {
+      padding: 7px 16px;
+      border-radius: var(--radius);
+      border: none;
+      font-size: 0.85rem;
+      cursor: pointer;
+      font-weight: 600;
+      transition: opacity .15s, transform .1s;
+    }
+
+    button:hover { opacity: .85; }
+    button:active { transform: scale(.97); }
+
+    .btn-primary  { background: var(--accent); color: #fff; }
+    .btn-success  { background: var(--accent2); color: #000; }
+    .btn-danger   { background: var(--danger); color: #fff; }
+    .btn-warn     { background: var(--warn); color: #000; }
+    .btn-ghost    { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
+
+    /* ================================================================
+       Video Player Column
+       ================================================================ */
+    .player-col {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .video-wrap {
+      position: relative;
+      background: #000;
+      border-radius: var(--radius);
+      overflow: hidden;
+      border: 1px solid var(--border);
+      aspect-ratio: 16/9;
+    }
+
+    video {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    /* Current speaker overlay */
+    #speaker-overlay {
+      position: absolute;
+      bottom: 52px;
+      left: 0;
+      right: 0;
+      text-align: center;
+      pointer-events: none;
+    }
+
+    #speaker-overlay .badge {
+      display: inline-block;
+      background: rgba(0,0,0,.75);
+      backdrop-filter: blur(4px);
+      color: #fff;
+      padding: 6px 18px;
+      border-radius: 24px;
+      font-size: 1rem;
+      font-weight: 700;
+      border: 2px solid var(--accent);
+      letter-spacing: .5px;
+    }
+
+    #speaker-overlay .badge.unknown { border-color: var(--warn); }
+    #speaker-overlay .badge.confirmed { border-color: var(--accent2); }
+
+    /* ================================================================
+       Timeline Bar
+       ================================================================ */
+    .timeline-wrap {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 10px 12px;
+    }
+
+    .timeline-wrap h3 {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+      text-transform: uppercase;
+      letter-spacing: .8px;
+    }
+
+    #timeline-bar {
+      position: relative;
+      height: 28px;
+      background: var(--surface2);
+      border-radius: 4px;
+      overflow: hidden;
+      cursor: pointer;
+    }
+
+    .tl-segment {
+      position: absolute;
+      top: 0;
+      height: 100%;
+      opacity: .85;
+      transition: opacity .1s;
+      border-right: 1px solid var(--bg);
+    }
+
+    .tl-segment:hover { opacity: 1; }
+
+    #timeline-cursor {
+      position: absolute;
+      top: 0;
+      width: 2px;
+      height: 100%;
+      background: #fff;
+      pointer-events: none;
+      transition: left .1s linear;
+    }
+
+    /* ================================================================
+       Sidebar – Speaker List
+       ================================================================ */
+    .sidebar {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      min-width: 0;
+      overflow-y: auto;
+    }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px;
+    }
+
+    .card h3 {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: .8px;
+      margin-bottom: 10px;
+    }
+
+    /* Speaker list items */
+    .speaker-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px;
+      border-radius: 6px;
+      margin-bottom: 6px;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      cursor: pointer;
+      transition: border-color .15s;
+    }
+
+    .speaker-item:hover { border-color: var(--accent); }
+    .speaker-item.active { border-color: var(--accent2); }
+
+    .speaker-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .speaker-info { flex: 1; min-width: 0; }
+    .speaker-name { font-size: 0.9rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .speaker-meta { font-size: 0.72rem; color: var(--text-muted); }
+
+    .speaker-actions { display: flex; gap: 4px; flex-shrink: 0; }
+    .speaker-actions button { padding: 4px 8px; font-size: 0.72rem; }
+
+    /* ================================================================
+       Assign Modal
+       ================================================================ */
+    #modal-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,.7);
+      backdrop-filter: blur(4px);
+      z-index: 100;
+      align-items: center;
+      justify-content: center;
+    }
+
+    #modal-overlay.open { display: flex; }
+
+    #modal {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 24px;
+      width: 420px;
+      max-width: 95vw;
+      box-shadow: var(--shadow);
+    }
+
+    #modal h2 { font-size: 1.1rem; margin-bottom: 16px; }
+
+    .form-row {
+      margin-bottom: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .form-row label { font-size: 0.8rem; color: var(--text-muted); }
+    .form-row input, .form-row select { width: 100%; }
+
+    .modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+
+    /* ================================================================
+       Toast Notifications
+       ================================================================ */
+    #toast-container {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      z-index: 200;
+    }
+
+    .toast {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 16px;
+      font-size: 0.85rem;
+      box-shadow: var(--shadow);
+      animation: slideIn .2s ease;
+      max-width: 320px;
+    }
+
+    .toast.success { border-color: var(--accent2); color: var(--accent2); }
+    .toast.error   { border-color: var(--danger);  color: var(--danger); }
+    .toast.info    { border-color: var(--accent);  color: var(--accent); }
+
+    @keyframes slideIn {
+      from { transform: translateX(100%); opacity: 0; }
+      to   { transform: translateX(0);   opacity: 1; }
+    }
+
+    /* ================================================================
+       Finalize Button
+       ================================================================ */
+    #btn-finalize { width: 100%; margin-top: 4px; }
+
+    /* ================================================================
+       Scrollbar
+       ================================================================ */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: var(--surface2); }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  </style>
+</head>
+<body>
+
+<!-- ================================================================
+     Header
+     ================================================================ -->
+<header>
+  <h1>🎬 ice_audio_nexus</h1>
+  <span id="status-badge">● Getrennt</span>
+</header>
+
+<!-- ================================================================
+     Main
+     ================================================================ -->
+<div class="main">
+
+  <!-- Episode Selector Bar -->
+  <div class="episode-bar">
+    <label>Serie / Film:</label>
+    <select id="sel-series"><option value="">– wählen –</option></select>
+
+    <label>Episode:</label>
+    <select id="sel-episode"><option value="">– wählen –</option></select>
+
+    <button class="btn-primary" onclick="loadEpisode()">▶ Laden</button>
+    <button class="btn-ghost" onclick="refreshEpisodes()">↺ Aktualisieren</button>
+
+    <span id="ep-info" style="font-size:.8rem;color:var(--text-muted);margin-left:8px;"></span>
+  </div>
+
+  <!-- Video Player Column -->
+  <div class="player-col">
+    <div class="video-wrap">
+      <video id="player" controls preload="metadata">
+        <source src="" type="video/mp4" />
+        Dein Browser unterstützt kein HTML5-Video.
+      </video>
+      <div id="speaker-overlay">
+        <span class="badge unknown" id="current-speaker-badge">– kein Sprecher –</span>
+      </div>
+    </div>
+
+    <!-- Timeline -->
+    <div class="timeline-wrap">
+      <h3>Sprecher-Timeline</h3>
+      <div id="timeline-bar">
+        <div id="timeline-cursor"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Sidebar -->
+  <div class="sidebar">
+    <div class="card">
+      <h3>Erkannte Sprecher</h3>
+      <div id="speaker-list">
+        <p style="color:var(--text-muted);font-size:.85rem;">Lade Episode…</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Aktionen</h3>
+      <button id="btn-finalize" class="btn-success" onclick="finalizeEpisode()">
+        ✅ Episode finalisieren &amp; Vektoren verbessern
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ================================================================
+     Assign Modal
+     ================================================================ -->
+<div id="modal-overlay">
+  <div id="modal">
+    <h2>Sprecher benennen</h2>
+    <p style="font-size:.85rem;color:var(--text-muted);margin-bottom:16px;">
+      Sprecher-ID: <strong id="modal-speaker-id"></strong>
+    </p>
+
+    <div class="form-row">
+      <label>Charakter-Name *</label>
+      <input type="text" id="modal-name" placeholder="z.B. Daryl Dixon" />
+    </div>
+
+    <div class="form-row">
+      <label>Serie / Film-Kontext *</label>
+      <input type="text" id="modal-context" placeholder="z.B. The Walking Dead" />
+    </div>
+
+    <div class="form-row">
+      <label>Synchronsprecher (optional)</label>
+      <input type="text" id="modal-actor" placeholder="z.B. Tommy Morgenstern" />
+    </div>
+
+    <div class="modal-actions">
+      <button class="btn-ghost" onclick="closeModal()">Abbrechen</button>
+      <button class="btn-warn" onclick="submitAssign(false)">Zuweisen</button>
+      <button class="btn-success" onclick="submitAssign(true)">Zuweisen &amp; Bestätigen</button>
+    </div>
+  </div>
+</div>
+
+<!-- ================================================================
+     Toast Container
+     ================================================================ -->
+<div id="toast-container"></div>
+
+<!-- ================================================================
+     JavaScript
+     ================================================================ -->
+<script>
+// ----------------------------------------------------------------
+// State
+// ----------------------------------------------------------------
+let _segments     = [];
+let _speakers     = {};   // raw_speaker_id → { name, color, confirmed, identityId }
+let _duration     = 0;
+let _currentSeries  = '';
+let _currentEpisode = '';
+let _assignTarget   = null;  // raw_speaker_id für den Modal
+let _ws             = null;
+
+const SPEAKER_COLORS = [
+  '#6c63ff','#00d4aa','#ff6b6b','#ffa502','#2ed573',
+  '#1e90ff','#ff4757','#eccc68','#a29bfe','#fd79a8',
+];
+
+// ----------------------------------------------------------------
+// WebSocket
+// ----------------------------------------------------------------
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  _ws = new WebSocket(`${proto}://${location.host}/ws`);
+
+  _ws.onopen = () => {
+    document.getElementById('status-badge').textContent = '● Verbunden';
+    document.getElementById('status-badge').classList.add('connected');
+  };
+
+  _ws.onclose = () => {
+    document.getElementById('status-badge').textContent = '● Getrennt';
+    document.getElementById('status-badge').classList.remove('connected');
+    setTimeout(connectWS, 3000);
+  };
+
+  _ws.onmessage = (evt) => {
+    try {
+      const msg = JSON.parse(evt.data);
+      handleWSMessage(msg);
+    } catch (e) {}
+  };
+}
+
+function handleWSMessage(msg) {
+  if (msg.type === 'speaker_assigned' || msg.type === 'speaker_confirmed') {
+    if (msg.type === 'speaker_assigned') {
+      const sp = _speakers[msg.raw_speaker_id] || {};
+      sp.name        = msg.character_name;
+      sp.identityId  = msg.identity_id;
+      sp.confirmed   = false;
+      _speakers[msg.raw_speaker_id] = sp;
+    }
+    if (msg.type === 'speaker_confirmed') {
+      const sp = _speakers[msg.raw_speaker_id] || {};
+      sp.confirmed = true;
+      _speakers[msg.raw_speaker_id] = sp;
+    }
+    renderSpeakerList();
+    renderTimeline();
+    toast(`Sprecher aktualisiert: ${msg.raw_speaker_id}`, 'info');
+  }
+  if (msg.type === 'episode_finalized') {
+    toast('Episode finalisiert – Master-Vektoren verbessert! ✅', 'success');
+  }
+}
+
+// ----------------------------------------------------------------
+// Episode loading
+// ----------------------------------------------------------------
+async function refreshEpisodes() {
+  try {
+    const res = await fetch('/api/episodes');
+    const data = await res.json();
+
+    const seriesSet = new Set();
+    const epMap = {};
+
+    for (const ep of data.episodes || []) {
+      seriesSet.add(ep.series_name);
+      if (!epMap[ep.series_name]) epMap[ep.series_name] = [];
+      epMap[ep.series_name].push(ep);
+    }
+
+    const selSeries = document.getElementById('sel-series');
+    selSeries.innerHTML = '<option value="">– wählen –</option>';
+    for (const s of [...seriesSet].sort()) {
+      selSeries.appendChild(new Option(s, s));
+    }
+
+    selSeries.onchange = () => {
+      const selEp = document.getElementById('sel-episode');
+      selEp.innerHTML = '<option value="">– wählen –</option>';
+      for (const ep of (epMap[selSeries.value] || [])) {
+        const opt = new Option(ep.episode_title, ep.episode_title);
+        opt.dataset.videoPath = ep.video_path || '';
+        selEp.appendChild(opt);
+      }
+    };
+
+  } catch (e) {
+    toast('Episoden konnten nicht geladen werden', 'error');
+  }
+}
+
+async function loadEpisode() {
+  const series  = document.getElementById('sel-series').value;
+  const episode = document.getElementById('sel-episode').value;
+  if (!series || !episode) { toast('Bitte Serie und Episode wählen', 'error'); return; }
+
+  _currentSeries  = series;
+  _currentEpisode = episode;
+
+  // Segmente laden
+  const res  = await fetch(`/api/segments?series_name=${encodeURIComponent(series)}&episode_title=${encodeURIComponent(episode)}`);
+  const data = await res.json();
+  _segments = data.segments || [];
+
+  // Speaker-Map aufbauen
+  _speakers = {};
+  let colorIdx = 0;
+  for (const seg of _segments) {
+    if (!_speakers[seg.raw_speaker_id]) {
+      _speakers[seg.raw_speaker_id] = {
+        name:      seg.character_name || seg.raw_speaker_id,
+        color:     SPEAKER_COLORS[colorIdx++ % SPEAKER_COLORS.length],
+        confirmed: seg.is_confirmed,
+        identityId: seg.identity_id,
+      };
+    }
+  }
+
+  // Dauer ermitteln
+  if (_segments.length > 0) {
+    _duration = Math.max(..._segments.map(s => s.end_ms)) / 1000;
+  }
+
+  // Episoden-Info
+  document.getElementById('ep-info').textContent =
+    `${_segments.length} Segmente · ${Object.keys(_speakers).length} Sprecher · ${fmtTime(_duration)}`;
+
+  // Video laden
+  const selEp = document.getElementById('sel-episode');
+  const selectedOpt = selEp.options[selEp.selectedIndex];
+  const videoPath = selectedOpt ? selectedOpt.dataset.videoPath : '';
+  if (videoPath) {
+    const player = document.getElementById('player');
+    player.src = `/api/stream?video_path=${encodeURIComponent(videoPath)}`;
+    player.load();
+  }
+
+  renderSpeakerList();
+  renderTimeline();
+}
+
+// ----------------------------------------------------------------
+// Render Speaker List
+// ----------------------------------------------------------------
+function renderSpeakerList() {
+  const container = document.getElementById('speaker-list');
+  if (Object.keys(_speakers).length === 0) {
+    container.innerHTML = '<p style="color:var(--text-muted);font-size:.85rem;">Keine Sprecher gefunden.</p>';
+    return;
+  }
+
+  container.innerHTML = '';
+  for (const [rawId, sp] of Object.entries(_speakers)) {
+    const isUnknown   = !sp.identityId;
+    const isConfirmed = sp.confirmed;
+
+    const div = document.createElement('div');
+    div.className = 'speaker-item' + (isConfirmed ? ' active' : '');
+    div.dataset.rawId = rawId;
+
+    div.innerHTML = `
+      <div class="speaker-dot" style="background:${sp.color}"></div>
+      <div class="speaker-info">
+        <div class="speaker-name">${escHtml(sp.name)}</div>
+        <div class="speaker-meta">
+          ${escHtml(rawId)}
+          ${isConfirmed ? ' · ✅ Bestätigt' : ''}
+          ${isUnknown   ? ' · ⚠ Unbekannt' : ''}
+        </div>
+      </div>
+      <div class="speaker-actions">
+        <button class="btn-warn btn-assign" data-raw-id="${escHtml(rawId)}" title="Umbenennen / Zuweisen">✏</button>
+        ${!isConfirmed && sp.identityId
+          ? `<button class="btn-success btn-confirm" data-raw-id="${escHtml(rawId)}" title="Bestätigen">✔</button>`
+          : ''}
+      </div>
+    `;
+    container.appendChild(div);
+  }
+}
+
+// ----------------------------------------------------------------
+// Timeline
+// ----------------------------------------------------------------
+function renderTimeline() {
+  const bar = document.getElementById('timeline-bar');
+  // Vorhandene Segmente entfernen (Cursor behalten)
+  [...bar.querySelectorAll('.tl-segment')].forEach(el => el.remove());
+
+  if (_duration === 0) return;
+
+  for (const seg of _segments) {
+    const left  = (seg.start_ms / 1000 / _duration) * 100;
+    const width = ((seg.end_ms - seg.start_ms) / 1000 / _duration) * 100;
+    const sp    = _speakers[seg.raw_speaker_id] || {};
+
+    const el = document.createElement('div');
+    el.className = 'tl-segment';
+    el.style.left  = left + '%';
+    el.style.width = Math.max(width, 0.1) + '%';
+    el.style.background = sp.color || '#666';
+    el.title = `${sp.name || seg.raw_speaker_id} [${fmtTime(seg.start_ms/1000)}–${fmtTime(seg.end_ms/1000)}]`;
+    el.onclick = (e) => {
+      e.stopPropagation();
+      seekTo(seg.start_ms / 1000);
+    };
+    bar.insertBefore(el, document.getElementById('timeline-cursor'));
+  }
+}
+
+// ----------------------------------------------------------------
+// Video timeupdate → Speaker Overlay + Timeline Cursor
+// ----------------------------------------------------------------
+document.getElementById('player').addEventListener('timeupdate', function() {
+  const t = this.currentTime * 1000;  // ms
+
+  // Aktives Segment finden
+  const activeSeg = _segments.find(s => t >= s.start_ms && t <= s.end_ms);
+
+  const badge = document.getElementById('current-speaker-badge');
+  if (activeSeg) {
+    const sp = _speakers[activeSeg.raw_speaker_id] || {};
+    const name = sp.name || activeSeg.raw_speaker_id;
+    badge.textContent = name;
+    badge.className = 'badge' + (sp.confirmed ? ' confirmed' : '') + (!sp.identityId ? ' unknown' : '');
+
+    // Aktiven Speaker in der Liste markieren
+    document.querySelectorAll('.speaker-item').forEach(el => {
+      el.classList.toggle('active', el.dataset.rawId === activeSeg.raw_speaker_id);
+    });
+  } else {
+    badge.textContent = '–';
+    badge.className = 'badge';
+  }
+
+  // Timeline-Cursor
+  if (_duration > 0) {
+    const pct = (this.currentTime / _duration) * 100;
+    document.getElementById('timeline-cursor').style.left = pct + '%';
+  }
+});
+
+// ----------------------------------------------------------------
+// Jump to Speaker (erste Szene wo er spricht)
+// ----------------------------------------------------------------
+function jumpToSpeaker(rawId) {
+  const seg = _segments.find(s => s.raw_speaker_id === rawId);
+  if (seg) seekTo(seg.start_ms / 1000);
+}
+
+function seekTo(seconds) {
+  const player = document.getElementById('player');
+  player.currentTime = seconds;
+  player.play().catch(() => {});
+}
+
+// ----------------------------------------------------------------
+// Assign Modal
+// ----------------------------------------------------------------
+function openAssign(evt, rawId) {
+  evt.stopPropagation();
+  _assignTarget = rawId;
+  document.getElementById('modal-speaker-id').textContent = rawId;
+  const sp = _speakers[rawId] || {};
+  document.getElementById('modal-name').value    = sp.identityId ? (sp.name !== rawId ? sp.name : '') : '';
+  document.getElementById('modal-context').value = _currentSeries;
+  document.getElementById('modal-actor').value   = '';
+  document.getElementById('modal-overlay').classList.add('open');
+  document.getElementById('modal-name').focus();
+}
+
+function closeModal() {
+  document.getElementById('modal-overlay').classList.remove('open');
+  _assignTarget = null;
+}
+
+async function submitAssign(confirmed) {
+  const name    = document.getElementById('modal-name').value.trim();
+  const context = document.getElementById('modal-context').value.trim();
+  if (!name || !context) { toast('Name und Kontext sind Pflichtfelder', 'error'); return; }
+
+  const body = {
+    series_name:    _currentSeries,
+    episode_title:  _currentEpisode,
+    raw_speaker_id: _assignTarget,
+    character_name: name,
+    series_context: context,
+    sync_actor_name: document.getElementById('modal-actor').value.trim() || null,
+    confirmed,
+  };
+
+  try {
+    const res  = await fetch('/api/assign', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (data.success) {
+      const sp = _speakers[_assignTarget] || {};
+      sp.name        = name;
+      sp.identityId  = data.identity_id;
+      sp.confirmed   = confirmed;
+      _speakers[_assignTarget] = sp;
+      renderSpeakerList();
+      renderTimeline();
+      closeModal();
+      toast(`"${name}" zugewiesen (${data.updated_segments} Segmente)`, 'success');
+    } else {
+      toast('Fehler beim Zuweisen', 'error');
+    }
+  } catch (e) {
+    toast('Netzwerkfehler: ' + e.message, 'error');
+  }
+}
+
+// ----------------------------------------------------------------
+// Confirm
+// ----------------------------------------------------------------
+async function confirmSpeaker(evt, rawId) {
+  evt.stopPropagation();
+  try {
+    const res  = await fetch('/api/confirm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        series_name:    _currentSeries,
+        episode_title:  _currentEpisode,
+        raw_speaker_id: rawId,
+      }),
+    });
+    const data = await res.json();
+    if (data.success) {
+      if (_speakers[rawId]) _speakers[rawId].confirmed = true;
+      renderSpeakerList();
+      toast(`Bestätigt (${data.updated_segments} Segmente)`, 'success');
+    }
+  } catch (e) {
+    toast('Fehler: ' + e.message, 'error');
+  }
+}
+
+// ----------------------------------------------------------------
+// Finalize Episode
+// ----------------------------------------------------------------
+async function finalizeEpisode() {
+  if (!_currentSeries || !_currentEpisode) {
+    toast('Bitte zuerst eine Episode laden', 'error');
+    return;
+  }
+  if (!confirm(`Episode "${_currentEpisode}" finalisieren?\nDies verbessert die Master-Vektoren aller bestätigten Sprecher.`)) return;
+
+  try {
+    const res  = await fetch('/api/finalize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ series_name: _currentSeries, episode_title: _currentEpisode }),
+    });
+    const data = await res.json();
+    if (data.success) {
+      toast('Episode finalisiert! ' + data.message, 'success');
+    }
+  } catch (e) {
+    toast('Fehler: ' + e.message, 'error');
+  }
+}
+
+// ----------------------------------------------------------------
+// Toast
+// ----------------------------------------------------------------
+function toast(msg, type = 'info') {
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.textContent = msg;
+  document.getElementById('toast-container').appendChild(el);
+  setTimeout(() => el.remove(), 4000);
+}
+
+// ----------------------------------------------------------------
+// Helpers
+// ----------------------------------------------------------------
+function fmtTime(sec) {
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+}
+
+function escHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+// Keyboard: Escape closes modal
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closeModal();
+});
+
+// Click outside modal closes it
+document.getElementById('modal-overlay').addEventListener('click', function(e) {
+  if (e.target === this) closeModal();
+});
+
+// Event delegation for speaker list buttons (avoids inline handlers / XSS)
+document.getElementById('speaker-list').addEventListener('click', function(e) {
+  const assignBtn  = e.target.closest('.btn-assign');
+  const confirmBtn = e.target.closest('.btn-confirm');
+  const speakerItem = e.target.closest('.speaker-item');
+
+  if (assignBtn) {
+    e.stopPropagation();
+    openAssign(e, assignBtn.dataset.rawId);
+  } else if (confirmBtn) {
+    e.stopPropagation();
+    confirmSpeaker(e, confirmBtn.dataset.rawId);
+  } else if (speakerItem) {
+    jumpToSpeaker(speakerItem.dataset.rawId);
+  }
+});
+
+// ----------------------------------------------------------------
+// Init
+// ----------------------------------------------------------------
+connectWS();
+refreshEpisodes();
+</script>
+</body>
+</html>
