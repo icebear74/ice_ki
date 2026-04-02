@@ -233,6 +233,20 @@
     .tag-unknown    { background: rgba(248,81,73,.15); color: var(--danger); }
     .sc-transcript  { color: var(--text-muted); font-size: 11px; margin-top: 4px; font-style: italic; line-height: 1.4; }
 
+    /* Confidence percentage badge – colour-coded by tier */
+    .conf-badge {
+      display: inline-block;
+      padding: 1px 6px;
+      border-radius: 10px;
+      font-size: 11px;
+      font-weight: 700;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .conf-high   { background: rgba(63,185,80,.25);  color: #56d364; }   /* ≥ 80 % */
+    .conf-medium { background: rgba(210,153,34,.25); color: #d29922; }   /* ≥ 55 % */
+    .conf-low    { background: rgba(248,81,73,.20);  color: #f85149; }   /* < 55 % */
+
     /* Assignment panel (shown below selected speaker card) */
     .assign-panel {
       background: var(--bg-hover);
@@ -743,6 +757,13 @@ function renderSegments() {
   list.innerHTML = segments.map(seg => segCard(seg)).join("");
 }
 
+function confBadge(distance) {
+  if (distance == null) return "";
+  const pct = Math.round((1 - distance) * 100);
+  const cls = pct >= 80 ? "conf-high" : pct >= 55 ? "conf-medium" : "conf-low";
+  return `<span class="conf-badge ${cls}">${pct}%</span>`;
+}
+
 function segCard(seg) {
   const start = msToTime(seg.start_ms);
   const label = seg.identity_name || seg.speaker_label || "Unbekannt";
@@ -750,20 +771,22 @@ function segCard(seg) {
   let cardClass = "speaker-card";
 
   if (seg.identity_id) {
-    const pct = seg.match_distance != null
-      ? Math.round((1 - seg.match_distance) * 100) + "% Match" : "";
+    const badge = confBadge(seg.match_distance);
     const ctx = seg.matched_sample_context ? ` via "${seg.matched_sample_context}"` : "";
     if (seg.is_suggestion) {
       cardClass += " suggestion";
       matchHtml = `<div class="sc-match"><span class="match-tag tag-suggest">⚠ Vorschlag</span>
-        Erkannt als <strong>${esc(seg.identity_name)}</strong>${esc(ctx)} · ${pct}</div>`;
+        Erkannt als <strong>${esc(seg.identity_name)}</strong>${esc(ctx)}</div>`;
     } else {
       matchHtml = `<div class="sc-match"><span class="match-tag tag-matched">✓ Erkannt</span>
-        <strong>${esc(seg.identity_name)}</strong>${esc(ctx)} · ${pct}</div>`;
+        <strong>${esc(seg.identity_name)}</strong>${esc(ctx)}</div>`;
     }
+    // badge is shown in the header (top-right, next to time)
   } else {
     matchHtml = `<div class="sc-match"><span class="match-tag tag-unknown">? Unbekannt</span></div>`;
   }
+
+  const badge = seg.identity_id ? confBadge(seg.match_distance) : "";
 
   const transcript = seg.transcript
     ? `<div class="sc-transcript">"${esc(seg.transcript.slice(0,120))}${seg.transcript.length>120?"…":""}"</div>`
@@ -775,7 +798,7 @@ function segCard(seg) {
          onclick="selectSegment(${seg.id})">
       <div class="sc-header">
         <span class="sc-label">${esc(label)}</span>
-        <span class="sc-time">${start}</span>
+        <span style="display:flex;align-items:center;gap:6px;">${badge}<span class="sc-time">${start}</span></span>
       </div>
       ${matchHtml}
       ${transcript}
@@ -817,7 +840,7 @@ function buildAssignPanel(seg) {
 
   const suggestionNote = seg.is_suggestion
     ? `<div style="color:var(--warn);font-size:11px;margin-bottom:8px;">
-        ⚠ Dies ist ein Vorschlag – die Distanz war etwas höher (${seg.match_distance?.toFixed(3)}).
+        ⚠ Dies ist ein Vorschlag – Konfidenz: ${confBadge(seg.match_distance)}.
         Bestätige oder weise einer anderen Identität zu.
        </div>` : "";
 
@@ -932,7 +955,8 @@ function updateOverlay(nowMs) {
   if (active.identity_id && active.match_distance != null) {
     const pct = Math.round((1 - active.match_distance) * 100);
     const ctx = active.matched_sample_context ? ` · via „${active.matched_sample_context}"` : "";
-    ovMatch.textContent = `${pct}% Match${ctx}`;
+    const prefix = active.is_suggestion ? "⚠ Vorschlag · " : "";
+    ovMatch.textContent = `${prefix}${pct}%${ctx}`;
   } else if (active.is_suggestion) {
     ovMatch.textContent = "⚠ Vorschlag – Bestätigung ausstehend";
   } else {
