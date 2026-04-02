@@ -172,8 +172,29 @@ def _get_whisper_model(model_size: str = "large-v3"):
                 "faster-whisper is not installed. Run setup_env.sh first."
             ) from exc
         device = "cuda" if TRANSCRIPTION_DEVICE.startswith("cuda") else "cpu"
-        compute_type = "float16" if device == "cuda" else "int8"
-        _whisper_model = WhisperModel(model_size, device=device, compute_type=compute_type)
+        # CTranslate2 requires tensor-core FP16 support (Volta+, compute ≥7.0).
+        # Older CUDA GPUs like Tesla P4/P100 (Pascal, compute 6.x) only support
+        # float32 efficiently.  CPU falls back to int8.
+        if device == "cuda":
+            compute_type_candidates = ["float16", "float32"]
+        else:
+            compute_type_candidates = ["int8"]
+        last_exc: Exception | None = None
+        for compute_type in compute_type_candidates:
+            try:
+                _whisper_model = WhisperModel(model_size, device=device, compute_type=compute_type)
+                logger.info("Whisper loaded with compute_type=%s on %s", compute_type, device)
+                break
+            except (ValueError, RuntimeError) as exc:
+                logger.warning(
+                    "Whisper compute_type=%s not supported on %s, trying next: %s",
+                    compute_type, device, exc,
+                )
+                last_exc = exc
+        else:
+            raise RuntimeError(
+                f"Could not load Whisper model on {device}: {last_exc}"
+            ) from last_exc
     return _whisper_model
 
 
