@@ -102,7 +102,7 @@ def run_diarization(audio_path: str) -> list[dict]:
     hf_token = os.getenv("HF_TOKEN")
     pipeline = Pipeline.from_pretrained(
         "pyannote/speaker-diarization-3.1",
-        use_auth_token=hf_token,
+        token=hf_token,
     )
     device = torch.device(DIARIZATION_DEVICE if torch.cuda.is_available() else "cpu")
     pipeline = pipeline.to(device)
@@ -114,7 +114,7 @@ def run_diarization(audio_path: str) -> list[dict]:
     # Extract per-segment embeddings using pyannote's SpeakerEmbedding model
     try:
         from pyannote.audio import Model, Inference
-        emb_model = Model.from_pretrained("pyannote/embedding", use_auth_token=hf_token)
+        emb_model = Model.from_pretrained("pyannote/embedding", token=hf_token)
         emb_model = emb_model.to(device)
         inference = Inference(emb_model, window="whole")
     except Exception:
