@@ -13,10 +13,18 @@ ALL stored voice_samples and:
                                    (web UI will prompt the user)
   - otherwise                    → stored as unknown (speaker_label only)
 
-Usage:
+Usage (Series – episode auto-detected from filename):
+    python -m processor.scanner --video /path/to/S01E01-Episode.mkv \
+                                 --series "Star Trek TNG"
+
+Usage (Series – episode provided explicitly):
     python -m processor.scanner --video /path/to/episode.mkv \
                                  --series "Star Trek TNG" \
                                  --episode "The Inner Light"
+
+Usage (Movie – no SxxExx pattern in filename):
+    python -m processor.scanner --video /path/to/X-Men.mkv \
+                                 --series "X-Men"
 """
 
 from __future__ import annotations
@@ -24,6 +32,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import subprocess
 import tempfile
 
@@ -290,21 +299,41 @@ def scan_video(
 # CLI entry point
 # ---------------------------------------------------------------------------
 
+def parse_filename(filename: str) -> str:
+    """
+    Extract episode code from *filename*.
+
+    Recognises patterns like S01E01, s01e01, S1E1, etc.
+    Returns a normalised string such as "S01E01", or "Movie" if no pattern
+    is found (indicating a film rather than a series episode).
+    """
+    match = re.search(r"[Ss](\d+)[Ee](\d+)", filename)
+    if match:
+        return f"S{int(match.group(1)):02d}E{int(match.group(2)):02d}"
+    return "Movie"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="ice_audio_nexus scanner – diarize & identify speakers in a video"
     )
     parser.add_argument("--video",   required=True, help="Path to the video file")
-    parser.add_argument("--series",  required=True, help="Series name (e.g. 'Star Trek TNG')")
-    parser.add_argument("--episode", required=True, help="Episode title")
+    parser.add_argument("--series",  required=True, help="Series or movie title (e.g. 'Star Trek TNG')")
+    parser.add_argument("--episode", default=None,
+                        help="Episode title or code (optional – auto-detected from filename; "
+                             "defaults to 'Movie' if no SxxExx pattern is found)")
     parser.add_argument("--no-transcribe", action="store_true",
                         help="Skip Whisper transcription (faster)")
     args = parser.parse_args()
 
+    # Auto-detect episode from filename when not provided explicitly
+    episode_title = args.episode or parse_filename(os.path.basename(args.video))
+    logger.info("Series: %s | Episode: %s", args.series, episode_title)
+
     scan_video(
         video_path=args.video,
         series_name=args.series,
-        episode_title=args.episode,
+        episode_title=episode_title,
         transcribe=not args.no_transcribe,
     )
 
