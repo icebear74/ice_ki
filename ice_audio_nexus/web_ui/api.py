@@ -313,14 +313,16 @@ async def stream_video(
 
     The resolved path must be inside VIDEO_DIR to prevent path traversal.
     """
-    video_path = Path(path).resolve()
+    resolved_video_dir = VIDEO_DIR.resolve()
 
-    # Security: ensure the resolved path is inside the configured VIDEO_DIR
+    # Security: resolve the path and verify it is inside VIDEO_DIR before use
+    candidate = (resolved_video_dir / path).resolve()
     try:
-        video_path.relative_to(VIDEO_DIR.resolve())
+        candidate.relative_to(resolved_video_dir)
     except ValueError:
         raise HTTPException(status_code=403, detail="Access to this path is not allowed")
 
+    video_path = candidate
     if not video_path.exists():
         raise HTTPException(status_code=404, detail="Video not found")
 

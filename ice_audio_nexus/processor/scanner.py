@@ -177,10 +177,10 @@ def transcribe_segment(
     """
     model = _get_whisper_model(model_size)
 
-    # Use a context manager so the temp file is always cleaned up
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as tmp:
-        tmp_path = tmp.name
-        # Write the sliced audio while the file handle is still open
+    # Create a temp file, close it, let FFmpeg write to it, clean up in finally
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".wav")
+    os.close(tmp_fd)
+    try:
         cmd = [
             "ffmpeg", "-y",
             "-ss", str(start_s), "-to", str(end_s),
@@ -191,6 +191,9 @@ def transcribe_segment(
         subprocess.run(cmd, capture_output=True, check=True)
         whisper_segments, _ = model.transcribe(tmp_path, beam_size=5)
         return " ".join(seg.text.strip() for seg in whisper_segments)
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
 
 # ---------------------------------------------------------------------------
