@@ -83,6 +83,7 @@ _DDL = [
         start_ms        INT NOT NULL,
         end_ms          INT NOT NULL,
         speaker_label   VARCHAR(100) COMMENT 'Temporary diarization label (SPEAKER_01)',
+        embedding       VECTOR(512) NULL COMMENT 'Raw speaker embedding from diarization',
         identity_id     INT DEFAULT NULL,
         matched_sample_id INT DEFAULT NULL COMMENT 'Which voice_sample triggered the match',
         match_distance  FLOAT DEFAULT NULL COMMENT 'Cosine distance of the winning match',
@@ -131,6 +132,15 @@ def ensure_schema() -> None:
         cur = conn.cursor()
         for ddl in _DDL:
             cur.execute(ddl)
+        # Migrate pre-existing episode_segments tables that were created before
+        # the embedding column was added.
+        cur.execute(
+            """
+            ALTER TABLE episode_segments
+            ADD COLUMN IF NOT EXISTS embedding VECTOR(512) NULL
+                COMMENT 'Raw speaker embedding from diarization'
+            """
+        )
         conn.commit()
         logger.info("Database schema verified / created.")
     finally:
@@ -369,8 +379,8 @@ def upsert_segment(conn: mariadb.Connection, **kwargs) -> int:
     # if the caller ever passes unexpected keys.
     _ALLOWED_COLS = (
         "series_name", "episode_title", "video_path", "start_ms", "end_ms",
-        "speaker_label", "identity_id", "matched_sample_id", "match_distance",
-        "transcript", "confidence", "is_suggestion",
+        "speaker_label", "embedding", "identity_id", "matched_sample_id",
+        "match_distance", "transcript", "confidence", "is_suggestion",
     )
     data = {k: v for k, v in kwargs.items() if k in _ALLOWED_COLS}
     # Build column list from the verified allowlist (not from caller input)
@@ -402,6 +412,22 @@ def update_segment_identity(
         (identity_id, matched_sample_id, match_distance, is_suggestion, segment_id),
     )
     conn.commit()
+
+
+def get_segment_embedding(
+    conn: mariadb.Connection,
+    segment_id: int,
+) -> list[float] | None:
+    """Return the stored speaker embedding for a segment, or None if absent."""
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT embedding FROM episode_segments WHERE id = ?",
+        (segment_id,),
+    )
+    row = cur.fetchone()
+    if row is None or row[0] is None:
+        return None
+    return bytes_to_vector(row[0])
 
 
 def list_processed_episodes(conn: mariadb.Connection) -> list[dict]:

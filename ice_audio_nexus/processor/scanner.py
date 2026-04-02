@@ -229,6 +229,7 @@ def scan_video(
         get_connection,
         find_nearest_identity,
         upsert_segment,
+        vector_to_bytes,
     )
 
     ensure_schema()
@@ -283,6 +284,7 @@ def scan_video(
                 start_ms=seg["start_ms"],
                 end_ms=seg["end_ms"],
                 speaker_label=seg["speaker_label"],
+                embedding=vector_to_bytes(seg["embedding"]) if seg["embedding"] else None,
                 identity_id=match_result.get("identity_id"),
                 matched_sample_id=match_result.get("sample_id"),
                 match_distance=match_result.get("distance"),

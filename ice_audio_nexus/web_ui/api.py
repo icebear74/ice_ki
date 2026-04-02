@@ -48,6 +48,7 @@ from db.database import (
     delete_voice_sample,
     update_segment_identity,
     get_episode_segments,
+    get_segment_embedding,
     list_processed_episodes,
 )
 
@@ -295,6 +296,11 @@ def api_assign_segment(
         context     = data.get("context", "")
         add_sample  = bool(data.get("add_sample", False))
         embedding   = data.get("embedding", [])
+
+        # If the caller didn't supply an embedding, try to load the one that
+        # the scanner persisted in episode_segments for this segment.
+        if add_sample and (not embedding or len(embedding) != 512):
+            embedding = get_segment_embedding(conn, segment_id) or []
 
         new_sample_id = None
         if add_sample and embedding and len(embedding) == 512:
