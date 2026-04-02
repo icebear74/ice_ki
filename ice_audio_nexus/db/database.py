@@ -404,6 +404,30 @@ def update_segment_identity(
     conn.commit()
 
 
+def list_processed_episodes(conn: mariadb.Connection) -> list[dict]:
+    """
+    Return a grouped list of all episodes that have been processed by the scanner.
+    Each entry contains series_name, episode_title, the stored video_path and the
+    total segment count – enough for the Web UI library view.
+    """
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT
+            series_name,
+            episode_title,
+            MIN(video_path)  AS video_path,
+            COUNT(*)         AS segment_count
+        FROM episode_segments
+        WHERE series_name IS NOT NULL
+          AND episode_title IS NOT NULL
+        GROUP BY series_name, episode_title
+        ORDER BY series_name, episode_title
+    """)
+    cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+
 def get_episode_segments(
     conn: mariadb.Connection,
     series_name: str,

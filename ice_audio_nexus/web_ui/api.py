@@ -48,6 +48,7 @@ from db.database import (
     delete_voice_sample,
     update_segment_identity,
     get_episode_segments,
+    list_processed_episodes,
 )
 
 logger = logging.getLogger(__name__)
@@ -88,6 +89,16 @@ _TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
 VIDEO_DIR = Path(os.getenv("VIDEO_DIR", "/data/videos"))
+
+# Compiled once at module load – used by api_library()
+_SEASON_RE = re.compile(r"^(S\d+)E\d+", re.IGNORECASE)
+
+# Mount VIDEO_DIR for direct static access (fallback alongside /stream)
+try:
+    if VIDEO_DIR.exists():
+        app.mount("/videos", StaticFiles(directory=str(VIDEO_DIR)), name="videos")
+except Exception as _e:
+    pass  # VIDEO_DIR not available at startup – /stream endpoint still works
 
 
 # ---------------------------------------------------------------------------
@@ -305,20 +316,51 @@ def api_assign_segment(
 
 
 # ---------------------------------------------------------------------------
-# Video listing & streaming
+# Library (DB-driven) & streaming
 # ---------------------------------------------------------------------------
 
-@app.get("/api/videos")
-def api_list_videos() -> JSONResponse:
-    if not VIDEO_DIR.exists():
-        return JSONResponse([])
-    extensions = {".mkv", ".mp4", ".avi", ".mov", ".m4v"}
-    videos = [
-        {"name": f.name, "path": str(f)}
-        for f in sorted(VIDEO_DIR.rglob("*"))
-        if f.suffix.lower() in extensions
+@app.get("/api/library")
+def api_library() -> JSONResponse:
+    """
+    Return all episodes that have been processed by the scanner, grouped by
+    series → season.  The video_path stored in episode_segments is used
+    directly – no filesystem scan required.
+
+    Response shape:
+      [ { name: str,
+          seasons: [ { name: str,
+                       episodes: [ { title, video_path, segment_count } ] } ] } ]
+    """
+    conn = get_connection()
+    try:
+        episodes = list_processed_episodes(conn)
+    finally:
+        conn.close()
+
+    # Group: series_name → season (extracted from title e.g. S01E03 → S01) → episodes
+    series_map: dict[str, dict[str, list]] = {}
+    for ep in episodes:
+        s = ep["series_name"]
+        t = ep["episode_title"]
+        m = _SEASON_RE.match(t)
+        season = m.group(1).upper() if m else "—"
+        series_map.setdefault(s, {}).setdefault(season, []).append({
+            "title":         t,
+            "video_path":    ep["video_path"],
+            "segment_count": ep["segment_count"],
+        })
+
+    library = [
+        {
+            "name": series_name,
+            "seasons": [
+                {"name": k, "episodes": series_map[series_name][k]}
+                for k in sorted(series_map[series_name])
+            ],
+        }
+        for series_name in sorted(series_map)
     ]
-    return JSONResponse(videos)
+    return JSONResponse(library)
 
 
 @app.get("/stream")
@@ -328,36 +370,48 @@ async def stream_video(
     seek: float = 0.0,
 ) -> StreamingResponse:
     """
-    Stream a video via FFmpeg (CUDA) as HLS-compatible H.264/AAC in fragmented
-    MP4 format, which is playable by all modern browsers.
-    If *seek* is given the stream starts at that second offset.
+    Stream a video via FFmpeg as a browser-compatible fragmented MP4.
+    *path* may be the absolute path stored in episode_segments.video_path or a
+    path relative to VIDEO_DIR.  In both cases the resolved path must fall
+    inside VIDEO_DIR to prevent path traversal.
 
-    The resolved path must be inside VIDEO_DIR to prevent path traversal.
+    Uses h264_nvenc when available (probed at startup), falls back to libx264.
     """
     resolved_video_dir = VIDEO_DIR.resolve()
 
-    # Security: resolve the path and verify it is inside VIDEO_DIR before use
-    candidate = (resolved_video_dir / path).resolve()
+    path_obj = Path(path)
+    candidate = path_obj.resolve() if path_obj.is_absolute() \
+        else (resolved_video_dir / path).resolve()
+
+    # Security: reconstruct the path from its validated relative portion so the
+    # result is provably inside VIDEO_DIR regardless of symlinks or traversal.
     try:
-        candidate.relative_to(resolved_video_dir)
+        safe_path = resolved_video_dir / candidate.relative_to(resolved_video_dir)
     except ValueError:
         raise HTTPException(status_code=403, detail="Access to this path is not allowed")
 
-    video_path = candidate
-    if not video_path.exists():
+    if not safe_path.exists():
         raise HTTPException(status_code=404, detail="Video not found")
+
+    if _NVENC_AVAILABLE:
+        encoder_args = ["-c:v", "h264_nvenc", "-preset", "p4"]
+        hwaccel_args = ["-hwaccel", "cuda"]
+    else:
+        encoder_args = ["-c:v", "libx264", "-preset", "fast", "-crf", "23"]
+        hwaccel_args = []
 
     cmd = [
         "ffmpeg", "-y",
-        "-hwaccel", "cuda",
+        *hwaccel_args,
         "-ss", str(seek),
-        "-i", str(video_path),
-        "-c:v", "h264_nvenc",       # NVIDIA hardware encoder
-        "-preset", "p4",
+        "-i", str(safe_path),
+        *encoder_args,
         "-c:a", "aac",
         "-b:a", "192k",
         "-f", "mp4",
-        "-movflags", "frag_keyframe+empty_moov+faststart",
+        # frag_keyframe+empty_moov: browser-streamable fragmented MP4 via pipe
+        # (faststart intentionally omitted – requires seekable output)
+        "-movflags", "frag_keyframe+empty_moov",
         "pipe:1",
     ]
 
