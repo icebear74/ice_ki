@@ -9,7 +9,6 @@ FastAPI backend providing:
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import re
@@ -55,32 +54,14 @@ from db.database import (
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-# h264_nvenc availability is probed once at startup
-_NVENC_AVAILABLE: bool = False
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _NVENC_AVAILABLE
     try:
         ensure_schema()
         logger.info("DB schema verified.")
     except Exception as exc:
         logger.error("DB init failed: %s", exc)
-
-    # Probe whether h264_nvenc is available in the installed ffmpeg
-    try:
-        probe = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-hide_banner", "-encoders",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        out, _ = await probe.communicate()
-        _NVENC_AVAILABLE = b"h264_nvenc" in out
-        logger.info("h264_nvenc encoder: %s", "available" if _NVENC_AVAILABLE else "NOT available – using libx264")
-    except Exception as exc:
-        logger.warning("Could not probe ffmpeg encoders: %s", exc)
-
     yield
 
 
@@ -380,15 +361,23 @@ for _extra in os.getenv("STREAM_ALLOWED_ROOTS", "").split():
 
 _VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".m4v", ".webm", ".ts"}
 
+_MIME_TYPES: dict[str, str] = {
+    ".mp4":  "video/mp4",
+    ".m4v":  "video/mp4",
+    ".mkv":  "video/x-matroska",
+    ".webm": "video/webm",
+    ".avi":  "video/x-msvideo",
+    ".mov":  "video/quicktime",
+    ".ts":   "video/mp2t",
+}
+
 
 @app.get("/stream")
-async def stream_video(
-    request: Request,
-    path: str,
-    seek: float = 0.0,
-) -> StreamingResponse:
+def stream_video(request: Request, path: str) -> StreamingResponse:
     """
-    Stream a video via FFmpeg as a browser-compatible fragmented MP4.
+    Serve a video file with full HTTP Range request support (RFC 7233) so that
+    browsers can start playback immediately and seek freely without re-requesting
+    the stream.
 
     *path* may be:
       - an absolute path as stored in episode_segments.video_path, OR
@@ -396,8 +385,6 @@ async def stream_video(
 
     Security: the resolved path must sit inside one of the allowed roots
     (VIDEO_DIR or STREAM_ALLOWED_ROOTS) and must have a known video extension.
-
-    Uses h264_nvenc when available (probed at startup), falls back to libx264.
     """
     path_obj = Path(path)
     candidate = path_obj.resolve() if path_obj.is_absolute() \
@@ -408,68 +395,67 @@ async def stream_video(
         raise HTTPException(status_code=403, detail="File type not allowed")
 
     # Must sit inside at least one permitted root directory.
-    # When the scanner stores an absolute path on a different mount, we also
-    # accept it if it is a real file (its parent is auto-added to the roots
-    # so that traversal back out of that directory is still prevented).
     allowed = any(
         candidate == root or candidate.is_relative_to(root)
         for root in _STREAM_ROOTS
     )
     if not allowed and path_obj.is_absolute() and candidate.is_file():
-        # Accept the scanner-stored path; add its directory as a new root
-        # so future requests to siblings are also allowed without re-checking.
         _STREAM_ROOTS.append(candidate.parent.resolve())
         allowed = True
 
     if not allowed:
         raise HTTPException(status_code=403, detail="Access to this path is not allowed")
 
-    safe_path = candidate
-    if not safe_path.exists():
+    if not candidate.exists():
         raise HTTPException(status_code=404, detail="Video not found")
 
-    if _NVENC_AVAILABLE:
-        encoder_args = ["-c:v", "h264_nvenc", "-preset", "p4"]
-        hwaccel_args = ["-hwaccel", "cuda"]
-    else:
-        encoder_args = ["-c:v", "libx264", "-preset", "fast", "-crf", "23"]
-        hwaccel_args = []
+    file_size = candidate.stat().st_size
+    media_type = _MIME_TYPES.get(candidate.suffix.lower(), "video/octet-stream")
 
-    cmd = [
-        "ffmpeg", "-y",
-        *hwaccel_args,
-        "-ss", str(seek),
-        "-i", str(safe_path),
-        *encoder_args,
-        "-c:a", "aac",
-        "-b:a", "192k",
-        "-f", "mp4",
-        # frag_keyframe+empty_moov: browser-streamable fragmented MP4 via pipe
-        # (faststart intentionally omitted – requires seekable output)
-        "-movflags", "frag_keyframe+empty_moov",
-        "pipe:1",
-    ]
+    # Parse optional Range header: "bytes=start-end"
+    range_header = request.headers.get("range", "")
+    start, end = 0, file_size - 1
+    is_range_request = False
 
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
+    if range_header:
+        m = re.match(r"bytes=(\d+)-(\d*)", range_header)
+        if m:
+            start = int(m.group(1))
+            end = int(m.group(2)) if m.group(2) else file_size - 1
+            is_range_request = True
 
-    async def _generator():
-        assert proc.stdout is not None
-        try:
-            while True:
-                chunk = await proc.stdout.read(65536)
-                if not chunk:
+        if start >= file_size:
+            raise HTTPException(
+                status_code=416,
+                detail="Range not satisfiable",
+                headers={"Content-Range": f"bytes */{file_size}"},
+            )
+
+    end = min(end, file_size - 1)
+    chunk_size = end - start + 1
+
+    def _iter_file() -> bytes:
+        with open(candidate, "rb") as fh:
+            fh.seek(start)
+            remaining = chunk_size
+            while remaining > 0:
+                data = fh.read(min(65536, remaining))
+                if not data:
                     break
-                yield chunk
-        finally:
-            if proc.returncode is None:
-                proc.terminate()
+                remaining -= len(data)
+                yield data
+
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(chunk_size),
+        "Cache-Control": "no-cache",
+    }
+    if is_range_request:
+        headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
 
     return StreamingResponse(
-        _generator(),
-        media_type="video/mp4",
-        headers={"Cache-Control": "no-cache"},
+        _iter_file(),
+        status_code=206 if is_range_request else 200,
+        media_type=media_type,
+        headers=headers,
     )

@@ -736,11 +736,7 @@ function selectSegment(segId) {
   // ── Jump to the segment start in the video ──────────────────────────
   if (currentVideoPath) {
     const seekSec = seg.start_ms / 1000;
-    // Re-request the stream from the exact start position.
-    // This is reliable for fragmented MP4 pipe streams where the browser
-    // cannot seek freely in an incomplete buffer.
-    player.src = `/stream?path=${encodeURIComponent(currentVideoPath)}&seek=${seekSec}`;
-    player.load();
+    player.currentTime = seekSec;
     player.play().catch(() => {});
   }
 
@@ -917,8 +913,7 @@ tlContainer.addEventListener("click", e => {
   const ratio = (e.clientX - rect.left) / rect.width;
   if (player.duration && currentVideoPath) {
     const seekSec = ratio * player.duration;
-    player.src = `/stream?path=${encodeURIComponent(currentVideoPath)}&seek=${seekSec}`;
-    player.load();
+    player.currentTime = seekSec;
     player.play().catch(() => {});
   }
 });
