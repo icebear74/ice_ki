@@ -51,6 +51,12 @@ logging.basicConfig(
 # Thresholds (can be overridden via .env)
 MATCH_THRESHOLD   = float(os.getenv("MATCH_THRESHOLD",   "0.25"))
 SUGGEST_THRESHOLD = float(os.getenv("SUGGEST_THRESHOLD", "0.45"))
+# Minimum cosine-distance gap required between the best match and the closest
+# sample from a *different* identity.  Raises this bar prevents two similar-
+# sounding characters (e.g. Sheldon vs Leonard) from collapsing onto the same
+# identity.  Increase if you still see false merges; decrease if valid matches
+# get downgraded to "suggest".
+MIN_MARGIN        = float(os.getenv("MIN_MARGIN",         "0.07"))
 
 # GPU assignments
 DIARIZATION_DEVICE   = os.getenv("DIARIZATION_DEVICE",   "cuda:0")
@@ -328,6 +334,7 @@ def scan_video(
                     seg["embedding"],
                     match_threshold=MATCH_THRESHOLD,
                     suggest_threshold=SUGGEST_THRESHOLD,
+                    min_margin=MIN_MARGIN,
                 )
                 if match_result["status"] != "unknown":
                     logger.info(

@@ -312,10 +312,19 @@ def find_nearest_identity(
     embedding: list[float],
     match_threshold: float = 0.25,
     suggest_threshold: float = 0.45,
+    min_margin: float = 0.07,
 ) -> dict:
     """
     Search all voice_samples using VEC_DISTANCE_COSINE (MariaDB 11.7+) and
     return the closest match.
+
+    *min_margin* guards against cross-identity confusion (e.g. two characters
+    whose embeddings land close together).  Even if the best match is within
+    *match_threshold*, the result is only considered a confirmed match when the
+    next-closest sample from a **different** identity is at least *min_margin*
+    further away.  If the margin is too small the result is downgraded:
+      • confirmed → suggest  (if still within suggest_threshold + margin)
+      • suggest   → unknown
 
     Returns a dict with keys:
       status        – 'matched' | 'suggest' | 'unknown'
@@ -324,9 +333,11 @@ def find_nearest_identity(
       sample_id     – int or None   (which sample triggered the match)
       sample_context– str or None
       distance      – float or None
+      second_distance – float or None  (runner-up distance, useful for debugging)
     """
     vec_bytes = vector_to_bytes(embedding)
     cur = conn.cursor()
+    # Fetch the two closest samples (potentially from different identities)
     cur.execute(
         """
         SELECT vs.id,
@@ -337,36 +348,58 @@ def find_nearest_identity(
         FROM voice_samples vs
         JOIN identities i ON i.id = vs.identity_id
         ORDER BY dist ASC
-        LIMIT 1
+        LIMIT 2
         """,
         (vec_bytes,),
     )
-    row = cur.fetchone()
-    if row is None:
+    rows = cur.fetchall()
+    if not rows:
         return {"status": "unknown", "identity_id": None, "identity_name": None,
-                "sample_id": None, "sample_context": None, "distance": None}
+                "sample_id": None, "sample_context": None, "distance": None,
+                "second_distance": None}
 
-    sample_id, identity_id, identity_name, sample_context, distance = row
-    if distance <= match_threshold:
-        return {
-            "status": "matched",
-            "identity_id": identity_id,
-            "identity_name": identity_name,
-            "sample_id": sample_id,
-            "sample_context": sample_context,
-            "distance": float(distance),
-        }
-    if distance <= suggest_threshold:
-        return {
-            "status": "suggest",
-            "identity_id": identity_id,
-            "identity_name": identity_name,
-            "sample_id": sample_id,
-            "sample_context": sample_context,
-            "distance": float(distance),
-        }
-    return {"status": "unknown", "identity_id": None, "identity_name": None,
-            "sample_id": None, "sample_context": None, "distance": float(distance)}
+    sample_id, identity_id, identity_name, sample_context, distance = rows[0]
+
+    # Find the closest sample that belongs to a *different* identity (runner-up).
+    second_distance: float | None = None
+    if len(rows) > 1:
+        for row in rows[1:]:
+            if row[1] != identity_id:
+                second_distance = float(row[4])
+                break
+        # If both rows share the same identity, the second_distance stays None.
+        # In that case there is no competing identity, so no margin check needed.
+
+    # Check whether the winning match is sufficiently separated from the
+    # runner-up identity.  If not, downgrade the confidence level.
+    margin_ok = (second_distance is None) or (second_distance - float(distance) >= min_margin)
+
+    if float(distance) <= match_threshold:
+        if margin_ok:
+            status = "matched"
+        elif float(distance) <= suggest_threshold:
+            status = "suggest"   # too close to a rival – downgrade
+        else:
+            status = "unknown"
+    elif float(distance) <= suggest_threshold:
+        status = "suggest"
+    else:
+        status = "unknown"
+
+    if status == "unknown":
+        return {"status": "unknown", "identity_id": None, "identity_name": None,
+                "sample_id": None, "sample_context": None,
+                "distance": float(distance), "second_distance": second_distance}
+
+    return {
+        "status": status,
+        "identity_id": identity_id,
+        "identity_name": identity_name,
+        "sample_id": sample_id,
+        "sample_context": sample_context,
+        "distance": float(distance),
+        "second_distance": second_distance,
+    }
 
 
 # ---------------------------------------------------------------------------
