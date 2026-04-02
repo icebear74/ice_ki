@@ -29,7 +29,8 @@
       color: var(--text);
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       font-size: 14px;
-      min-height: 100vh;
+      height: 100vh;      /* lock to viewport – prevents body from growing with content */
+      overflow: hidden;   /* the individual panels scroll, not the page */
       display: flex;
       flex-direction: column;
     }

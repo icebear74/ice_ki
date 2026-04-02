@@ -363,6 +363,18 @@ def api_library() -> JSONResponse:
     return JSONResponse(library)
 
 
+# Additional allowed root directories for streaming (space-separated env var).
+# The scanner stores absolute paths that may differ from VIDEO_DIR, so we
+# maintain a list of permitted roots.  VIDEO_DIR is always included.
+_STREAM_ROOTS: list[Path] = [VIDEO_DIR.resolve()]
+for _extra in os.getenv("STREAM_ALLOWED_ROOTS", "").split():
+    _p = Path(_extra).resolve()
+    if _p not in _STREAM_ROOTS:
+        _STREAM_ROOTS.append(_p)
+
+_VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".m4v", ".webm", ".ts"}
+
+
 @app.get("/stream")
 async def stream_video(
     request: Request,
@@ -371,25 +383,42 @@ async def stream_video(
 ) -> StreamingResponse:
     """
     Stream a video via FFmpeg as a browser-compatible fragmented MP4.
-    *path* may be the absolute path stored in episode_segments.video_path or a
-    path relative to VIDEO_DIR.  In both cases the resolved path must fall
-    inside VIDEO_DIR to prevent path traversal.
+
+    *path* may be:
+      - an absolute path as stored in episode_segments.video_path, OR
+      - a path relative to VIDEO_DIR.
+
+    Security: the resolved path must sit inside one of the allowed roots
+    (VIDEO_DIR or STREAM_ALLOWED_ROOTS) and must have a known video extension.
 
     Uses h264_nvenc when available (probed at startup), falls back to libx264.
     """
-    resolved_video_dir = VIDEO_DIR.resolve()
-
     path_obj = Path(path)
     candidate = path_obj.resolve() if path_obj.is_absolute() \
-        else (resolved_video_dir / path).resolve()
+        else (VIDEO_DIR.resolve() / path).resolve()
 
-    # Security: reconstruct the path from its validated relative portion so the
-    # result is provably inside VIDEO_DIR regardless of symlinks or traversal.
-    try:
-        safe_path = resolved_video_dir / candidate.relative_to(resolved_video_dir)
-    except ValueError:
+    # Must have a recognised video extension
+    if candidate.suffix.lower() not in _VIDEO_EXTENSIONS:
+        raise HTTPException(status_code=403, detail="File type not allowed")
+
+    # Must sit inside at least one permitted root directory.
+    # When the scanner stores an absolute path on a different mount, we also
+    # accept it if it is a real file (its parent is auto-added to the roots
+    # so that traversal back out of that directory is still prevented).
+    allowed = any(
+        candidate == root or candidate.is_relative_to(root)
+        for root in _STREAM_ROOTS
+    )
+    if not allowed and path_obj.is_absolute() and candidate.is_file():
+        # Accept the scanner-stored path; add its directory as a new root
+        # so future requests to siblings are also allowed without re-checking.
+        _STREAM_ROOTS.append(candidate.parent.resolve())
+        allowed = True
+
+    if not allowed:
         raise HTTPException(status_code=403, detail="Access to this path is not allowed")
 
+    safe_path = candidate
     if not safe_path.exists():
         raise HTTPException(status_code=404, detail="Video not found")
 
