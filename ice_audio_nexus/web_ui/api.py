@@ -9,9 +9,11 @@ FastAPI backend providing:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
+import subprocess
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -361,40 +363,19 @@ for _extra in os.getenv("STREAM_ALLOWED_ROOTS", "").split():
 
 _VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".m4v", ".webm", ".ts"}
 
-_MIME_TYPES: dict[str, str] = {
-    ".mp4":  "video/mp4",
-    ".m4v":  "video/mp4",
-    ".mkv":  "video/x-matroska",
-    ".webm": "video/webm",
-    ".avi":  "video/x-msvideo",
-    ".mov":  "video/quicktime",
-    ".ts":   "video/mp2t",
-}
 
+def _resolve_video_path(path: str) -> Path:
+    """Resolve, validate and return the absolute Path for *path*.
 
-@app.get("/stream")
-def stream_video(request: Request, path: str) -> StreamingResponse:
-    """
-    Serve a video file with full HTTP Range request support (RFC 7233) so that
-    browsers can start playback immediately and seek freely without re-requesting
-    the stream.
-
-    *path* may be:
-      - an absolute path as stored in episode_segments.video_path, OR
-      - a path relative to VIDEO_DIR.
-
-    Security: the resolved path must sit inside one of the allowed roots
-    (VIDEO_DIR or STREAM_ALLOWED_ROOTS) and must have a known video extension.
+    Raises HTTPException (403/404) on any security or existence failure.
     """
     path_obj = Path(path)
     candidate = path_obj.resolve() if path_obj.is_absolute() \
         else (VIDEO_DIR.resolve() / path).resolve()
 
-    # Must have a recognised video extension
     if candidate.suffix.lower() not in _VIDEO_EXTENSIONS:
         raise HTTPException(status_code=403, detail="File type not allowed")
 
-    # Must sit inside at least one permitted root directory.
     allowed = any(
         candidate == root or candidate.is_relative_to(root)
         for root in _STREAM_ROOTS
@@ -409,53 +390,83 @@ def stream_video(request: Request, path: str) -> StreamingResponse:
     if not candidate.exists():
         raise HTTPException(status_code=404, detail="Video not found")
 
-    file_size = candidate.stat().st_size
-    media_type = _MIME_TYPES.get(candidate.suffix.lower(), "video/octet-stream")
+    return candidate
 
-    # Parse optional Range header: "bytes=start-end"
-    range_header = request.headers.get("range", "")
-    start, end = 0, file_size - 1
-    is_range_request = False
 
-    if range_header:
-        m = re.match(r"bytes=(\d+)-(\d*)", range_header)
-        if m:
-            start = int(m.group(1))
-            end = int(m.group(2)) if m.group(2) else file_size - 1
-            is_range_request = True
+@app.get("/stream")
+def stream_video(path: str, t: float = 0.0) -> StreamingResponse:
+    """
+    Transcode a video through FFmpeg to H.264/AAC in a fragmented MP4 container
+    and stream the result to the browser.  Works for any source format (MKV,
+    AVI, H.265, DivX, …) without requiring browser codec support.
 
-        if start >= file_size:
-            raise HTTPException(
-                status_code=416,
-                detail="Range not satisfiable",
-                headers={"Content-Range": f"bytes */{file_size}"},
-            )
+    ?t=<seconds>  optional start offset – FFmpeg seeks to this position before
+                  encoding so the browser always receives a playable stream from
+                  the very first byte.
+    """
+    candidate = _resolve_video_path(path)
 
-    end = min(end, file_size - 1)
-    chunk_size = end - start + 1
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
+    if t > 0:
+        cmd += ["-ss", f"{t:.3f}"]
+    cmd += [
+        "-i", str(candidate),
+        # Video: H.264 baseline, fast encode, good browser compatibility
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+        "-profile:v", "baseline", "-level", "3.1",
+        # Audio: AAC stereo
+        "-c:a", "aac", "-b:a", "128k", "-ac", "2",
+        # Fragmented MP4: browser can start decoding before full file is received
+        "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+        "-f", "mp4",
+        "pipe:1",
+    ]
 
-    def _iter_file() -> bytes:
-        with open(candidate, "rb") as fh:
-            fh.seek(start)
-            remaining = chunk_size
-            while remaining > 0:
-                data = fh.read(min(65536, remaining))
-                if not data:
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except FileNotFoundError:
+        raise HTTPException(status_code=500, detail="FFmpeg not found on this server")
+
+    def _iter():
+        assert proc.stdout
+        try:
+            while True:
+                chunk = proc.stdout.read(65536)
+                if not chunk:
                     break
-                remaining -= len(data)
-                yield data
-
-    headers = {
-        "Accept-Ranges": "bytes",
-        "Content-Length": str(chunk_size),
-        "Cache-Control": "no-cache",
-    }
-    if is_range_request:
-        headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
+                yield chunk
+        finally:
+            proc.stdout.close()
+            proc.wait()
 
     return StreamingResponse(
-        _iter_file(),
-        status_code=206 if is_range_request else 200,
-        media_type=media_type,
-        headers=headers,
+        _iter(),
+        media_type="video/mp4",
+        headers={"Cache-Control": "no-cache"},
     )
+
+
+@app.get("/api/probe")
+def api_probe(path: str) -> JSONResponse:
+    """Return the total duration (seconds) of a video file via ffprobe."""
+    candidate = _resolve_video_path(path)
+
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "quiet",
+                "-print_format", "json",
+                "-show_format",
+                str(candidate),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        data = json.loads(result.stdout)
+        duration = float(data.get("format", {}).get("duration", 0))
+    except Exception as exc:
+        logger.warning("ffprobe failed for %s: %s", candidate, exc)
+        duration = 0.0
+
+    return JSONResponse({"duration": duration})

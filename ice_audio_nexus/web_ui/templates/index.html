@@ -431,6 +431,8 @@ let videoDuration   = 0;
 let seriesName      = "";
 let episodeTitle    = "";
 let currentVideoPath = "";  // absolute path currently loaded into the player
+let _streamOffset  = 0;    // seconds: where the current FFmpeg stream starts in the video
+let _totalDuration = 0;    // seconds: full video duration from /api/probe
 
 const player      = document.getElementById("player");
 const overlay     = document.getElementById("speaker-overlay");
@@ -439,6 +441,25 @@ const ovMatch     = document.getElementById("ov-match");
 const tlBar       = document.getElementById("timeline-bar");
 const tlProgress  = document.getElementById("timeline-progress");
 const tlContainer = document.getElementById("timeline-container");
+
+/* -------------------------------------------------------------------- */
+/*  FFmpeg stream helpers                                                 */
+/* -------------------------------------------------------------------- */
+
+// Reload the FFmpeg stream starting at *t* seconds and auto-play.
+function _loadStreamAt(t) {
+  _streamOffset = t;
+  player.src = `/stream?path=${encodeURIComponent(currentVideoPath)}&t=${t.toFixed(3)}`;
+  player.load();
+  player.play().catch(() => {});
+}
+
+// Show video errors as toasts.
+player.addEventListener("error", () => {
+  const err = player.error;
+  const msg = err ? `Video-Fehler (Code ${err.code}): ${err.message || "unbekannt"}` : "Videofehler";
+  toast(msg, "error");
+});
 
 /* -------------------------------------------------------------------- */
 /*  Tab switching                                                        */
@@ -654,8 +675,18 @@ async function loadEpisode() {
 
   if (videoPath) {
     currentVideoPath = videoPath;
+    _streamOffset    = 0;
     player.src = `/stream?path=${encodeURIComponent(videoPath)}`;
     player.load();
+    // Probe total duration (player.duration is Infinity for live FFmpeg streams)
+    fetch(`/api/probe?path=${encodeURIComponent(videoPath)}`)
+      .then(r => r.json())
+      .then(d => {
+        _totalDuration = d.duration || 0;
+        videoDuration  = _totalDuration * 1000;
+        drawTimeline();
+      })
+      .catch(() => {});
   }
 
   await fetchSegments();
@@ -735,9 +766,7 @@ function selectSegment(segId) {
 
   // ── Jump to the segment start in the video ──────────────────────────
   if (currentVideoPath) {
-    const seekSec = seg.start_ms / 1000;
-    player.currentTime = seekSec;
-    player.play().catch(() => {});
+    _loadStreamAt(seg.start_ms / 1000);
   }
 
   // ── Toggle assignment panel ──────────────────────────────────────────
@@ -838,17 +867,21 @@ async function applyAssign(segId) {
 /*  Video → overlay sync                                                 */
 /* -------------------------------------------------------------------- */
 player.addEventListener("timeupdate", () => {
-  const nowMs = player.currentTime * 1000;
-  const dur   = player.duration || 0;
-  if (dur > 0) {
-    tlProgress.style.width = (player.currentTime / dur * 100) + "%";
+  const absTime = player.currentTime + _streamOffset;
+  const nowMs   = absTime * 1000;
+  if (_totalDuration > 0) {
+    tlProgress.style.width = (absTime / _totalDuration * 100) + "%";
   }
   updateOverlay(nowMs);
 });
 
 player.addEventListener("loadedmetadata", () => {
-  videoDuration = player.duration * 1000;
-  drawTimeline();
+  // Total duration comes from /api/probe (player.duration is Infinity for
+  // live FFmpeg streams); just redraw the timeline if probe has returned.
+  if (_totalDuration > 0) {
+    videoDuration = _totalDuration * 1000;
+    drawTimeline();
+  }
 });
 
 function updateOverlay(nowMs) {
@@ -911,10 +944,8 @@ function drawTimeline() {
 tlContainer.addEventListener("click", e => {
   const rect  = tlContainer.getBoundingClientRect();
   const ratio = (e.clientX - rect.left) / rect.width;
-  if (player.duration && currentVideoPath) {
-    const seekSec = ratio * player.duration;
-    player.currentTime = seekSec;
-    player.play().catch(() => {});
+  if (_totalDuration > 0 && currentVideoPath) {
+    _loadStreamAt(ratio * _totalDuration);
   }
 });
 
