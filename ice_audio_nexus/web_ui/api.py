@@ -9,6 +9,7 @@ FastAPI backend providing:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -394,11 +395,15 @@ def _resolve_video_path(path: str) -> Path:
 
 
 @app.get("/stream")
-def stream_video(path: str, t: float = 0.0) -> StreamingResponse:
+async def stream_video(path: str, t: float = 0.0) -> StreamingResponse:
     """
     Transcode a video through FFmpeg to H.264/AAC in a fragmented MP4 container
     and stream the result to the browser.  Works for any source format (MKV,
     AVI, H.265, DivX, …) without requiring browser codec support.
+
+    Uses asyncio.create_subprocess_exec so FFmpeg stdout is read asynchronously
+    and never causes a pipe-buffer deadlock.  stderr is discarded (DEVNULL) so
+    FFmpeg cannot block on its own error output either.
 
     ?t=<seconds>  optional start offset – FFmpeg seeks to this position before
                   encoding so the browser always receives a playable stream from
@@ -423,21 +428,28 @@ def stream_video(path: str, t: float = 0.0) -> StreamingResponse:
     ]
 
     try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,  # discard – never blocks FFmpeg
+        )
     except FileNotFoundError:
         raise HTTPException(status_code=500, detail="FFmpeg not found on this server")
 
-    def _iter():
+    async def _iter():
         assert proc.stdout
         try:
             while True:
-                chunk = proc.stdout.read(65536)
+                chunk = await proc.stdout.read(65536)
                 if not chunk:
                     break
                 yield chunk
         finally:
-            proc.stdout.close()
-            proc.wait()
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            await proc.wait()
 
     return StreamingResponse(
         _iter(),
