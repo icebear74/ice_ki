@@ -1,184 +1,129 @@
 # ice_audio_nexus
 
-**KI-basierte Video-Audio-Analyse und Personenidentifikation**
+KI-basiertes System zur Sprecheridentifikation in Videos mit **Multi-Vektor-Identitätssystem**.
 
-Ein System, das Filme und Serien analysiert, Sprecher (inkl. Synchronsprecher in verschiedenen Rollen) sauber trennt und durch menschliches Feedback lernt.
-
----
-
-## Kernfunktionalitäten
-
-### 1. Sprecher-Diarization & -Identifikation
-- **Two-Pass-Verfahren**: PyAnnote erkennt Sprecherwechsel auf Millisekunden-Ebene, anschließend werden hochpräzise 512-dimensionale Embedding-Vektoren extrahiert.
-- **Kontext-bewusste Zuordnung**: Eine Stimme (Synchronsprecher) kann mehrere Charakter-Identitäten in unterschiedlichen Serien haben. Die Zuordnung erfolgt immer im Kontext der aktuellen Serie.
-- **Lernzyklus**: Nach dem manuellen Labeling im Webinterface berechnet das System optimierte Master-Vektoren für jede Identität.
-
-### 2. Hardware-Setup
-| Aufgabe | Gerät |
-|---|---|
-| FFmpeg Audio-Extraktion | CUDA (h264_nvenc) |
-| Speaker Diarization (PyAnnote) | Tesla P4 (`cuda:0`) |
-| Embedding-Extraktion (PyAnnote) | Tesla P4 (`cuda:0`) |
-| Transkription (Faster-Whisper) | Tesla P100 (`cuda:1`) |
-
-### 3. Datenbank (MariaDB 11.7)
-- `voice_profiles`: VECTOR(512) Float32-Embeddings (~2KB/Eintrag)
-- `identities`: Verknüpft Stimme mit Charakter und Serien-Kontext
-- `episode_segments`: Timeline der Sprecher pro Episode (Millisekunden-Timestamps)
-
----
-
-## Schnellstart
-
-### 1. Umgebung einrichten
-```bash
-cd ice_audio_nexus
-./setup_env.sh
-```
-
-### 2. Datenbank konfigurieren
-```bash
-cp .env.example .env
-nano .env  # DB-Zugangsdaten eintragen
-```
-
-MariaDB-Schema manuell anlegen (optional – wird auch automatisch beim Start angelegt):
-```bash
-mariadb -u root -p < db/schema.sql
-```
-
-### 3. Episode scannen (Tesla P4 + P100)
-```bash
-source venv/bin/activate
-python processor/scanner.py \
-    --video /pfad/zur/episode.mkv \
-    --source "The Walking Dead" \
-    --episode "S01E01 - Days Gone Bye"
-```
-
-Optionen:
-```
---diarization-device cuda:0   # Tesla P4 (Standard)
---whisper-device cuda:1       # Tesla P100 (Standard)
---whisper-model large-v3      # Whisper-Modellgröße
---language de                 # Sprache (Standard: de)
---similarity-threshold 0.85   # Mindest-Ähnlichkeit für Auto-Zuordnung
---skip-transcription          # Nur Diarization, keine Transkription
---no-cuda-ffmpeg              # FFmpeg ohne CUDA-Beschleunigung
-```
-
-### 4. Webinterface starten
-```bash
-python web_ui/api.py
-# Browser: http://localhost:8000
-```
-
----
-
-## Verzeichnisstruktur
+## Architektur
 
 ```
 ice_audio_nexus/
-├── setup_env.sh           # Einrichtungs-Skript (Python 3.12 venv)
-├── .env.example           # Vorlage für Datenbank-Konfiguration
+├── setup_env.sh          # Python 3.12 venv + Abhängigkeiten
+├── .env.example          # Vorlage für Zugangsdaten
 ├── .gitignore
-├── README.md
+│
 ├── db/
-│   ├── __init__.py
-│   ├── schema.sql         # MariaDB 11.7 Schema (manuell oder automatisch)
-│   └── database.py        # Verbindung, auto-init, Vektorfunktionen
+│   └── database.py       # MariaDB 11.7 – Auto-Schema, VECTOR(512) Suche
+│
 ├── processor/
-│   ├── __init__.py
-│   └── scanner.py         # FFmpeg-Extraktion, Diarization, Transkription
+│   └── scanner.py        # FFmpeg CUDA + PyAnnote + Whisper → MariaDB
+│
 └── web_ui/
-    ├── __init__.py
-    ├── api.py             # FastAPI-Backend (Streaming, REST, WebSocket)
+    ├── api.py             # FastAPI Backend
     └── templates/
-        └── index.html     # HTML5-Player mit interaktiver Sprecher-Timeline
+        └── index.html    # Interaktives Webinterface
 ```
 
----
+## Multi-Vektor-Identitätssystem
 
-## Workflow
+Eine **Identität** (z. B. "Jean-Luc Picard") kann beliebig viele **Voice Samples** besitzen.
+Jedes Sample speichert einen eigenen `VECTOR(512)` Embedding mit Kontext-Metadaten
+(z. B. `TNG Season 1`, `Picard S3E02`).
 
-```
-1. scanner.py analysiert Episode
-       │
-       ▼
-2. Segmente in MariaDB (raw_speaker_id: SPEAKER_00, SPEAKER_01, …)
-       │
-       ▼
-3. Webinterface: Video streamen, Sprecher-Timeline anzeigen
-       │
-       ▼
-4. "Jump-to-Speaker": Klick → Video springt zur ersten Szene des Sprechers
-       │
-       ▼
-5. "Rename/Assign": Eingabe Name + Serien-Kontext → alle Segmente aktualisiert
-       │
-       ▼
-6. "Confirm": Bestätigung → is_confirmed = TRUE
-       │
-       ▼
-7. "Episode finalisieren": Master-Vektoren neu berechnet → bessere Erkennung
-```
-
----
-
-## Synchronsprecher-Handling
-
-Das System trennt **physische Stimme** von **Charakter-Identität**:
+### Erkennungslogik
 
 ```
-voice_profiles (Stimm-Vektor)
-    └─── identities.character_name = "Daryl Dixon"
-    │    identities.series_name    = "The Walking Dead"
-    │
-    └─── identities.character_name = "Charakter Y"
-         identities.series_name    = "Serie B"
+VECTOR_DISTANCE(new_embedding, alle gespeicherten Samples)
+  → kleinste Distanz ermitteln
+  
+  dist < MATCH_THRESHOLD   → ✅ Erkannt – Identität zugewiesen
+  dist < SUGGEST_THRESHOLD → ⚠ Vorschlag – Nutzer muss bestätigen
+                              (empfohlen: neues Sample anlegen für diese Ära)
+  dist ≥ SUGGEST_THRESHOLD → ❓ Unbekannt – neuer Sprecher
 ```
 
-Wenn eine bekannte Stimme in einem neuen Kontext auftaucht, erstellt das System eine neue Identität (mit neuem Serien-Kontext), verweist aber auf denselben `voice_id`.
+Standardwerte: `MATCH_THRESHOLD=0.25`, `SUGGEST_THRESHOLD=0.45` (via `.env` anpassbar).
 
----
+### Warum mehrere Vektoren?
+
+Jean-Luc Picard in **Star Trek TNG (1990)** klingt messbar anders als in  
+**Star Trek: Picard (2022)**. Mit einem einzigen "Master-Vektor" würde das System  
+die Alterung nicht korrekt abbilden. Durch mehrere Vektoren pro Identität kann das  
+System die Stimme über Jahrzehnte robust erkennen.
 
 ## Datenbank-Schema
 
-```sql
--- Biometrischer Stimm-Fingerabdruck
-voice_profiles (id, voice_vector VECTOR(512), sample_count, is_confirmed)
+### `identities`
+| Spalte      | Typ          | Beschreibung                          |
+|-------------|--------------|---------------------------------------|
+| id          | INT PK       | Auto-Increment                        |
+| name        | VARCHAR(255) | z. B. "Jean-Luc Picard" (unique)     |
+| description | TEXT         | Optionale Beschreibung                |
+| created_at  | TIMESTAMP    | Erstellungszeitpunkt                  |
 
--- Charakter in Serien-Kontext  
-identities (id, voice_id, character_name, series_name, sync_actor_name)
+### `voice_samples`
+| Spalte       | Typ          | Beschreibung                           |
+|--------------|--------------|----------------------------------------|
+| id           | INT PK       | Auto-Increment                         |
+| identity_id  | INT FK       | → identities.id                       |
+| embedding    | VECTOR(512)  | 512-dim Float32 Vektor                 |
+| context      | VARCHAR(255) | z. B. "TNG Season 1", "Picard S3E02"  |
+| is_confirmed | BOOLEAN      | Durch Nutzer bestätigt?                |
+| created_at   | TIMESTAMP    | Zeitpunkt der Speicherung              |
 
--- Timeline pro Episode
-episode_segments (id, series_name, episode_title, video_path,
-                  start_ms, end_ms, raw_speaker_id, identity_id,
-                  transcript, confidence, is_confirmed)
+### `episode_segments`
+| Spalte             | Typ    | Beschreibung                                           |
+|--------------------|--------|--------------------------------------------------------|
+| id                 | INT PK | Auto-Increment                                         |
+| series_name        | TEXT   | Serienname                                             |
+| episode_title      | TEXT   | Folgenname                                             |
+| video_path         | TEXT   | Pfad zur Videodatei                                    |
+| start_ms / end_ms  | INT    | Zeitstempel in Millisekunden                           |
+| speaker_label      | TEXT   | Temporäres Diarization-Label (SPEAKER_01)              |
+| identity_id        | INT FK | → identities.id (nach Zuordnung)                      |
+| matched_sample_id  | INT FK | → voice_samples.id (welcher Vektor hat gematcht?)     |
+| match_distance     | FLOAT  | Cosinus-Distanz des besten Treffers                    |
+| is_suggestion      | BOOL   | True = Vorschlag, Nutzerbestätigung ausstehend         |
+| transcript         | TEXT   | Whisper-Transkript des Segments                        |
+
+## Schnellstart
+
+```bash
+# 1. Python-Umgebung einrichten
+chmod +x setup_env.sh && ./setup_env.sh
+
+# 2. Konfiguration anlegen
+cp .env.example .env
+# → .env editieren: DB_USER, DB_PASSWORD, DB_HOST, DB_NAME, VIDEO_DIR
+
+# 3. Web-Interface starten (Tabellen werden automatisch angelegt)
+source venv/bin/activate
+uvicorn web_ui.api:app --reload --host 0.0.0.0 --port 8765
+
+# 4. Browser öffnen: http://localhost:8765
+
+# 5. Video scannen (im Hintergrund, auf Tesla P4/P100)
+python -m processor.scanner \
+    --video /pfad/zur/episode.mkv \
+    --series "Star Trek TNG" \
+    --episode "The Inner Light"
 ```
 
----
+## Hardware-Setup
 
-## API-Endpunkte
+| GPU          | Aufgabe                         | Variable               |
+|--------------|---------------------------------|------------------------|
+| Tesla P4 8GB | Speaker Diarization (PyAnnote)  | `DIARIZATION_DEVICE`   |
+| Tesla P100   | Transkription (Faster-Whisper)  | `TRANSCRIPTION_DEVICE` |
 
-| Methode | Pfad | Beschreibung |
-|---|---|---|
-| GET | `/` | Webinterface |
-| GET | `/api/episodes` | Alle bekannten Episoden |
-| GET | `/api/segments?series_name=&episode_title=` | Segmente einer Episode |
-| GET | `/api/identities` | Alle Identitäten |
-| POST | `/api/assign` | Sprecher benennen/zuweisen |
-| POST | `/api/confirm` | Zuordnung bestätigen |
-| POST | `/api/finalize` | Episode finalisieren (Master-Vektoren) |
-| GET | `/api/stream?video_path=&seek=` | Video-Stream (FFmpeg CUDA) |
-| WS | `/ws` | WebSocket für Echtzeit-Updates |
+FFmpeg v8 (selbst kompiliert mit CUDA) wird für Audio-Extraktion und Video-Streaming genutzt.
 
----
+## Webinterface – Funktionen
 
-## Voraussetzungen
-
-- Python 3.12
-- MariaDB 11.7 (mit VECTOR-Support)
-- FFmpeg (mit CUDA-Support empfohlen)
-- NVIDIA-GPUs (Tesla P4 + P100 empfohlen)
-- HuggingFace-Token für PyAnnote-Modelle (`HF_TOKEN` in `.env`)
+- **▶ Video-Player** mit HLS-kompatiblem Stream via FFmpeg CUDA
+- **Speaker-Overlay** im Video: zeigt live den Sprecher + "Erkannt via TNG-Sample, 95% Match"
+- **Farbige Timeline** aller Segmente (klickbar zum Springen)
+- **Segment-Sidebar**:
+  - ✅ Erkannte Sprecher (grün)
+  - ⚠ Vorschläge – Distanz war etwas höher (orange, Alterungsschutz)
+  - ❓ Unbekannte Sprecher (rot)
+- **Zuweisungs-Panel**: Klick auf Segment → Identität wählen/neu anlegen + optional als neuen Vektor speichern
+- **Identitäten-Tab**: Übersicht aller Personen mit Vektor-Anzahl

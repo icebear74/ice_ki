@@ -1,24 +1,22 @@
 """
 ice_audio_nexus – processor/scanner.py
+---------------------------------------
+Analyses a video file using:
+  • FFmpeg v8 (CUDA) for audio extraction
+  • pyannote.audio for speaker diarization  (Tesla P4 / cuda:0)
+  • faster-whisper for transcription         (Tesla P100 / cuda:1)
 
-Analysiert eine Videodatei und schreibt die erkannten Sprecher-Segmente
-in die MariaDB. Nutzt:
-  - FFmpeg v8 (CUDA) für effiziente Audio-Extraktion
-  - PyAnnote (Tesla P4) für Speaker Diarization
-  - Faster-Whisper (Tesla P100) für Transkription
-  - MariaDB VECTOR(512) für Sprecher-Embeddings
+For each detected segment it searches MariaDB using VECTOR_DISTANCE against
+ALL stored voice_samples and:
+  - distance < MATCH_THRESHOLD   → confirmed match (identity assigned)
+  - distance < SUGGEST_THRESHOLD → stores segment with is_suggestion=True
+                                   (web UI will prompt the user)
+  - otherwise                    → stored as unknown (speaker_label only)
 
-Verwendung:
-  python processor/scanner.py \\
-      --video /pfad/zur/episode.mkv \\
-      --source "The Walking Dead" \\
-      --episode "S01E01 - Days Gone Bye"
-
-  Optional:
-      --diarization-device cuda:0   # Tesla P4
-      --whisper-device cuda:1       # Tesla P100
-      --whisper-model large-v3
-      --similarity-threshold 0.85
+Usage:
+    python -m processor.scanner --video /path/to/episode.mkv \
+                                 --series "Star Trek TNG" \
+                                 --episode "The Inner Light"
 """
 
 from __future__ import annotations
@@ -28,500 +26,287 @@ import logging
 import os
 import subprocess
 import tempfile
-from pathlib import Path
-from typing import Optional
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
+logger = logging.getLogger(__name__)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s – %(message)s",
 )
-logger = logging.getLogger("scanner")
+
+# Thresholds (can be overridden via .env)
+MATCH_THRESHOLD   = float(os.getenv("MATCH_THRESHOLD",   "0.25"))
+SUGGEST_THRESHOLD = float(os.getenv("SUGGEST_THRESHOLD", "0.45"))
+
+# GPU assignments
+DIARIZATION_DEVICE   = os.getenv("DIARIZATION_DEVICE",   "cuda:0")
+TRANSCRIPTION_DEVICE = os.getenv("TRANSCRIPTION_DEVICE", "cuda:1")
 
 
-# ------------------------------------------------------------------
-# Audio-Extraktion via FFmpeg (CUDA-beschleunigt)
-# ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Audio extraction via FFmpeg (CUDA)
+# ---------------------------------------------------------------------------
 
-def extract_audio(video_path: str, output_wav: str, use_cuda: bool = True) -> bool:
+def extract_audio(video_path: str, output_wav: str) -> None:
     """
-    Extrahiert die Audiospur mit FFmpeg und optimiert sie für KI-Analyse.
-    Ausgabeformat: 16 kHz, Mono, PCM 16-bit (Standard für PyAnnote & Whisper).
-
-    Args:
-        video_path:  Pfad zur Quelldatei (MKV, MP4, …).
-        output_wav:  Pfad der Ausgabe-WAV-Datei.
-        use_cuda:    FFmpeg CUDA-Hardwaredekodierung nutzen (nur wenn verfügbar).
-
-    Returns:
-        True bei Erfolg, False bei Fehler.
+    Extract a mono 16-kHz PCM WAV from the video using FFMPEG CUDA acceleration.
+    16 kHz / mono is the standard format expected by pyannote.audio and Whisper.
     """
-    hw_args: list[str] = []
-    if use_cuda:
-        hw_args = ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
-
-    command = (
-        ["ffmpeg"]
-        + hw_args
-        + [
-            "-i", video_path,
-            "-vn",               # kein Video-Output
-            "-acodec", "pcm_s16le",
-            "-ar", "16000",
-            "-ac", "1",
-            "-y", output_wav,
-        ]
-    )
-
-    logger.info("FFmpeg: extrahiere Audio aus '%s'", video_path)
-    try:
-        result = subprocess.run(
-            command,
-            check=True,
-            capture_output=True,
-            timeout=3600,
-        )
-        logger.info("Audio extrahiert: %s", output_wav)
-        return True
-    except subprocess.CalledProcessError as e:
-        stderr = e.stderr.decode(errors="replace")
-        if use_cuda and "No such decoder" in stderr:
-            logger.warning("CUDA-Dekodierung nicht verfügbar – Fallback auf CPU")
-            return extract_audio(video_path, output_wav, use_cuda=False)
-        logger.error("FFmpeg-Fehler: %s", stderr[-2000:])
-        return False
-    except subprocess.TimeoutExpired:
-        logger.error("FFmpeg-Timeout bei '%s'", video_path)
-        return False
+    cmd = [
+        "ffmpeg", "-y",
+        "-hwaccel", "cuda",           # CUDA hardware-accelerated decoding
+        "-i", video_path,
+        "-vn",                         # drop video stream
+        "-acodec", "pcm_s16le",        # PCM 16-bit little-endian
+        "-ar", "16000",                # 16 kHz
+        "-ac", "1",                    # mono
+        output_wav,
+    ]
+    logger.info("Extracting audio: %s", " ".join(cmd))
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"FFmpeg failed:\n{result.stderr}")
+    logger.info("Audio extracted → %s", output_wav)
 
 
-# ------------------------------------------------------------------
-# Speaker Diarization (PyAnnote, Tesla P4)
-# ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Diarization
+# ---------------------------------------------------------------------------
 
-def run_diarization(
-    audio_path: str,
-    device: str = "cuda:0",
-    hf_token: Optional[str] = None,
-) -> list[dict]:
+def run_diarization(audio_path: str) -> list[dict]:
     """
-    Führt die Speaker Diarization mit PyAnnote durch.
-
-    Args:
-        audio_path:  Pfad zur WAV-Datei.
-        device:      Torch-Gerät ('cuda:0' = Tesla P4 empfohlen, 'cpu' als Fallback).
-        hf_token:    HuggingFace-Token für den Modell-Download.
-
-    Returns:
-        Liste von Dicts mit: start, end, speaker, embedding (list[float] | None)
+    Run pyannote.audio speaker diarization on *audio_path*.
+    Returns a list of dicts: {start_ms, end_ms, speaker_label, embedding}
     """
     try:
         import torch
         from pyannote.audio import Pipeline
         from pyannote.audio.pipelines.utils.hook import ProgressHook
-    except ImportError as e:
+    except ImportError as exc:
         raise ImportError(
-            "PyAnnote nicht installiert. Führe 'setup_env.sh' aus."
-        ) from e
+            "pyannote.audio is not installed. Run setup_env.sh first."
+        ) from exc
 
-    token = hf_token or os.environ.get("HF_TOKEN")
-
-    logger.info("Lade PyAnnote-Pipeline auf Gerät '%s'…", device)
+    hf_token = os.getenv("HF_TOKEN")
     pipeline = Pipeline.from_pretrained(
         "pyannote/speaker-diarization-3.1",
-        use_auth_token=token,
+        use_auth_token=hf_token,
     )
-    pipeline.to(torch.device(device))
+    device = torch.device(DIARIZATION_DEVICE if torch.cuda.is_available() else "cpu")
+    pipeline = pipeline.to(device)
+    logger.info("Diarization device: %s", device)
 
-    logger.info("Starte Diarization für '%s'…", audio_path)
     with ProgressHook() as hook:
         diarization = pipeline(audio_path, hook=hook)
 
-    segments: list[dict] = []
+    # Extract per-segment embeddings using pyannote's SpeakerEmbedding model
+    try:
+        from pyannote.audio import Model, Inference
+        emb_model = Model.from_pretrained("pyannote/embedding", use_auth_token=hf_token)
+        emb_model = emb_model.to(device)
+        inference = Inference(emb_model, window="whole")
+    except Exception:
+        logger.warning("Could not load embedding model; embeddings will be empty.")
+        inference = None
+
+    segments = []
     for turn, _, speaker in diarization.itertracks(yield_label=True):
-        segments.append(
-            {
-                "start": turn.start,
-                "end": turn.end,
-                "speaker": speaker,
-                "embedding": None,  # wird im nächsten Schritt befüllt
-            }
-        )
+        start_ms = int(turn.start * 1000)
+        end_ms   = int(turn.end   * 1000)
 
-    logger.info("Diarization abgeschlossen: %d Segmente", len(segments))
+        embedding: list[float] = []
+        if inference is not None:
+            try:
+                import numpy as np
+                from pyannote.core import Segment
+                emb = inference.crop(audio_path, Segment(turn.start, turn.end))
+                embedding = emb.flatten().tolist()
+                # Pad or truncate to exactly 512 dimensions
+                if len(embedding) < 512:
+                    embedding = embedding + [0.0] * (512 - len(embedding))
+                else:
+                    embedding = embedding[:512]
+            except Exception as exc:
+                logger.debug("Embedding extraction failed for %s: %s", speaker, exc)
+
+        segments.append({
+            "start_ms":     start_ms,
+            "end_ms":       end_ms,
+            "speaker_label": speaker,
+            "embedding":    embedding,
+        })
+
+    logger.info("Diarization complete: %d segments", len(segments))
     return segments
 
 
-# ------------------------------------------------------------------
-# Sprecher-Embeddings extrahieren (PyAnnote SpeakerEmbedding, Tesla P4)
-# ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Transcription (model cached per process to avoid repeated loading)
+# ---------------------------------------------------------------------------
 
-def extract_embeddings(
-    audio_path: str,
-    segments: list[dict],
-    device: str = "cuda:0",
-) -> list[dict]:
-    """
-    Extrahiert für jedes Sprecher-Segment einen 512-dim Float32-Embedding-Vektor.
+_whisper_model = None  # module-level cache
 
-    Args:
-        audio_path:  Pfad zur WAV-Datei.
-        segments:    Segment-Liste aus run_diarization().
-        device:      Torch-Gerät.
 
-    Returns:
-        Dieselbe Segment-Liste mit befülltem 'embedding'-Feld.
-    """
-    try:
-        import torch
-        from pyannote.audio import Inference, Model
-    except ImportError as e:
-        raise ImportError("PyAnnote nicht installiert.") from e
-
-    logger.info("Lade Embedding-Modell (pyannote/embedding) auf '%s'…", device)
-    model = Model.from_pretrained(
-        "pyannote/embedding",
-        use_auth_token=os.environ.get("HF_TOKEN"),
-    )
-    inference = Inference(model, window="whole")
-    inference.to(torch.device(device))
-
-    logger.info("Extrahiere Embeddings für %d Segmente…", len(segments))
-    from pyannote.core import Segment
-
-    for i, seg in enumerate(segments):
+def _get_whisper_model(model_size: str = "large-v3"):
+    """Return a cached WhisperModel instance (loaded once per process)."""
+    global _whisper_model
+    if _whisper_model is None:
         try:
-            emb = inference.crop(audio_path, Segment(seg["start"], seg["end"]))
-            seg["embedding"] = emb.flatten().tolist()
-        except Exception as exc:
-            logger.warning("Embedding für Segment %d fehlgeschlagen: %s", i, exc)
-            seg["embedding"] = None
+            from faster_whisper import WhisperModel
+        except ImportError as exc:
+            raise ImportError(
+                "faster-whisper is not installed. Run setup_env.sh first."
+            ) from exc
+        device = "cuda" if TRANSCRIPTION_DEVICE.startswith("cuda") else "cpu"
+        _whisper_model = WhisperModel(model_size, device=device, compute_type="float16")
+    return _whisper_model
 
-    logger.info("Embeddings extrahiert.")
-    return segments
 
-
-# ------------------------------------------------------------------
-# Transkription (Faster-Whisper, Tesla P100)
-# ------------------------------------------------------------------
-
-def transcribe_segments(
+def transcribe_segment(
     audio_path: str,
-    segments: list[dict],
-    device: str = "cuda:1",
+    start_s: float,
+    end_s: float,
     model_size: str = "large-v3",
-    language: str = "de",
-) -> list[dict]:
+) -> str:
     """
-    Transkribiert die Audio-Abschnitte mit Faster-Whisper.
-
-    Args:
-        audio_path:  Pfad zur WAV-Datei.
-        segments:    Segment-Liste aus run_diarization().
-        device:      Torch-Gerät ('cuda:1' = Tesla P100 empfohlen).
-        model_size:  Whisper-Modellgröße.
-        language:    Sprache (z.B. 'de', 'en').
-
-    Returns:
-        Dieselbe Segment-Liste mit befülltem 'transcript'-Feld.
+    Transcribe a single audio segment using faster-whisper.
+    Returns the detected text.
     """
+    model = _get_whisper_model(model_size)
+
+    # Create a temp file, close it, let FFmpeg write to it, clean up in finally
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".wav")
+    os.close(tmp_fd)
     try:
-        from faster_whisper import WhisperModel
-    except ImportError as e:
-        raise ImportError(
-            "faster-whisper nicht installiert. Führe 'setup_env.sh' aus."
-        ) from e
-
-    compute_type = "float16" if device.startswith("cuda") else "int8"
-    logger.info(
-        "Lade Whisper-Modell '%s' auf '%s' (compute_type=%s)…",
-        model_size, device, compute_type,
-    )
-    whisper_device = "cuda" if device.startswith("cuda") else "cpu"
-    model = WhisperModel(model_size, device=whisper_device, compute_type=compute_type)
-
-    logger.info("Transkribiere %d Segmente…", len(segments))
-    for i, seg in enumerate(segments):
-        try:
-            whisper_segments, _ = model.transcribe(
-                audio_path,
-                language=language,
-                initial_prompt=None,
-                word_timestamps=False,
-                clip_timestamps=f"{seg['start']},{seg['end']}",
-            )
-            seg["transcript"] = " ".join(s.text.strip() for s in whisper_segments)
-        except Exception as exc:
-            logger.warning("Transkription für Segment %d fehlgeschlagen: %s", i, exc)
-            seg["transcript"] = None
-
-    logger.info("Transkription abgeschlossen.")
-    return segments
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", str(start_s), "-to", str(end_s),
+            "-i", audio_path,
+            "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+            tmp_path,
+        ]
+        subprocess.run(cmd, capture_output=True, check=True)
+        whisper_segments, _ = model.transcribe(tmp_path, beam_size=5)
+        return " ".join(seg.text.strip() for seg in whisper_segments)
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
 
-# ------------------------------------------------------------------
-# Ergebnisse in MariaDB speichern
-# ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Main scan pipeline
+# ---------------------------------------------------------------------------
 
-def save_to_database(
-    segments: list[dict],
+def scan_video(
+    video_path: str,
     series_name: str,
     episode_title: str,
-    video_path: str,
-    similarity_threshold: float = 0.85,
+    transcribe: bool = True,
 ) -> None:
     """
-    Speichert die analysierten Segmente in der MariaDB.
-
-    Für jedes Segment:
-      1. Sucht nach ähnlichen Stimm-Vektoren im Serien-Kontext.
-      2. Legt bei Bedarf ein neues voice_profile an.
-      3. Schreibt das episode_segment.
-
-    Args:
-        segments:             Segment-Liste mit embedding, transcript usw.
-        series_name:          Name der Serie/des Films.
-        episode_title:        Episodentitel oder Dateiname.
-        video_path:           Pfad zur Quelldatei.
-        similarity_threshold: Mindest-Ähnlichkeit für automatische Zuordnung.
+    Full pipeline:
+      1. Extract audio
+      2. Diarize speakers
+      3. For each segment: look up in MariaDB (multi-vector VECTOR_DISTANCE)
+      4. Store results in episode_segments
     """
     from db.database import (
-        find_similar_voice,
+        ensure_schema,
         get_connection,
-        insert_segment,
-        upsert_voice_profile,
+        find_nearest_identity,
+        upsert_segment,
     )
 
+    ensure_schema()
     conn = get_connection()
-    try:
-        for seg in segments:
-            identity_id: Optional[int] = None
-            confidence: Optional[float] = None
 
-            if seg.get("embedding"):
-                matches = find_similar_voice(
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        audio_path = tmp.name
+
+    try:
+        extract_audio(video_path, audio_path)
+        segments = run_diarization(audio_path)
+
+        for seg in segments:
+            transcript = ""
+            if transcribe and seg["embedding"]:
+                try:
+                    transcript = transcribe_segment(
+                        audio_path,
+                        seg["start_ms"] / 1000.0,
+                        seg["end_ms"]   / 1000.0,
+                    )
+                except Exception as exc:
+                    logger.warning("Transcription failed: %s", exc)
+
+            # Multi-vector identity search
+            match_result = {"status": "unknown", "identity_id": None,
+                            "sample_id": None, "distance": None}
+            if seg["embedding"]:
+                match_result = find_nearest_identity(
                     conn,
                     seg["embedding"],
-                    series_name,
-                    threshold=similarity_threshold,
+                    match_threshold=MATCH_THRESHOLD,
+                    suggest_threshold=SUGGEST_THRESHOLD,
                 )
-                if matches:
-                    best = matches[0]
-                    identity_id = best["identity_id"]
-                    confidence = best["confidence"]
-                    logger.debug(
-                        "Segment [%.1fs-%.1fs] → '%s' (confidence=%.2f)",
-                        seg["start"],
-                        seg["end"],
-                        best["character_name"],
-                        confidence,
+                if match_result["status"] != "unknown":
+                    logger.info(
+                        "[%s–%s] %s → %s (dist=%.3f, status=%s, via sample %s '%s')",
+                        seg["start_ms"], seg["end_ms"],
+                        seg["speaker_label"],
+                        match_result.get("identity_name"),
+                        match_result.get("distance", 0),
+                        match_result["status"],
+                        match_result.get("sample_id"),
+                        match_result.get("sample_context", ""),
                     )
 
-            insert_segment(
-                conn=conn,
+            upsert_segment(
+                conn,
                 series_name=series_name,
                 episode_title=episode_title,
                 video_path=video_path,
-                start_ms=int(seg["start"] * 1000),
-                end_ms=int(seg["end"] * 1000),
-                raw_speaker_id=seg["speaker"],
-                identity_id=identity_id,
-                transcript=seg.get("transcript"),
-                confidence=confidence,
+                start_ms=seg["start_ms"],
+                end_ms=seg["end_ms"],
+                speaker_label=seg["speaker_label"],
+                identity_id=match_result.get("identity_id"),
+                matched_sample_id=match_result.get("sample_id"),
+                match_distance=match_result.get("distance"),
+                transcript=transcript,
+                is_suggestion=(match_result["status"] == "suggest"),
             )
 
-        logger.info(
-            "Alle %d Segmente für '%s / %s' in DB gespeichert.",
-            len(segments),
-            series_name,
-            episode_title,
-        )
+        logger.info("Scan complete – %d segments stored.", len(segments))
     finally:
         conn.close()
+        if os.path.exists(audio_path):
+            os.unlink(audio_path)
 
 
-# ------------------------------------------------------------------
-# Master-Vektoren nach Nutzer-Bestätigung berechnen
-# ------------------------------------------------------------------
-
-def recompute_master_vectors(series_name: str, episode_title: str) -> None:
-    """
-    Berechnet den Master-Vektor für jede bestätigte Identität neu.
-
-    Wird nach dem manuellen Labeling im Webinterface aufgerufen
-    ("Finalize Episode"-Button). Mittelt alle bestätigten Segment-
-    Embeddings zu einem hochpräzisen Centroid-Vektor.
-
-    Args:
-        series_name:    Serienname.
-        episode_title:  Episodentitel.
-    """
-    from db.database import get_connection, update_master_vector
-
-    conn = get_connection()
-    try:
-        cur = conn.cursor()
-
-        # Alle bestätigten Identitäten der Episode
-        cur.execute(
-            """
-            SELECT DISTINCT identity_id
-            FROM episode_segments
-            WHERE series_name = %s AND episode_title = %s
-              AND identity_id IS NOT NULL AND is_confirmed = TRUE
-            """,
-            (series_name, episode_title),
-        )
-        identity_ids = [row[0] for row in cur.fetchall()]
-
-        for identity_id in identity_ids:
-            # voice_id zur Identität
-            cur.execute(
-                "SELECT voice_id FROM identities WHERE id = %s",
-                (identity_id,),
-            )
-            row = cur.fetchone()
-            if not row:
-                continue
-            voice_id = row[0]
-
-            # Alle Segmente dieser Identität mit Embeddings
-            cur.execute(
-                """
-                SELECT es.start_ms, es.end_ms, es.series_name, es.episode_title
-                FROM episode_segments es
-                WHERE es.identity_id = %s AND es.is_confirmed = TRUE
-                """,
-                (identity_id,),
-            )
-            segments_info = cur.fetchall()
-            logger.info(
-                "Re-Profiling Identität %d: %d bestätigte Segmente",
-                identity_id,
-                len(segments_info),
-            )
-
-        logger.info(
-            "Master-Vektor-Neuberechnung für '%s / %s' abgeschlossen.",
-            series_name,
-            episode_title,
-        )
-    finally:
-        conn.close()
-
-
-# ------------------------------------------------------------------
-# CLI-Entry-Point
-# ------------------------------------------------------------------
-
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(
-        description="ice_audio_nexus Scanner – analysiert eine Videodatei"
-    )
-    p.add_argument("--video", required=True, help="Pfad zur Videodatei")
-    p.add_argument("--source", required=True, help="Name der Serie/des Films")
-    p.add_argument("--episode", required=True, help="Episodentitel")
-    p.add_argument(
-        "--diarization-device",
-        default="cuda:0",
-        help="PyAnnote Gerät (Standard: cuda:0 = Tesla P4)",
-    )
-    p.add_argument(
-        "--whisper-device",
-        default="cuda:1",
-        help="Whisper Gerät (Standard: cuda:1 = Tesla P100)",
-    )
-    p.add_argument(
-        "--whisper-model",
-        default="large-v3",
-        help="Faster-Whisper Modellgröße (Standard: large-v3)",
-    )
-    p.add_argument(
-        "--language",
-        default="de",
-        help="Sprache für Whisper (Standard: de)",
-    )
-    p.add_argument(
-        "--similarity-threshold",
-        type=float,
-        default=0.85,
-        help="Mindest-Ähnlichkeit für automatische Zuordnung (0.0–1.0, Standard: 0.85)",
-    )
-    p.add_argument(
-        "--no-cuda-ffmpeg",
-        action="store_true",
-        help="FFmpeg CUDA-Dekodierung deaktivieren",
-    )
-    p.add_argument(
-        "--skip-transcription",
-        action="store_true",
-        help="Transkription überspringen",
-    )
-    return p.parse_args()
-
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
 
 def main() -> None:
-    args = parse_args()
-
-    from dotenv import load_dotenv
-    _env_path = Path(__file__).parent.parent / ".env"
-    load_dotenv(dotenv_path=_env_path)
-
-    from db.database import init_db
-    logger.info("Initialisiere Datenbank…")
-    init_db()
-
-    video_path = os.path.abspath(args.video)
-    if not os.path.exists(video_path):
-        logger.error("Videodatei nicht gefunden: %s", video_path)
-        return
-
-    with tempfile.TemporaryDirectory(prefix="ice_nexus_") as tmpdir:
-        audio_wav = os.path.join(tmpdir, "audio.wav")
-
-        # Schritt 1: Audio extrahieren
-        if not extract_audio(video_path, audio_wav, use_cuda=not args.no_cuda_ffmpeg):
-            logger.error("Audio-Extraktion fehlgeschlagen – Abbruch.")
-            return
-
-        # Schritt 2: Speaker Diarization (Tesla P4)
-        segments = run_diarization(
-            audio_wav,
-            device=args.diarization_device,
-            hf_token=os.environ.get("HF_TOKEN"),
-        )
-
-        # Schritt 3: Embeddings extrahieren (Tesla P4)
-        segments = extract_embeddings(audio_wav, segments, device=args.diarization_device)
-
-        # Schritt 4: Transkription (Tesla P100)
-        if not args.skip_transcription:
-            segments = transcribe_segments(
-                audio_wav,
-                segments,
-                device=args.whisper_device,
-                model_size=args.whisper_model,
-                language=args.language,
-            )
-        else:
-            for seg in segments:
-                seg["transcript"] = None
-
-        # Schritt 5: In MariaDB speichern
-        save_to_database(
-            segments,
-            series_name=args.source,
-            episode_title=args.episode,
-            video_path=video_path,
-            similarity_threshold=args.similarity_threshold,
-        )
-
-    logger.info(
-        "Scan abgeschlossen: '%s / %s' – %d Segmente verarbeitet.",
-        args.source,
-        args.episode,
-        len(segments),
+    parser = argparse.ArgumentParser(
+        description="ice_audio_nexus scanner – diarize & identify speakers in a video"
     )
-    logger.info("Starte jetzt das Webinterface: python web_ui/api.py")
+    parser.add_argument("--video",   required=True, help="Path to the video file")
+    parser.add_argument("--series",  required=True, help="Series name (e.g. 'Star Trek TNG')")
+    parser.add_argument("--episode", required=True, help="Episode title")
+    parser.add_argument("--no-transcribe", action="store_true",
+                        help="Skip Whisper transcription (faster)")
+    args = parser.parse_args()
+
+    scan_video(
+        video_path=args.video,
+        series_name=args.series,
+        episode_title=args.episode,
+        transcribe=not args.no_transcribe,
+    )
 
 
 if __name__ == "__main__":

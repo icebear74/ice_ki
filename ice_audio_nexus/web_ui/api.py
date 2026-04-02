@@ -1,18 +1,10 @@
 """
 ice_audio_nexus – web_ui/api.py
-
-FastAPI-Backend für das interaktive Webinterface.
-
-Funktionen:
-  - Video-Streaming via FFmpeg (CUDA-beschleunigt, H.264/AAC für Browser)
-  - Sprecher-Timeline aus der MariaDB
-  - Echtzeit-Updates via WebSocket
-  - REST-Endpunkte zum Benennen und Bestätigen von Sprechern
-  - "Finalize Episode" – triggert Master-Vektor-Neuberechnung
-
-Starten:
-  python web_ui/api.py
-  Browser: http://localhost:8000
+FastAPI backend providing:
+  • Video streaming via FFmpeg (CUDA)
+  • Episode segment data (JSON)
+  • Identity & voice_sample management
+  • Assign vector to existing identity (Multi-Vector Identity system)
 """
 
 from __future__ import annotations
@@ -20,472 +12,354 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import subprocess
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Annotated
 
-import uvicorn
-from dotenv import load_dotenv
-from fastapi import (
-    FastAPI,
-    HTTPException,
-    Query,
-    Request,
-    WebSocket,
-    WebSocketDisconnect,
+from fastapi import FastAPI, HTTPException, Request, Body
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    StreamingResponse,
 )
-from fastapi.responses import HTMLResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel
+from dotenv import load_dotenv
 
-# Projektpfade
-_PROJECT_ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(_PROJECT_ROOT))
+load_dotenv()
 
-load_dotenv(dotenv_path=_PROJECT_ROOT / ".env")
+# Ensure the project root is on sys.path when running via uvicorn from web_ui/
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s – %(message)s",
+from db.database import (
+    ensure_schema,
+    get_connection,
+    list_identities,
+    get_identity,
+    create_identity,
+    update_identity,
+    add_voice_sample,
+    list_voice_samples,
+    confirm_voice_sample,
+    delete_voice_sample,
+    update_segment_identity,
+    get_episode_segments,
 )
-logger = logging.getLogger("api")
 
-app = FastAPI(
-    title="ice_audio_nexus",
-    description="KI-basierte Video-Audio-Analyse & Personenidentifikation",
-    version="1.0.0",
-)
-
-# Templates & Static
-_TEMPLATES_DIR = Path(__file__).parent / "templates"
-_STATIC_DIR = Path(__file__).parent / "static"
-_STATIC_DIR.mkdir(exist_ok=True)
-
-templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
-app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
-
-# WebSocket-Verbindungen für Echtzeit-Updates
-_ws_clients: list[WebSocket] = []
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
 
-# ------------------------------------------------------------------
-# Datenbank-Verbindung (lazy)
-# ------------------------------------------------------------------
-
-def _get_db():
-    from db.database import get_connection, init_db
-    return get_connection()
-
-
-# ------------------------------------------------------------------
-# Startvorgang: DB initialisieren
-# ------------------------------------------------------------------
-
-@app.on_event("startup")
-async def on_startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     try:
-        from db.database import init_db
-        init_db()
-        logger.info("Datenbank initialisiert.")
-    except Exception as e:
-        logger.warning("DB-Initialisierung fehlgeschlagen (starte ohne DB): %s", e)
+        ensure_schema()
+        logger.info("DB schema verified.")
+    except Exception as exc:
+        logger.error("DB init failed: %s", exc)
+    yield
 
 
-# ------------------------------------------------------------------
-# Root – Webinterface
-# ------------------------------------------------------------------
+app = FastAPI(title="ice_audio_nexus", version="1.0.0", lifespan=lifespan)
+
+_TEMPLATES_DIR = Path(__file__).parent / "templates"
+templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+
+VIDEO_DIR = Path(os.getenv("VIDEO_DIR", "/data/videos"))
+
+
+# ---------------------------------------------------------------------------
+# Startup (removed – replaced by lifespan context manager above)
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Web UI entry
+# ---------------------------------------------------------------------------
 
 @app.get("/", response_class=HTMLResponse)
-async def index(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
-
-
-# ------------------------------------------------------------------
-# Episoden-Liste
-# ------------------------------------------------------------------
-
-@app.get("/api/episodes")
-async def list_episodes():
-    """Gibt alle bekannten Episoden zurück."""
+async def index(request: Request) -> HTMLResponse:
+    conn = get_connection()
     try:
-        conn = _get_db()
-        from db.database import get_all_episodes
-        episodes = get_all_episodes(conn)
+        identities = list_identities(conn)
+    finally:
         conn.close()
-        return {"episodes": episodes}
-    except Exception as e:
-        logger.error("Episoden-Liste Fehler: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+    return templates.TemplateResponse(
+        "index.html",
+        {"request": request, "identities": identities},
+    )
 
 
-# ------------------------------------------------------------------
-# Sprecher-Timeline einer Episode
-# ------------------------------------------------------------------
-
-@app.get("/api/segments")
-async def get_segments(
-    series_name: str = Query(..., description="Serienname"),
-    episode_title: str = Query(..., description="Episodentitel"),
-):
-    """
-    Gibt alle Sprecher-Segmente einer Episode zurück.
-    Die Zeitstempel (start_ms, end_ms) erlauben die Synchronisierung
-    mit dem HTML5-Video-Player.
-    """
-    try:
-        conn = _get_db()
-        from db.database import get_segments_for_episode
-        segments = get_segments_for_episode(conn, series_name, episode_title)
-        conn.close()
-        return {"segments": segments}
-    except Exception as e:
-        logger.error("Segmente Fehler: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ------------------------------------------------------------------
-# Identitäten-Liste
-# ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Identity API
+# ---------------------------------------------------------------------------
 
 @app.get("/api/identities")
-async def list_identities():
-    """Gibt alle bekannten Identitäten zurück."""
+def api_list_identities() -> JSONResponse:
+    conn = get_connection()
     try:
-        conn = _get_db()
-        from db.database import get_all_identities
-        identities = get_all_identities(conn)
+        return JSONResponse(list_identities(conn))
+    finally:
         conn.close()
-        return {"identities": identities}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 
-# ------------------------------------------------------------------
-# Sprecher benennen / zuweisen (Rename / Assign)
-# ------------------------------------------------------------------
-
-class AssignRequest(BaseModel):
-    series_name: str
-    episode_title: str
-    raw_speaker_id: str
-    character_name: str
-    series_context: str
-    sync_actor_name: Optional[str] = None
-    confirmed: bool = False
-
-
-@app.post("/api/assign")
-async def assign_speaker(req: AssignRequest):
-    """
-    Weist einer Sprecher-ID (raw_speaker_id) einen Charakternamen und
-    Serien-Kontext zu. Erstellt bei Bedarf eine neue Identität in der DB.
-
-    Aktualisiert alle Segmente der Episode mit dieser raw_speaker_id.
-    """
+@app.post("/api/identities")
+def api_create_identity(
+    name: Annotated[str, Body()],
+    description: Annotated[str, Body()] = "",
+) -> JSONResponse:
+    conn = get_connection()
     try:
-        conn = _get_db()
-        try:
-            cur = conn.cursor()
-
-            # Prüfen, ob Identität bereits existiert
-            cur.execute(
-                """
-                SELECT i.id, i.voice_id FROM identities i
-                WHERE i.character_name = %s AND i.series_name = %s
-                """,
-                (req.character_name, req.series_context),
-            )
-            row = cur.fetchone()
-
-            if row:
-                identity_id = row[0]
-            else:
-                # Neues voice_profile anlegen (Platzhalter-Vektor)
-                from db.database import upsert_voice_profile
-                placeholder = [0.0] * 512
-                voice_id = upsert_voice_profile(conn, placeholder, sample_count=0)
-
-                # Neue Identität anlegen
-                cur.execute(
-                    """
-                    INSERT INTO identities
-                        (voice_id, character_name, series_name, sync_actor_name)
-                    VALUES (%s, %s, %s, %s)
-                    """,
-                    (voice_id, req.character_name, req.series_context, req.sync_actor_name),
-                )
-                conn.commit()
-                identity_id = cur.lastrowid
-
-            # Alle Segmente der Episode mit dieser raw_speaker_id aktualisieren
-            from db.database import assign_identity_to_speaker
-            updated = assign_identity_to_speaker(
-                conn,
-                req.series_name,
-                req.episode_title,
-                req.raw_speaker_id,
-                identity_id,
-                confirmed=req.confirmed,
-            )
-
-            conn.close()
-
-            # WebSocket-Broadcast: Live-Update an alle verbundenen Browser
-            await _broadcast(
-                {
-                    "type": "speaker_assigned",
-                    "raw_speaker_id": req.raw_speaker_id,
-                    "identity_id": identity_id,
-                    "character_name": req.character_name,
-                    "series_context": req.series_context,
-                    "updated_segments": updated,
-                }
-            )
-
-            logger.info(
-                "Sprecher '%s' → '%s' (%s) zugewiesen (%d Segmente)",
-                req.raw_speaker_id,
-                req.character_name,
-                req.series_context,
-                updated,
-            )
-            return {
-                "success": True,
-                "identity_id": identity_id,
-                "updated_segments": updated,
-            }
-        except Exception as e:
-            conn.close()
-            raise e
-    except Exception as e:
-        logger.error("Assign-Fehler: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        new_id = create_identity(conn, name, description)
+        return JSONResponse({"id": new_id, "name": name, "description": description})
+    finally:
+        conn.close()
 
 
-# ------------------------------------------------------------------
-# Confirm – Zuordnung bestätigen
-# ------------------------------------------------------------------
-
-class ConfirmRequest(BaseModel):
-    series_name: str
-    episode_title: str
-    raw_speaker_id: str
-
-
-@app.post("/api/confirm")
-async def confirm_speaker(req: ConfirmRequest):
-    """
-    Bestätigt die Zuordnung einer Sprecher-ID. Setzt is_confirmed=TRUE
-    für alle Segmente dieser raw_speaker_id in der Episode.
-    """
+@app.put("/api/identities/{identity_id}")
+def api_update_identity(
+    identity_id: int,
+    name: Annotated[str, Body()],
+    description: Annotated[str, Body()] = "",
+) -> JSONResponse:
+    conn = get_connection()
     try:
-        conn = _get_db()
-        cur = conn.cursor()
+        if get_identity(conn, identity_id) is None:
+            raise HTTPException(status_code=404, detail="Identity not found")
+        update_identity(conn, identity_id, name, description)
+        return JSONResponse({"status": "ok"})
+    finally:
+        conn.close()
 
-        # Aktuelle Identität ermitteln
-        cur.execute(
-            """
-            SELECT identity_id FROM episode_segments
-            WHERE series_name = %s AND episode_title = %s AND raw_speaker_id = %s
-            LIMIT 1
-            """,
-            (req.series_name, req.episode_title, req.raw_speaker_id),
-        )
-        row = cur.fetchone()
-        if not row or not row[0]:
-            conn.close()
+
+# ---------------------------------------------------------------------------
+# Voice-sample API
+# ---------------------------------------------------------------------------
+
+@app.get("/api/identities/{identity_id}/samples")
+def api_list_samples(identity_id: int) -> JSONResponse:
+    conn = get_connection()
+    try:
+        samples = list_voice_samples(conn, identity_id)
+        # Don't send raw float arrays to the browser – send metadata only
+        for s in samples:
+            s.pop("embedding", None)
+        return JSONResponse(samples)
+    finally:
+        conn.close()
+
+
+@app.post("/api/identities/{identity_id}/samples")
+def api_add_sample(
+    identity_id: int,
+    data: dict = Body(...),
+) -> JSONResponse:
+    """
+    Assign a new voice embedding (coming from an episode segment) to an
+    existing identity.  Body: {segment_id, context, confirm}
+    """
+    conn = get_connection()
+    try:
+        if get_identity(conn, identity_id) is None:
+            raise HTTPException(status_code=404, detail="Identity not found")
+
+        segment_id = data.get("segment_id")
+        context    = data.get("context", "")
+        confirm    = bool(data.get("confirm", False))
+
+        # Load the embedding from the segment's matched_sample or re-extract
+        # For now we accept a direct float list under "embedding" for flexibility.
+        embedding: list[float] = data.get("embedding", [])
+        if not embedding or len(embedding) != 512:
             raise HTTPException(
                 status_code=400,
-                detail="Kein identity_id für diesen Sprecher gefunden. Erst zuweisen.",
+                detail="embedding must be a list of 512 floats",
             )
 
-        identity_id = row[0]
+        sample_id = add_voice_sample(conn, identity_id, embedding, context, confirm)
 
-        from db.database import assign_identity_to_speaker
-        updated = assign_identity_to_speaker(
-            conn,
-            req.series_name,
-            req.episode_title,
-            req.raw_speaker_id,
-            identity_id,
-            confirmed=True,
-        )
+        # If a segment_id was supplied, update that segment's identity link
+        if segment_id is not None:
+            update_segment_identity(
+                conn,
+                segment_id=int(segment_id),
+                identity_id=identity_id,
+                matched_sample_id=sample_id,
+                is_suggestion=False,
+            )
+
+        return JSONResponse({"status": "ok", "sample_id": sample_id})
+    finally:
         conn.close()
 
-        await _broadcast(
-            {
-                "type": "speaker_confirmed",
-                "raw_speaker_id": req.raw_speaker_id,
-                "identity_id": identity_id,
-                "updated_segments": updated,
-            }
-        )
 
-        return {"success": True, "updated_segments": updated}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error("Confirm-Fehler: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ------------------------------------------------------------------
-# Finalize Episode – Master-Vektor neu berechnen
-# ------------------------------------------------------------------
-
-class FinalizeRequest(BaseModel):
-    series_name: str
-    episode_title: str
-
-
-@app.post("/api/finalize")
-async def finalize_episode(req: FinalizeRequest):
-    """
-    Triggert die Master-Vektor-Neuberechnung nach abgeschlossenem Labeling.
-    Verbessert die Erkennungsgenauigkeit für zukünftige Episoden.
-    """
+@app.post("/api/samples/{sample_id}/confirm")
+def api_confirm_sample(sample_id: int) -> JSONResponse:
+    conn = get_connection()
     try:
-        from processor.scanner import recompute_master_vectors
-        recompute_master_vectors(req.series_name, req.episode_title)
+        confirm_voice_sample(conn, sample_id)
+        return JSONResponse({"status": "ok"})
+    finally:
+        conn.close()
 
-        await _broadcast(
-            {
-                "type": "episode_finalized",
-                "series_name": req.series_name,
-                "episode_title": req.episode_title,
-            }
+
+@app.delete("/api/samples/{sample_id}")
+def api_delete_sample(sample_id: int) -> JSONResponse:
+    conn = get_connection()
+    try:
+        delete_voice_sample(conn, sample_id)
+        return JSONResponse({"status": "ok"})
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Episode segment API
+# ---------------------------------------------------------------------------
+
+@app.get("/api/segments")
+def api_segments(series: str, episode: str) -> JSONResponse:
+    conn = get_connection()
+    try:
+        segs = get_episode_segments(conn, series, episode)
+        return JSONResponse(segs)
+    finally:
+        conn.close()
+
+
+@app.post("/api/segments/{segment_id}/assign")
+def api_assign_segment(
+    segment_id: int,
+    data: dict = Body(...),
+) -> JSONResponse:
+    """
+    Assign a segment to an existing identity (or create a new one).
+
+    Body:
+      identity_id  – existing identity (int) OR
+      new_name     – if identity_id is omitted, create a new identity first
+      context      – optional context string for the new voice_sample
+      add_sample   – bool; if True, extract embedding from segment and store
+                     it as a new voice_sample for the identity (multi-vector)
+    """
+    conn = get_connection()
+    try:
+        identity_id = data.get("identity_id")
+        new_name    = data.get("new_name", "").strip()
+
+        if identity_id is None and new_name:
+            identity_id = create_identity(conn, new_name, data.get("description", ""))
+        elif identity_id is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Provide identity_id or new_name",
+            )
+
+        if get_identity(conn, identity_id) is None:
+            raise HTTPException(status_code=404, detail="Identity not found")
+
+        context     = data.get("context", "")
+        add_sample  = bool(data.get("add_sample", False))
+        embedding   = data.get("embedding", [])
+
+        new_sample_id = None
+        if add_sample and embedding and len(embedding) == 512:
+            new_sample_id = add_voice_sample(
+                conn, identity_id, embedding, context, is_confirmed=True
+            )
+
+        update_segment_identity(
+            conn,
+            segment_id=segment_id,
+            identity_id=identity_id,
+            matched_sample_id=new_sample_id,
+            is_suggestion=False,
         )
+        return JSONResponse({"status": "ok", "identity_id": identity_id,
+                             "sample_id": new_sample_id})
+    finally:
+        conn.close()
 
-        return {"success": True, "message": "Master-Vektoren aktualisiert."}
-    except Exception as e:
-        logger.error("Finalize-Fehler: %s", e)
-        raise HTTPException(status_code=500, detail=str(e))
+
+# ---------------------------------------------------------------------------
+# Video listing & streaming
+# ---------------------------------------------------------------------------
+
+@app.get("/api/videos")
+def api_list_videos() -> JSONResponse:
+    if not VIDEO_DIR.exists():
+        return JSONResponse([])
+    extensions = {".mkv", ".mp4", ".avi", ".mov", ".m4v"}
+    videos = [
+        {"name": f.name, "path": str(f)}
+        for f in sorted(VIDEO_DIR.rglob("*"))
+        if f.suffix.lower() in extensions
+    ]
+    return JSONResponse(videos)
 
 
-# ------------------------------------------------------------------
-# Video-Streaming via FFmpeg (CUDA, H.264 → Browser-kompatibel)
-# ------------------------------------------------------------------
-
-@app.get("/api/stream")
+@app.get("/stream")
 async def stream_video(
-    video_path: str = Query(..., description="Absoluter Pfad zur Videodatei"),
-    seek: float = Query(0.0, description="Startzeit in Sekunden"),
-):
+    request: Request,
+    path: str,
+    seek: float = 0.0,
+) -> StreamingResponse:
     """
-    Streamt das Video browsergerecht (H.264/AAC, fragmented MP4).
-    Unterstützt Seekable-Streams via ?seek= Parameter.
+    Stream a video via FFmpeg (CUDA) as HLS-compatible H.264/AAC in fragmented
+    MP4 format, which is playable by all modern browsers.
+    If *seek* is given the stream starts at that second offset.
 
-    FFmpeg nutzt CUDA-Hardwareenkodierung (h264_nvenc) wenn verfügbar,
-    sonst Fallback auf libx264.
+    The resolved path must be inside VIDEO_DIR to prevent path traversal.
     """
-    video_path = os.path.abspath(video_path)
-    if not os.path.isfile(video_path):
-        raise HTTPException(status_code=404, detail="Videodatei nicht gefunden.")
+    resolved_video_dir = VIDEO_DIR.resolve()
 
-    # Validate that the resolved path has a recognised video extension to prevent
-    # path-injection attacks from serving arbitrary files.
-    _ALLOWED_EXTENSIONS = {".mkv", ".mp4", ".avi", ".mov", ".wmv", ".m4v", ".ts", ".webm"}
-    if Path(video_path).suffix.lower() not in _ALLOWED_EXTENSIONS:
-        raise HTTPException(status_code=400, detail="Dateityp nicht unterstützt.")
+    # Security: resolve the path and verify it is inside VIDEO_DIR before use
+    candidate = (resolved_video_dir / path).resolve()
+    try:
+        candidate.relative_to(resolved_video_dir)
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Access to this path is not allowed")
 
-    def _build_ffmpeg_cmd(use_cuda: bool) -> list[str]:
-        encoder = "h264_nvenc" if use_cuda else "libx264"
-        preset = "p4" if use_cuda else "veryfast"
-        return [
-            "ffmpeg",
-            "-ss", str(seek),
-            "-i", video_path,
-            "-c:v", encoder,
-            "-preset", preset,
-            "-c:a", "aac",
-            "-b:a", "192k",
-            "-movflags", "frag_keyframe+empty_moov+faststart",
-            "-f", "mp4",
-            "pipe:1",
-        ]
+    video_path = candidate
+    if not video_path.exists():
+        raise HTTPException(status_code=404, detail="Video not found")
 
-    async def video_generator():
-        cmd = _build_ffmpeg_cmd(use_cuda=True)
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
+    cmd = [
+        "ffmpeg", "-y",
+        "-hwaccel", "cuda",
+        "-ss", str(seek),
+        "-i", str(video_path),
+        "-c:v", "h264_nvenc",       # NVIDIA hardware encoder
+        "-preset", "p4",
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-f", "mp4",
+        "-movflags", "frag_keyframe+empty_moov+faststart",
+        "pipe:1",
+    ]
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+
+    async def _generator():
+        assert proc.stdout is not None
         try:
             while True:
                 chunk = await proc.stdout.read(65536)
                 if not chunk:
                     break
                 yield chunk
-        except asyncio.CancelledError:
-            proc.kill()
-            raise
         finally:
             if proc.returncode is None:
-                proc.kill()
-            await proc.wait()
+                proc.terminate()
 
     return StreamingResponse(
-        video_generator(),
+        _generator(),
         media_type="video/mp4",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Content-Type-Options": "nosniff",
-        },
-    )
-
-
-# ------------------------------------------------------------------
-# WebSocket für Echtzeit-Updates
-# ------------------------------------------------------------------
-
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    """
-    WebSocket-Verbindung für Echtzeit-Updates.
-    Sendet JSON-Events bei Sprecher-Zuweisungen, Bestätigungen und
-    Episode-Finalisierungen an alle verbundenen Browser.
-    """
-    await websocket.accept()
-    _ws_clients.append(websocket)
-    logger.info("WebSocket verbunden (aktive Clients: %d)", len(_ws_clients))
-    try:
-        while True:
-            # Hält die Verbindung offen; Client kann ping/pong senden
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        pass
-    finally:
-        if websocket in _ws_clients:
-            _ws_clients.remove(websocket)
-        logger.info("WebSocket getrennt (aktive Clients: %d)", len(_ws_clients))
-
-
-async def _broadcast(message: dict) -> None:
-    """Sendet eine JSON-Nachricht an alle verbundenen WebSocket-Clients."""
-    dead: list[WebSocket] = []
-    for ws in list(_ws_clients):
-        try:
-            await ws.send_json(message)
-        except Exception:
-            dead.append(ws)
-    for ws in dead:
-        if ws in _ws_clients:
-            _ws_clients.remove(ws)
-
-
-# ------------------------------------------------------------------
-# Entry-Point
-# ------------------------------------------------------------------
-
-if __name__ == "__main__":
-    uvicorn.run(
-        "api:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=False,
-        log_level="info",
-        app_dir=str(Path(__file__).parent),
+        headers={"Cache-Control": "no-cache"},
     )
