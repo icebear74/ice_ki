@@ -1,53 +1,20 @@
 #!/bin/bash
-# setup_env.sh – Richtet die Python-Umgebung für ice_audio_nexus ein.
-# Nutzt Python 3.12 (bevorzugt) oder 3.11.
-# Führe dieses Skript im Verzeichnis ice_audio_nexus aus.
-
 set -e
 
-echo "🚀 Starte Setup für ice_audio_nexus ..."
+echo "🚀 Fix für huggingface_hub Inkompatibilität..."
 
-# Python-Interpreter ermitteln
-PYTHON_EXE=$(command -v python3.12 2>/dev/null || command -v python3.11 2>/dev/null || command -v python3 2>/dev/null)
-if [ -z "$PYTHON_EXE" ]; then
-    echo "❌ Kein Python 3.11/3.12 gefunden. Bitte installieren."
-    exit 1
-fi
-echo "✅ Python-Interpreter: $PYTHON_EXE"
-
-# Virtual Environment erstellen
-if [ ! -d "venv" ]; then
-    "$PYTHON_EXE" -m venv venv
-    echo "✅ venv erstellt."
-else
-    echo "ℹ️  venv existiert bereits – überspringe Erstellung."
-fi
-
-# Aktivieren
+# venv aktivieren
 source venv/bin/activate
 
-# pip upgraden
-pip install --upgrade pip 
+# 1. huggingface_hub auf eine Version bringen, die noch use_auth_token versteht
+pip install "huggingface_hub<0.25.0"
 
-echo "📦 Installiere Kern-Abhängigkeiten ..."
+# 2. Kurzer Check
+python3 << END
+from huggingface_hub import hf_hub_download
+import pyannote.audio
+print(f"huggingface_hub Version: {importlib_metadata.version('huggingface_hub') if 'importlib_metadata' in locals() else 'Check manual'}")
+print("✅ huggingface_hub Downgrade abgeschlossen.")
+END
 
-# MariaDB-Connector (benötigt libmariadb-dev auf dem System)
-pip install mariadb python-dotenv 
-
-# PyTorch mit CUDA 12.x (für Tesla P4 / P100)
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
-
-# Audio-Processing & Diarization
-pip install pyannote.audio faster-whisper librosa soundfile
-
-# Web-Interface
-pip install "fastapi[standard]" uvicorn[standard] jinja2 python-multipart aiofiles
-
-echo ""
-echo "✅ Setup abgeschlossen!"
-echo ""
-echo "Nächste Schritte:"
-echo "  1. Kopiere .env.example → .env und trage deine DB-Zugangsdaten ein."
-echo "  2. Aktiviere die Umgebung:  source venv/bin/activate"
-echo "  3. Starte die Web-GUI:      uvicorn web_ui.api:app --reload --host 0.0.0.0 --port 8765"
-echo "  4. Scanner starten:         python -m processor.scanner --video /pfad/zum/video.mkv"
+echo "✅ Fertig. Jetzt sollte Pipeline.from_pretrained() endlich durchlaufen."
