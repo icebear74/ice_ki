@@ -298,17 +298,22 @@ def find_nearest_identity(
 
 def upsert_segment(conn: mariadb.Connection, **kwargs) -> int:
     """Insert a new episode segment row.  kwargs map directly to column names."""
-    allowed = {
+    # Explicit allowlist of valid column names – guards against SQL injection
+    # if the caller ever passes unexpected keys.
+    _ALLOWED_COLS = (
         "series_name", "episode_title", "video_path", "start_ms", "end_ms",
         "speaker_label", "identity_id", "matched_sample_id", "match_distance",
         "transcript", "confidence", "is_suggestion",
-    }
-    data = {k: v for k, v in kwargs.items() if k in allowed}
-    cols  = ", ".join(data.keys())
+    )
+    data = {k: v for k, v in kwargs.items() if k in _ALLOWED_COLS}
+    # Build column list from the verified allowlist (not from caller input)
+    cols         = ", ".join(data.keys())
     placeholders = ", ".join("?" for _ in data)
     cur = conn.cursor()
-    cur.execute(f"INSERT INTO episode_segments ({cols}) VALUES ({placeholders})",
-                list(data.values()))
+    cur.execute(
+        f"INSERT INTO episode_segments ({cols}) VALUES ({placeholders})",  # noqa: S608
+        list(data.values()),
+    )
     conn.commit()
     return cur.lastrowid
 

@@ -12,18 +12,17 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import subprocess
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import FastAPI, HTTPException, Request, Form, Body
+from fastapi import FastAPI, HTTPException, Request, Body
 from fastapi.responses import (
     HTMLResponse,
     JSONResponse,
     StreamingResponse,
 )
-from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from dotenv import load_dotenv
 
@@ -52,7 +51,18 @@ from db.database import (
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-app = FastAPI(title="ice_audio_nexus", version="1.0.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    try:
+        ensure_schema()
+        logger.info("DB schema verified.")
+    except Exception as exc:
+        logger.error("DB init failed: %s", exc)
+    yield
+
+
+app = FastAPI(title="ice_audio_nexus", version="1.0.0", lifespan=lifespan)
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
@@ -61,16 +71,8 @@ VIDEO_DIR = Path(os.getenv("VIDEO_DIR", "/data/videos"))
 
 
 # ---------------------------------------------------------------------------
-# Startup
+# Startup (removed – replaced by lifespan context manager above)
 # ---------------------------------------------------------------------------
-
-@app.on_event("startup")
-def _startup() -> None:
-    try:
-        ensure_schema()
-        logger.info("DB schema verified.")
-    except Exception as exc:
-        logger.error("DB init failed: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -308,8 +310,17 @@ async def stream_video(
     Stream a video via FFmpeg (CUDA) as HLS-compatible H.264/AAC in fragmented
     MP4 format, which is playable by all modern browsers.
     If *seek* is given the stream starts at that second offset.
+
+    The resolved path must be inside VIDEO_DIR to prevent path traversal.
     """
     video_path = Path(path).resolve()
+
+    # Security: ensure the resolved path is inside the configured VIDEO_DIR
+    try:
+        video_path.relative_to(VIDEO_DIR.resolve())
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Access to this path is not allowed")
+
     if not video_path.exists():
         raise HTTPException(status_code=404, detail="Video not found")
 

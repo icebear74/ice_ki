@@ -144,8 +144,26 @@ def run_diarization(audio_path: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Transcription
+# Transcription (model cached per process to avoid repeated loading)
 # ---------------------------------------------------------------------------
+
+_whisper_model = None  # module-level cache
+
+
+def _get_whisper_model(model_size: str = "large-v3"):
+    """Return a cached WhisperModel instance (loaded once per process)."""
+    global _whisper_model
+    if _whisper_model is None:
+        try:
+            from faster_whisper import WhisperModel
+        except ImportError as exc:
+            raise ImportError(
+                "faster-whisper is not installed. Run setup_env.sh first."
+            ) from exc
+        device = "cuda" if TRANSCRIPTION_DEVICE.startswith("cuda") else "cpu"
+        _whisper_model = WhisperModel(model_size, device=device, compute_type="float16")
+    return _whisper_model
+
 
 def transcribe_segment(
     audio_path: str,
@@ -157,20 +175,12 @@ def transcribe_segment(
     Transcribe a single audio segment using faster-whisper.
     Returns the detected text.
     """
-    try:
-        from faster_whisper import WhisperModel
-    except ImportError as exc:
-        raise ImportError(
-            "faster-whisper is not installed. Run setup_env.sh first."
-        ) from exc
+    model = _get_whisper_model(model_size)
 
-    device = "cuda" if TRANSCRIPTION_DEVICE.startswith("cuda") else "cpu"
-    model = WhisperModel(model_size, device=device, compute_type="float16")
-
-    # Segment the WAV in memory via a temp file to avoid loading the full audio
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+    # Use a context manager so the temp file is always cleaned up
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as tmp:
         tmp_path = tmp.name
-    try:
+        # Write the sliced audio while the file handle is still open
         cmd = [
             "ffmpeg", "-y",
             "-ss", str(start_s), "-to", str(end_s),
@@ -179,11 +189,8 @@ def transcribe_segment(
             tmp_path,
         ]
         subprocess.run(cmd, capture_output=True, check=True)
-        segments, _ = model.transcribe(tmp_path, beam_size=5)
-        return " ".join(seg.text.strip() for seg in segments)
-    finally:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
+        whisper_segments, _ = model.transcribe(tmp_path, beam_size=5)
+        return " ".join(seg.text.strip() for seg in whisper_segments)
 
 
 # ---------------------------------------------------------------------------
