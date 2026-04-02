@@ -22,6 +22,7 @@ from typing import Annotated
 
 from fastapi import FastAPI, HTTPException, Request, Body
 from fastapi.responses import (
+    FileResponse,
     HTMLResponse,
     JSONResponse,
     StreamingResponse,
@@ -453,6 +454,46 @@ async def stream_video(path: str, t: float = 0.0) -> StreamingResponse:
 
     return StreamingResponse(
         _iter(),
+        media_type="video/mp4",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+def _web_preview_path(video_path: str) -> Path | None:
+    """Return the `.web.mp4` sibling of *video_path* if it exists, else None."""
+    preview = Path(os.path.splitext(video_path)[0] + ".web.mp4")
+    return preview if preview.exists() else None
+
+
+@app.get("/api/has_preview")
+def api_has_preview(path: str) -> JSONResponse:
+    """Return whether a pre-transcoded .web.mp4 preview exists for *path*."""
+    try:
+        candidate = _resolve_video_path(path)
+    except HTTPException:
+        return JSONResponse({"has_preview": False})
+    preview = _web_preview_path(str(candidate))
+    return JSONResponse({"has_preview": preview is not None})
+
+
+@app.get("/video")
+def serve_video_preview(path: str) -> FileResponse:
+    """
+    Serve the pre-transcoded .web.mp4 preview file for *path*.
+
+    FastAPI's FileResponse honours HTTP Range requests automatically, so the
+    browser can seek to any position without re-downloading the whole file.
+    Returns 404 if no preview has been generated yet.
+    """
+    candidate = _resolve_video_path(path)
+    preview = _web_preview_path(str(candidate))
+    if preview is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No web preview available for this file. Run the scanner first.",
+        )
+    return FileResponse(
+        str(preview),
         media_type="video/mp4",
         headers={"Cache-Control": "no-cache"},
     )

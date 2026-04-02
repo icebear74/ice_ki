@@ -83,6 +83,37 @@ def extract_audio(video_path: str, output_wav: str) -> None:
     logger.info("Audio extracted → %s", output_wav)
 
 
+def transcode_web_preview(video_path: str, output_mp4: str) -> None:
+    """
+    Transcode *video_path* to a browser-ready H.264/AAC MP4 file stored at
+    *output_mp4*.  The file is written with -movflags +faststart so the moov
+    atom sits at the front – this lets the browser seek freely without
+    downloading the whole file first.
+
+    Output is capped at 480p (width scaled to keep aspect ratio) so the file
+    stays small.  Audio is kept as stereo AAC 128k so voice sync works
+    correctly in the Web UI.
+    """
+    cmd = [
+        "ffmpeg", "-y",
+        "-hwaccel", "cuda",                   # GPU-accelerated decoding
+        "-i", video_path,
+        "-c:v", "libx264",
+        "-preset", "fast",
+        "-crf", "28",                          # slightly lower quality = smaller file
+        "-profile:v", "baseline", "-level", "3.1",
+        "-vf", "scale=-2:480",                 # scale to 480p, keep aspect ratio
+        "-c:a", "aac", "-b:a", "128k", "-ac", "2",
+        "-movflags", "+faststart",             # moov atom at front → seekable
+        output_mp4,
+    ]
+    logger.info("Transcoding web preview: %s → %s", video_path, output_mp4)
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"FFmpeg web-preview transcode failed:\n{result.stderr}")
+    logger.info("Web preview ready → %s", output_mp4)
+
+
 # ---------------------------------------------------------------------------
 # Diarization
 # ---------------------------------------------------------------------------
@@ -257,11 +288,23 @@ def scan_video(
     ensure_schema()
     conn = get_connection()
 
+    # Derive the web-preview path: same directory, same stem, suffix .web.mp4
+    web_preview_path = os.path.splitext(video_path)[0] + ".web.mp4"
+
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         audio_path = tmp.name
 
     try:
         extract_audio(video_path, audio_path)
+
+        # Generate the browser-ready preview alongside the WAV extraction so
+        # the Web UI can serve it directly (seekable, audio + video).
+        if not os.path.exists(web_preview_path):
+            try:
+                transcode_web_preview(video_path, web_preview_path)
+            except Exception as exc:
+                logger.warning("Web preview transcode failed (non-fatal): %s", exc)
+
         segments = run_diarization(audio_path)
 
         for seg in segments:

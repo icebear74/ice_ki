@@ -433,6 +433,7 @@ let episodeTitle    = "";
 let currentVideoPath = "";  // absolute path currently loaded into the player
 let _streamOffset  = 0;    // seconds: where the current FFmpeg stream starts in the video
 let _totalDuration = 0;    // seconds: full video duration from /api/probe
+let _hasWebPreview = false; // true when a .web.mp4 preview is available
 
 const player      = document.getElementById("player");
 const overlay     = document.getElementById("speaker-overlay");
@@ -443,15 +444,21 @@ const tlProgress  = document.getElementById("timeline-progress");
 const tlContainer = document.getElementById("timeline-container");
 
 /* -------------------------------------------------------------------- */
-/*  FFmpeg stream helpers                                                 */
+/*  Video helpers                                                        */
 /* -------------------------------------------------------------------- */
 
-// Reload the FFmpeg stream starting at *t* seconds and auto-play.
+// Seek to *t* seconds.  When a .web.mp4 preview exists the browser handles
+// seeking natively; otherwise reload the FFmpeg live-stream from offset *t*.
 function _loadStreamAt(t) {
-  _streamOffset = t;
-  player.src = `/stream?path=${encodeURIComponent(currentVideoPath)}&t=${t.toFixed(3)}`;
-  player.load();
-  player.play().catch(() => {});
+  if (_hasWebPreview) {
+    player.currentTime = t;
+    player.play().catch(() => {});
+  } else {
+    _streamOffset = t;
+    player.src = `/stream?path=${encodeURIComponent(currentVideoPath)}&t=${t.toFixed(3)}`;
+    player.load();
+    player.play().catch(() => {});
+  }
 }
 
 // Show video errors as toasts.
@@ -676,8 +683,28 @@ async function loadEpisode() {
   if (videoPath) {
     currentVideoPath = videoPath;
     _streamOffset    = 0;
-    player.src = `/stream?path=${encodeURIComponent(videoPath)}`;
-    player.load();
+    _hasWebPreview   = false;
+
+    // Check whether the scanner has already produced a .web.mp4 preview.
+    // If yes, serve the pre-transcoded file (supports native seeking + audio).
+    // If not, fall back to the live FFmpeg /stream endpoint.
+    fetch(`/api/has_preview?path=${encodeURIComponent(videoPath)}`)
+      .then(r => r.json())
+      .then(d => {
+        _hasWebPreview = !!d.has_preview;
+        if (_hasWebPreview) {
+          player.src = `/video?path=${encodeURIComponent(videoPath)}`;
+        } else {
+          player.src = `/stream?path=${encodeURIComponent(videoPath)}`;
+        }
+        player.load();
+      })
+      .catch(() => {
+        // On network error fall back to stream
+        player.src = `/stream?path=${encodeURIComponent(videoPath)}`;
+        player.load();
+      });
+
     // Probe total duration (player.duration is Infinity for live FFmpeg streams)
     fetch(`/api/probe?path=${encodeURIComponent(videoPath)}`)
       .then(r => r.json())
@@ -867,7 +894,12 @@ async function applyAssign(segId) {
 /*  Video → overlay sync                                                 */
 /* -------------------------------------------------------------------- */
 player.addEventListener("timeupdate", () => {
-  const absTime = player.currentTime + _streamOffset;
+  // With a .web.mp4 preview the browser tracks absolute time itself.
+  // With a live /stream, currentTime restarts from 0 at each seek, so we
+  // add _streamOffset to recover the absolute position in the video.
+  const absTime = _hasWebPreview
+    ? player.currentTime
+    : player.currentTime + _streamOffset;
   const nowMs   = absTime * 1000;
   if (_totalDuration > 0) {
     tlProgress.style.width = (absTime / _totalDuration * 100) + "%";
@@ -876,8 +908,13 @@ player.addEventListener("timeupdate", () => {
 });
 
 player.addEventListener("loadedmetadata", () => {
-  // Total duration comes from /api/probe (player.duration is Infinity for
-  // live FFmpeg streams); just redraw the timeline if probe has returned.
+  // For a .web.mp4 preview player.duration is finite; use it directly.
+  // For live FFmpeg streams player.duration is Infinity, so we rely on
+  // /api/probe which writes _totalDuration asynchronously.
+  if (isFinite(player.duration) && player.duration > 0) {
+    _totalDuration = player.duration;
+    videoDuration  = _totalDuration * 1000;
+  }
   if (_totalDuration > 0) {
     videoDuration = _totalDuration * 1000;
     drawTimeline();
