@@ -51,6 +51,12 @@ logging.basicConfig(
 # Thresholds (can be overridden via .env)
 MATCH_THRESHOLD   = float(os.getenv("MATCH_THRESHOLD",   "0.25"))
 SUGGEST_THRESHOLD = float(os.getenv("SUGGEST_THRESHOLD", "0.45"))
+# Minimum cosine-distance gap required between the best match and the closest
+# sample from a *different* identity.  Raises this bar prevents two similar-
+# sounding characters (e.g. Sheldon vs Leonard) from collapsing onto the same
+# identity.  Increase if you still see false merges; decrease if valid matches
+# get downgraded to "suggest".
+MIN_MARGIN        = float(os.getenv("MIN_MARGIN",         "0.07"))
 
 # GPU assignments
 DIARIZATION_DEVICE   = os.getenv("DIARIZATION_DEVICE",   "cuda:0")
@@ -81,6 +87,37 @@ def extract_audio(video_path: str, output_wav: str) -> None:
     if result.returncode != 0:
         raise RuntimeError(f"FFmpeg failed:\n{result.stderr}")
     logger.info("Audio extracted → %s", output_wav)
+
+
+def transcode_web_preview(video_path: str, output_mp4: str) -> None:
+    """
+    Transcode *video_path* to a browser-ready H.264/AAC MP4 file stored at
+    *output_mp4*.  The file is written with -movflags +faststart so the moov
+    atom sits at the front – this lets the browser seek freely without
+    downloading the whole file first.
+
+    Output is capped at 480p (width scaled to keep aspect ratio) so the file
+    stays small.  Audio is kept as stereo AAC 128k so voice sync works
+    correctly in the Web UI.
+    """
+    cmd = [
+        "ffmpeg", "-y",
+        "-hwaccel", "cuda",                   # GPU-accelerated decoding
+        "-i", video_path,
+        "-c:v", "libx264",
+        "-preset", "fast",
+        "-crf", "28",                          # slightly lower quality = smaller file
+        "-profile:v", "baseline", "-level", "3.1",
+        "-vf", "scale=-2:480",                 # scale to 480p, keep aspect ratio
+        "-c:a", "aac", "-b:a", "128k", "-ac", "2",
+        "-movflags", "+faststart",             # moov atom at front → seekable
+        output_mp4,
+    ]
+    logger.info("Transcoding web preview: %s → %s", video_path, output_mp4)
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"FFmpeg web-preview transcode failed:\n{result.stderr}")
+    logger.info("Web preview ready → %s", output_mp4)
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +209,29 @@ def _get_whisper_model(model_size: str = "large-v3"):
                 "faster-whisper is not installed. Run setup_env.sh first."
             ) from exc
         device = "cuda" if TRANSCRIPTION_DEVICE.startswith("cuda") else "cpu"
-        _whisper_model = WhisperModel(model_size, device=device, compute_type="float16")
+        # CTranslate2 requires tensor-core FP16 support (Volta+, compute ≥7.0).
+        # Older CUDA GPUs like Tesla P4/P100 (Pascal, compute 6.x) only support
+        # float32 efficiently.  CPU falls back to int8.
+        if device == "cuda":
+            compute_type_candidates = ["float16", "float32"]
+        else:
+            compute_type_candidates = ["int8"]
+        last_exc: Exception | None = None
+        for compute_type in compute_type_candidates:
+            try:
+                _whisper_model = WhisperModel(model_size, device=device, compute_type=compute_type)
+                logger.info("Whisper loaded with compute_type=%s on %s", compute_type, device)
+                break
+            except (ValueError, RuntimeError) as exc:
+                logger.warning(
+                    "Whisper compute_type=%s not supported on %s, trying next: %s",
+                    compute_type, device, exc,
+                )
+                last_exc = exc
+        else:
+            raise RuntimeError(
+                f"Could not load Whisper model on {device}: {last_exc}"
+            ) from last_exc
     return _whisper_model
 
 
@@ -229,16 +288,29 @@ def scan_video(
         get_connection,
         find_nearest_identity,
         upsert_segment,
+        vector_to_bytes,
     )
 
     ensure_schema()
     conn = get_connection()
+
+    # Derive the web-preview path: same directory, same stem, suffix .web.mp4
+    web_preview_path = os.path.splitext(video_path)[0] + ".web.mp4"
 
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         audio_path = tmp.name
 
     try:
         extract_audio(video_path, audio_path)
+
+        # Generate the browser-ready preview alongside the WAV extraction so
+        # the Web UI can serve it directly (seekable, audio + video).
+        if not os.path.exists(web_preview_path):
+            try:
+                transcode_web_preview(video_path, web_preview_path)
+            except Exception as exc:
+                logger.warning("Web preview transcode failed (non-fatal): %s", exc)
+
         segments = run_diarization(audio_path)
 
         for seg in segments:
@@ -262,6 +334,7 @@ def scan_video(
                     seg["embedding"],
                     match_threshold=MATCH_THRESHOLD,
                     suggest_threshold=SUGGEST_THRESHOLD,
+                    min_margin=MIN_MARGIN,
                 )
                 if match_result["status"] != "unknown":
                     logger.info(
@@ -283,6 +356,7 @@ def scan_video(
                 start_ms=seg["start_ms"],
                 end_ms=seg["end_ms"],
                 speaker_label=seg["speaker_label"],
+                embedding=vector_to_bytes(seg["embedding"]) if seg["embedding"] else None,
                 identity_id=match_result.get("identity_id"),
                 matched_sample_id=match_result.get("sample_id"),
                 match_distance=match_result.get("distance"),

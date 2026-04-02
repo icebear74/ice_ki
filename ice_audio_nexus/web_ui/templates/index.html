@@ -29,7 +29,8 @@
       color: var(--text);
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
       font-size: 14px;
-      min-height: 100vh;
+      height: 100vh;      /* lock to viewport – prevents body from growing with content */
+      overflow: hidden;   /* the individual panels scroll, not the page */
       display: flex;
       flex-direction: column;
     }
@@ -53,8 +54,9 @@
     /* ------------------------------------------------------------------ */
     .app-layout {
       display: grid;
-      grid-template-columns: 1fr 340px;
+      grid-template-columns: 1fr 360px;
       flex: 1;
+      min-height: 0;          /* allow grid to shrink below content size */
       overflow: hidden;
     }
 
@@ -67,6 +69,7 @@
       padding: 20px;
       gap: 16px;
       overflow-y: auto;
+      min-height: 0;          /* allow panel to shrink and scroll */
     }
 
     /* Episode selector */
@@ -77,15 +80,19 @@
       flex-wrap: wrap;
     }
     .episode-bar label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-muted); }
-    .episode-bar input, .episode-bar select {
+    .episode-bar select {
       background: var(--bg-card);
       border: 1px solid var(--border);
       color: var(--text);
       padding: 6px 10px;
       border-radius: var(--radius);
       font-size: 13px;
-      min-width: 200px;
+      min-width: 220px;
+      max-width: 400px;
     }
+    #sel-episode { min-width: 300px; }
+    .episode-bar select:disabled { opacity: .45; cursor: not-allowed; }
+    #btn-load:disabled { opacity: .45; cursor: not-allowed; }
     .btn {
       padding: 7px 16px;
       border: none;
@@ -168,10 +175,12 @@
       display: flex;
       flex-direction: column;
       overflow: hidden;
+      min-height: 0;          /* critical: allow sidebar to shrink in grid */
     }
     .sidebar-tabs {
       display: flex;
       border-bottom: 1px solid var(--border);
+      flex-shrink: 0;         /* tabs row must not shrink */
     }
     .sidebar-tabs button {
       flex: 1;
@@ -189,8 +198,16 @@
       border-bottom-color: var(--accent);
     }
 
-    .tab-content { flex: 1; overflow-y: auto; padding: 12px; display: none; }
-    .tab-content.active { display: block; }
+    /* Tab panes: fill remaining sidebar height and scroll independently */
+    .tab-content {
+      flex: 1;
+      min-height: 0;          /* allow flex child to shrink and overflow-y to work */
+      overflow-y: auto;
+      overflow-x: hidden;
+      padding: 12px;
+      display: none;
+    }
+    .tab-content.active { display: flex; flex-direction: column; }
 
     /* Speaker list items */
     .speaker-card {
@@ -215,6 +232,20 @@
     .tag-suggest    { background: rgba(210,153,34,.2); color: var(--warn); }
     .tag-unknown    { background: rgba(248,81,73,.15); color: var(--danger); }
     .sc-transcript  { color: var(--text-muted); font-size: 11px; margin-top: 4px; font-style: italic; line-height: 1.4; }
+
+    /* Confidence percentage badge – colour-coded by tier */
+    .conf-badge {
+      display: inline-block;
+      padding: 1px 6px;
+      border-radius: 10px;
+      font-size: 11px;
+      font-weight: 700;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .conf-high   { background: rgba(63,185,80,.25);  color: #56d364; }   /* ≥ 80 % */
+    .conf-medium { background: rgba(210,153,34,.25); color: #d29922; }   /* ≥ 55 % */
+    .conf-low    { background: rgba(248,81,73,.20);  color: #f85149; }   /* < 55 % */
 
     /* Assignment panel (shown below selected speaker card) */
     .assign-panel {
@@ -321,23 +352,31 @@
   <!-- ================================================================ -->
   <div class="main-panel">
 
-    <!-- Episode selector -->
+    <!-- Library-driven Episode selector -->
     <div class="episode-bar">
       <label>
-        Serie
-        <input id="inp-series" type="text" placeholder="z.B. Star Trek TNG" />
-      </label>
-      <label>
-        Folge
-        <input id="inp-episode" type="text" placeholder="z.B. The Inner Light" />
-      </label>
-      <label>
-        Video
-        <select id="sel-video">
-          <option value="">— Video wählen —</option>
+        Serie / Film
+        <select id="sel-series" onchange="onSeriesChange()">
+          <option value="">— Bibliothek lädt… —</option>
         </select>
       </label>
-      <button class="btn btn-primary" onclick="loadEpisode()">▶ Laden</button>
+      <label id="lbl-season" style="display:none">
+        Staffel
+        <select id="sel-season" onchange="onSeasonChange()">
+          <option value="">— Staffel wählen —</option>
+        </select>
+      </label>
+      <label id="lbl-episode" style="display:none">
+        Episode
+        <select id="sel-episode" onchange="onEpisodeChange()">
+          <option value="">— Episode wählen —</option>
+        </select>
+      </label>
+      <!-- Hidden values consumed by loadEpisode() -->
+      <input id="inp-series"    type="hidden" />
+      <input id="inp-episode"   type="hidden" />
+      <input id="inp-videopath" type="hidden" />
+      <button class="btn btn-primary" id="btn-load" onclick="loadEpisode()" disabled>▶ Laden</button>
     </div>
 
     <!-- Player -->
@@ -398,20 +437,50 @@
 /* -------------------------------------------------------------------- */
 /*  State                                                                */
 /* -------------------------------------------------------------------- */
-let segments      = [];
-let identities    = [];
-let currentSeg    = null;  // selected segment id
-let videoDuration = 0;
-let seriesName    = "";
-let episodeTitle  = "";
+let segments        = [];
+let identities      = [];
+let library         = [];   // [{name, seasons:[{name, episodes:[{title,video_path,segment_count}]}]}]
+let currentSeg      = null;
+let videoDuration   = 0;
+let seriesName      = "";
+let episodeTitle    = "";
+let currentVideoPath = "";  // absolute path currently loaded into the player
+let _streamOffset  = 0;    // seconds: where the current FFmpeg stream starts in the video
+let _totalDuration = 0;    // seconds: full video duration from /api/probe
+let _hasWebPreview = false; // true when a .web.mp4 preview is available
 
-const player   = document.getElementById("player");
-const overlay  = document.getElementById("speaker-overlay");
-const ovName   = document.getElementById("ov-name");
-const ovMatch  = document.getElementById("ov-match");
-const tlBar    = document.getElementById("timeline-bar");
-const tlProgress = document.getElementById("timeline-progress");
+const player      = document.getElementById("player");
+const overlay     = document.getElementById("speaker-overlay");
+const ovName      = document.getElementById("ov-name");
+const ovMatch     = document.getElementById("ov-match");
+const tlBar       = document.getElementById("timeline-bar");
+const tlProgress  = document.getElementById("timeline-progress");
 const tlContainer = document.getElementById("timeline-container");
+
+/* -------------------------------------------------------------------- */
+/*  Video helpers                                                        */
+/* -------------------------------------------------------------------- */
+
+// Seek to *t* seconds.  When a .web.mp4 preview exists the browser handles
+// seeking natively; otherwise reload the FFmpeg live-stream from offset *t*.
+function _loadStreamAt(t) {
+  if (_hasWebPreview) {
+    player.currentTime = t;
+    player.play().catch(() => {});
+  } else {
+    _streamOffset = t;
+    player.src = `/stream?path=${encodeURIComponent(currentVideoPath)}&t=${t.toFixed(3)}`;
+    player.load();
+    player.play().catch(() => {});
+  }
+}
+
+// Show video errors as toasts.
+player.addEventListener("error", () => {
+  const err = player.error;
+  const msg = err ? `Video-Fehler (Code ${err.code}): ${err.message || "unbekannt"}` : "Videofehler";
+  toast(msg, "error");
+});
 
 /* -------------------------------------------------------------------- */
 /*  Tab switching                                                        */
@@ -435,19 +504,115 @@ function toast(msg, type = "success") {
 }
 
 /* -------------------------------------------------------------------- */
-/*  Load video list on page load                                         */
+/*  Library – load from DB via /api/library                              */
 /* -------------------------------------------------------------------- */
-async function loadVideoList() {
-  const resp = await fetch("/api/videos");
-  if (!resp.ok) return;
-  const videos = await resp.json();
-  const sel = document.getElementById("sel-video");
-  videos.forEach(v => {
+async function loadLibrary() {
+  const resp = await fetch("/api/library");
+  if (!resp.ok) {
+    toast("Bibliothek konnte nicht geladen werden.", "error");
+    return;
+  }
+  library = await resp.json();
+
+  const sel = document.getElementById("sel-series");
+  if (!library.length) {
+    sel.innerHTML = '<option value="">— Noch keine gescannten Videos —</option>';
+    return;
+  }
+  sel.innerHTML = '<option value="">— Serie / Film wählen —</option>';
+  library.forEach(entry => {
     const opt = document.createElement("option");
-    opt.value = v.path;
-    opt.textContent = v.name;
+    opt.value = entry.name;
+    const totalSegs = entry.seasons.reduce(
+      (a, s) => a + s.episodes.reduce((b, e) => b + e.segment_count, 0), 0);
+    opt.textContent = entry.name + (totalSegs > 0 ? `  (${totalSegs} Seg.)` : "");
     sel.appendChild(opt);
   });
+}
+
+/* -------------------------------------------------------------------- */
+/*  Library dropdown cascade: Series → Season → Episode                 */
+/* -------------------------------------------------------------------- */
+function onSeriesChange() {
+  const name = document.getElementById("sel-series").value;
+  document.getElementById("inp-series").value   = name;
+  document.getElementById("inp-episode").value  = "";
+  document.getElementById("inp-videopath").value = "";
+  document.getElementById("btn-load").disabled  = true;
+
+  const seasonSel = document.getElementById("sel-season");
+  const episodeSel = document.getElementById("sel-episode");
+  seasonSel.innerHTML  = '<option value="">— Staffel wählen —</option>';
+  episodeSel.innerHTML = '<option value="">— Episode wählen —</option>';
+  document.getElementById("lbl-season").style.display  = "none";
+  document.getElementById("lbl-episode").style.display = "none";
+
+  if (!name) return;
+  const entry = library.find(s => s.name === name);
+  if (!entry) return;
+
+  if (entry.seasons.length === 1) {
+    // Single season / movie – skip the season picker
+    populateEpisodes(entry.seasons[0].episodes);
+  } else {
+    document.getElementById("lbl-season").style.display = "";
+    entry.seasons.forEach(season => {
+      const opt = document.createElement("option");
+      opt.value = season.name;
+      const processed = season.episodes.filter(e => e.segment_count > 0).length;
+      opt.textContent = `${season.name}  (${season.episodes.length} Folgen${processed ? ", " + processed + " ✓" : ""})`;
+      seasonSel.appendChild(opt);
+    });
+  }
+}
+
+function onSeasonChange() {
+  const seriesName = document.getElementById("sel-series").value;
+  const seasonName = document.getElementById("sel-season").value;
+  document.getElementById("inp-episode").value   = "";
+  document.getElementById("inp-videopath").value  = "";
+  document.getElementById("btn-load").disabled   = true;
+  document.getElementById("lbl-episode").style.display = "none";
+  if (!seasonName) return;
+
+  const entry  = library.find(s => s.name === seriesName);
+  const season = entry?.seasons.find(s => s.name === seasonName);
+  if (season) populateEpisodes(season.episodes);
+}
+
+function populateEpisodes(episodes) {
+  const sel = document.getElementById("sel-episode");
+  sel.innerHTML = '<option value="">— Episode wählen —</option>';
+  episodes.forEach(ep => {
+    const opt = document.createElement("option");
+    opt.value = JSON.stringify({ title: ep.title, path: ep.video_path });
+
+    // Friendly display name: strip extension + episode code prefix from filename
+    const filename = (ep.video_path || ep.title).split("/").pop();
+    let pretty = filename.replace(/\.[^/.]+$/, "").replace(/_/g, " ");
+    pretty = pretty.replace(/^[Ss]\d+[Ee]\d+[-– ]+/, "").trim();
+    const label = pretty ? `${ep.title}  –  ${pretty}` : ep.title;
+
+    const badge = ep.segment_count > 0 ? "✓ " : "";
+    opt.textContent = badge + label
+      + (ep.segment_count > 0 ? `  (${ep.segment_count} Seg.)` : "");
+    if (ep.segment_count > 0) opt.style.color = "#3fb950";
+    sel.appendChild(opt);
+  });
+  document.getElementById("lbl-episode").style.display = "";
+}
+
+function onEpisodeChange() {
+  const val = document.getElementById("sel-episode").value;
+  document.getElementById("btn-load").disabled = !val;
+  if (!val) {
+    document.getElementById("inp-episode").value   = "";
+    document.getElementById("inp-videopath").value  = "";
+    return;
+  }
+  const ep = JSON.parse(val);
+  document.getElementById("inp-episode").value   = ep.title;
+  document.getElementById("inp-videopath").value  = ep.path || "";
 }
 
 /* -------------------------------------------------------------------- */
@@ -484,7 +649,6 @@ async function createIdentity() {
   const name = document.getElementById("new-id-name").value.trim();
   const desc = document.getElementById("new-id-desc").value.trim();
   if (!name) { toast("Bitte einen Namen eingeben.", "warn"); return; }
-
   const resp = await fetch("/api/identities", {
     method: "POST",
     headers: {"Content-Type": "application/json"},
@@ -518,21 +682,52 @@ async function viewSamples(identityId, identityName) {
 }
 
 /* -------------------------------------------------------------------- */
-/*  Load episode                                                          */
+/*  Load episode: start video + fetch segments                          */
 /* -------------------------------------------------------------------- */
 async function loadEpisode() {
-  seriesName   = document.getElementById("inp-series").value.trim();
-  episodeTitle = document.getElementById("inp-episode").value.trim();
-  const videoPath = document.getElementById("sel-video").value;
+  seriesName        = document.getElementById("inp-series").value.trim();
+  episodeTitle      = document.getElementById("inp-episode").value.trim();
+  const videoPath   = document.getElementById("inp-videopath").value.trim();
 
   if (!seriesName || !episodeTitle) {
-    toast("Bitte Serie und Folge eingeben.", "warn");
+    toast("Bitte Serie und Episode aus der Bibliothek wählen.", "warn");
     return;
   }
 
   if (videoPath) {
-    player.src = `/stream?path=${encodeURIComponent(videoPath)}`;
-    player.load();
+    currentVideoPath = videoPath;
+    _streamOffset    = 0;
+    _hasWebPreview   = false;
+
+    // Check whether the scanner has already produced a .web.mp4 preview.
+    // If yes, serve the pre-transcoded file (supports native seeking + audio).
+    // If not, fall back to the live FFmpeg /stream endpoint.
+    fetch(`/api/has_preview?path=${encodeURIComponent(videoPath)}`)
+      .then(r => r.json())
+      .then(d => {
+        _hasWebPreview = !!d.has_preview;
+        if (_hasWebPreview) {
+          player.src = `/video?path=${encodeURIComponent(videoPath)}`;
+        } else {
+          player.src = `/stream?path=${encodeURIComponent(videoPath)}`;
+        }
+        player.load();
+      })
+      .catch(() => {
+        // On network error fall back to stream
+        player.src = `/stream?path=${encodeURIComponent(videoPath)}`;
+        player.load();
+      });
+
+    // Probe total duration (player.duration is Infinity for live FFmpeg streams)
+    fetch(`/api/probe?path=${encodeURIComponent(videoPath)}`)
+      .then(r => r.json())
+      .then(d => {
+        _totalDuration = d.duration || 0;
+        videoDuration  = _totalDuration * 1000;
+        drawTimeline();
+      })
+      .catch(() => {});
   }
 
   await fetchSegments();
@@ -541,7 +736,9 @@ async function loadEpisode() {
 
 async function fetchSegments() {
   if (!seriesName || !episodeTitle) return;
-  const resp = await fetch(`/api/segments?series=${encodeURIComponent(seriesName)}&episode=${encodeURIComponent(episodeTitle)}`);
+  const resp = await fetch(
+    `/api/segments?series=${encodeURIComponent(seriesName)}&episode=${encodeURIComponent(episodeTitle)}`
+  );
   if (!resp.ok) { toast("Fehler beim Laden der Segmente.", "error"); return; }
   segments = await resp.json();
   renderSegments();
@@ -560,6 +757,13 @@ function renderSegments() {
   list.innerHTML = segments.map(seg => segCard(seg)).join("");
 }
 
+function confBadge(distance) {
+  if (distance == null) return "";
+  const pct = Math.round((1 - distance) * 100);
+  const cls = pct >= 80 ? "conf-high" : pct >= 55 ? "conf-medium" : "conf-low";
+  return `<span class="conf-badge ${cls}">${pct}%</span>`;
+}
+
 function segCard(seg) {
   const start = msToTime(seg.start_ms);
   const label = seg.identity_name || seg.speaker_label || "Unbekannt";
@@ -567,23 +771,26 @@ function segCard(seg) {
   let cardClass = "speaker-card";
 
   if (seg.identity_id) {
-    const pct = seg.match_distance != null
-      ? Math.round((1 - seg.match_distance) * 100) + "% Match"
-      : "";
+    const badge = confBadge(seg.match_distance);
     const ctx = seg.matched_sample_context ? ` via "${seg.matched_sample_context}"` : "";
     if (seg.is_suggestion) {
       cardClass += " suggestion";
       matchHtml = `<div class="sc-match"><span class="match-tag tag-suggest">⚠ Vorschlag</span>
-        Erkannt als <strong>${esc(seg.identity_name)}</strong>${esc(ctx)} · ${pct}</div>`;
+        Erkannt als <strong>${esc(seg.identity_name)}</strong>${esc(ctx)}</div>`;
     } else {
       matchHtml = `<div class="sc-match"><span class="match-tag tag-matched">✓ Erkannt</span>
-        <strong>${esc(seg.identity_name)}</strong>${esc(ctx)} · ${pct}</div>`;
+        <strong>${esc(seg.identity_name)}</strong>${esc(ctx)}</div>`;
     }
+    // badge is shown in the header (top-right, next to time)
   } else {
     matchHtml = `<div class="sc-match"><span class="match-tag tag-unknown">? Unbekannt</span></div>`;
   }
 
-  const transcript = seg.transcript ? `<div class="sc-transcript">"${esc(seg.transcript.slice(0,120))}${seg.transcript.length>120?"…":""}"</div>` : "";
+  const badge = seg.identity_id ? confBadge(seg.match_distance) : "";
+
+  const transcript = seg.transcript
+    ? `<div class="sc-transcript">"${esc(seg.transcript.slice(0,120))}${seg.transcript.length>120?"…":""}"</div>`
+    : "";
 
   return `
     <div class="speaker-card${cardClass.replace("speaker-card","")}"
@@ -591,7 +798,7 @@ function segCard(seg) {
          onclick="selectSegment(${seg.id})">
       <div class="sc-header">
         <span class="sc-label">${esc(label)}</span>
-        <span class="sc-time">${start}</span>
+        <span style="display:flex;align-items:center;gap:6px;">${badge}<span class="sc-time">${start}</span></span>
       </div>
       ${matchHtml}
       ${transcript}
@@ -601,29 +808,27 @@ function segCard(seg) {
 }
 
 /* -------------------------------------------------------------------- */
-/*  Segment selection & assignment panel                                 */
+/*  Segment selection: jump to video position + show assignment panel   */
 /* -------------------------------------------------------------------- */
 function selectSegment(segId) {
-  // Jump video to that position
   const seg = segments.find(s => s.id === segId);
-  if (seg && player.src) {
-    player.currentTime = seg.start_ms / 1000;
-    player.play();
+  if (!seg) return;
+
+  // ── Jump to the segment start in the video ──────────────────────────
+  if (currentVideoPath) {
+    _loadStreamAt(seg.start_ms / 1000);
   }
 
-  // Toggle assignment panel
+  // ── Toggle assignment panel ──────────────────────────────────────────
   const panelEl = document.getElementById("assign-panel-" + segId);
   if (!panelEl) return;
   if (panelEl.style.display === "block") {
     panelEl.style.display = "none";
     return;
   }
-
-  // Close all others
   document.querySelectorAll('[id^="assign-panel-"]').forEach(el => el.style.display = "none");
   document.querySelectorAll(".speaker-card").forEach(c => c.classList.remove("active"));
   document.getElementById("seg-card-" + segId)?.classList.add("active");
-
   panelEl.style.display = "block";
   panelEl.innerHTML = buildAssignPanel(seg);
 }
@@ -635,7 +840,7 @@ function buildAssignPanel(seg) {
 
   const suggestionNote = seg.is_suggestion
     ? `<div style="color:var(--warn);font-size:11px;margin-bottom:8px;">
-        ⚠ Dies ist ein Vorschlag – die Distanz war etwas höher (${seg.match_distance?.toFixed(3)}).
+        ⚠ Dies ist ein Vorschlag – Konfidenz: ${confBadge(seg.match_distance)}.
         Bestätige oder weise einer anderen Identität zu.
        </div>` : "";
 
@@ -673,11 +878,11 @@ function buildAssignPanel(seg) {
 }
 
 async function applyAssign(segId) {
-  const seg         = segments.find(s => s.id === segId);
-  const identityId  = parseInt(document.getElementById("ap-identity-" + segId)?.value) || null;
-  const newName     = document.getElementById("ap-newname-" + segId)?.value.trim();
-  const context     = document.getElementById("ap-context-" + segId)?.value.trim();
-  const addSample   = document.getElementById("ap-addsample-" + segId)?.checked;
+  const seg        = segments.find(s => s.id === segId);
+  const identityId = parseInt(document.getElementById("ap-identity-" + segId)?.value) || null;
+  const newName    = document.getElementById("ap-newname-"  + segId)?.value.trim();
+  const context    = document.getElementById("ap-context-"  + segId)?.value.trim();
+  const addSample  = document.getElementById("ap-addsample-"+ segId)?.checked;
 
   if (!identityId && !newName) {
     toast("Bitte eine Identität wählen oder neuen Namen eingeben.", "warn");
@@ -689,8 +894,6 @@ async function applyAssign(segId) {
     new_name:    newName  || undefined,
     context:     context  || "",
     add_sample:  addSample,
-    // embedding would come from the segment's own embedding stored in the scanner
-    // For the UI we signal the backend to re-use the segment's embedding
     segment_id:  segId,
   };
 
@@ -701,7 +904,6 @@ async function applyAssign(segId) {
   });
 
   if (resp.ok) {
-    const result = await resp.json();
     toast("Zugewiesen ✓");
     await fetchSegments();
     await loadIdentities();
@@ -715,17 +917,31 @@ async function applyAssign(segId) {
 /*  Video → overlay sync                                                 */
 /* -------------------------------------------------------------------- */
 player.addEventListener("timeupdate", () => {
-  const nowMs = player.currentTime * 1000;
-  const dur   = player.duration || 0;
-  if (dur > 0) {
-    tlProgress.style.width = (player.currentTime / dur * 100) + "%";
+  // With a .web.mp4 preview the browser tracks absolute time itself.
+  // With a live /stream, currentTime restarts from 0 at each seek, so we
+  // add _streamOffset to recover the absolute position in the video.
+  const absTime = _hasWebPreview
+    ? player.currentTime
+    : player.currentTime + _streamOffset;
+  const nowMs   = absTime * 1000;
+  if (_totalDuration > 0) {
+    tlProgress.style.width = (absTime / _totalDuration * 100) + "%";
   }
   updateOverlay(nowMs);
 });
 
 player.addEventListener("loadedmetadata", () => {
-  videoDuration = player.duration * 1000;
-  drawTimeline();
+  // For a .web.mp4 preview player.duration is finite; use it directly.
+  // For live FFmpeg streams player.duration is Infinity, so we rely on
+  // /api/probe which writes _totalDuration asynchronously.
+  if (isFinite(player.duration) && player.duration > 0) {
+    _totalDuration = player.duration;
+    videoDuration  = _totalDuration * 1000;
+  }
+  if (_totalDuration > 0) {
+    videoDuration = _totalDuration * 1000;
+    drawTimeline();
+  }
 });
 
 function updateOverlay(nowMs) {
@@ -739,14 +955,14 @@ function updateOverlay(nowMs) {
   if (active.identity_id && active.match_distance != null) {
     const pct = Math.round((1 - active.match_distance) * 100);
     const ctx = active.matched_sample_context ? ` · via „${active.matched_sample_context}"` : "";
-    ovMatch.textContent = `${pct}% Match${ctx}`;
+    const prefix = active.is_suggestion ? "⚠ Vorschlag · " : "";
+    ovMatch.textContent = `${prefix}${pct}%${ctx}`;
   } else if (active.is_suggestion) {
     ovMatch.textContent = "⚠ Vorschlag – Bestätigung ausstehend";
   } else {
     ovMatch.textContent = "";
   }
 
-  // Highlight the matching segment card
   document.querySelectorAll(".speaker-card").forEach(c => c.classList.remove("active"));
   const card = document.getElementById("seg-card-" + active.id);
   if (card) {
@@ -778,9 +994,7 @@ function drawTimeline() {
 
   segments.forEach(seg => {
     const key = seg.identity_id || seg.speaker_label;
-    if (!colorMap[key]) {
-      colorMap[key] = COLORS[colorIdx++ % COLORS.length];
-    }
+    if (!colorMap[key]) colorMap[key] = COLORS[colorIdx++ % COLORS.length];
     const x1 = (seg.start_ms / videoDuration) * W;
     const x2 = (seg.end_ms   / videoDuration) * W;
     ctx.fillStyle = colorMap[key];
@@ -789,10 +1003,10 @@ function drawTimeline() {
 }
 
 tlContainer.addEventListener("click", e => {
-  const rect = tlContainer.getBoundingClientRect();
+  const rect  = tlContainer.getBoundingClientRect();
   const ratio = (e.clientX - rect.left) / rect.width;
-  if (player.duration) {
-    player.currentTime = ratio * player.duration;
+  if (_totalDuration > 0 && currentVideoPath) {
+    _loadStreamAt(ratio * _totalDuration);
   }
 });
 
@@ -821,7 +1035,7 @@ function esc(str) {
 /*  Boot                                                                 */
 /* -------------------------------------------------------------------- */
 (async () => {
-  await loadVideoList();
+  await loadLibrary();
   await loadIdentities();
 })();
 </script>

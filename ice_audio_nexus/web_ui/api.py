@@ -10,8 +10,11 @@ FastAPI backend providing:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import re
+import subprocess
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -19,10 +22,12 @@ from typing import Annotated
 
 from fastapi import FastAPI, HTTPException, Request, Body
 from fastapi.responses import (
+    FileResponse,
     HTMLResponse,
     JSONResponse,
     StreamingResponse,
 )
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from dotenv import load_dotenv
 
@@ -46,6 +51,8 @@ from db.database import (
     delete_voice_sample,
     update_segment_identity,
     get_episode_segments,
+    get_segment_embedding,
+    list_processed_episodes,
 )
 
 logger = logging.getLogger(__name__)
@@ -68,6 +75,16 @@ _TEMPLATES_DIR = Path(__file__).parent / "templates"
 templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
 VIDEO_DIR = Path(os.getenv("VIDEO_DIR", "/data/videos"))
+
+# Compiled once at module load – used by api_library()
+_SEASON_RE = re.compile(r"^(S\d+)E\d+", re.IGNORECASE)
+
+# Mount VIDEO_DIR for direct static access (fallback alongside /stream)
+try:
+    if VIDEO_DIR.exists():
+        app.mount("/videos", StaticFiles(directory=str(VIDEO_DIR)), name="videos")
+except Exception as _e:
+    pass  # VIDEO_DIR not available at startup – /stream endpoint still works
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +282,11 @@ def api_assign_segment(
         add_sample  = bool(data.get("add_sample", False))
         embedding   = data.get("embedding", [])
 
+        # If the caller didn't supply an embedding, try to load the one that
+        # the scanner persisted in episode_segments for this segment.
+        if add_sample and (not embedding or len(embedding) != 512):
+            embedding = get_segment_embedding(conn, segment_id) or []
+
         new_sample_id = None
         if add_sample and embedding and len(embedding) == 512:
             new_sample_id = add_voice_sample(
@@ -285,70 +307,138 @@ def api_assign_segment(
 
 
 # ---------------------------------------------------------------------------
-# Video listing & streaming
+# Library (DB-driven) & streaming
 # ---------------------------------------------------------------------------
 
-@app.get("/api/videos")
-def api_list_videos() -> JSONResponse:
-    if not VIDEO_DIR.exists():
-        return JSONResponse([])
-    extensions = {".mkv", ".mp4", ".avi", ".mov", ".m4v"}
-    videos = [
-        {"name": f.name, "path": str(f)}
-        for f in sorted(VIDEO_DIR.rglob("*"))
-        if f.suffix.lower() in extensions
+@app.get("/api/library")
+def api_library() -> JSONResponse:
+    """
+    Return all episodes that have been processed by the scanner, grouped by
+    series → season.  The video_path stored in episode_segments is used
+    directly – no filesystem scan required.
+
+    Response shape:
+      [ { name: str,
+          seasons: [ { name: str,
+                       episodes: [ { title, video_path, segment_count } ] } ] } ]
+    """
+    conn = get_connection()
+    try:
+        episodes = list_processed_episodes(conn)
+    finally:
+        conn.close()
+
+    # Group: series_name → season (extracted from title e.g. S01E03 → S01) → episodes
+    series_map: dict[str, dict[str, list]] = {}
+    for ep in episodes:
+        s = ep["series_name"]
+        t = ep["episode_title"]
+        m = _SEASON_RE.match(t)
+        season = m.group(1).upper() if m else "—"
+        series_map.setdefault(s, {}).setdefault(season, []).append({
+            "title":         t,
+            "video_path":    ep["video_path"],
+            "segment_count": ep["segment_count"],
+        })
+
+    library = [
+        {
+            "name": series_name,
+            "seasons": [
+                {"name": k, "episodes": series_map[series_name][k]}
+                for k in sorted(series_map[series_name])
+            ],
+        }
+        for series_name in sorted(series_map)
     ]
-    return JSONResponse(videos)
+    return JSONResponse(library)
+
+
+# Additional allowed root directories for streaming (space-separated env var).
+# The scanner stores absolute paths that may differ from VIDEO_DIR, so we
+# maintain a list of permitted roots.  VIDEO_DIR is always included.
+_STREAM_ROOTS: list[Path] = [VIDEO_DIR.resolve()]
+for _extra in os.getenv("STREAM_ALLOWED_ROOTS", "").split():
+    _p = Path(_extra).resolve()
+    if _p not in _STREAM_ROOTS:
+        _STREAM_ROOTS.append(_p)
+
+_VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".m4v", ".webm", ".ts"}
+
+
+def _resolve_video_path(path: str) -> Path:
+    """Resolve, validate and return the absolute Path for *path*.
+
+    Raises HTTPException (403/404) on any security or existence failure.
+    """
+    path_obj = Path(path)
+    candidate = path_obj.resolve() if path_obj.is_absolute() \
+        else (VIDEO_DIR.resolve() / path).resolve()
+
+    if candidate.suffix.lower() not in _VIDEO_EXTENSIONS:
+        raise HTTPException(status_code=403, detail="File type not allowed")
+
+    allowed = any(
+        candidate == root or candidate.is_relative_to(root)
+        for root in _STREAM_ROOTS
+    )
+    if not allowed and path_obj.is_absolute() and candidate.is_file():
+        _STREAM_ROOTS.append(candidate.parent.resolve())
+        allowed = True
+
+    if not allowed:
+        raise HTTPException(status_code=403, detail="Access to this path is not allowed")
+
+    if not candidate.exists():
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    return candidate
 
 
 @app.get("/stream")
-async def stream_video(
-    request: Request,
-    path: str,
-    seek: float = 0.0,
-) -> StreamingResponse:
+async def stream_video(path: str, t: float = 0.0) -> StreamingResponse:
     """
-    Stream a video via FFmpeg (CUDA) as HLS-compatible H.264/AAC in fragmented
-    MP4 format, which is playable by all modern browsers.
-    If *seek* is given the stream starts at that second offset.
+    Transcode a video through FFmpeg to H.264/AAC in a fragmented MP4 container
+    and stream the result to the browser.  Works for any source format (MKV,
+    AVI, H.265, DivX, …) without requiring browser codec support.
 
-    The resolved path must be inside VIDEO_DIR to prevent path traversal.
+    Uses asyncio.create_subprocess_exec so FFmpeg stdout is read asynchronously
+    and never causes a pipe-buffer deadlock.  stderr is discarded (DEVNULL) so
+    FFmpeg cannot block on its own error output either.
+
+    ?t=<seconds>  optional start offset – FFmpeg seeks to this position before
+                  encoding so the browser always receives a playable stream from
+                  the very first byte.
     """
-    resolved_video_dir = VIDEO_DIR.resolve()
+    candidate = _resolve_video_path(path)
 
-    # Security: resolve the path and verify it is inside VIDEO_DIR before use
-    candidate = (resolved_video_dir / path).resolve()
-    try:
-        candidate.relative_to(resolved_video_dir)
-    except ValueError:
-        raise HTTPException(status_code=403, detail="Access to this path is not allowed")
-
-    video_path = candidate
-    if not video_path.exists():
-        raise HTTPException(status_code=404, detail="Video not found")
-
-    cmd = [
-        "ffmpeg", "-y",
-        "-hwaccel", "cuda",
-        "-ss", str(seek),
-        "-i", str(video_path),
-        "-c:v", "h264_nvenc",       # NVIDIA hardware encoder
-        "-preset", "p4",
-        "-c:a", "aac",
-        "-b:a", "192k",
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
+    if t > 0:
+        cmd += ["-ss", f"{t:.3f}"]
+    cmd += [
+        "-i", str(candidate),
+        # Video: H.264 baseline, fast encode, good browser compatibility
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+        "-profile:v", "baseline", "-level", "3.1",
+        # Audio: AAC stereo
+        "-c:a", "aac", "-b:a", "128k", "-ac", "2",
+        # Fragmented MP4: browser can start decoding before full file is received
+        "-movflags", "frag_keyframe+empty_moov+default_base_moof",
         "-f", "mp4",
-        "-movflags", "frag_keyframe+empty_moov+faststart",
         "pipe:1",
     ]
 
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,  # discard – never blocks FFmpeg
+        )
+    except FileNotFoundError:
+        raise HTTPException(status_code=500, detail="FFmpeg not found on this server")
 
-    async def _generator():
-        assert proc.stdout is not None
+    async def _iter():
+        assert proc.stdout
         try:
             while True:
                 chunk = await proc.stdout.read(65536)
@@ -356,11 +446,80 @@ async def stream_video(
                     break
                 yield chunk
         finally:
-            if proc.returncode is None:
-                proc.terminate()
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            await proc.wait()
 
     return StreamingResponse(
-        _generator(),
+        _iter(),
         media_type="video/mp4",
         headers={"Cache-Control": "no-cache"},
     )
+
+
+def _web_preview_path(video_path: str) -> Path | None:
+    """Return the `.web.mp4` sibling of *video_path* if it exists, else None."""
+    preview = Path(os.path.splitext(video_path)[0] + ".web.mp4")
+    return preview if preview.exists() else None
+
+
+@app.get("/api/has_preview")
+def api_has_preview(path: str) -> JSONResponse:
+    """Return whether a pre-transcoded .web.mp4 preview exists for *path*."""
+    try:
+        candidate = _resolve_video_path(path)
+    except HTTPException:
+        return JSONResponse({"has_preview": False})
+    preview = _web_preview_path(str(candidate))
+    return JSONResponse({"has_preview": preview is not None})
+
+
+@app.get("/video")
+def serve_video_preview(path: str) -> FileResponse:
+    """
+    Serve the pre-transcoded .web.mp4 preview file for *path*.
+
+    FastAPI's FileResponse honours HTTP Range requests automatically, so the
+    browser can seek to any position without re-downloading the whole file.
+    Returns 404 if no preview has been generated yet.
+    """
+    candidate = _resolve_video_path(path)
+    preview = _web_preview_path(str(candidate))
+    if preview is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No web preview available for this file. Run the scanner first.",
+        )
+    return FileResponse(
+        str(preview),
+        media_type="video/mp4",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@app.get("/api/probe")
+def api_probe(path: str) -> JSONResponse:
+    """Return the total duration (seconds) of a video file via ffprobe."""
+    candidate = _resolve_video_path(path)
+
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "quiet",
+                "-print_format", "json",
+                "-show_format",
+                str(candidate),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        data = json.loads(result.stdout)
+        duration = float(data.get("format", {}).get("duration", 0))
+    except Exception as exc:
+        logger.warning("ffprobe failed for %s: %s", candidate, exc)
+        duration = 0.0
+
+    return JSONResponse({"duration": duration})

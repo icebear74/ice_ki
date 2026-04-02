@@ -83,6 +83,7 @@ _DDL = [
         start_ms        INT NOT NULL,
         end_ms          INT NOT NULL,
         speaker_label   VARCHAR(100) COMMENT 'Temporary diarization label (SPEAKER_01)',
+        embedding       VECTOR(512) NULL COMMENT 'Raw speaker embedding from diarization',
         identity_id     INT DEFAULT NULL,
         matched_sample_id INT DEFAULT NULL COMMENT 'Which voice_sample triggered the match',
         match_distance  FLOAT DEFAULT NULL COMMENT 'Cosine distance of the winning match',
@@ -131,6 +132,15 @@ def ensure_schema() -> None:
         cur = conn.cursor()
         for ddl in _DDL:
             cur.execute(ddl)
+        # Migrate pre-existing episode_segments tables that were created before
+        # the embedding column was added.
+        cur.execute(
+            """
+            ALTER TABLE episode_segments
+            ADD COLUMN IF NOT EXISTS embedding VECTOR(512) NULL
+                COMMENT 'Raw speaker embedding from diarization'
+            """
+        )
         conn.commit()
         logger.info("Database schema verified / created.")
     finally:
@@ -302,10 +312,19 @@ def find_nearest_identity(
     embedding: list[float],
     match_threshold: float = 0.25,
     suggest_threshold: float = 0.45,
+    min_margin: float = 0.07,
 ) -> dict:
     """
-    Search all voice_samples with VECTOR_DISTANCE (cosine) and return the
-    closest match.
+    Search all voice_samples using VEC_DISTANCE_COSINE (MariaDB 11.7+) and
+    return the closest match.
+
+    *min_margin* guards against cross-identity confusion (e.g. two characters
+    whose embeddings land close together).  Even if the best match is within
+    *match_threshold*, the result is only considered a confirmed match when the
+    next-closest sample from a **different** identity is at least *min_margin*
+    further away.  If the margin is too small the result is downgraded:
+      • confirmed → suggest  (if still within suggest_threshold + margin)
+      • suggest   → unknown
 
     Returns a dict with keys:
       status        – 'matched' | 'suggest' | 'unknown'
@@ -314,49 +333,73 @@ def find_nearest_identity(
       sample_id     – int or None   (which sample triggered the match)
       sample_context– str or None
       distance      – float or None
+      second_distance – float or None  (runner-up distance, useful for debugging)
     """
     vec_bytes = vector_to_bytes(embedding)
     cur = conn.cursor()
+    # Fetch the two closest samples (potentially from different identities)
     cur.execute(
         """
         SELECT vs.id,
                vs.identity_id,
                i.name,
                vs.context,
-               VECTOR_DISTANCE(vs.embedding, ?) AS dist
+               VEC_DISTANCE_COSINE(vs.embedding, ?) AS dist
         FROM voice_samples vs
         JOIN identities i ON i.id = vs.identity_id
         ORDER BY dist ASC
-        LIMIT 1
+        LIMIT 2
         """,
         (vec_bytes,),
     )
-    row = cur.fetchone()
-    if row is None:
+    rows = cur.fetchall()
+    if not rows:
         return {"status": "unknown", "identity_id": None, "identity_name": None,
-                "sample_id": None, "sample_context": None, "distance": None}
+                "sample_id": None, "sample_context": None, "distance": None,
+                "second_distance": None}
 
-    sample_id, identity_id, identity_name, sample_context, distance = row
-    if distance <= match_threshold:
-        return {
-            "status": "matched",
-            "identity_id": identity_id,
-            "identity_name": identity_name,
-            "sample_id": sample_id,
-            "sample_context": sample_context,
-            "distance": float(distance),
-        }
-    if distance <= suggest_threshold:
-        return {
-            "status": "suggest",
-            "identity_id": identity_id,
-            "identity_name": identity_name,
-            "sample_id": sample_id,
-            "sample_context": sample_context,
-            "distance": float(distance),
-        }
-    return {"status": "unknown", "identity_id": None, "identity_name": None,
-            "sample_id": None, "sample_context": None, "distance": float(distance)}
+    sample_id, identity_id, identity_name, sample_context, distance = rows[0]
+
+    # Find the closest sample that belongs to a *different* identity (runner-up).
+    second_distance: float | None = None
+    if len(rows) > 1:
+        for row in rows[1:]:
+            if row[1] != identity_id:
+                second_distance = float(row[4])
+                break
+        # If both rows share the same identity, the second_distance stays None.
+        # In that case there is no competing identity, so no margin check needed.
+
+    # Check whether the winning match is sufficiently separated from the
+    # runner-up identity.  If not, downgrade the confidence level.
+    margin_ok = (second_distance is None) or (second_distance - float(distance) >= min_margin)
+
+    if float(distance) <= match_threshold:
+        if margin_ok:
+            status = "matched"
+        elif float(distance) <= suggest_threshold:
+            status = "suggest"   # too close to a rival – downgrade
+        else:
+            status = "unknown"
+    elif float(distance) <= suggest_threshold:
+        status = "suggest"
+    else:
+        status = "unknown"
+
+    if status == "unknown":
+        return {"status": "unknown", "identity_id": None, "identity_name": None,
+                "sample_id": None, "sample_context": None,
+                "distance": float(distance), "second_distance": second_distance}
+
+    return {
+        "status": status,
+        "identity_id": identity_id,
+        "identity_name": identity_name,
+        "sample_id": sample_id,
+        "sample_context": sample_context,
+        "distance": float(distance),
+        "second_distance": second_distance,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -369,8 +412,8 @@ def upsert_segment(conn: mariadb.Connection, **kwargs) -> int:
     # if the caller ever passes unexpected keys.
     _ALLOWED_COLS = (
         "series_name", "episode_title", "video_path", "start_ms", "end_ms",
-        "speaker_label", "identity_id", "matched_sample_id", "match_distance",
-        "transcript", "confidence", "is_suggestion",
+        "speaker_label", "embedding", "identity_id", "matched_sample_id",
+        "match_distance", "transcript", "confidence", "is_suggestion",
     )
     data = {k: v for k, v in kwargs.items() if k in _ALLOWED_COLS}
     # Build column list from the verified allowlist (not from caller input)
@@ -402,6 +445,46 @@ def update_segment_identity(
         (identity_id, matched_sample_id, match_distance, is_suggestion, segment_id),
     )
     conn.commit()
+
+
+def get_segment_embedding(
+    conn: mariadb.Connection,
+    segment_id: int,
+) -> list[float] | None:
+    """Return the stored speaker embedding for a segment, or None if absent."""
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT embedding FROM episode_segments WHERE id = ?",
+        (segment_id,),
+    )
+    row = cur.fetchone()
+    if row is None or row[0] is None:
+        return None
+    return bytes_to_vector(row[0])
+
+
+def list_processed_episodes(conn: mariadb.Connection) -> list[dict]:
+    """
+    Return a grouped list of all episodes that have been processed by the scanner.
+    Each entry contains series_name, episode_title, the stored video_path and the
+    total segment count – enough for the Web UI library view.
+    """
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT
+            series_name,
+            episode_title,
+            MIN(video_path)  AS video_path,
+            COUNT(*)         AS segment_count
+        FROM episode_segments
+        WHERE series_name IS NOT NULL
+          AND episode_title IS NOT NULL
+        GROUP BY series_name, episode_title
+        ORDER BY series_name, episode_title
+    """)
+    cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, row)) for row in cur.fetchall()]
+
 
 
 def get_episode_segments(
