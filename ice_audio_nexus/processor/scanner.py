@@ -172,7 +172,8 @@ def _get_whisper_model(model_size: str = "large-v3"):
                 "faster-whisper is not installed. Run setup_env.sh first."
             ) from exc
         device = "cuda" if TRANSCRIPTION_DEVICE.startswith("cuda") else "cpu"
-        _whisper_model = WhisperModel(model_size, device=device, compute_type="float16")
+        compute_type = "float16" if device == "cuda" else "int8"
+        _whisper_model = WhisperModel(model_size, device=device, compute_type=compute_type)
     return _whisper_model
 
 

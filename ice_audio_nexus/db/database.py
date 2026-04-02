@@ -314,8 +314,8 @@ def find_nearest_identity(
     suggest_threshold: float = 0.45,
 ) -> dict:
     """
-    Search all voice_samples with VECTOR_DISTANCE (cosine) and return the
-    closest match.
+    Search all voice_samples using VEC_DISTANCE_COSINE (MariaDB 11.7+) and
+    return the closest match.
 
     Returns a dict with keys:
       status        – 'matched' | 'suggest' | 'unknown'
@@ -333,7 +333,7 @@ def find_nearest_identity(
                vs.identity_id,
                i.name,
                vs.context,
-               VECTOR_DISTANCE(vs.embedding, ?) AS dist
+               VEC_DISTANCE_COSINE(vs.embedding, ?) AS dist
         FROM voice_samples vs
         JOIN identities i ON i.id = vs.identity_id
         ORDER BY dist ASC
