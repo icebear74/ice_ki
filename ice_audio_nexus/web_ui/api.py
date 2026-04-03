@@ -54,6 +54,11 @@ from db.database import (
     delete_identity,
     refresh_supervectors,
     revert_supervectors,
+    # Named supervector groups
+    list_supervector_groups,
+    list_free_samples,
+    create_named_supervector,
+    revert_supervector_group,
     add_voice_sample,
     list_voice_samples,
     confirm_voice_sample,
@@ -293,6 +298,85 @@ def api_revert_supervector(identity_id: int) -> JSONResponse:
 
 
 # ---------------------------------------------------------------------------
+# Named supervector group API
+# ---------------------------------------------------------------------------
+
+@app.get("/api/identities/{identity_id}/supervector_groups")
+def api_list_supervector_groups(identity_id: int) -> JSONResponse:
+    """List all named supervector groups for an identity."""
+    conn = get_connection()
+    try:
+        if get_identity(conn, identity_id) is None:
+            raise HTTPException(status_code=404, detail="Identity not found")
+        groups = list_supervector_groups(conn, identity_id)
+        return JSONResponse(groups)
+    finally:
+        conn.close()
+
+
+@app.get("/api/identities/{identity_id}/free_samples")
+def api_list_free_samples(identity_id: int) -> JSONResponse:
+    """List active raw samples for an identity that are not yet in any supervector group."""
+    conn = get_connection()
+    try:
+        if get_identity(conn, identity_id) is None:
+            raise HTTPException(status_code=404, detail="Identity not found")
+        samples = list_free_samples(conn, identity_id)
+        # Strip embeddings – browser only needs metadata + id for selection
+        for s in samples:
+            s.pop("embedding", None)
+        return JSONResponse(samples)
+    finally:
+        conn.close()
+
+
+@app.post("/api/identities/{identity_id}/supervector_groups")
+def api_create_supervector_group(identity_id: int, data: dict = Body(...)) -> JSONResponse:
+    """
+    Create a named supervector group from a selected list of sample IDs.
+
+    Body: { name: str, sample_ids: [int, ...] }
+    """
+    conn = get_connection()
+    try:
+        if get_identity(conn, identity_id) is None:
+            raise HTTPException(status_code=404, detail="Identity not found")
+        name       = str(data.get("name", "")).strip()
+        sample_ids = [int(i) for i in data.get("sample_ids", [])]
+        if not name:
+            raise HTTPException(status_code=400, detail="name is required")
+        if not sample_ids:
+            raise HTTPException(status_code=400, detail="sample_ids must not be empty")
+        try:
+            group_id = create_named_supervector(conn, identity_id, name, sample_ids)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse({"status": "ok", "group_id": group_id,
+                             "sample_count": len(sample_ids)})
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("create_named_supervector failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to create supervector group.")
+    finally:
+        conn.close()
+
+
+@app.delete("/api/supervector_groups/{group_id}")
+def api_revert_supervector_group(group_id: int) -> JSONResponse:
+    """Delete a named supervector group and reactivate all its source samples."""
+    conn = get_connection()
+    try:
+        reactivated = revert_supervector_group(conn, group_id)
+        return JSONResponse({"status": "ok", "reactivated_samples": reactivated})
+    except Exception as exc:
+        logger.error("revert_supervector_group failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to revert supervector group.")
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
 # Voice-sample API
 # ---------------------------------------------------------------------------
 
@@ -502,7 +586,12 @@ def _extract_tts_snippet(
 
     out_dir = TTS_DATASET_DIR / actor_name
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = str(out_dir / filename)
+    # Resolve to absolute path and confirm it stays inside TTS_DATASET_DIR
+    # (guards against path-traversal if sanitisation above were ever bypassed).
+    out_path = os.path.realpath(out_dir / filename)
+    if not out_path.startswith(os.path.realpath(TTS_DATASET_DIR)):
+        logger.warning("TTS path escapes dataset dir – skipping: %s", out_path)
+        return None
 
     start_s = start_ms / 1000.0
     end_s   = end_ms   / 1000.0
@@ -517,7 +606,7 @@ def _extract_tts_snippet(
         "-ac", "1",
         out_path,
     ]
-    result = subprocess.run(cmd, capture_output=True, timeout=60)
+    result = subprocess.run(cmd, capture_output=True, timeout=60, shell=False)
     if result.returncode != 0:
         logger.warning("TTS FFmpeg failed: %s", result.stderr.decode(errors="replace")[-300:])
         return None

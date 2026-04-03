@@ -88,7 +88,19 @@ _DDL = [
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
 
-    # 4. Identity anchor – voice recognition profile (one per voice actor or character voice)
+    # 4. Supervector groups – named subsets of voice samples that form one supervector
+    """
+    CREATE TABLE IF NOT EXISTS supervector_groups (
+        id          INT AUTO_INCREMENT PRIMARY KEY,
+        identity_id INT NOT NULL,
+        name        VARCHAR(255) NOT NULL COMMENT 'e.g. TNG Staffel 1-7 or Picard Serie',
+        created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (identity_id) REFERENCES identities(id) ON DELETE CASCADE,
+        INDEX idx_svgroup_identity (identity_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+
+    # 5. Identity anchor – voice recognition profile (one per voice actor or character voice)
     """
     CREATE TABLE IF NOT EXISTS identities (
         id              INT AUTO_INCREMENT PRIMARY KEY,
@@ -111,7 +123,7 @@ _DDL = [
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
 
-    # 5. Voice samples – many per identity, each with its own 512-dim vector
+    # 6. Voice samples – many per identity, each with its own 512-dim vector
     """
     CREATE TABLE IF NOT EXISTS voice_samples (
         id          INT AUTO_INCREMENT PRIMARY KEY,
@@ -132,7 +144,7 @@ _DDL = [
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
 
-    # 6. Episode segments – speaker timeline with link to matched identity
+    # 7. Episode segments – speaker timeline with link to matched identity
     """
     CREATE TABLE IF NOT EXISTS episode_segments (
         id              INT AUTO_INCREMENT PRIMARY KEY,
@@ -197,6 +209,34 @@ def ensure_schema() -> None:
             cur.execute(ddl)
 
         # ── Migrate pre-existing tables ──────────────────────────────────────
+        # supervector_groups table (new in this version)
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS supervector_groups (
+                id          INT AUTO_INCREMENT PRIMARY KEY,
+                identity_id INT NOT NULL,
+                name        VARCHAR(255) NOT NULL,
+                created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (identity_id) REFERENCES identities(id) ON DELETE CASCADE,
+                INDEX idx_svgroup_identity (identity_id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """
+        )
+        # voice_samples: supervector group membership columns
+        cur.execute(
+            """
+            ALTER TABLE voice_samples
+            ADD COLUMN IF NOT EXISTS supervector_group_id INT NULL
+                COMMENT 'If set, this IS the supervector sample for that group'
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE voice_samples
+            ADD COLUMN IF NOT EXISTS used_in_group_id INT NULL
+                COMMENT 'If set, this sample was merged into this supervector group'
+            """
+        )
         # actors: add new columns if missing
         for col_sql in [
             "ALTER TABLE actors ADD COLUMN IF NOT EXISTS description TEXT NULL",
@@ -349,29 +389,31 @@ def delete_identity(conn: mariadb.Connection, identity_id: int) -> None:
 
 def refresh_supervectors(conn: mariadb.Connection) -> dict:
     """
-    For every identity that has at least one non-supervector sample, calculate
-    the mean embedding (centroid) of all its real samples and store it as a new
-    sample with context='SUPERVECTOR' and is_active=TRUE.
+    Auto-supervector mode: for every identity, group ALL currently free
+    (not yet merged) non-low-quality samples into a single named supervector
+    group called "Auto <date>".
 
-    All other (non-supervector) samples for that identity are marked
-    is_active=FALSE so the scanner only uses the supervector for matching.
+    This is the quick "merge everything" path.  Users can use
+    create_named_supervector() for fine-grained era-based groups.
 
     Returns a summary dict: {identity_name: sample_count_used, ...}
     """
+    from datetime import date
+    auto_name = f"Auto {date.today()}"
+
     cur = conn.cursor()
     summary: dict = {}
     try:
         cur.execute("SELECT id, name FROM identities ORDER BY name")
-        identities = cur.fetchall()
+        identities_list = cur.fetchall()
 
-        for identity_id, identity_name in identities:
-            # Load all real (non-supervector) embeddings for this identity.
-            # Samples flagged as is_low_quality are excluded so that laughter,
-            # noise or very short utterances do not pollute the supervector.
+        for identity_id, identity_name in identities_list:
+            # Fetch free non-LQ sample IDs
             cur.execute(
-                """SELECT embedding FROM voice_samples
+                """SELECT id FROM voice_samples
                    WHERE identity_id = ?
                      AND (context IS NULL OR context != 'SUPERVECTOR')
+                     AND used_in_group_id IS NULL
                      AND is_low_quality = FALSE""",
                 (identity_id,),
             )
@@ -379,40 +421,13 @@ def refresh_supervectors(conn: mariadb.Connection) -> dict:
             if not rows:
                 continue
 
-            embeddings = []
-            for (raw,) in rows:
-                vec = np.frombuffer(raw, dtype=np.float32)
-                if vec.shape[0] == 512:
-                    embeddings.append(vec)
+            sample_ids = [row[0] for row in rows]
+            try:
+                create_named_supervector(conn, identity_id, auto_name, sample_ids)
+                summary[identity_name] = len(sample_ids)
+            except Exception as exc:
+                logger.warning("Auto-supervector skipped for %s: %s", identity_name, exc)
 
-            if not embeddings:
-                continue
-
-            # Compute the centroid (mean across all samples).
-            supervector = np.mean(embeddings, axis=0).astype(np.float32)
-
-            # Remove any old supervector for this identity.
-            cur.execute(
-                "DELETE FROM voice_samples WHERE identity_id = ? AND context = 'SUPERVECTOR'",
-                (identity_id,),
-            )
-            # Mark all real (non-supervector) samples as inactive.
-            cur.execute(
-                """UPDATE voice_samples SET is_active = FALSE
-                   WHERE identity_id = ?
-                     AND (context IS NULL OR context != 'SUPERVECTOR')""",
-                (identity_id,),
-            )
-            # Insert the new supervector as the sole active sample.
-            cur.execute(
-                """INSERT INTO voice_samples
-                       (identity_id, embedding, context, is_confirmed, is_active)
-                   VALUES (?, ?, 'SUPERVECTOR', TRUE, TRUE)""",
-                (identity_id, vector_to_bytes(supervector.tolist())),
-            )
-            summary[identity_name] = len(embeddings)
-
-        conn.commit()
     except Exception:
         conn.rollback()
         raise
@@ -424,31 +439,25 @@ def refresh_supervectors(conn: mariadb.Connection) -> dict:
 
 def revert_supervectors(conn: mariadb.Connection, identity_id: int) -> int:
     """
-    Delete the supervector for *identity_id* and reactivate all original
-    samples so the user can review/refine them before re-merging.
+    Revert ALL supervector groups for *identity_id*: delete every supervector
+    sample and reactivate all original source samples.
 
-    Returns the number of reactivated samples.
+    Returns the total number of reactivated samples.
     """
     cur = conn.cursor()
     try:
         cur.execute(
-            "DELETE FROM voice_samples WHERE identity_id = ? AND context = 'SUPERVECTOR'",
+            "SELECT id FROM supervector_groups WHERE identity_id = ?",
             (identity_id,),
         )
-        cur.execute(
-            """UPDATE voice_samples SET is_active = TRUE
-               WHERE identity_id = ?
-                 AND (context IS NULL OR context != 'SUPERVECTOR')""",
-            (identity_id,),
-        )
-        reactivated = cur.rowcount
-        conn.commit()
-        return reactivated
-    except Exception:
-        conn.rollback()
-        raise
+        group_ids = [row[0] for row in cur.fetchall()]
     finally:
         cur.close()
+
+    total = 0
+    for gid in group_ids:
+        total += revert_supervector_group(conn, gid)
+    return total
 
 
 # ---------------------------------------------------------------------------
@@ -697,6 +706,170 @@ def delete_voice_casting(conn: mariadb.Connection, casting_id: int) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Named supervector groups
+# ---------------------------------------------------------------------------
+
+def list_supervector_groups(conn: mariadb.Connection, identity_id: int) -> list[dict]:
+    """Return all supervector groups for *identity_id* with their sample counts."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT sg.id, sg.name, sg.created_at,
+               COUNT(sv.id) AS sample_count
+        FROM supervector_groups sg
+        LEFT JOIN voice_samples sv ON sv.used_in_group_id = sg.id
+        WHERE sg.identity_id = ?
+        GROUP BY sg.id
+        ORDER BY sg.created_at
+        """,
+        (identity_id,),
+    )
+    cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def list_free_samples(conn: mariadb.Connection, identity_id: int) -> list[dict]:
+    """Return active raw samples not yet merged into any supervector group."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, context, is_confirmed, is_active, is_low_quality, created_at
+        FROM voice_samples
+        WHERE identity_id = ?
+          AND (context IS NULL OR context != 'SUPERVECTOR')
+          AND used_in_group_id IS NULL
+        ORDER BY created_at
+        """,
+        (identity_id,),
+    )
+    cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def create_named_supervector(
+    conn: mariadb.Connection,
+    identity_id: int,
+    name: str,
+    sample_ids: list[int],
+) -> int:
+    """
+    Compute the centroid of the selected *sample_ids*, store it as a new
+    SUPERVECTOR voice_sample linked to a new supervector_group, and mark all
+    source samples as inactive / merged.
+
+    Returns the new supervector_group.id.
+    Raises ValueError if any sample_id is invalid (wrong identity, already merged,
+    is itself a supervector, or is missing).
+    """
+    if not sample_ids:
+        raise ValueError("sample_ids must not be empty")
+
+    cur = conn.cursor()
+
+    # Build a parameterised IN-clause from the validated integer list.
+    # {fmt} expands to "?,?,?,...,?" – only placeholders, never user data –
+    # so there is no SQL-injection risk despite the f-string.  The actual
+    # values are passed as bound parameters in the second argument.
+    fmt = ",".join("?" for _ in sample_ids)
+    cur.execute(
+        f"""
+        SELECT id FROM voice_samples
+        WHERE id IN ({fmt})
+          AND identity_id = ?
+          AND (context IS NULL OR context != 'SUPERVECTOR')
+          AND used_in_group_id IS NULL
+          AND is_active = TRUE
+        """,  # noqa: S608
+        (*sample_ids, identity_id),
+    )
+    valid_ids = {row[0] for row in cur.fetchall()}
+    invalid = set(sample_ids) - valid_ids
+    if invalid:
+        raise ValueError(f"Invalid or already-merged sample IDs: {invalid}")
+
+    # Load embeddings
+    cur.execute(
+        f"SELECT id, embedding FROM voice_samples WHERE id IN ({fmt})",  # noqa: S608
+        sample_ids,
+    )
+    embeddings = []
+    for row in cur.fetchall():
+        vec = np.frombuffer(row[1], dtype=np.float32)
+        if vec.shape[0] == 512:
+            embeddings.append(vec)
+
+    if not embeddings:
+        raise ValueError("No valid 512-dim embeddings found in selected samples")
+
+    supervector = np.mean(embeddings, axis=0).astype(np.float32)
+
+    try:
+        # Create the group record
+        cur.execute(
+            "INSERT INTO supervector_groups (identity_id, name) VALUES (?, ?)",
+            (identity_id, name),
+        )
+        group_id = cur.lastrowid
+
+        # Insert the supervector sample
+        cur.execute(
+            """INSERT INTO voice_samples
+                   (identity_id, embedding, context, is_confirmed, is_active,
+                    supervector_group_id)
+               VALUES (?, ?, 'SUPERVECTOR', TRUE, TRUE, ?)
+            """,
+            (identity_id, vector_to_bytes(supervector.tolist()), group_id),
+        )
+
+        # Mark source samples as merged (inactive, linked to group)
+        cur.execute(
+            f"""UPDATE voice_samples
+               SET is_active = FALSE, used_in_group_id = ?
+               WHERE id IN ({fmt})""",  # noqa: S608
+            (group_id, *sample_ids),
+        )
+
+        conn.commit()
+        return group_id
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def revert_supervector_group(conn: mariadb.Connection, group_id: int) -> int:
+    """
+    Delete the supervector for *group_id* and reactivate all original samples
+    that were merged into it.  Deletes the group record afterwards.
+
+    Returns the number of reactivated samples.
+    """
+    cur = conn.cursor()
+    try:
+        # Delete the supervector sample linked to this group
+        cur.execute(
+            "DELETE FROM voice_samples WHERE supervector_group_id = ?",
+            (group_id,),
+        )
+        # Reactivate merged source samples
+        cur.execute(
+            """UPDATE voice_samples
+               SET is_active = TRUE, used_in_group_id = NULL
+               WHERE used_in_group_id = ?""",
+            (group_id,),
+        )
+        reactivated = cur.rowcount
+        # Delete the group record
+        cur.execute("DELETE FROM supervector_groups WHERE id = ?", (group_id,))
+        conn.commit()
+        return reactivated
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+
+
+# ---------------------------------------------------------------------------
 # Voice sample CRUD
 # ---------------------------------------------------------------------------
 
@@ -800,7 +973,7 @@ def find_nearest_identity(
         JOIN identities i ON i.id = vs.identity_id
         WHERE vs.is_active = TRUE
         ORDER BY dist ASC
-        LIMIT 2
+        LIMIT 10
         """,
         (vec_bytes,),
     )

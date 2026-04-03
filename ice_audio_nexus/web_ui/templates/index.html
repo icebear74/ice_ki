@@ -371,6 +371,23 @@
     .cast-badge { padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 600; background: rgba(88,166,255,.15); color: var(--accent); }
     /* Looping segment highlight */
     .player-wrap.looping { outline: 2px solid var(--accent); }
+
+    /* Supervector management panel */
+    .sv-mgmt-panel { background:var(--bg); border:1px solid var(--border); border-radius:var(--radius); padding:10px; margin-bottom:8px; }
+    .sv-mgmt-panel .sv-section-title { font-size:11px; color:var(--text-muted); text-transform:uppercase; letter-spacing:.4px; margin:8px 0 6px; }
+    .sv-group-row { display:flex; align-items:flex-start; gap:8px; padding:6px 8px; background:var(--bg-card); border:1px solid var(--border); border-radius:6px; margin-bottom:4px; font-size:12px; }
+    .sv-group-row .sv-info { flex:1; min-width:0; }
+    .sv-group-row .sv-name { font-weight:600; color:var(--accent2); }
+    .sv-group-row .sv-meta { font-size:10px; color:var(--text-muted); margin-top:2px; }
+    .free-sample-item { display:flex; align-items:flex-start; gap:6px; padding:5px 4px; border-bottom:1px solid var(--border); font-size:11px; cursor:pointer; }
+    .free-sample-item:last-child { border-bottom:none; }
+    .free-sample-item:hover { background:var(--bg-hover); }
+    .free-sample-item input[type=checkbox] { flex-shrink:0; margin-top:2px; }
+    .free-sample-item .fs-body { flex:1; min-width:0; }
+    .free-sample-item .fs-ctx { font-weight:600; color:var(--text); }
+    .free-sample-item .fs-date { color:var(--text-muted); font-size:10px; white-space:nowrap; }
+    .badge-confirmed { color:var(--accent2); font-size:10px; }
+    .badge-lq { color:var(--warn); font-size:10px; }
   </style>
 </head>
 <body>
@@ -766,16 +783,15 @@ function renderIdentities() {
       </div>
       <div class="id-actions">
         <button class="btn btn-ghost" style="font-size:11px;padding:4px 8px;"
-                onclick="viewSamples(${id.id}, '${esc(id.name)}')">Samples</button>
+                title="Supervektoren verwalten – Altersgruppen definieren"
+                onclick="toggleSvPanel(${id.id})">🧬 Supervektoren</button>
         <button class="btn btn-ghost" style="font-size:11px;padding:4px 8px;"
-                onclick="openEditModal(${id.id}, '${esc(id.name)}', '${esc(id.description||'')}')">✏</button>
-        <button class="btn btn-ghost" style="font-size:11px;padding:4px 8px;"
-                title="Supervektor rückgängig – Original-Samples reaktivieren"
-                onclick="revertSupervector(${id.id}, '${esc(id.name)}')">↩</button>
+                onclick="openEditModal(${id.id}, '${esc(id.name)}', '${esc(id.description||'')}')">✏️</button>
         <button class="btn btn-danger" style="font-size:11px;padding:4px 8px;"
-                onclick="deleteIdentity(${id.id}, '${esc(id.name)}')">🗑</button>
+                onclick="deleteIdentity(${id.id}, '${esc(id.name)}')">&#128465;</button>
       </div>
     </div>
+    <div id="sv-panel-${id.id}" style="display:none;"></div>
   `).join("");
 }
 
@@ -1321,23 +1337,152 @@ function esc(str) {
 }
 
 /* -------------------------------------------------------------------- */
-/*  Revert supervector                                                   */
+/*  Named supervector group management panel                             */
 /* -------------------------------------------------------------------- */
-async function revertSupervector(id, name) {
-  if (!confirm(`Supervektor für „${name}" rückgängig machen?
 
-Der Supervektor wird gelöscht und alle Original-Samples werden reaktiviert. Du kannst dann schlechte Samples entfernen und den Supervektor neu berechnen.`)) return;
-  const resp = await fetch(`/api/identities/${id}/revert_supervector`, { method: "POST" });
+async function toggleSvPanel(identityId) {
+  const panelEl = document.getElementById('sv-panel-' + identityId);
+  if (!panelEl) return;
+  if (panelEl.style.display === 'block') { panelEl.style.display = 'none'; return; }
+  document.querySelectorAll('[id^="sv-panel-"]').forEach(el => { el.style.display = 'none'; });
+  panelEl.style.display = 'block';
+  panelEl.innerHTML = '<div style="padding:8px;color:var(--text-muted);font-size:12px;">Lade…</div>';
+  await loadSvPanel(identityId);
+}
+
+async function loadSvPanel(identityId) {
+  const panelEl = document.getElementById('sv-panel-' + identityId);
+  if (!panelEl) return;
+  const [groupsResp, samplesResp] = await Promise.all([
+    fetch(`/api/identities/${identityId}/supervector_groups`),
+    fetch(`/api/identities/${identityId}/free_samples`),
+  ]);
+  const groups  = groupsResp.ok  ? await groupsResp.json()  : [];
+  const samples = samplesResp.ok ? await samplesResp.json() : [];
+
+  // Existing supervector groups
+  const groupsHtml = groups.length
+    ? groups.map(g => `
+        <div class="sv-group-row">
+          <div class="sv-info">
+            <div class="sv-name">${esc(g.name)}</div>
+            <div class="sv-meta">${g.sample_count} Sample(s) · ${(g.created_at||'').slice(0,10)}</div>
+          </div>
+          <button class="btn btn-warn" style="font-size:11px;padding:3px 8px;flex-shrink:0;"
+                  onclick="revertSvGroup(${g.id},'${esc(g.name)}',${identityId})"
+                  title="Supervektor löschen und Samples reaktivieren"
+                  >↩ Rückgängig</button>
+        </div>`).join('')
+    : '<div style="color:var(--text-muted);font-size:11px;padding:4px 0 6px;">Noch keine benannten Supervektoren.</div>';
+
+  // Free samples - context = where the sample comes from (series/episode)
+  const samplesHtml = samples.length
+    ? samples.map(s => {
+        const ctx       = s.context || '';
+        const dateStr   = (s.created_at || '').slice(0, 10);
+        const qualBadge = s.is_low_quality ? ' <span class="badge-lq">⚠ LQ</span>' : '';
+        const confBadge = s.is_confirmed   ? ' <span class="badge-confirmed">✓</span>' : '';
+        return `
+        <div class="free-sample-item" onclick="toggleCheck(event,'fs-${identityId}-${s.id}')">
+          <input type="checkbox" id="fs-${identityId}-${s.id}" value="${s.id}"
+                 onclick="event.stopPropagation()" />
+          <div class="fs-body">
+            <span class="fs-ctx">${esc(ctx) || '—'}</span>${confBadge}${qualBadge}
+          </div>
+          <span class="fs-date">${dateStr}</span>
+        </div>`;
+      }).join('')
+    : '<div style="color:var(--text-muted);font-size:11px;padding:6px 0;">Alle Samples wurden bereits in Supervektoren eingebettet.</div>';
+
+  const allCheckId = 'fs-all-'      + identityId;
+  const newNameId  = 'sv-new-name-' + identityId;
+
+  panelEl.innerHTML = `
+    <div class="sv-mgmt-panel">
+      <div class="sv-section-title">Bestehende Supervektoren</div>
+      ${groupsHtml}
+      <div class="sv-section-title">Freie Samples (${samples.length}) &ndash; Herkunft &amp; Auswahl</div>
+      ${samples.length ? `
+        <div style="margin-bottom:4px;">
+          <label style="font-size:11px;color:var(--text-muted);cursor:pointer;display:flex;align-items:center;gap:4px;">
+            <input type="checkbox" id="${allCheckId}"
+                   onchange="toggleAllFreeSamples('${identityId}',this.checked)" />
+            Alle auswählen
+            <span style="font-size:10px;font-style:italic;margin-left:4px;">(Kontextname = Herkunft des Samples)</span>
+          </label>
+        </div>` : ''}
+      <div style="max-height:200px;overflow-y:auto;border:1px solid var(--border);
+                  border-radius:6px;padding:0 4px;margin-bottom:8px;">
+        ${samplesHtml}
+      </div>
+      ${samples.length ? `
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;">
+          Ausgewählte Samples zu einem neuen benannten Supervektor zusammenführen:
+        </div>
+        <div style="display:flex;gap:6px;align-items:center;">
+          <input id="${newNameId}" type="text"
+                 placeholder='z.B. &quot;TNG Staffel 1–5&quot; oder &quot;Picard Serie&quot;'
+                 style="flex:1;background:var(--bg-card);border:1px solid var(--border);
+                        color:var(--text);padding:5px 8px;border-radius:6px;font-size:12px;" />
+          <button class="btn btn-success" style="font-size:11px;padding:5px 10px;white-space:nowrap;"
+                  onclick="createSvGroup(${identityId})">✓ Erstellen</button>
+        </div>
+        <div style="font-size:10px;color:var(--text-muted);margin-top:4px;">
+          ⚠ Samples mit LQ können einbezogen werden – Herkunft vorher prüfen.
+        </div>` : ''}
+    </div>`;
+}
+
+function toggleCheck(event, checkId) {
+  if (event.target.tagName === 'INPUT') return;
+  const cb = document.getElementById(checkId);
+  if (cb) cb.checked = !cb.checked;
+}
+
+function toggleAllFreeSamples(identityId, checked) {
+  document.querySelectorAll(`input[id^="fs-${identityId}-"]`)
+    .forEach(cb => { cb.checked = checked; });
+}
+
+async function createSvGroup(identityId) {
+  const name = document.getElementById('sv-new-name-' + identityId)?.value.trim();
+  if (!name) { toast('Bitte einen Namen eingeben.', 'warn'); return; }
+  const sample_ids = Array.from(
+    document.querySelectorAll(`input[id^="fs-${identityId}-"]:checked`)
+  ).map(cb => parseInt(cb.value)).filter(n => !isNaN(n));
+  if (!sample_ids.length) { toast('Bitte mindestens ein Sample auswählen.', 'warn'); return; }
+  const resp = await fetch(`/api/identities/${identityId}/supervector_groups`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({name, sample_ids}),
+  });
   if (resp.ok) {
     const data = await resp.json();
-    toast(`Supervektor rückgängig – ${data.reactivated_samples} Sample(s) reaktiviert ✓`);
+    toast('„' + name + '“ aus ' + data.sample_count + ' Sample(s) erstellt ✓');
+    await loadSvPanel(identityId);
     await loadIdentities();
   } else {
     const err = await resp.json().catch(() => ({}));
-    toast("Fehler: " + (err.detail || resp.statusText), "error");
+    toast('Fehler: ' + (err.detail || resp.statusText), 'error');
   }
 }
 
+async function revertSvGroup(groupId, name, identityId) {
+  if (!confirm(
+    'Supervektor „' + name + '“ rükgängig machen?\n\n' +
+    'Der Supervektor wird gelöscht und alle ursprünglich verwendeten Samples werden reaktiviert.'
+  )) return;
+  const resp = await fetch(`/api/supervector_groups/${groupId}`, { method: 'DELETE' });
+  if (resp.ok) {
+    const data = await resp.json();
+    toast('„' + name + '“ rükgängig – ' + data.reactivated_samples + ' Sample(s) reaktiviert ✓');
+    await loadSvPanel(identityId);
+    await loadIdentities();
+  } else {
+    const err = await resp.json().catch(() => ({}));
+    toast('Fehler: ' + (err.detail || resp.statusText), 'error');
+  }
+}
 /* -------------------------------------------------------------------- */
 /*  Casting tab: actors, roles, productions, voice castings             */
 /* -------------------------------------------------------------------- */
@@ -1465,8 +1610,8 @@ function renderCastings() {
         <strong>${esc(c.production_title)}</strong> ·
         <span style="color:var(--accent)">${esc(c.role_name)}</span> ·
         Sprecher: <strong>${esc(c.voice_actor_name)}</strong>
-        ${c.actor_name !== c.voice_actor_name ? `<span style="color:var(--text-muted);font-size:10px;">(orig. ${esc(c.actor_name)})</span>` : ""}
-        <button class="btn btn-ghost" style="font-size:10px;padding:2px 5px;margin-left:auto;"
+        ${c.actor_name !== c.voice_actor_name ? `<span style="color:var(--text-muted);font-size:11px;">(orig. ${esc(c.actor_name)})</span>` : ""}
+        <button class="btn btn-ghost" style="font-size:11px;padding:2px 5px;margin-left:auto;"
                 onclick="deleteCasting(${c.id})">🗑</button>
       </div>
     </div>`).join("");

@@ -75,6 +75,28 @@ CLUSTERING_THRESHOLD         = float(os.getenv("CLUSTERING_THRESHOLD",         "
 DEEPFILTER_ENABLED = os.getenv("DEEPFILTER_ENABLED", "false").lower() in ("1", "true", "yes")
 DEEPFILTER_DEVICE  = os.getenv("DEEPFILTER_DEVICE", DIARIZATION_DEVICE)  # defaults to P4
 
+# ---------------------------------------------------------------------------
+# Configurable temporary file directories
+# ---------------------------------------------------------------------------
+# AUDIO_TMP_DIR – where extracted / DeepFilter-cleaned WAV files are written.
+#                 Defaults to the OS temp directory (tempfile.gettempdir()).
+# VIDEO_TMP_DIR – where web-preview MP4 transcodes are written.
+#                 Defaults to the same directory as the source video file.
+#                 Set to a fast scratch disk (e.g. /mnt/nvme/tmp) to avoid
+#                 writing large MP4 files next to the originals.
+_audio_tmp_env = os.getenv("AUDIO_TMP_DIR", "").strip()
+_video_tmp_env = os.getenv("VIDEO_TMP_DIR", "").strip()
+
+AUDIO_TMP_DIR: str | None = _audio_tmp_env if _audio_tmp_env else None   # None → system tmp
+VIDEO_TMP_DIR: str | None = _video_tmp_env if _video_tmp_env else None   # None → beside source
+
+if AUDIO_TMP_DIR:
+    os.makedirs(AUDIO_TMP_DIR, exist_ok=True)
+    logger.info("Audio temp dir: %s", AUDIO_TMP_DIR)
+if VIDEO_TMP_DIR:
+    os.makedirs(VIDEO_TMP_DIR, exist_ok=True)
+    logger.info("Video temp dir: %s", VIDEO_TMP_DIR)
+
 
 # ---------------------------------------------------------------------------
 # Audio extraction via FFmpeg (CUDA)
@@ -377,8 +399,9 @@ def transcribe_segment(
         return text, no_speech_prob
 
     # Legacy path: file path – use FFmpeg to carve out the segment.
-    # Create a temp file, close it, let FFmpeg write to it, clean up in finally
-    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".wav")
+    # Create a temp file in the configured audio-tmp directory, close it,
+    # let FFmpeg write to it, then clean it up in finally.
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".wav", dir=AUDIO_TMP_DIR)
     os.close(tmp_fd)
     try:
         cmd = [
@@ -455,10 +478,15 @@ def scan_video(
 
     ensure_schema()
 
-    # Derive the web-preview path: same directory, same stem, suffix .web.mp4
-    web_preview_path = os.path.splitext(video_path)[0] + ".web.mp4"
+    # Derive the web-preview path: configured VIDEO_TMP_DIR or same directory
+    # as the source video (original behaviour).
+    video_stem = os.path.splitext(os.path.basename(video_path))[0]
+    if VIDEO_TMP_DIR:
+        web_preview_path = os.path.join(VIDEO_TMP_DIR, video_stem + ".web.mp4")
+    else:
+        web_preview_path = os.path.splitext(video_path)[0] + ".web.mp4"
 
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+    with tempfile.NamedTemporaryFile(suffix=".wav", dir=AUDIO_TMP_DIR, delete=False) as tmp:
         audio_path = tmp.name
 
     # DeepFilterNet output goes to a separate temp file so the original raw WAV

@@ -94,7 +94,7 @@ echo -e "${GREEN}✓ KI-Pakete installiert${RESET}"
 # ---------------------------------------------------------------------------
 # 4. Web-UI & DB packages + image processing + audio enhancement
 # ---------------------------------------------------------------------------
-echo -e "\n${CYAN}�� Schritt 4: Web-UI-Pakete installieren...${RESET}"
+echo -e "\n${CYAN}>> Schritt 4: Web-UI-Pakete installieren...${RESET}"
 pip install \
     "fastapi[standard]" \
     "uvicorn[standard]" \
