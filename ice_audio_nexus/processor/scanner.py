@@ -3,8 +3,9 @@ ice_audio_nexus – processor/scanner.py
 ---------------------------------------
 Analyses a video file using:
   • FFmpeg v8 (CUDA) for audio extraction
-  • pyannote.audio for speaker diarization  (Tesla P4 / cuda:0)
-  • faster-whisper for transcription         (Tesla P100 / cuda:1)
+  • DeepFilterNet 3 for noise suppression   (Tesla P4  / cuda:1)
+  • pyannote.audio for speaker diarization  (Tesla P100 / cuda:0)
+  • faster-whisper for transcription         (Tesla P100 / cuda:0)
 
 For each detected segment it searches MariaDB using VECTOR_DISTANCE against
 ALL stored voice_samples and:
@@ -144,20 +145,24 @@ def apply_deepfilter(input_wav: str, output_wav: str) -> None:
     *input_wav* is expected at **48 kHz** (DeepFilterNet's native rate), which
     is what ``extract_audio`` produces.
 
+    **Device assignment**: ``DEEPFILTER_DEVICE`` (default ``cuda:1``, P4) is
+    set as the active CUDA device via ``torch.cuda.set_device()`` *before*
+    ``init_df()`` is called.  This must be called from the main thread (or at
+    least not concurrently with other CUDA-initialising code), because
+    ``set_device()`` is global: a racing thread could overwrite it and cause
+    the cross-device mismatch that previously blocked this pipeline.  The
+    device is reset to ``cuda:0`` before returning so that the downstream
+    Whisper / pyannote pipeline uses the P100 as intended.
+
     Pipeline:
 
-    1. ``load_audio`` reads the 48 kHz file as a CPU float32 tensor.
-    2. ``init_df()`` loads the model and allocates df_state buffers on
-       whatever CUDA device DF chooses internally.  Attempting to override
-       this via ``torch.cuda.set_device()`` or ``model.to(device)`` causes a
-       cross-device mismatch because df_state STFT buffers remain on the
-       original device.
-    3. ``enhance()`` receives the CPU audio tensor (DF's Rust backend calls
-       ``.numpy()`` on it via ``df_state.analysis``; a CUDA tensor would
-       raise a RuntimeError).  DF manages GPU placement internally and
-       returns a CPU tensor.
-    4. FFmpeg downsamples the enhanced audio to 16 kHz for downstream
-       consumers (Whisper / pyannote).
+    1. ``set_device(cuda:1)`` – pins all subsequent CUDA allocations to P4.
+    2. ``init_df()`` loads model + df_state STFT buffers, both on cuda:1.
+    3. ``load_audio`` returns a CPU float32 tensor (DF's Rust backend calls
+       ``.numpy()`` on it; a CUDA tensor would raise a RuntimeError).
+    4. ``enhance()`` processes on cuda:1 and returns a CPU tensor.
+    5. FFmpeg downsamples the enhanced audio to 16 kHz.
+    6. ``set_device(cuda:0)`` resets the default for Whisper / pyannote.
 
     Falls back silently to a raw 16-kHz copy if the library is missing or
     processing fails, so the rest of the pipeline is never blocked.
@@ -173,16 +178,22 @@ def apply_deepfilter(input_wav: str, output_wav: str) -> None:
         _fallback_to_16k(input_wav, output_wav)
         return
 
+    # Parse the target GPU index from DEEPFILTER_DEVICE (e.g. "cuda:1" → 1).
+    # Called before any other CUDA code so set_device() takes effect reliably.
+    cuda_available = torch.cuda.is_available()
+    df_cuda_idx: int | None = None
+    if cuda_available and DEEPFILTER_DEVICE.startswith("cuda"):
+        try:
+            df_cuda_idx = int(DEEPFILTER_DEVICE.split(":")[-1]) if ":" in DEEPFILTER_DEVICE else 0
+            torch.cuda.set_device(df_cuda_idx)
+        except (ValueError, RuntimeError) as exc:
+            logger.warning("Could not set CUDA device %s for DeepFilter: %s", DEEPFILTER_DEVICE, exc)
+            df_cuda_idx = None
+
     tmp_enhanced: str | None = None
     try:
-        # ── Step 1: run DeepFilterNet on the 48 kHz WAV (no resampling) ───────
-        # DeepFilterNet's init_df() picks its own CUDA device internally;
-        # attempting to override it via torch.cuda.set_device() or
-        # model.to(device) causes a cross-device mismatch because the
-        # df_state STFT buffers are already allocated on init_df()'s chosen
-        # device while the model ends up on a different one.
-        # Solution: let DF own its device completely.  The audio tensor must
-        # stay on CPU (DF calls .numpy() on it internally via df_state.analysis).
+        # init_df() reads torch.cuda.current_device() internally to pick its
+        # device – that is now cuda:1 (P4) thanks to set_device() above.
         model, df_state, _ = init_df()
 
         audio, sr = load_audio(input_wav, sr=df_state.sr())
@@ -195,11 +206,12 @@ def apply_deepfilter(input_wav: str, output_wav: str) -> None:
         os.close(tmp_fd)
         save_audio(tmp_enhanced, enhanced, sr)
 
-        # Release GPU memory before diarization starts.
+        # Release P4 VRAM before diarization starts on the same device.
         del enhanced, audio, model, df_state
-        torch.cuda.empty_cache()
+        if cuda_available:
+            torch.cuda.empty_cache()
 
-        # ── Step 2: downsample to 16 kHz for Whisper / pyannote ──────────────
+        # ── Downsample to 16 kHz for Whisper / pyannote ───────────────────────
         result = subprocess.run(
             [
                 "ffmpeg", "-y", "-i", tmp_enhanced,
@@ -213,8 +225,8 @@ def apply_deepfilter(input_wav: str, output_wav: str) -> None:
             raise RuntimeError(f"FFmpeg downsample to 16 kHz failed:\n{result.stderr}")
 
         logger.info(
-            "DeepFilterNet applied on GPU (48kHz→16kHz): %s → %s",
-            input_wav, output_wav,
+            "DeepFilterNet applied on %s (48kHz→16kHz): %s → %s",
+            DEEPFILTER_DEVICE, input_wav, output_wav,
         )
     except Exception as exc:
         logger.warning("DeepFilterNet processing failed (non-fatal): %s", exc)
@@ -224,6 +236,12 @@ def apply_deepfilter(input_wav: str, output_wav: str) -> None:
             try:
                 os.unlink(tmp_enhanced)
             except OSError:
+                pass
+        # Reset to P100 (cuda:0) so Whisper / pyannote allocate on the right GPU.
+        if cuda_available and df_cuda_idx is not None and df_cuda_idx != 0:
+            try:
+                torch.cuda.set_device(0)
+            except RuntimeError:
                 pass
 
 
@@ -578,62 +596,34 @@ def scan_video(
             except Exception as exc:
                 logger.warning("Web preview transcode failed (non-fatal): %s", exc)
 
-        # ── Step 2: Parallel pre-processing (P4 + P100 simultaneously) ────────
+        # ── Step 2: Pre-processing – DeepFilter (P4), then Whisper pre-load (P100) ─
         #
-        #   Thread A  – P4  (cuda:1): DeepFilterNet noise suppression
-        #   Thread B  – P100 (cuda:0): Whisper model pre-load
-        #
-        # Because DeepFilter runs on the P4 and Whisper loads on the P100 they
-        # use *different* GPUs: no VRAM conflict.  DeepFilterNet explicitly
-        # releases all GPU tensors (del + empty_cache) before returning, so the
-        # P4 is fully free for diarization which runs next on the same device.
+        # Run sequentially so torch.cuda.set_device() in apply_deepfilter()
+        # takes effect without any racing thread overwriting the current device.
+        # DF uses cuda:1 (P4); after it returns the default is reset to cuda:0
+        # (P100) so Whisper and pyannote allocate on the right card.
 
-        deepfilter_exc:   list[Exception] = []
-        whisper_preload_exc: list[Exception] = []
-
-        def _deepfilter_worker() -> None:
-            if DEEPFILTER_ENABLED:
-                logger.info("DeepFilterNet: starting noise suppression on %s", DEEPFILTER_DEVICE)
-                try:
-                    apply_deepfilter(audio_path, clean_audio_path)
-                except Exception as exc:
-                    logger.error("DeepFilterNet failed: %s", exc)
-                    deepfilter_exc.append(exc)
-            else:
-                logger.warning(
-                    "DeepFilterNet disabled (DEEPFILTER_ENABLED=false) – "
-                    "downsampling raw audio to 16 kHz for pipeline"
-                )
-                # audio_path is at native sample rate; Whisper and pyannote
-                # need 16 kHz, so downsample here the same way apply_deepfilter
-                # would in its final step.
+        if DEEPFILTER_ENABLED:
+            logger.info("DeepFilterNet: noise suppression on %s", DEEPFILTER_DEVICE)
+            try:
+                apply_deepfilter(audio_path, clean_audio_path)
+            except Exception as exc:
+                logger.error("DeepFilterNet failed (non-fatal): %s", exc)
                 _fallback_to_16k(audio_path, clean_audio_path)
+        else:
+            logger.warning(
+                "DeepFilterNet disabled (DEEPFILTER_ENABLED=false) – "
+                "downsampling raw audio to 16 kHz for pipeline"
+            )
+            _fallback_to_16k(audio_path, clean_audio_path)
 
-        def _whisper_preload_worker() -> None:
-            if transcribe:
-                try:
-                    _get_whisper_model(model_size)
-                    logger.info("Whisper model pre-loaded on %s", TRANSCRIPTION_DEVICE)
-                except Exception as exc:
-                    logger.warning("Whisper pre-load failed (will retry per segment): %s", exc)
-                    whisper_preload_exc.append(exc)
-
-        t_deepfilter = threading.Thread(
-            target=_deepfilter_worker, daemon=True, name="deepfilter-P4"
-        )
-        t_whisper = threading.Thread(
-            target=_whisper_preload_worker, daemon=True, name="whisper-preload-P100"
-        )
-        logger.info(
-            "Starting parallel pre-processing: DeepFilter=%s (%s) + Whisper pre-load (P100)",
-            "ON" if DEEPFILTER_ENABLED else "OFF",
-            DEEPFILTER_DEVICE,
-        )
-        t_deepfilter.start()
-        t_whisper.start()
-        t_deepfilter.join()
-        t_whisper.join()
-        logger.info("Parallel pre-processing complete.")
+        if transcribe:
+            logger.info("Pre-loading Whisper model on %s", TRANSCRIPTION_DEVICE)
+            try:
+                _get_whisper_model(model_size)
+                logger.info("Whisper model pre-loaded on %s", TRANSCRIPTION_DEVICE)
+            except Exception as exc:
+                logger.warning("Whisper pre-load failed (will retry per segment): %s", exc)
 
         # ── Step 3: Load cleaned audio into memory ─────────────────────────────
         audio_for_pipeline = clean_audio_path  # always exists (copy if DeepFilter off)
