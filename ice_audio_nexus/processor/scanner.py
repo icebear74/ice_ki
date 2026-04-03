@@ -72,7 +72,7 @@ DIARIZATION_MIN_DURATION_OFF = float(os.getenv("DIARIZATION_MIN_DURATION_OFF", "
 CLUSTERING_THRESHOLD         = float(os.getenv("CLUSTERING_THRESHOLD",         "0.7"))
 
 # DeepFilterNet noise suppression
-DEEPFILTER_ENABLED = os.getenv("DEEPFILTER_ENABLED", "false").lower() in ("1", "true", "yes")
+DEEPFILTER_ENABLED = os.getenv("DEEPFILTER_ENABLED", "true").lower() in ("1", "true", "yes")
 DEEPFILTER_DEVICE  = os.getenv("DEEPFILTER_DEVICE", DIARIZATION_DEVICE)  # defaults to P4
 
 # ---------------------------------------------------------------------------
@@ -526,6 +526,10 @@ def scan_video(
                     logger.error("DeepFilterNet failed: %s", exc)
                     deepfilter_exc.append(exc)
             else:
+                logger.warning(
+                    "DeepFilterNet disabled (DEEPFILTER_ENABLED=false) – "
+                    "using raw audio without noise suppression"
+                )
                 # Point clean_audio_path at the raw WAV so the rest of the
                 # pipeline is uniform regardless of DeepFilter being enabled.
                 import shutil
@@ -547,7 +551,9 @@ def scan_video(
             target=_whisper_preload_worker, daemon=True, name="whisper-preload-P100"
         )
         logger.info(
-            "Starting parallel pre-processing: DeepFilter (P4) + Whisper pre-load (P100)"
+            "Starting parallel pre-processing: DeepFilter=%s (%s) + Whisper pre-load (P100)",
+            "ON" if DEEPFILTER_ENABLED else "OFF",
+            DEEPFILTER_DEVICE,
         )
         t_deepfilter.start()
         t_whisper.start()
