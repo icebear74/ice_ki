@@ -164,11 +164,20 @@ def apply_deepfilter(input_wav: str, output_wav: str) -> None:
         model = model.to(device)
 
         audio, sr = load_audio(input_wav, sr=df_state.sr())
-        # Pascal GPUs (P4/P100) require contiguous tensors for cuDNN ops.
-        # After resampling the tensor may be non-contiguous, causing
-        # CUDNN_STATUS_NOT_SUPPORTED.  Make it contiguous before enhance().
         audio = audio.contiguous()
-        enhanced = enhance(model, df_state, audio)
+        try:
+            enhanced = enhance(model, df_state, audio)
+        except RuntimeError as cuda_exc:
+            # Pascal-era GPUs (P4/P100, compute capability 6.x) raise
+            # CUDNN_STATUS_NOT_SUPPORTED because torchaudio's sinc resampler
+            # and internal chunk-split ops produce non-contiguous tensors that
+            # cuDNN rejects.  Retry on CPU which has no such restriction.
+            logger.warning(
+                "DeepFilterNet GPU enhance failed (%s) – retrying on CPU",
+                cuda_exc,
+            )
+            model = model.to("cpu")
+            enhanced = enhance(model, df_state, audio.cpu())
         save_audio(output_wav, enhanced, sr)
         logger.info("DeepFilterNet applied: %s → %s", input_wav, output_wav)
     except Exception as exc:
