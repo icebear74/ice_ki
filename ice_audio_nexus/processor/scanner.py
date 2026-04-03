@@ -63,8 +63,11 @@ SUGGEST_THRESHOLD = float(os.getenv("SUGGEST_THRESHOLD", "0.45"))
 MIN_MARGIN        = float(os.getenv("MIN_MARGIN",         "0.07"))
 
 # GPU assignments
-DIARIZATION_DEVICE   = os.getenv("DIARIZATION_DEVICE",   "cuda:0")
-TRANSCRIPTION_DEVICE = os.getenv("TRANSCRIPTION_DEVICE", "cuda:1")
+# Hardware layout (overridable via environment / .env):
+#   cuda:0 = P100 (16 GB) – large Whisper model fits here
+#   cuda:1 = P4  ( 8 GB)  – diarization + DeepFilterNet (run sequentially)
+DIARIZATION_DEVICE   = os.getenv("DIARIZATION_DEVICE",   "cuda:1")
+TRANSCRIPTION_DEVICE = os.getenv("TRANSCRIPTION_DEVICE", "cuda:0")
 
 # Diarization tuning parameters (configurable via .env)
 DIARIZATION_MIN_DURATION_ON  = float(os.getenv("DIARIZATION_MIN_DURATION_ON",  "0.3"))
@@ -195,6 +198,11 @@ def apply_deepfilter(input_wav: str, output_wav: str) -> None:
         tmp_fd, tmp_enhanced = tempfile.mkstemp(suffix=".enhanced.wav", dir=AUDIO_TMP_DIR)
         os.close(tmp_fd)
         save_audio(tmp_enhanced, enhanced, sr)
+
+        # Release GPU tensors immediately so the diarization pipeline (which
+        # runs on the same device right after) finds the VRAM free.
+        del enhanced, audio, model, df_state
+        torch.cuda.empty_cache()
 
         # ── Step 2: downsample to 16 kHz for Whisper / pyannote ──────────────
         result = subprocess.run(
@@ -577,12 +585,13 @@ def scan_video(
 
         # ── Step 2: Parallel pre-processing (P4 + P100 simultaneously) ────────
         #
-        #   Thread A  – P4  (cuda:0): DeepFilterNet noise suppression
-        #   Thread B  – P100 (cuda:1): Whisper model pre-load
+        #   Thread A  – P4  (cuda:1): DeepFilterNet noise suppression
+        #   Thread B  – P100 (cuda:0): Whisper model pre-load
         #
-        # DeepFilter on a full episode can take 2-5 min on a Pascal P4.
-        # Whisper large-v3-turbo model loading takes ~30-60 s.
-        # Running them in parallel saves that waiting time on every scan.
+        # Because DeepFilter runs on the P4 and Whisper loads on the P100 they
+        # use *different* GPUs: no VRAM conflict.  DeepFilterNet explicitly
+        # releases all GPU tensors (del + empty_cache) before returning, so the
+        # P4 is fully free for diarization which runs next on the same device.
 
         deepfilter_exc:   list[Exception] = []
         whisper_preload_exc: list[Exception] = []
