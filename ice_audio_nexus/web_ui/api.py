@@ -61,13 +61,32 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
+def _probe_nvenc() -> bool:
+    """Return True if the installed FFmpeg was compiled with the h264_nvenc encoder."""
+    try:
+        r = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return "h264_nvenc" in r.stdout
+    except Exception:
+        return False
+
+
+# Probed once during app startup (lifespan) and cached here.
+_NVENC_AVAILABLE: bool = False
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _NVENC_AVAILABLE
     try:
         ensure_schema()
         logger.info("DB schema verified.")
     except Exception as exc:
         logger.error("DB init failed: %s", exc)
+    _NVENC_AVAILABLE = _probe_nvenc()
+    logger.info("NVENC available: %s", _NVENC_AVAILABLE)
     yield
 
 
@@ -448,10 +467,15 @@ async def stream_video(path: str, t: float = 0.0) -> StreamingResponse:
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
     if t > 0:
         cmd += ["-ss", f"{t:.3f}"]
+    # Use GPU-accelerated NVENC when available; fall back to CPU libx264.
+    if _NVENC_AVAILABLE:
+        _video_enc = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "23"]
+    else:
+        _video_enc = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "23"]
     cmd += [
         "-i", str(candidate),
         # Video: H.264 baseline, fast encode, good browser compatibility
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+        *_video_enc,
         "-profile:v", "baseline", "-level", "3.1",
         # Audio: AAC stereo
         "-c:a", "aac", "-b:a", "128k", "-ac", "2",
