@@ -204,9 +204,10 @@ def apply_deepfilter(input_wav: str, output_wav: str) -> None:
             torch.backends.cudnn.enabled = _prev_cudnn
 
         # Save enhanced audio at 48 kHz to a temp file.
+        # save_audio calls .numpy() internally, which fails on non-CPU tensors.
         tmp_fd, tmp_enhanced = tempfile.mkstemp(suffix=".enhanced.wav", dir=AUDIO_TMP_DIR)
         os.close(tmp_fd)
-        save_audio(tmp_enhanced, enhanced, sr)
+        save_audio(tmp_enhanced, enhanced.cpu(), sr)
 
         # Release GPU tensors immediately so the diarization pipeline (which
         # runs on the same device right after) finds the VRAM free.
