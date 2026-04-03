@@ -123,6 +123,18 @@
       display: block;
     }
 
+    /* Audio-track toggle button (bottom-right of player) */
+    .audio-track-btn {
+      position: absolute;
+      bottom: 48px;           /* above native controls */
+      right: 10px;
+      font-size: 12px;
+      padding: 4px 10px;
+      opacity: .85;
+      z-index: 10;
+    }
+    .audio-track-btn.active { background: var(--accent2); color: #0d1117; border-color: transparent; }
+
     /* Speaker overlay badge (top-left of video) */
     #speaker-overlay {
       position: absolute;
@@ -444,6 +456,11 @@
         <div class="speaker-name" id="ov-name">—</div>
         <div class="match-info"  id="ov-match"></div>
       </div>
+      <!-- Audio-track toggle: only visible in Chromium/Edge with dual-track .web.mp4 -->
+      <button id="btn-audio-track" class="btn btn-ghost audio-track-btn" style="display:none"
+              onclick="toggleAudioTrack()" title="Zwischen Originalton und Cleanaudio wechseln">
+        🔊 Originalton
+      </button>
     </div>
 
     <!-- Timeline -->
@@ -611,6 +628,7 @@ let currentVideoPath = "";  // absolute path currently loaded into the player
 let _streamOffset  = 0;    // seconds: where the current FFmpeg stream starts in the video
 let _totalDuration = 0;    // seconds: full video duration from /api/probe
 let _hasWebPreview = false; // true when a .web.mp4 preview is available
+let _activeAudioTrack = 0; // 0 = original (track 0), 1 = clean (track 1)
 
 const player      = document.getElementById("player");
 const overlay     = document.getElementById("speaker-overlay");
@@ -637,6 +655,43 @@ function _loadStreamAt(t) {
     player.play().catch(() => {});
   }
 }
+
+// Audio-track toggle (dual-track .web.mp4, Chromium/Edge only).
+// Track 0 = original audio, Track 1 = clean/noise-suppressed audio.
+function _updateAudioTrackBtn() {
+  const btn = document.getElementById("btn-audio-track");
+  if (!btn) return;
+  const tracks = player.audioTracks;
+  // Show the button only when the preview is loaded and the browser supports
+  // audioTracks with at least two entries.
+  if (!_hasWebPreview || !tracks || tracks.length < 2) {
+    btn.style.display = "none";
+    return;
+  }
+  btn.style.display = "block";
+  if (_activeAudioTrack === 0) {
+    btn.textContent = "🔊 Originalton";
+    btn.classList.remove("active");
+  } else {
+    btn.textContent = "🎧 Clean Audio";
+    btn.classList.add("active");
+  }
+}
+
+function toggleAudioTrack() {
+  const tracks = player.audioTracks;
+  if (!tracks || tracks.length < 2) return;
+  _activeAudioTrack = _activeAudioTrack === 0 ? 1 : 0;
+  for (let i = 0; i < tracks.length; i++) {
+    tracks[i].enabled = (i === _activeAudioTrack);
+  }
+  _updateAudioTrackBtn();
+}
+
+// Re-evaluate the button whenever metadata is loaded (audioTracks are populated).
+player.addEventListener("loadedmetadata", () => {
+  _updateAudioTrackBtn();
+});
 
 // Show video errors as toasts.
 player.addEventListener("error", () => {
@@ -1064,6 +1119,7 @@ async function loadEpisode() {
     currentVideoPath = videoPath;
     _streamOffset    = 0;
     _hasWebPreview   = false;
+    _activeAudioTrack = 0;
 
     // Check whether the scanner has already produced a .web.mp4 preview.
     // If yes, serve the pre-transcoded file (supports native seeking + audio).
@@ -1078,11 +1134,13 @@ async function loadEpisode() {
           player.src = `/stream?path=${encodeURIComponent(videoPath)}`;
         }
         player.load();
+        _updateAudioTrackBtn();
       })
       .catch(() => {
         // On network error fall back to stream
         player.src = `/stream?path=${encodeURIComponent(videoPath)}`;
         player.load();
+        _updateAudioTrackBtn();
       });
 
     // Probe total duration (player.duration is Infinity for live FFmpeg streams)

@@ -307,7 +307,11 @@ def _probe_duration(path: str) -> float:
         return 0.0
 
 
-def transcode_web_preview(video_path: str, output_mp4: str) -> None:
+def transcode_web_preview(
+    video_path: str,
+    output_mp4: str,
+    clean_audio_path: str | None = None,
+) -> None:
     """
     Transcode *video_path* to a browser-ready H.264/AAC MP4 file stored at
     *output_mp4*.  The file is written with -movflags +faststart so the moov
@@ -317,6 +321,13 @@ def transcode_web_preview(video_path: str, output_mp4: str) -> None:
     Output is capped at 480p (width scaled to keep aspect ratio) so the file
     stays small.  Audio is kept as stereo AAC 128k so voice sync works
     correctly in the Web UI.
+
+    When *clean_audio_path* is provided the output contains **two** audio
+    tracks: track 0 = original audio (from *video_path*), track 1 = clean /
+    noise-suppressed audio (from *clean_audio_path*).  Chromium-based browsers
+    (Edge, Chrome) expose ``HTMLMediaElement.audioTracks`` and can switch
+    between them at runtime.  Firefox ignores ``audioTracks`` and always plays
+    track 0 (the original), which is the safe default.
     """
     # Each tuple: (extra_input_flags, codec_args)
     # -hwaccel cuda accelerates decoding on GPU but can silently truncate output
@@ -332,19 +343,37 @@ def transcode_web_preview(video_path: str, output_mp4: str) -> None:
     last_stderr = ""
 
     for hw_flags, codec_args in _codec_variants:
-        cmd = [
-            "ffmpeg", "-y",
-            *hw_flags,
-            "-i", video_path,
-            "-map", "0:v:0",               # first video stream only
-            "-map", "0:a:0",               # first audio stream only
-            *codec_args,
-            "-profile:v", "baseline", "-level", "3.1",
-            "-vf", "scale=-2:480",                 # scale to 480p, keep aspect ratio
-            "-c:a", "aac", "-b:a", "128k", "-ac", "2",
-            "-movflags", "+faststart",             # moov atom at front → seekable
-            output_mp4,
-        ]
+        if clean_audio_path:
+            # Two-track output: track 0 = original, track 1 = clean audio
+            cmd = [
+                "ffmpeg", "-y",
+                *hw_flags,
+                "-i", video_path,
+                "-i", clean_audio_path,
+                "-map", "0:v:0",               # video from source 0
+                "-map", "0:a:0",               # original audio → track 0
+                "-map", "1:a:0",               # clean audio    → track 1
+                *codec_args,
+                "-profile:v", "baseline", "-level", "3.1",
+                "-vf", "scale=-2:480",
+                "-c:a", "aac", "-b:a", "128k", "-ac", "2",
+                "-movflags", "+faststart",
+                output_mp4,
+            ]
+        else:
+            cmd = [
+                "ffmpeg", "-y",
+                *hw_flags,
+                "-i", video_path,
+                "-map", "0:v:0",               # first video stream only
+                "-map", "0:a:0",               # first audio stream only
+                *codec_args,
+                "-profile:v", "baseline", "-level", "3.1",
+                "-vf", "scale=-2:480",                 # scale to 480p, keep aspect ratio
+                "-c:a", "aac", "-b:a", "128k", "-ac", "2",
+                "-movflags", "+faststart",             # moov atom at front → seekable
+                output_mp4,
+            ]
         logger.info(
             "Transcoding web preview (%s): %s → %s", codec_args[1], video_path, output_mp4
         )
@@ -662,19 +691,14 @@ def scan_video(
         # ── Step 1: Extract audio ──────────────────────────────────────────────
         extract_audio(video_path, audio_path)
 
-        # Generate the browser-ready preview in the background so it is ready
-        # by the time the analysis is finished.  Non-fatal if it fails.
-        if not os.path.exists(web_preview_path):
-            try:
-                transcode_web_preview(video_path, web_preview_path)
-            except Exception as exc:
-                logger.warning("Web preview transcode failed (non-fatal): %s", exc)
-
         # ── Step 2: Pre-processing – DeepFilter (cuda:0, brief), then Whisper preload ─
         #
         # DeepFilterNet hardcodes "cuda" → cuda:0 and ignores set_device().
         # Run it sequentially and free it completely before loading Whisper so
         # the two models never share P100 VRAM simultaneously.
+        #
+        # NOTE: transcode_web_preview is called AFTER DeepFilter so that
+        # clean_audio_path already exists and can be embedded as track 1.
 
         if DEEPFILTER_ENABLED:
             logger.info("DeepFilterNet: noise suppression on %s", DEEPFILTER_DEVICE)
@@ -689,6 +713,15 @@ def scan_video(
                 "downsampling raw audio to 16 kHz for pipeline"
             )
             _fallback_to_16k(audio_path, clean_audio_path)
+
+        # Generate the browser-ready preview now that clean_audio_path exists.
+        # Track 0 = original audio, track 1 = clean/noise-suppressed audio.
+        # Non-fatal if it fails.
+        if not os.path.exists(web_preview_path):
+            try:
+                transcode_web_preview(video_path, web_preview_path, clean_audio_path)
+            except Exception as exc:
+                logger.warning("Web preview transcode failed (non-fatal): %s", exc)
 
         if transcribe:
             logger.info("Pre-loading Whisper model on %s", TRANSCRIPTION_DEVICE)
