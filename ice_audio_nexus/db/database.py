@@ -25,6 +25,18 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
+
+def _sanitize_float(v: float | None) -> float | None:
+    """Convert NaN or Inf to None so MariaDB does not raise NotSupportedError."""
+    if v is None:
+        return None
+    try:
+        if math.isnan(v) or math.isinf(v):
+            return None
+    except TypeError:
+        return None
+    return v
+
 # ---------------------------------------------------------------------------
 # DDL
 # ---------------------------------------------------------------------------
@@ -1098,6 +1110,8 @@ def upsert_segment(conn: mariadb.Connection, **kwargs) -> int:
         "is_low_quality",
     )
     data = {k: v for k, v in kwargs.items() if k in _ALLOWED_COLS}
+    if "match_distance" in data:
+        data["match_distance"] = _sanitize_float(data["match_distance"])
     # Build column list from the verified allowlist (not from caller input)
     cols         = ", ".join(data.keys())
     placeholders = ", ".join("?" for _ in data)
@@ -1146,6 +1160,7 @@ def update_segment_match(
     is_low_quality: bool = False,
 ) -> None:
     """Update only the auto-detected fields; preserve manual identity assignments."""
+    match_distance = _sanitize_float(match_distance)
     cur = conn.cursor()
     if embedding is not None and transcript is not None:
         cur.execute(
@@ -1176,6 +1191,7 @@ def update_segment_identity(
     match_distance: float | None = None,
     is_suggestion: bool = False,
 ) -> None:
+    match_distance = _sanitize_float(match_distance)
     cur = conn.cursor()
     cur.execute(
         """UPDATE episode_segments
