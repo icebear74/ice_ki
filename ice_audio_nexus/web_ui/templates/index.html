@@ -634,6 +634,10 @@ function switchTab(name, btn) {
   document.querySelectorAll(".sidebar-tabs button").forEach(b => b.classList.remove("active"));
   document.getElementById("tab-" + name).classList.add("active");
   btn.classList.add("active");
+  if (name === "casting" && !castings._loaded) {
+    castings._loaded = true;
+    loadCastingData();
+  }
 }
 
 /* -------------------------------------------------------------------- */
@@ -1730,16 +1734,6 @@ async function deleteCasting(id) {
   const resp = await fetch(`/api/voice_castings/${id}`, { method:"DELETE" });
   if (resp.ok) { toast("Besetzung gelöscht."); await loadCastingData(); }
   else { toast("Fehler.", "error"); }
-}
-
-/* Patch switchTab to load casting data on first visit */
-const _origSwitchTab = switchTab;
-function switchTab(name, btn) {
-  _origSwitchTab(name, btn);
-  if (name === "casting" && !castings._loaded) {
-    castings._loaded = true;
-    loadCastingData();
-  }
 }
 
 /* -------------------------------------------------------------------- */
