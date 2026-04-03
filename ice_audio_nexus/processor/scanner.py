@@ -187,7 +187,11 @@ def apply_deepfilter(input_wav: str, output_wav: str) -> None:
         # DF picks cuda:0 on its own; no set_device needed.
         model, df_state, _ = init_df()
 
-        audio, sr = load_audio(input_wav, sr=df_state.sr())
+        # df_state.sr() always returns a plain int; use it directly to avoid
+        # torchaudio version skew where load_audio() may return AudioMetaData
+        # as the second element instead of an int (torchaudio ≥0.13 API change).
+        sr: int = int(df_state.sr())
+        audio, _ = load_audio(input_wav, sr=sr)
         # audio must remain on CPU – DF's Rust-backed df_state.analysis()
         # calls .numpy() on it and will raise if it is on a CUDA device.
         #
