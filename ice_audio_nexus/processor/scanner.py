@@ -62,11 +62,10 @@ SUGGEST_THRESHOLD = float(os.getenv("SUGGEST_THRESHOLD", "0.45"))
 # get downgraded to "suggest".
 MIN_MARGIN        = float(os.getenv("MIN_MARGIN",         "0.07"))
 
-# GPU assignments
-# Hardware layout (overridable via environment / .env):
-#   cuda:0 = P100 (16 GB) – large Whisper model fits here
-#   cuda:1 = P4  ( 8 GB)  – diarization + DeepFilterNet (run sequentially)
-DIARIZATION_DEVICE   = os.getenv("DIARIZATION_DEVICE",   "cuda:1")
+# GPU assignments (override in .env – see .env.example for all options)
+# Default layout: P100 (cuda:0, 16 GB) handles the heavy work (diarization +
+# transcription); P4 (cuda:1, 8 GB) runs DeepFilterNet only.
+DIARIZATION_DEVICE   = os.getenv("DIARIZATION_DEVICE",   "cuda:0")
 TRANSCRIPTION_DEVICE = os.getenv("TRANSCRIPTION_DEVICE", "cuda:0")
 
 # Diarization tuning parameters (configurable via .env)
@@ -76,7 +75,7 @@ CLUSTERING_THRESHOLD         = float(os.getenv("CLUSTERING_THRESHOLD",         "
 
 # DeepFilterNet noise suppression
 DEEPFILTER_ENABLED = os.getenv("DEEPFILTER_ENABLED", "true").lower() in ("1", "true", "yes")
-DEEPFILTER_DEVICE  = os.getenv("DEEPFILTER_DEVICE", DIARIZATION_DEVICE)  # defaults to P4
+DEEPFILTER_DEVICE  = os.getenv("DEEPFILTER_DEVICE", "cuda:1")  # P4 – freed up for noise suppression
 
 # ---------------------------------------------------------------------------
 # Configurable temporary file directories
