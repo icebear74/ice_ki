@@ -174,11 +174,21 @@ def apply_deepfilter(input_wav: str, output_wav: str) -> None:
         # ── Step 1: run DeepFilterNet on the 48 kHz WAV (no resampling) ───────
         device = torch.device(DEEPFILTER_DEVICE if torch.cuda.is_available() else "cpu")
 
+        # init_df() calls model.to("cuda") internally and resolves "cuda" to
+        # whichever device is currently set as default – which is cuda:0 unless
+        # we tell PyTorch otherwise.  If we later do model.to(cuda:1) only the
+        # model moves; the DF state object keeps its internal STFT buffers on
+        # cuda:0, causing a cross-device error inside enhance().
+        # Fix: set the default device *before* init_df() so the entire state
+        # (model + df_state buffers) is initialised on the correct GPU.
+        if device.type == "cuda":
+            torch.cuda.set_device(device)
+
         model, df_state, _ = init_df()
         model = model.to(device)
 
         audio, sr = load_audio(input_wav, sr=df_state.sr())
-        audio = audio.contiguous()
+        audio = audio.to(device).contiguous()
 
         # Pascal GPUs (sm_60, e.g. P4/P100) reject non-contiguous CUDA tensors
         # inside cuDNN kernels that DeepFilterNet's forward pass produces
