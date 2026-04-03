@@ -132,11 +132,22 @@ def extract_audio(video_path: str, output_wav: str) -> None:
 def apply_deepfilter(input_wav: str, output_wav: str) -> None:
     """
     Run DeepFilterNet 3 noise suppression on *input_wav* and write the
-    cleaned audio to *output_wav*.
+    cleaned audio to *output_wav* at the same sample rate as *input_wav*.
 
-    DeepFilterNet works on arbitrary sample rates internally but we keep
-    I/O at 16 kHz (pyannote.audio and Whisper standard).  It runs well on
-    Pascal GPUs (Tesla P100/P4) with CUDA 11.8 via PyTorch 2.4.1+cu118.
+    Strategy to avoid cuDNN non-contiguous tensor errors on Pascal GPUs
+    (P4/P100, compute capability 6.x):
+
+    1. Resample *input_wav* to 48 kHz (DeepFilterNet's native sample rate)
+       using FFmpeg **before** passing it to DeepFilterNet.  This means
+       ``load_audio`` inside DeepFilterNet loads the file at native rate
+       and performs NO torchaudio resampling.  torchaudio's sinc_interpolation
+       resampler produces non-contiguous CUDA tensors, which cuDNN on Pascal
+       GPUs rejects with CUDNN_STATUS_NOT_SUPPORTED.
+    2. Run ``enhance()`` on the 48-kHz audio fully on GPU.
+    3. Save the enhanced 48-kHz audio to a temporary WAV, then use FFmpeg to
+       downsample back to the original sample rate (typically 16 kHz) so the
+       rest of the pipeline (Whisper, pyannote) receives audio at the expected
+       rate.
 
     Falls back silently to the unchanged file if the library is missing or
     if processing fails, so the rest of the pipeline is never blocked.
@@ -144,7 +155,6 @@ def apply_deepfilter(input_wav: str, output_wav: str) -> None:
     try:
         import torch
         from df.enhance import enhance, init_df, load_audio, save_audio
-        from df import config as df_config
     except ImportError:
         logger.warning(
             "deepfilternet not installed – skipping noise suppression. "
@@ -154,36 +164,82 @@ def apply_deepfilter(input_wav: str, output_wav: str) -> None:
         shutil.copy2(input_wav, output_wav)
         return
 
+    tmp_48k: str | None = None
+    tmp_enhanced: str | None = None
     try:
-        # Use the GPU that handles diarization so we stay on the P4
+        # Detect the original sample rate so we can restore it afterwards.
+        probe = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "a:0",
+                "-show_entries", "stream=sample_rate",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                input_wav,
+            ],
+            capture_output=True, text=True,
+        )
+        orig_sr = int(probe.stdout.strip()) if probe.returncode == 0 and probe.stdout.strip().isdigit() else 16000
+
+        # ── Step 1: upsample to 48 kHz so DeepFilterNet needs no resampling ──
+        tmp_fd, tmp_48k = tempfile.mkstemp(suffix=".48k.wav", dir=AUDIO_TMP_DIR)
+        os.close(tmp_fd)
+        result = subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", input_wav,
+                "-ar", "48000", "-ac", "1",
+                "-acodec", "pcm_s16le",
+                tmp_48k,
+            ],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"FFmpeg upsample to 48 kHz failed:\n{result.stderr}")
+
+        # ── Step 2: run DeepFilterNet on the native-rate WAV (no resampling) ──
         device_str = DEEPFILTER_DEVICE
         device = torch.device(device_str if torch.cuda.is_available() else "cpu")
 
-        # init_df returns (model, df_state, suffix)
         model, df_state, _ = init_df()
         model = model.to(device)
 
-        audio, sr = load_audio(input_wav, sr=df_state.sr())
-        audio = audio.contiguous()
-        try:
-            enhanced = enhance(model, df_state, audio)
-        except RuntimeError as cuda_exc:
-            # Pascal-era GPUs (P4/P100, compute capability 6.x) raise
-            # CUDNN_STATUS_NOT_SUPPORTED because torchaudio's sinc resampler
-            # and internal chunk-split ops produce non-contiguous tensors that
-            # cuDNN rejects.  Retry on CPU which has no such restriction.
-            logger.warning(
-                "DeepFilterNet GPU enhance failed (%s) – retrying on CPU",
-                cuda_exc,
-            )
-            model = model.to("cpu")
-            enhanced = enhance(model, df_state, audio.cpu())
-        save_audio(output_wav, enhanced, sr)
-        logger.info("DeepFilterNet applied: %s → %s", input_wav, output_wav)
+        # load_audio with sr=df_state.sr() reads the 48 kHz file without any
+        # internal resampling, so the resulting tensor is always contiguous.
+        audio, sr = load_audio(tmp_48k, sr=df_state.sr())
+        enhanced = enhance(model, df_state, audio)
+
+        # Save enhanced audio at 48 kHz to a second temp file.
+        tmp_fd2, tmp_enhanced = tempfile.mkstemp(suffix=".enhanced.wav", dir=AUDIO_TMP_DIR)
+        os.close(tmp_fd2)
+        save_audio(tmp_enhanced, enhanced, sr)
+
+        # ── Step 3: downsample back to the original sample rate ───────────────
+        result2 = subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", tmp_enhanced,
+                "-ar", str(orig_sr), "-ac", "1",
+                "-acodec", "pcm_s16le",
+                output_wav,
+            ],
+            capture_output=True, text=True,
+        )
+        if result2.returncode != 0:
+            raise RuntimeError(f"FFmpeg downsample to {orig_sr} Hz failed:\n{result2.stderr}")
+
+        logger.info(
+            "DeepFilterNet applied on GPU (48 kHz path): %s → %s",
+            input_wav, output_wav,
+        )
     except Exception as exc:
         logger.warning("DeepFilterNet processing failed (non-fatal): %s", exc)
         import shutil
         shutil.copy2(input_wav, output_wav)
+    finally:
+        for tmp in (tmp_48k, tmp_enhanced):
+            if tmp and os.path.exists(tmp):
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
 
 
 def transcode_web_preview(video_path: str, output_mp4: str) -> None:
