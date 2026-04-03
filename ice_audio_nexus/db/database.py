@@ -93,23 +93,27 @@ _DDL = [
     #    NOTE: must be created BEFORE supervector_groups (which has a FK to this table)
     """
     CREATE TABLE IF NOT EXISTS identities (
-        id              INT AUTO_INCREMENT PRIMARY KEY,
-        name            VARCHAR(255) NOT NULL,
-        description     TEXT,
-        actor_id        INT DEFAULT NULL
-                        COMMENT 'Legacy link to actors.id (physical actor)',
-        voice_actor_id  INT DEFAULT NULL
-                        COMMENT 'The voice actor whose voice this identity represents',
-        context_filter  VARCHAR(255) DEFAULT NULL
-                        COMMENT 'SQL LIKE pattern for context matching, e.g. Star Trek%',
-        created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-                                            ON UPDATE CURRENT_TIMESTAMP,
+        id               INT AUTO_INCREMENT PRIMARY KEY,
+        name             VARCHAR(255) NOT NULL,
+        description      TEXT,
+        actor_id         INT DEFAULT NULL
+                         COMMENT 'Legacy link to actors.id (physical actor)',
+        voice_actor_id   INT DEFAULT NULL
+                         COMMENT 'The voice actor whose voice this identity represents',
+        voice_casting_id INT DEFAULT NULL
+                         COMMENT 'Optional link to the specific voice_casting entry (role+production) this identity represents',
+        context_filter   VARCHAR(255) DEFAULT NULL
+                         COMMENT 'SQL LIKE pattern for context matching, e.g. Star Trek%',
+        created_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                                             ON UPDATE CURRENT_TIMESTAMP,
         UNIQUE KEY uq_identity_name (name),
-        FOREIGN KEY (actor_id)       REFERENCES actors(id) ON DELETE SET NULL,
-        FOREIGN KEY (voice_actor_id) REFERENCES actors(id) ON DELETE SET NULL,
-        INDEX idx_identity_actor       (actor_id),
-        INDEX idx_identity_voice_actor (voice_actor_id)
+        FOREIGN KEY (actor_id)         REFERENCES actors(id)        ON DELETE SET NULL,
+        FOREIGN KEY (voice_actor_id)   REFERENCES actors(id)        ON DELETE SET NULL,
+        FOREIGN KEY (voice_casting_id) REFERENCES voice_castings(id) ON DELETE SET NULL,
+        INDEX idx_identity_actor         (actor_id),
+        INDEX idx_identity_voice_actor   (voice_actor_id),
+        INDEX idx_identity_voice_casting (voice_casting_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
 
@@ -256,6 +260,14 @@ def ensure_schema() -> None:
                 COMMENT 'The voice actor whose voice this identity represents'
             """
         )
+        # identities: add voice_casting_id if missing
+        cur.execute(
+            """
+            ALTER TABLE identities
+            ADD COLUMN IF NOT EXISTS voice_casting_id INT NULL
+                COMMENT 'Optional link to the specific voice_casting entry this identity represents'
+            """
+        )
 
         # episode_segments: add embedding column if missing
         cur.execute(
@@ -338,10 +350,17 @@ def list_identities(conn: mariadb.Connection) -> list[dict]:
         SELECT i.id, i.name, i.description,
                COUNT(vs.id) AS sample_count,
                i.voice_actor_id,
-               a.name AS voice_actor_name
+               a.name AS voice_actor_name,
+               i.voice_casting_id,
+               vc.language AS casting_language,
+               r.name  AS casting_role_name,
+               p.title AS casting_production_title
         FROM identities i
         LEFT JOIN voice_samples vs ON vs.identity_id = i.id
         LEFT JOIN actors a ON a.id = i.voice_actor_id
+        LEFT JOIN voice_castings vc ON vc.id = i.voice_casting_id
+        LEFT JOIN roles       r ON r.id  = vc.role_id
+        LEFT JOIN productions p ON p.id  = vc.production_id
         GROUP BY i.id
         ORDER BY i.name
     """)
@@ -351,30 +370,41 @@ def list_identities(conn: mariadb.Connection) -> list[dict]:
 
 def get_identity(conn: mariadb.Connection, identity_id: int) -> dict | None:
     cur = conn.cursor()
-    cur.execute("SELECT id, name, description, voice_actor_id FROM identities WHERE id = ?", (identity_id,))
+    cur.execute(
+        "SELECT id, name, description, voice_actor_id, voice_casting_id "
+        "FROM identities WHERE id = ?",
+        (identity_id,),
+    )
     row = cur.fetchone()
     if row is None:
         return None
-    return {"id": row[0], "name": row[1], "description": row[2], "voice_actor_id": row[3]}
+    return {
+        "id": row[0], "name": row[1], "description": row[2],
+        "voice_actor_id": row[3], "voice_casting_id": row[4],
+    }
 
 
 def create_identity(conn: mariadb.Connection, name: str, description: str = "",
-                    voice_actor_id: int | None = None) -> int:
+                    voice_actor_id: int | None = None,
+                    voice_casting_id: int | None = None) -> int:
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO identities (name, description, voice_actor_id) VALUES (?, ?, ?)",
-        (name, description, voice_actor_id),
+        "INSERT INTO identities (name, description, voice_actor_id, voice_casting_id) "
+        "VALUES (?, ?, ?, ?)",
+        (name, description, voice_actor_id, voice_casting_id),
     )
     conn.commit()
     return cur.lastrowid
 
 
 def update_identity(conn: mariadb.Connection, identity_id: int, name: str, description: str,
-                    voice_actor_id: int | None = None) -> None:
+                    voice_actor_id: int | None = None,
+                    voice_casting_id: int | None = None) -> None:
     cur = conn.cursor()
     cur.execute(
-        "UPDATE identities SET name = ?, description = ?, voice_actor_id = ? WHERE id = ?",
-        (name, description, voice_actor_id, identity_id),
+        "UPDATE identities SET name = ?, description = ?, voice_actor_id = ?, "
+        "voice_casting_id = ? WHERE id = ?",
+        (name, description, voice_actor_id, voice_casting_id, identity_id),
     )
     conn.commit()
 
@@ -705,6 +735,19 @@ def create_voice_casting(conn: mariadb.Connection, production_id: int, role_id: 
 def delete_voice_casting(conn: mariadb.Connection, casting_id: int) -> None:
     cur = conn.cursor()
     cur.execute("DELETE FROM voice_castings WHERE id = ?", (casting_id,))
+    conn.commit()
+
+
+def update_voice_casting(conn: mariadb.Connection, casting_id: int, production_id: int,
+                         role_id: int, actor_id: int, voice_actor_id: int,
+                         language: str = "de") -> None:
+    cur = conn.cursor()
+    cur.execute(
+        """UPDATE voice_castings
+           SET production_id = ?, role_id = ?, actor_id = ?, voice_actor_id = ?, language = ?
+           WHERE id = ?""",
+        (production_id, role_id, actor_id, voice_actor_id, language, casting_id),
+    )
     conn.commit()
 
 

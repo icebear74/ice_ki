@@ -95,6 +95,7 @@ from db.database import (
     # Voice casting CRUD
     list_voice_castings,
     create_voice_casting,
+    update_voice_casting,
     delete_voice_casting,
 )
 
@@ -219,12 +220,14 @@ def api_create_identity(
     name: Annotated[str, Body()],
     description: Annotated[str, Body()] = "",
     voice_actor_id: Annotated[int | None, Body()] = None,
+    voice_casting_id: Annotated[int | None, Body()] = None,
 ) -> JSONResponse:
     conn = get_connection()
     try:
-        new_id = create_identity(conn, name, description, voice_actor_id)
+        new_id = create_identity(conn, name, description, voice_actor_id, voice_casting_id)
         return JSONResponse({"id": new_id, "name": name, "description": description,
-                             "voice_actor_id": voice_actor_id})
+                             "voice_actor_id": voice_actor_id,
+                             "voice_casting_id": voice_casting_id})
     except mariadb.IntegrityError:
         raise HTTPException(status_code=409, detail=f"Name bereits vergeben: {name}")
     finally:
@@ -237,12 +240,13 @@ def api_update_identity(
     name: Annotated[str, Body()],
     description: Annotated[str, Body()] = "",
     voice_actor_id: Annotated[int | None, Body()] = None,
+    voice_casting_id: Annotated[int | None, Body()] = None,
 ) -> JSONResponse:
     conn = get_connection()
     try:
         if get_identity(conn, identity_id) is None:
             raise HTTPException(status_code=404, detail="Identity not found")
-        update_identity(conn, identity_id, name, description, voice_actor_id)
+        update_identity(conn, identity_id, name, description, voice_actor_id, voice_casting_id)
         return JSONResponse({"status": "ok"})
     finally:
         conn.close()
@@ -889,6 +893,26 @@ def api_delete_voice_casting(casting_id: int) -> JSONResponse:
     try:
         delete_voice_casting(conn, casting_id)
         return JSONResponse({"status": "ok"})
+    finally:
+        conn.close()
+
+
+@app.put("/api/voice_castings/{casting_id}")
+def api_update_voice_casting(casting_id: int, data: dict = Body(...)) -> JSONResponse:
+    conn = get_connection()
+    try:
+        update_voice_casting(
+            conn,
+            casting_id=casting_id,
+            production_id=int(data["production_id"]),
+            role_id=int(data["role_id"]),
+            actor_id=int(data["actor_id"]),
+            voice_actor_id=int(data["voice_actor_id"]),
+            language=data.get("language", "de"),
+        )
+        return JSONResponse({"status": "ok"})
+    except KeyError as exc:
+        raise HTTPException(status_code=400, detail=f"Missing field: {exc}") from exc
     finally:
         conn.close()
 

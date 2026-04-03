@@ -560,16 +560,35 @@
 <!--  Edit Identity Modal                                                -->
 <!-- ================================================================== -->
 <div id="edit-identity-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:900;align-items:center;justify-content:center;">
-  <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:20px;width:340px;max-width:95vw;">
+  <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:20px;width:380px;max-width:95vw;">
     <div class="section-title" style="margin-bottom:12px;">Identität bearbeiten</div>
     <input id="edit-id-id" type="hidden" />
     <input id="edit-id-name" type="text" placeholder="Name"
            style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:6px;font-size:13px;margin-bottom:8px;" />
     <textarea id="edit-id-desc" placeholder="Beschreibung (optional)"
-              style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:6px;font-size:13px;margin-bottom:10px;resize:vertical;min-height:60px;"></textarea>
+              style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:6px;font-size:13px;margin-bottom:8px;resize:vertical;min-height:60px;"></textarea>
+    <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">Synchronbesetzung (optional – welche Rolle/Produktion):</div>
+    <select id="edit-id-casting"
+            style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:6px;font-size:12px;margin-bottom:10px;">
+      <option value="">— keine Zuordnung —</option>
+    </select>
     <div style="display:flex;gap:8px;">
       <button class="btn btn-primary" style="flex:1" onclick="saveEditIdentity()">Speichern</button>
       <button class="btn btn-ghost"   style="flex:1" onclick="closeEditModal()">Abbrechen</button>
+    </div>
+  </div>
+</div>
+
+<!-- ================================================================== -->
+<!--  Generic Entity Edit Modal (Actor / Role / Production / Casting)   -->
+<!-- ================================================================== -->
+<div id="edit-entity-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:900;align-items:center;justify-content:center;">
+  <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:20px;width:400px;max-width:95vw;">
+    <div id="edit-entity-title" class="section-title" style="margin-bottom:12px;"></div>
+    <div id="edit-entity-fields"></div>
+    <div style="display:flex;gap:8px;margin-top:10px;">
+      <button class="btn btn-primary" style="flex:1" onclick="saveEntityEdit()">Speichern</button>
+      <button class="btn btn-ghost"   style="flex:1" onclick="closeEntityEditModal()">Abbrechen</button>
     </div>
   </div>
 </div>
@@ -783,14 +802,14 @@ function renderIdentities() {
     <div class="identity-row">
       <div>
         <div class="id-name">${esc(id.name)}</div>
-        <div class="id-count">${id.sample_count} Vektor(en)</div>
+        <div class="id-count">${id.sample_count} Vektor(en)${id.casting_role_name ? ` · <span style="color:var(--accent)">${esc(id.casting_role_name)}</span> (${esc(id.casting_production_title||'')} · ${esc(id.casting_language||'')})` : ""}</div>
       </div>
       <div class="id-actions">
         <button class="btn btn-ghost" style="font-size:11px;padding:4px 8px;"
                 title="Supervektoren verwalten – Altersgruppen definieren"
                 onclick="toggleSvPanel(${id.id})">🧬 Supervektoren</button>
         <button class="btn btn-ghost" style="font-size:11px;padding:4px 8px;"
-                onclick="openEditModal(${id.id}, '${esc(id.name)}', '${esc(id.description||'')}')">✏️</button>
+                onclick="openEditModal(${id.id}, '${esc(id.name)}', '${esc(id.description||'')}', ${id.voice_casting_id||'null'})">✏️</button>
         <button class="btn btn-danger" style="font-size:11px;padding:4px 8px;"
                 onclick="deleteIdentity(${id.id}, '${esc(id.name)}')">&#128465;</button>
       </div>
@@ -839,10 +858,25 @@ async function refreshSupervectors() {
 /* -------------------------------------------------------------------- */
 /*  Edit identity modal                                                  */
 /* -------------------------------------------------------------------- */
-function openEditModal(id, name, description) {
+async function openEditModal(id, name, description, voiceCastingId) {
   document.getElementById("edit-id-id").value   = id;
   document.getElementById("edit-id-name").value = name;
   document.getElementById("edit-id-desc").value = description;
+
+  // Populate the voice_casting dropdown (fetch fresh list)
+  const sel = document.getElementById("edit-id-casting");
+  sel.innerHTML = '<option value="">— keine Zuordnung —</option>';
+  try {
+    const castList = await fetch("/api/voice_castings").then(r => r.json());
+    castList.forEach(c => {
+      const opt = document.createElement("option");
+      opt.value = c.id;
+      opt.textContent = `${c.language.toUpperCase()} · ${c.production_title} · ${c.role_name} → ${c.voice_actor_name}`;
+      if (c.id === voiceCastingId) opt.selected = true;
+      sel.appendChild(opt);
+    });
+  } catch(e) { /* ignore – dropdown stays empty */ }
+
   const modal = document.getElementById("edit-identity-modal");
   modal.style.display = "flex";
 }
@@ -852,18 +886,128 @@ function closeEditModal() {
 }
 
 async function saveEditIdentity() {
-  const id   = parseInt(document.getElementById("edit-id-id").value);
-  const name = document.getElementById("edit-id-name").value.trim();
-  const desc = document.getElementById("edit-id-desc").value.trim();
+  const id             = parseInt(document.getElementById("edit-id-id").value);
+  const name           = document.getElementById("edit-id-name").value.trim();
+  const desc           = document.getElementById("edit-id-desc").value.trim();
+  const castingRaw     = document.getElementById("edit-id-casting").value;
+  const voice_casting_id = castingRaw ? parseInt(castingRaw) : null;
   if (!name) { toast("Name darf nicht leer sein.", "warn"); return; }
   const resp = await fetch(`/api/identities/${id}`, {
     method: "PUT",
     headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({name, description: desc}),
+    body: JSON.stringify({name, description: desc, voice_casting_id}),
   });
   if (resp.ok) {
     toast("Identität aktualisiert ✓");
     closeEditModal();
+    await loadIdentities();
+  } else {
+    const err = await resp.json().catch(() => ({}));
+    toast("Fehler: " + (err.detail || resp.statusText), "error");
+  }
+}
+
+/* -------------------------------------------------------------------- */
+/*  Generic entity edit modal (Actor, Role, Production, Casting)        */
+/* -------------------------------------------------------------------- */
+let _editEntityType = null;
+let _editEntityId   = null;
+
+const _FIELD_STYLE = "width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:6px;font-size:12px;margin-bottom:8px;box-sizing:border-box;";
+const _SEL_STYLE   = "width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:6px;font-size:12px;margin-bottom:8px;";
+
+function _makeOpts(items, labelFn, selectedId) {
+  return items.map(it => `<option value="${it.id}"${it.id===selectedId?" selected":""}>${esc(labelFn(it))}</option>`).join("");
+}
+
+function openEntityEditModal(type, id, name, desc, year, prodType,
+                              castProdId, castRoleId, castActorId, castVoiceId, castLang) {
+  _editEntityType = type;
+  _editEntityId   = id;
+
+  const titles = {actor:"Sprecher bearbeiten", role:"Rolle bearbeiten",
+                  production:"Produktion bearbeiten", casting:"Besetzung bearbeiten"};
+  document.getElementById("edit-entity-title").textContent = titles[type] || "Bearbeiten";
+
+  let html = "";
+  if (type === "actor" || type === "role") {
+    html = `<input id="ee-name" type="text" value="${esc(name)}" placeholder="Name" style="${_FIELD_STYLE}" />
+            <textarea id="ee-desc" placeholder="Beschreibung (optional)" style="${_FIELD_STYLE}resize:vertical;min-height:50px;">${esc(desc)}</textarea>`;
+  } else if (type === "production") {
+    const isSeries = (prodType === "Series");
+    html = `<input id="ee-title" type="text" value="${esc(name)}" placeholder="Titel" style="${_FIELD_STYLE}" />
+            <div style="display:flex;gap:6px;margin-bottom:8px;">
+              <input id="ee-year" type="number" value="${year||''}" placeholder="Jahr" style="width:90px;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:6px;font-size:12px;" />
+              <select id="ee-type" style="flex:1;${_SEL_STYLE}margin-bottom:0;">
+                <option value="Series"${isSeries?" selected":""}>Serie</option>
+                <option value="Movie"${!isSeries?" selected":""}>Film</option>
+              </select>
+            </div>`;
+  } else if (type === "casting") {
+    html = `<select id="ee-prod" style="${_SEL_STYLE}"><option value="">— Produktion —</option>${_makeOpts(productions, p=>`${p.title}${p.year?" ("+p.year+")":""}`, castProdId)}</select>
+            <select id="ee-role" style="${_SEL_STYLE}"><option value="">— Rolle —</option>${_makeOpts(roles, r=>r.name, castRoleId)}</select>
+            <select id="ee-actor" style="${_SEL_STYLE}"><option value="">— Schauspieler —</option>${_makeOpts(actors, a=>a.name, castActorId)}</select>
+            <select id="ee-voice" style="${_SEL_STYLE}"><option value="">— Synchronsprecher —</option>${_makeOpts(actors, a=>a.name, castVoiceId)}</select>
+            <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;">
+              <label style="font-size:11px;color:var(--text-muted);flex-shrink:0;">Sprache:</label>
+              <input id="ee-lang" type="text" value="${esc(castLang||'de')}" placeholder="de / en / fr …" style="width:70px;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:5px 8px;border-radius:6px;font-size:12px;" />
+            </div>`;
+  }
+
+  document.getElementById("edit-entity-fields").innerHTML = html;
+  document.getElementById("edit-entity-modal").style.display = "flex";
+}
+
+function closeEntityEditModal() {
+  document.getElementById("edit-entity-modal").style.display = "none";
+  _editEntityType = null;
+  _editEntityId   = null;
+}
+
+async function saveEntityEdit() {
+  const type = _editEntityType;
+  const id   = _editEntityId;
+  if (!type || !id) return;
+
+  let url, body;
+
+  if (type === "actor" || type === "role") {
+    const name = document.getElementById("ee-name")?.value.trim();
+    const desc = document.getElementById("ee-desc")?.value.trim();
+    if (!name) { toast("Name darf nicht leer sein.", "warn"); return; }
+    url  = `/api/${type}s/${id}`;
+    body = {name, description: desc};
+
+  } else if (type === "production") {
+    const title = document.getElementById("ee-title")?.value.trim();
+    const year  = parseInt(document.getElementById("ee-year")?.value) || null;
+    const ptype = document.getElementById("ee-type")?.value;
+    if (!title) { toast("Titel darf nicht leer sein.", "warn"); return; }
+    url  = `/api/productions/${id}`;
+    body = {title, year, type: ptype};
+
+  } else if (type === "casting") {
+    const prodId  = parseInt(document.getElementById("ee-prod")?.value);
+    const roleId  = parseInt(document.getElementById("ee-role")?.value);
+    const actorId = parseInt(document.getElementById("ee-actor")?.value);
+    const voiceId = parseInt(document.getElementById("ee-voice")?.value);
+    const lang    = document.getElementById("ee-lang")?.value.trim() || "de";
+    if (!prodId || !roleId || !actorId || !voiceId) {
+      toast("Bitte alle Felder ausfüllen.", "warn"); return;
+    }
+    url  = `/api/voice_castings/${id}`;
+    body = {production_id:prodId, role_id:roleId, actor_id:actorId, voice_actor_id:voiceId, language:lang};
+  }
+
+  const resp = await fetch(url, {
+    method: "PUT",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body),
+  });
+  if (resp.ok) {
+    toast("Gespeichert ✓");
+    closeEntityEditModal();
+    await loadCastingData();
     await loadIdentities();
   } else {
     const err = await resp.json().catch(() => ({}));
@@ -1559,6 +1703,8 @@ function renderActors() {
         <label class="btn btn-ghost" style="font-size:10px;padding:3px 6px;cursor:pointer;" title="Bild hochladen">
           🖼<input type="file" accept="image/*" style="display:none" onchange="uploadImage('actor',${a.id},this)" />
         </label>
+        <button class="btn btn-ghost" style="font-size:10px;padding:3px 6px;"
+                onclick="openEntityEditModal('actor',${a.id},'${esc(a.name)}','${esc(a.description||'')}')">✏️</button>
         <button class="btn btn-danger" style="font-size:10px;padding:3px 6px;"
                 onclick="deleteActor(${a.id},'${esc(a.name)}')">🗑</button>
       </div>
@@ -1580,6 +1726,8 @@ function renderRoles() {
         <label class="btn btn-ghost" style="font-size:10px;padding:3px 6px;cursor:pointer;" title="Bild hochladen">
           🖼<input type="file" accept="image/*" style="display:none" onchange="uploadImage('role',${r.id},this)" />
         </label>
+        <button class="btn btn-ghost" style="font-size:10px;padding:3px 6px;"
+                onclick="openEntityEditModal('role',${r.id},'${esc(r.name)}','${esc(r.description||'')}')">✏️</button>
         <button class="btn btn-danger" style="font-size:10px;padding:3px 6px;"
                 onclick="deleteRole(${r.id},'${esc(r.name)}')">🗑</button>
       </div>
@@ -1598,6 +1746,8 @@ function renderProductions() {
         <div class="ent-desc">${p.type==="Series"?"Serie":"Film"}${p.year?" · "+p.year:""}</div>
       </div>
       <div class="ent-actions">
+        <button class="btn btn-ghost" style="font-size:10px;padding:3px 6px;"
+                onclick="openEntityEditModal('production',${p.id},'${esc(p.title)}','',${p.year||'null'},'${p.type}')">✏️</button>
         <button class="btn btn-danger" style="font-size:10px;padding:3px 6px;"
                 onclick="deleteProduction(${p.id},'${esc(p.title)}')">🗑</button>
       </div>
@@ -1617,6 +1767,8 @@ function renderCastings() {
         Sprecher: <strong>${esc(c.voice_actor_name)}</strong>
         ${c.actor_name !== c.voice_actor_name ? `<span style="color:var(--text-muted);font-size:11px;">(orig. ${esc(c.actor_name)})</span>` : ""}
         <button class="btn btn-ghost" style="font-size:11px;padding:2px 5px;margin-left:auto;"
+                onclick="openEntityEditModal('casting',${c.id},'','',-1,'',${c.production_id},${c.role_id},${c.actor_id},${c.voice_actor_id},'${esc(c.language)}')">✏️</button>
+        <button class="btn btn-ghost" style="font-size:11px;padding:2px 5px;"
                 onclick="deleteCasting(${c.id})">🗑</button>
       </div>
     </div>`).join("");
