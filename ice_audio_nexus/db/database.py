@@ -69,7 +69,7 @@ _DDL = [
         is_active   BOOLEAN NOT NULL DEFAULT TRUE
                     COMMENT 'FALSE = deactivated (e.g. replaced by supervector)',
         is_low_quality BOOLEAN NOT NULL DEFAULT FALSE
-                    COMMENT 'TRUE = sample contains laughter/noise/non-speech; excluded from supervectors',
+                    COMMENT 'True = heuristically flagged as laughter/noise/short utterance; excluded from supervectors',
         created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                                        ON UPDATE CURRENT_TIMESTAMP,
@@ -98,7 +98,7 @@ _DDL = [
         is_suggestion   BOOLEAN NOT NULL DEFAULT FALSE
                         COMMENT 'True = proposed match (slightly high distance), needs user confirmation',
         is_low_quality  BOOLEAN NOT NULL DEFAULT FALSE
-                        COMMENT 'True = heuristic flagged laughter/noise/short utterance',
+                        COMMENT 'True = heuristically flagged as laughter/noise/short utterance',
         created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                                            ON UPDATE CURRENT_TIMESTAMP,
@@ -170,14 +170,14 @@ def ensure_schema() -> None:
             """
             ALTER TABLE episode_segments
             ADD COLUMN IF NOT EXISTS is_low_quality BOOLEAN NOT NULL DEFAULT FALSE
-                COMMENT 'True = heuristic flagged laughter/noise/short utterance'
+                COMMENT 'True = heuristically flagged as laughter/noise/short utterance'
             """
         )
         cur.execute(
             """
             ALTER TABLE voice_samples
             ADD COLUMN IF NOT EXISTS is_low_quality BOOLEAN NOT NULL DEFAULT FALSE
-                COMMENT 'TRUE = sample contains laughter/noise/non-speech; excluded from supervectors'
+                COMMENT 'True = heuristically flagged as laughter/noise/short utterance; excluded from supervectors'
             """
         )
         conn.commit()
