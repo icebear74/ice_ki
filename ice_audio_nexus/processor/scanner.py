@@ -388,7 +388,10 @@ def _iter_diarization_segments(audio_path: str):
         if inference is not None:
             try:
                 emb = inference.crop(audio_path, _PyannoteSegment(turn.start, turn.end))
-                embedding = emb.flatten().tolist()
+                # Replace NaN / ±inf (produced by very short segments) with 0.0
+                # so MariaDB VECTOR does not reject the row.
+                emb_clean = np.where(np.isfinite(emb), emb, 0.0)
+                embedding = emb_clean.flatten().tolist()
                 # Pad or truncate to exactly 512 dimensions
                 if len(embedding) < 512:
                     embedding = embedding + [0.0] * (512 - len(embedding))
