@@ -66,6 +66,15 @@ MIN_MARGIN        = float(os.getenv("MIN_MARGIN",         "0.07"))
 DIARIZATION_DEVICE   = os.getenv("DIARIZATION_DEVICE",   "cuda:0")
 TRANSCRIPTION_DEVICE = os.getenv("TRANSCRIPTION_DEVICE", "cuda:1")
 
+# Diarization tuning parameters (configurable via .env)
+DIARIZATION_MIN_DURATION_ON  = float(os.getenv("DIARIZATION_MIN_DURATION_ON",  "0.3"))
+DIARIZATION_MIN_DURATION_OFF = float(os.getenv("DIARIZATION_MIN_DURATION_OFF", "0.1"))
+CLUSTERING_THRESHOLD         = float(os.getenv("CLUSTERING_THRESHOLD",         "0.7"))
+
+# DeepFilterNet noise suppression
+DEEPFILTER_ENABLED = os.getenv("DEEPFILTER_ENABLED", "false").lower() in ("1", "true", "yes")
+DEEPFILTER_DEVICE  = os.getenv("DEEPFILTER_DEVICE", DIARIZATION_DEVICE)  # defaults to P4
+
 
 # ---------------------------------------------------------------------------
 # Audio extraction via FFmpeg (CUDA)
@@ -91,6 +100,56 @@ def extract_audio(video_path: str, output_wav: str) -> None:
     if result.returncode != 0:
         raise RuntimeError(f"FFmpeg failed:\n{result.stderr}")
     logger.info("Audio extracted → %s", output_wav)
+
+
+
+# ---------------------------------------------------------------------------
+# DeepFilterNet noise suppression (optional pre-processing step)
+# ---------------------------------------------------------------------------
+
+def apply_deepfilter(input_wav: str, output_wav: str) -> None:
+    """
+    Run DeepFilterNet 3 noise suppression on *input_wav* and write the
+    cleaned audio to *output_wav*.
+
+    DeepFilterNet works on arbitrary sample rates internally but we keep
+    I/O at 16 kHz (pyannote.audio and Whisper standard).  It runs well on
+    Pascal GPUs (Tesla P100/P4) with CUDA 11.8 via PyTorch 2.4.1+cu118.
+
+    Falls back silently to the unchanged file if the library is missing or
+    if processing fails, so the rest of the pipeline is never blocked.
+    """
+    try:
+        import torch
+        from df.enhance import enhance, init_df, load_audio, save_audio
+        from df import config as df_config
+    except ImportError:
+        logger.warning(
+            "deepfilternet not installed – skipping noise suppression. "
+            "Run: pip install deepfilternet"
+        )
+        import shutil
+        shutil.copy2(input_wav, output_wav)
+        return
+
+    try:
+        # Use the GPU that handles diarization so we stay on the P4
+        device_str = DEEPFILTER_DEVICE
+        import torch
+        device = torch.device(device_str if torch.cuda.is_available() else "cpu")
+
+        # init_df returns (model, df_state, suffix)
+        model, df_state, _ = init_df()
+        model = model.to(device)
+
+        audio, sr = load_audio(input_wav, sr=df_state.sr())
+        enhanced = enhance(model, df_state, audio)
+        save_audio(output_wav, enhanced, sr)
+        logger.info("DeepFilterNet applied: %s → %s", input_wav, output_wav)
+    except Exception as exc:
+        logger.warning("DeepFilterNet processing failed (non-fatal): %s", exc)
+        import shutil
+        shutil.copy2(input_wav, output_wav)
 
 
 def transcode_web_preview(video_path: str, output_mp4: str) -> None:
@@ -175,6 +234,17 @@ def _iter_diarization_segments(audio_path: str):
     device = torch.device(DIARIZATION_DEVICE if torch.cuda.is_available() else "cpu")
     pipeline = pipeline.to(device)
     logger.info("Diarization device: %s", device)
+
+    # Apply configurable tuning parameters when the pipeline exposes them
+    try:
+        params = pipeline.parameters(instantiated=True)
+        if hasattr(params, "clustering") and hasattr(params.clustering, "threshold"):
+            params.clustering.threshold = CLUSTERING_THRESHOLD
+        if hasattr(params, "segmentation") and hasattr(params.segmentation, "min_duration_on"):
+            params.segmentation.min_duration_on  = DIARIZATION_MIN_DURATION_ON
+            params.segmentation.min_duration_off = DIARIZATION_MIN_DURATION_OFF
+    except Exception as _p:
+        logger.debug("Could not set diarization tuning params: %s", _p)
 
     with ProgressHook() as hook:
         diarization = pipeline(audio_path, hook=hook)
@@ -348,24 +418,39 @@ def scan_video(
     episode_title: str,
     transcribe: bool = True,
     model_size: str = "large-v3-turbo",
+    update_mode: bool = True,
 ) -> None:
     """
     Full pipeline:
-      1. Extract audio
-      2. Diarize speakers  (Tesla P4  / cuda:0 – background thread)
-      3. For each segment: transcribe (Tesla P100 / cuda:1 – main thread)
+      1. Extract raw 16-kHz mono WAV (FFmpeg CUDA)
+      2. Parallel pre-processing phase (both GPUs active simultaneously):
+           • P4  (cuda:0): DeepFilterNet noise suppression (if DEEPFILTER_ENABLED)
+           • P100 (cuda:1): Whisper model pre-load
+      3. Load cleaned audio into memory
+      4. Diarize speakers (P4 – background thread / producer)
+      5. For each segment: transcribe (P100 – main thread / consumer)
                            look up in MariaDB (multi-vector VECTOR_DISTANCE)
-      4. Store results in episode_segments
+      6. Store / update results in episode_segments
 
-    Diarization and transcription run concurrently via a producer/consumer
-    queue: the P4 extracts speaker embeddings while the P100 simultaneously
-    transcribes previously diarized segments, maximising GPU utilisation.
+    Update mode (update_mode=True):
+      - If a segment already exists at the same timecode it is UPDATED, not
+        duplicated.
+      - Segments that were manually assigned by the user are preserved;
+        auto-detected identity assignments are refreshed using the latest
+        supervectors.
+
+    GPU utilisation:
+      P4  (cuda:0): DeepFilter → Diarization (sequential on same device)
+      P100 (cuda:1): Whisper pre-load runs concurrently with DeepFilter,
+                     then transcribes segments while P4 diarizes.
     """
     from db.database import (
         ensure_schema,
         get_connection,
         find_nearest_identity,
         upsert_segment,
+        get_existing_segment,
+        update_segment_match,
         vector_to_bytes,
     )
 
@@ -377,35 +462,81 @@ def scan_video(
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         audio_path = tmp.name
 
+    # DeepFilterNet output goes to a separate temp file so the original raw WAV
+    # is preserved and the cleaned copy can be cleaned up independently.
+    clean_audio_path = audio_path + ".clean.wav"
+
     try:
+        # ── Step 1: Extract audio ──────────────────────────────────────────────
         extract_audio(video_path, audio_path)
 
-        # Generate the browser-ready preview alongside the WAV extraction so
-        # the Web UI can serve it directly (seekable, audio + video).
+        # Generate the browser-ready preview in the background so it is ready
+        # by the time the analysis is finished.  Non-fatal if it fails.
         if not os.path.exists(web_preview_path):
             try:
                 transcode_web_preview(video_path, web_preview_path)
             except Exception as exc:
                 logger.warning("Web preview transcode failed (non-fatal): %s", exc)
 
-        # Pre-load Whisper on cuda:1 *before* diarization starts so the P100
-        # is immediately ready when the first segment arrives in the queue.
-        if transcribe:
-            try:
-                _get_whisper_model(model_size)
-                logger.info("Whisper model pre-loaded on %s", TRANSCRIPTION_DEVICE)
-            except Exception as exc:
-                logger.warning(
-                    "Whisper pre-load failed (will retry on first segment): %s", exc
-                )
+        # ── Step 2: Parallel pre-processing (P4 + P100 simultaneously) ────────
+        #
+        #   Thread A  – P4  (cuda:0): DeepFilterNet noise suppression
+        #   Thread B  – P100 (cuda:1): Whisper model pre-load
+        #
+        # DeepFilter on a full episode can take 2-5 min on a Pascal P4.
+        # Whisper large-v3-turbo model loading takes ~30-60 s.
+        # Running them in parallel saves that waiting time on every scan.
 
-        # Load the full episode audio into a float32 numpy array once so each
-        # segment can be sliced in-memory without spawning an FFmpeg process.
+        deepfilter_exc:   list[Exception] = []
+        whisper_preload_exc: list[Exception] = []
+
+        def _deepfilter_worker() -> None:
+            if DEEPFILTER_ENABLED:
+                logger.info("DeepFilterNet: starting noise suppression on %s", DEEPFILTER_DEVICE)
+                try:
+                    apply_deepfilter(audio_path, clean_audio_path)
+                except Exception as exc:
+                    logger.error("DeepFilterNet failed: %s", exc)
+                    deepfilter_exc.append(exc)
+            else:
+                # Point clean_audio_path at the raw WAV so the rest of the
+                # pipeline is uniform regardless of DeepFilter being enabled.
+                import shutil
+                shutil.copy2(audio_path, clean_audio_path)
+
+        def _whisper_preload_worker() -> None:
+            if transcribe:
+                try:
+                    _get_whisper_model(model_size)
+                    logger.info("Whisper model pre-loaded on %s", TRANSCRIPTION_DEVICE)
+                except Exception as exc:
+                    logger.warning("Whisper pre-load failed (will retry per segment): %s", exc)
+                    whisper_preload_exc.append(exc)
+
+        t_deepfilter = threading.Thread(
+            target=_deepfilter_worker, daemon=True, name="deepfilter-P4"
+        )
+        t_whisper = threading.Thread(
+            target=_whisper_preload_worker, daemon=True, name="whisper-preload-P100"
+        )
+        logger.info(
+            "Starting parallel pre-processing: DeepFilter (P4) + Whisper pre-load (P100)"
+        )
+        t_deepfilter.start()
+        t_whisper.start()
+        t_deepfilter.join()
+        t_whisper.join()
+        logger.info("Parallel pre-processing complete.")
+
+        # ── Step 3: Load cleaned audio into memory ─────────────────────────────
+        audio_for_pipeline = clean_audio_path  # always exists (copy if DeepFilter off)
         audio_data: np.ndarray | None = None
-        sample_rate: int = 16000  # default; overwritten by soundfile below
+        sample_rate: int = 16000
         try:
             import soundfile as sf
-            audio_data, sample_rate = sf.read(audio_path, dtype="float32", always_2d=False)
+            audio_data, sample_rate = sf.read(
+                audio_for_pipeline, dtype="float32", always_2d=False
+            )
             logger.info(
                 "Episode audio loaded into memory: %d samples @ %d Hz (%.1f s)",
                 len(audio_data), sample_rate, len(audio_data) / sample_rate,
@@ -415,21 +546,20 @@ def scan_video(
                 "soundfile load failed – will fall back to per-segment FFmpeg: %s", exc
             )
 
-        # -----------------------------------------------------------------------
-        # Producer / consumer: diarization on P4 feeds a queue; transcription
-        # on P100 drains it concurrently.
-        # 64 slots: large enough that the producer is never blocked waiting for
-        # the consumer yet small enough to bound memory for very long episodes.
-        # -----------------------------------------------------------------------
+        # ── Steps 4-6: Diarize (P4 producer) + Transcribe/Store (P100 consumer) ──
+        #
+        # 64-slot queue: large enough that the producer is never blocked yet
+        # small enough to bound memory for very long episodes.
+
         _SEGMENT_QUEUE_SIZE = 64
         seg_queue: queue.Queue = queue.Queue(maxsize=_SEGMENT_QUEUE_SIZE)
-        producer_exc: list[Exception] = []  # captures any exception from the thread
+        producer_exc: list[Exception] = []
 
         def _diarize_producer() -> None:
             try:
-                for seg in _iter_diarization_segments(audio_path):
+                for seg in _iter_diarization_segments(audio_for_pipeline):
                     seg_queue.put(seg)
-            except Exception as exc:  # noqa: BLE001 – daemon thread, no caller to propagate to
+            except Exception as exc:  # noqa: BLE001
                 logger.error("Diarization producer failed: %s", exc)
                 producer_exc.append(exc)
             finally:
@@ -440,9 +570,10 @@ def scan_video(
         )
         producer.start()
 
-        # Consumer loop (main thread – transcription on P100 + DB writes)
+        # Consumer: transcription on P100 + DB writes (main thread)
         conn = get_connection()
         segments_stored = 0
+        segments_updated = 0
         try:
             while True:
                 seg = seg_queue.get()
@@ -454,7 +585,7 @@ def scan_video(
                 if transcribe and seg["embedding"]:
                     try:
                         transcript, no_speech_prob = transcribe_segment(
-                            audio_data if audio_data is not None else audio_path,
+                            audio_data if audio_data is not None else audio_for_pipeline,
                             seg["start_ms"] / 1000.0,
                             seg["end_ms"]   / 1000.0,
                             sample_rate=sample_rate,
@@ -479,7 +610,7 @@ def scan_video(
                         no_speech_prob, duration_s, len(transcript.strip()),
                     )
 
-                # Multi-vector identity search
+                # Multi-vector identity search against latest supervectors
                 match_result = {"status": "unknown", "identity_id": None,
                                 "sample_id": None, "distance": None}
                 if seg["embedding"]:
@@ -502,23 +633,68 @@ def scan_video(
                             match_result.get("sample_context", ""),
                         )
 
-                upsert_segment(
-                    conn,
-                    series_name=series_name,
-                    episode_title=episode_title,
-                    video_path=video_path,
-                    start_ms=seg["start_ms"],
-                    end_ms=seg["end_ms"],
-                    speaker_label=seg["speaker_label"],
-                    embedding=vector_to_bytes(seg["embedding"]) if seg["embedding"] else None,
-                    identity_id=match_result.get("identity_id"),
-                    matched_sample_id=match_result.get("sample_id"),
-                    match_distance=match_result.get("distance"),
-                    transcript=transcript,
-                    is_suggestion=(match_result["status"] == "suggest"),
-                    is_low_quality=is_low_quality,
-                )
-                segments_stored += 1
+                emb_bytes = vector_to_bytes(seg["embedding"]) if seg["embedding"] else None
+
+                # ── Update mode: check for an existing segment at this timecode ──
+                existing = None
+                if update_mode:
+                    existing = get_existing_segment(
+                        conn, series_name, episode_title,
+                        seg["start_ms"], seg["end_ms"],
+                    )
+
+                if existing is not None:
+                    # Preserve any manual identity assignment the user made; only
+                    # refresh auto-detected (non-manual) assignments.
+                    # A segment is considered manually assigned when is_suggestion
+                    # was FALSE and identity_id was set – meaning the user confirmed
+                    # or assigned it via the Web UI.
+                    has_manual = (
+                        existing["identity_id"] is not None
+                        and not existing["is_suggestion"]
+                    )
+                    if not has_manual:
+                        # No manual assignment – safe to overwrite with fresh match
+                        update_segment_match(
+                            conn,
+                            segment_id=existing["id"],
+                            identity_id=match_result.get("identity_id"),
+                            matched_sample_id=match_result.get("sample_id"),
+                            match_distance=match_result.get("distance"),
+                            is_suggestion=(match_result["status"] == "suggest"),
+                            embedding=emb_bytes,
+                            transcript=transcript,
+                            is_low_quality=is_low_quality,
+                        )
+                        segments_updated += 1
+                        logger.debug(
+                            "[%s–%s] updated existing segment %s",
+                            seg["start_ms"], seg["end_ms"], existing["id"],
+                        )
+                    else:
+                        logger.debug(
+                            "[%s–%s] segment %s has manual assignment – skipped",
+                            seg["start_ms"], seg["end_ms"], existing["id"],
+                        )
+                else:
+                    upsert_segment(
+                        conn,
+                        series_name=series_name,
+                        episode_title=episode_title,
+                        video_path=video_path,
+                        start_ms=seg["start_ms"],
+                        end_ms=seg["end_ms"],
+                        speaker_label=seg["speaker_label"],
+                        embedding=emb_bytes,
+                        identity_id=match_result.get("identity_id"),
+                        matched_sample_id=match_result.get("sample_id"),
+                        match_distance=match_result.get("distance"),
+                        transcript=transcript,
+                        is_suggestion=(match_result["status"] == "suggest"),
+                        is_low_quality=is_low_quality,
+                    )
+                    segments_stored += 1
+
         finally:
             conn.close()
 
@@ -527,10 +703,17 @@ def scan_video(
             logger.error("Diarization failed: %s", producer_exc[0])
             raise producer_exc[0]
 
-        logger.info("Scan complete – %d segments stored.", segments_stored)
+        logger.info(
+            "Scan complete – %d new segments stored, %d existing segments updated.",
+            segments_stored, segments_updated,
+        )
     finally:
-        if os.path.exists(audio_path):
-            os.unlink(audio_path)
+        for path in (audio_path, clean_audio_path):
+            try:
+                if os.path.exists(path):
+                    os.unlink(path)
+            except OSError:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -564,6 +747,8 @@ def main() -> None:
                         help="Skip Whisper transcription (faster)")
     parser.add_argument("--model", default="large-v3-turbo",
                         help="Whisper model size (default: large-v3-turbo)")
+    parser.add_argument("--no-update-mode", action="store_true",
+                        help="Disable update mode (always insert new rows, never deduplicate)")
     args = parser.parse_args()
 
     # Auto-detect episode from filename when not provided explicitly
@@ -576,6 +761,7 @@ def main() -> None:
         episode_title=episode_title,
         transcribe=not args.no_transcribe,
         model_size=args.model,
+        update_mode=not args.no_update_mode,
     )
 
 

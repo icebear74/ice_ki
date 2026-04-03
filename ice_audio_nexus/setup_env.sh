@@ -92,9 +92,9 @@ pip uninstall -y torchcodec 2>/dev/null || true
 echo -e "${GREEN}✓ KI-Pakete installiert${RESET}"
 
 # ---------------------------------------------------------------------------
-# 4. Web-UI & DB packages
+# 4. Web-UI & DB packages + image processing + audio enhancement
 # ---------------------------------------------------------------------------
-echo -e "\n${CYAN}🌐 Schritt 4: Web-UI-Pakete installieren...${RESET}"
+echo -e "\n${CYAN}�� Schritt 4: Web-UI-Pakete installieren...${RESET}"
 pip install \
     "fastapi[standard]" \
     "uvicorn[standard]" \
@@ -103,8 +103,14 @@ pip install \
     aiofiles \
     "python-dotenv" \
     mariadb \
+    "Pillow>=10.0.0" \
     --quiet
-echo -e "${GREEN}✓ Web-UI-Pakete installiert${RESET}"
+
+# deepfilternet – audio noise suppression (Pascal GPU / CUDA 11.8 compatible)
+# Uses the PyTorch version installed in step 5, so install before the torch pin.
+pip install deepfilternet --quiet
+
+echo -e "${GREEN}✓ Web-UI-Pakete + Pillow + DeepFilterNet installiert${RESET}"
 
 # ---------------------------------------------------------------------------
 # 5. Force-install compatible torch (CUDA 11.8 – Pascal SM 6.0/6.1 support)

@@ -332,6 +332,45 @@
     .section-title { font-size: 11px; color: var(--text-muted); text-transform: uppercase;
                      letter-spacing: .5px; margin-bottom: 8px; }
     .empty-state   { text-align: center; color: var(--text-muted); padding: 32px; font-size: 13px; }
+
+    /* Casting tab entities */
+    .entity-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 6px 8px;
+      border-bottom: 1px solid var(--border);
+      gap: 8px;
+    }
+    .entity-row img.thumb {
+      width: 36px; height: 36px;
+      border-radius: 50%;
+      object-fit: cover;
+      border: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .entity-row .thumb-placeholder {
+      width: 36px; height: 36px;
+      border-radius: 50%;
+      background: var(--bg-hover);
+      border: 1px dashed var(--border);
+      flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 16px;
+    }
+    .entity-row .ent-info { flex: 1; min-width: 0; }
+    .entity-row .ent-name { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .entity-row .ent-desc { font-size: 11px; color: var(--text-muted); }
+    .entity-row .ent-actions { display: flex; gap: 4px; flex-shrink: 0; }
+    .casting-row {
+      padding: 6px 8px;
+      border-bottom: 1px solid var(--border);
+      font-size: 12px;
+    }
+    .casting-row .cast-line { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .cast-badge { padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 600; background: rgba(88,166,255,.15); color: var(--accent); }
+    /* Looping segment highlight */
+    .player-wrap.looping { outline: 2px solid var(--accent); }
   </style>
 </head>
 <body>
@@ -405,6 +444,7 @@
     <div class="sidebar-tabs">
       <button class="active" onclick="switchTab('segments', this)">Segmente</button>
       <button onclick="switchTab('identities', this)">Identitäten</button>
+      <button onclick="switchTab('casting', this)">Besetzung</button>
     </div>
 
     <!-- Tab: Segmente -->
@@ -432,6 +472,67 @@
         <button class="btn btn-primary" style="width:100%" onclick="createIdentity()">+ Anlegen</button>
       </div>
     </div>
+
+    <!-- Tab: Besetzung -->
+    <div id="tab-casting" class="tab-content">
+
+      <!-- Actors -->
+      <div class="section-title">🎭 Sprecher / Schauspieler</div>
+      <div id="actors-list"></div>
+      <div class="new-identity-form" style="margin-top:8px;">
+        <input id="new-actor-name" type="text" placeholder="Name (z.B. Rolf Schult)" />
+        <textarea id="new-actor-desc" placeholder="Beschreibung (optional)" style="min-height:40px;"></textarea>
+        <button class="btn btn-primary" style="width:100%" onclick="createActor()">+ Sprecher anlegen</button>
+      </div>
+
+      <!-- Roles -->
+      <div class="section-title" style="margin-top:14px;">🎬 Rollen / Charaktere</div>
+      <div id="roles-list"></div>
+      <div class="new-identity-form" style="margin-top:8px;">
+        <input id="new-role-name" type="text" placeholder="Name (z.B. Jean-Luc Picard)" />
+        <textarea id="new-role-desc" placeholder="Beschreibung (optional)" style="min-height:40px;"></textarea>
+        <button class="btn btn-primary" style="width:100%" onclick="createRole()">+ Rolle anlegen</button>
+      </div>
+
+      <!-- Productions -->
+      <div class="section-title" style="margin-top:14px;">📺 Produktionen</div>
+      <div id="productions-list"></div>
+      <div class="new-identity-form" style="margin-top:8px;">
+        <input id="new-prod-title" type="text" placeholder="Titel (z.B. Star Trek TNG)" />
+        <div style="display:flex;gap:6px;margin-bottom:6px;">
+          <input id="new-prod-year" type="number" placeholder="Jahr" style="width:80px;" />
+          <select id="new-prod-type" style="flex:1;background:var(--bg-card);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:6px;font-size:12px;">
+            <option value="Series">Serie</option>
+            <option value="Movie">Film</option>
+          </select>
+        </div>
+        <button class="btn btn-primary" style="width:100%" onclick="createProduction()">+ Produktion anlegen</button>
+      </div>
+
+      <!-- Voice Castings -->
+      <div class="section-title" style="margin-top:14px;">🔗 Synchronbesetzung</div>
+      <div id="castings-list"></div>
+      <div class="new-identity-form" style="margin-top:8px;">
+        <select id="cast-prod" style="width:100%;background:var(--bg-card);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:6px;font-size:12px;margin-bottom:6px;">
+          <option value="">— Produktion —</option>
+        </select>
+        <select id="cast-role" style="width:100%;background:var(--bg-card);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:6px;font-size:12px;margin-bottom:6px;">
+          <option value="">— Rolle —</option>
+        </select>
+        <select id="cast-actor" style="width:100%;background:var(--bg-card);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:6px;font-size:12px;margin-bottom:6px;">
+          <option value="">— Schauspieler —</option>
+        </select>
+        <select id="cast-voice-actor" style="width:100%;background:var(--bg-card);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:6px;font-size:12px;margin-bottom:6px;">
+          <option value="">— Synchronsprecher —</option>
+        </select>
+        <div style="display:flex;gap:6px;margin-bottom:6px;align-items:center;">
+          <label style="font-size:11px;color:var(--text-muted);">Sprache:</label>
+          <input id="cast-lang" type="text" value="de" placeholder="de / en / fr …" style="width:60px;background:var(--bg-card);border:1px solid var(--border);color:var(--text);padding:5px 8px;border-radius:6px;font-size:12px;" />
+        </div>
+        <button class="btn btn-primary" style="width:100%" onclick="createCasting()">+ Besetzung hinzufügen</button>
+      </div>
+    </div>
+
   </div>
 </div>
 
@@ -668,6 +769,9 @@ function renderIdentities() {
                 onclick="viewSamples(${id.id}, '${esc(id.name)}')">Samples</button>
         <button class="btn btn-ghost" style="font-size:11px;padding:4px 8px;"
                 onclick="openEditModal(${id.id}, '${esc(id.name)}', '${esc(id.description||'')}')">✏</button>
+        <button class="btn btn-ghost" style="font-size:11px;padding:4px 8px;"
+                title="Supervektor rückgängig – Original-Samples reaktivieren"
+                onclick="revertSupervector(${id.id}, '${esc(id.name)}')">↩</button>
         <button class="btn btn-danger" style="font-size:11px;padding:4px 8px;"
                 onclick="deleteIdentity(${id.id}, '${esc(id.name)}')">🗑</button>
       </div>
@@ -916,27 +1020,68 @@ function segCard(seg) {
 /* -------------------------------------------------------------------- */
 /*  Segment selection: jump to video position + show assignment panel   */
 /* -------------------------------------------------------------------- */
+/* -------------------------------------------------------------------- */
+/*  Segment looping state                                               */
+/* -------------------------------------------------------------------- */
+let _loopSegId   = null;  // ID of segment currently being looped
+let _loopStart   = 0;     // seconds
+let _loopEnd     = 0;     // seconds
+
+function _startLoop(seg) {
+  _loopSegId  = seg.id;
+  _loopStart  = seg.start_ms / 1000;
+  _loopEnd    = seg.end_ms   / 1000;
+  document.querySelector(".player-wrap")?.classList.add("looping");
+  _loadStreamAt(_loopStart);
+}
+
+function _stopLoop() {
+  _loopSegId = null;
+  document.querySelector(".player-wrap")?.classList.remove("looping");
+}
+
+// Hook into the timeupdate event to enforce looping
+player.addEventListener("timeupdate", () => {
+  if (_loopSegId !== null) {
+    const absTime = _hasWebPreview
+      ? player.currentTime
+      : player.currentTime + _streamOffset;
+    if (absTime >= _loopEnd - 0.15) {
+      // Seek back to start of loop segment
+      _loadStreamAt(_loopStart);
+      return;
+    }
+  }
+});
+
 function selectSegment(segId) {
   const seg = segments.find(s => s.id === segId);
   if (!seg) return;
 
-  // ── Jump to the segment start in the video ──────────────────────────
-  if (currentVideoPath) {
-    _loadStreamAt(seg.start_ms / 1000);
-  }
-
   // ── Toggle assignment panel ──────────────────────────────────────────
   const panelEl = document.getElementById("assign-panel-" + segId);
   if (!panelEl) return;
+
   if (panelEl.style.display === "block") {
+    // Clicking an already-open panel closes it and stops the loop
     panelEl.style.display = "none";
+    _stopLoop();
     return;
   }
+
+  // Close any previously open panel and stop its loop
   document.querySelectorAll('[id^="assign-panel-"]').forEach(el => el.style.display = "none");
+  _stopLoop();
+
   document.querySelectorAll(".speaker-card").forEach(c => c.classList.remove("active"));
   document.getElementById("seg-card-" + segId)?.classList.add("active");
   panelEl.style.display = "block";
   panelEl.innerHTML = buildAssignPanel(seg);
+
+  // ── Start looping this segment in the video ──────────────────────────
+  if (currentVideoPath) {
+    _startLoop(seg);
+  }
 }
 
 function buildAssignPanel(seg) {
@@ -983,12 +1128,27 @@ function buildAssignPanel(seg) {
       <div style="margin-top:4px;font-size:11px;color:var(--text-muted)">— oder neue Identität —</div>
       <input id="ap-newname-${seg.id}" type="text" placeholder="Neuer Name" />
 
+      <div class="row" style="margin-top:6px;">
+        <input type="checkbox" id="ap-tts-${seg.id}" />
+        <label for="ap-tts-${seg.id}">
+          TTS-Snippet extrahieren (16 kHz WAV)<br>
+          <span style="font-size:10px;color:var(--text-muted)">
+            (speichert Audio-Ausschnitt für TTS-Training)
+          </span>
+        </label>
+      </div>
+
       <div class="row" style="margin-top:8px;">
         <button class="btn btn-success" onclick="applyAssign(${seg.id})">✓ Zuweisen</button>
-        <button class="btn btn-ghost"   onclick="document.getElementById('assign-panel-${seg.id}').style.display='none'">Abbrechen</button>
+        <button class="btn btn-ghost"   onclick="cancelAssign(${seg.id})">Abbrechen</button>
       </div>
     </div>
   `;
+}
+
+function cancelAssign(segId) {
+  document.getElementById("assign-panel-" + segId).style.display = "none";
+  _stopLoop();
 }
 
 async function applyAssign(segId) {
@@ -1014,11 +1174,14 @@ async function applyAssign(segId) {
     if (!confirmed) return;
   }
 
+  const addTts = document.getElementById("ap-tts-" + segId)?.checked;
+
   const body = {
     identity_id: identityId,
     new_name:    newName  || undefined,
     context:     context  || "",
     add_sample:  addSample,
+    extract_tts: addTts && addSample,
     segment_id:  segId,
   };
 
@@ -1029,6 +1192,7 @@ async function applyAssign(segId) {
   });
 
   if (resp.ok) {
+    _stopLoop();
     toast("Zugewiesen ✓");
     await fetchSegments();
     await loadIdentities();
@@ -1154,6 +1318,276 @@ function esc(str) {
     .replace(/</g,"&lt;")
     .replace(/>/g,"&gt;")
     .replace(/"/g,"&quot;");
+}
+
+/* -------------------------------------------------------------------- */
+/*  Revert supervector                                                   */
+/* -------------------------------------------------------------------- */
+async function revertSupervector(id, name) {
+  if (!confirm(`Supervektor für „${name}" rückgängig machen?
+
+Der Supervektor wird gelöscht und alle Original-Samples werden reaktiviert. Du kannst dann schlechte Samples entfernen und den Supervektor neu berechnen.`)) return;
+  const resp = await fetch(`/api/identities/${id}/revert_supervector`, { method: "POST" });
+  if (resp.ok) {
+    const data = await resp.json();
+    toast(`Supervektor rückgängig – ${data.reactivated_samples} Sample(s) reaktiviert ✓`);
+    await loadIdentities();
+  } else {
+    const err = await resp.json().catch(() => ({}));
+    toast("Fehler: " + (err.detail || resp.statusText), "error");
+  }
+}
+
+/* -------------------------------------------------------------------- */
+/*  Casting tab: actors, roles, productions, voice castings             */
+/* -------------------------------------------------------------------- */
+let actors      = [];
+let roles       = [];
+let productions = [];
+let castings    = [];
+
+async function loadCastingData() {
+  [actors, roles, productions, castings] = await Promise.all([
+    fetch("/api/actors").then(r=>r.json()).catch(()=>[]),
+    fetch("/api/roles").then(r=>r.json()).catch(()=>[]),
+    fetch("/api/productions").then(r=>r.json()).catch(()=>[]),
+    fetch("/api/voice_castings").then(r=>r.json()).catch(()=>[]),
+  ]);
+  renderActors();
+  renderRoles();
+  renderProductions();
+  renderCastings();
+  _fillCastingDropdowns();
+}
+
+function _fillCastingDropdowns() {
+  const setOpts = (selId, items, labelFn) => {
+    const sel = document.getElementById(selId);
+    if (!sel) return;
+    const cur = sel.value;
+    sel.innerHTML = `<option value="">— ${sel.querySelector("option")?.textContent?.split("—")[1]?.trim()||""} —</option>`;
+    items.forEach(it => {
+      const opt = document.createElement("option");
+      opt.value = it.id;
+      opt.textContent = labelFn(it);
+      sel.appendChild(opt);
+    });
+    sel.value = cur;
+  };
+  setOpts("cast-prod",        productions, p => `${p.title}${p.year?" ("+p.year+")":""}`);
+  setOpts("cast-role",        roles,       r => r.name);
+  setOpts("cast-actor",       actors,      a => a.name);
+  setOpts("cast-voice-actor", actors,      a => a.name);
+}
+
+function _thumbHtml(id, type, name) {
+  return `<img class="thumb" src="/api/${type}s/${id}/image"
+               onerror="this.style.display='none';this.nextElementSibling.style.display='flex';"
+               alt="${esc(name)}" />
+          <div class="thumb-placeholder" style="display:none;">${esc(name.charAt(0))}</div>`;
+}
+
+function renderActors() {
+  const el = document.getElementById("actors-list");
+  if (!el) return;
+  if (!actors.length) { el.innerHTML = '<div class="empty-state">Noch keine Sprecher.</div>'; return; }
+  el.innerHTML = actors.map(a => `
+    <div class="entity-row">
+      ${_thumbHtml(a.id, "actor", a.name)}
+      <div class="ent-info">
+        <div class="ent-name">${esc(a.name)}</div>
+        <div class="ent-desc">${esc(a.description||"")}</div>
+      </div>
+      <div class="ent-actions">
+        <label class="btn btn-ghost" style="font-size:10px;padding:3px 6px;cursor:pointer;" title="Bild hochladen">
+          🖼<input type="file" accept="image/*" style="display:none" onchange="uploadImage('actor',${a.id},this)" />
+        </label>
+        <button class="btn btn-danger" style="font-size:10px;padding:3px 6px;"
+                onclick="deleteActor(${a.id},'${esc(a.name)}')">🗑</button>
+      </div>
+    </div>`).join("");
+}
+
+function renderRoles() {
+  const el = document.getElementById("roles-list");
+  if (!el) return;
+  if (!roles.length) { el.innerHTML = '<div class="empty-state">Noch keine Rollen.</div>'; return; }
+  el.innerHTML = roles.map(r => `
+    <div class="entity-row">
+      ${_thumbHtml(r.id, "role", r.name)}
+      <div class="ent-info">
+        <div class="ent-name">${esc(r.name)}</div>
+        <div class="ent-desc">${esc(r.description||"")}</div>
+      </div>
+      <div class="ent-actions">
+        <label class="btn btn-ghost" style="font-size:10px;padding:3px 6px;cursor:pointer;" title="Bild hochladen">
+          🖼<input type="file" accept="image/*" style="display:none" onchange="uploadImage('role',${r.id},this)" />
+        </label>
+        <button class="btn btn-danger" style="font-size:10px;padding:3px 6px;"
+                onclick="deleteRole(${r.id},'${esc(r.name)}')">🗑</button>
+      </div>
+    </div>`).join("");
+}
+
+function renderProductions() {
+  const el = document.getElementById("productions-list");
+  if (!el) return;
+  if (!productions.length) { el.innerHTML = '<div class="empty-state">Noch keine Produktionen.</div>'; return; }
+  el.innerHTML = productions.map(p => `
+    <div class="entity-row">
+      <div class="thumb-placeholder">📺</div>
+      <div class="ent-info">
+        <div class="ent-name">${esc(p.title)}</div>
+        <div class="ent-desc">${p.type==="Series"?"Serie":"Film"}${p.year?" · "+p.year:""}</div>
+      </div>
+      <div class="ent-actions">
+        <button class="btn btn-danger" style="font-size:10px;padding:3px 6px;"
+                onclick="deleteProduction(${p.id},'${esc(p.title)}')">🗑</button>
+      </div>
+    </div>`).join("");
+}
+
+function renderCastings() {
+  const el = document.getElementById("castings-list");
+  if (!el) return;
+  if (!castings.length) { el.innerHTML = '<div class="empty-state">Noch keine Besetzungen.</div>'; return; }
+  el.innerHTML = castings.map(c => `
+    <div class="casting-row">
+      <div class="cast-line">
+        <span class="cast-badge">${esc(c.language.toUpperCase())}</span>
+        <strong>${esc(c.production_title)}</strong> ·
+        <span style="color:var(--accent)">${esc(c.role_name)}</span> ·
+        Sprecher: <strong>${esc(c.voice_actor_name)}</strong>
+        ${c.actor_name !== c.voice_actor_name ? `<span style="color:var(--text-muted);font-size:10px;">(orig. ${esc(c.actor_name)})</span>` : ""}
+        <button class="btn btn-ghost" style="font-size:10px;padding:2px 5px;margin-left:auto;"
+                onclick="deleteCasting(${c.id})">🗑</button>
+      </div>
+    </div>`).join("");
+}
+
+async function uploadImage(type, id, input) {
+  if (!input.files.length) return;
+  const fd = new FormData();
+  fd.append("file", input.files[0]);
+  const resp = await fetch(`/api/${type}s/${id}/image`, { method: "POST", body: fd });
+  if (resp.ok) {
+    toast(`Bild hochgeladen ✓`);
+    // Force browser to reload the image by appending a timestamp
+    document.querySelectorAll(`img.thumb[src^="/api/${type}s/${id}/image"]`)
+      .forEach(img => { img.src = `/api/${type}s/${id}/image?t=${Date.now()}`; img.style.display=""; });
+    await loadCastingData();
+  } else {
+    toast("Bild-Upload fehlgeschlagen.", "error");
+  }
+  input.value = "";
+}
+
+async function createActor() {
+  const name = document.getElementById("new-actor-name").value.trim();
+  const desc = document.getElementById("new-actor-desc").value.trim();
+  if (!name) { toast("Bitte einen Namen eingeben.", "warn"); return; }
+  const resp = await fetch("/api/actors", {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({name, description: desc}),
+  });
+  if (resp.ok) {
+    toast("Sprecher angelegt: " + name);
+    document.getElementById("new-actor-name").value = "";
+    document.getElementById("new-actor-desc").value = "";
+    await loadCastingData();
+  } else { toast("Fehler beim Anlegen.", "error"); }
+}
+
+async function deleteActor(id, name) {
+  if (!confirm(`Sprecher „${name}" löschen?`)) return;
+  const resp = await fetch(`/api/actors/${id}`, { method:"DELETE" });
+  if (resp.ok) { toast(`Sprecher „${name}" gelöscht.`); await loadCastingData(); }
+  else { toast("Fehler.", "error"); }
+}
+
+async function createRole() {
+  const name = document.getElementById("new-role-name").value.trim();
+  const desc = document.getElementById("new-role-desc").value.trim();
+  if (!name) { toast("Bitte einen Namen eingeben.", "warn"); return; }
+  const resp = await fetch("/api/roles", {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({name, description: desc}),
+  });
+  if (resp.ok) {
+    toast("Rolle angelegt: " + name);
+    document.getElementById("new-role-name").value = "";
+    document.getElementById("new-role-desc").value = "";
+    await loadCastingData();
+  } else { toast("Fehler beim Anlegen.", "error"); }
+}
+
+async function deleteRole(id, name) {
+  if (!confirm(`Rolle „${name}" löschen?`)) return;
+  const resp = await fetch(`/api/roles/${id}`, { method:"DELETE" });
+  if (resp.ok) { toast(`Rolle „${name}" gelöscht.`); await loadCastingData(); }
+  else { toast("Fehler.", "error"); }
+}
+
+async function createProduction() {
+  const title = document.getElementById("new-prod-title").value.trim();
+  const year  = parseInt(document.getElementById("new-prod-year").value) || null;
+  const type  = document.getElementById("new-prod-type").value;
+  if (!title) { toast("Bitte einen Titel eingeben.", "warn"); return; }
+  const resp = await fetch("/api/productions", {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({title, year, type}),
+  });
+  if (resp.ok) {
+    toast("Produktion angelegt: " + title);
+    document.getElementById("new-prod-title").value = "";
+    document.getElementById("new-prod-year").value  = "";
+    await loadCastingData();
+  } else { toast("Fehler beim Anlegen.", "error"); }
+}
+
+async function deleteProduction(id, title) {
+  if (!confirm(`Produktion „${title}" und alle zugehörigen Besetzungen löschen?`)) return;
+  const resp = await fetch(`/api/productions/${id}`, { method:"DELETE" });
+  if (resp.ok) { toast(`Produktion „${title}" gelöscht.`); await loadCastingData(); }
+  else { toast("Fehler.", "error"); }
+}
+
+async function createCasting() {
+  const prodId    = parseInt(document.getElementById("cast-prod").value);
+  const roleId    = parseInt(document.getElementById("cast-role").value);
+  const actorId   = parseInt(document.getElementById("cast-actor").value);
+  const voiceId   = parseInt(document.getElementById("cast-voice-actor").value);
+  const lang      = document.getElementById("cast-lang").value.trim() || "de";
+  if (!prodId || !roleId || !actorId || !voiceId) {
+    toast("Bitte alle Felder ausfüllen.", "warn"); return;
+  }
+  const resp = await fetch("/api/voice_castings", {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({production_id:prodId, role_id:roleId,
+                          actor_id:actorId, voice_actor_id:voiceId, language:lang}),
+  });
+  if (resp.ok) { toast("Besetzung hinzugefügt ✓"); await loadCastingData(); }
+  else {
+    const err = await resp.json().catch(()=>({}));
+    toast("Fehler: " + (err.detail || resp.statusText), "error");
+  }
+}
+
+async function deleteCasting(id) {
+  if (!confirm("Besetzung löschen?")) return;
+  const resp = await fetch(`/api/voice_castings/${id}`, { method:"DELETE" });
+  if (resp.ok) { toast("Besetzung gelöscht."); await loadCastingData(); }
+  else { toast("Fehler.", "error"); }
+}
+
+/* Patch switchTab to load casting data on first visit */
+const _origSwitchTab = switchTab;
+function switchTab(name, btn) {
+  _origSwitchTab(name, btn);
+  if (name === "casting" && !castings._loaded) {
+    castings._loaded = true;
+    loadCastingData();
+  }
 }
 
 /* -------------------------------------------------------------------- */
