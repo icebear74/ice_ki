@@ -104,17 +104,12 @@ if VIDEO_TMP_DIR:
 
 def extract_audio(video_path: str, output_wav: str) -> None:
     """
-    Extract a mono PCM WAV from the video at its **native audio sample rate**
-    using FFmpeg CUDA acceleration.
+    Extract a mono 48 kHz PCM WAV from the video using FFmpeg CUDA acceleration.
 
-    Preserving the original sample rate keeps the maximum audio fidelity for
-    DeepFilterNet noise suppression, which runs at 48 kHz anyway (it will be
-    upsampled to 48 kHz before being passed to DeepFilterNet and then
-    downsampled to 16 kHz afterwards for Whisper / pyannote).
-
-    When DeepFilterNet is disabled the audio is still fed into the pipeline at
-    its native rate; ``scan_video`` reads the actual sample rate from the file
-    via soundfile and uses that for segment slicing.
+    48 kHz is DeepFilterNet's native rate, so ``apply_deepfilter`` can feed
+    the file directly to ``load_audio`` without any intermediate resampling
+    step.  When DeepFilterNet is disabled ``_fallback_to_16k`` downsamples
+    from 48 kHz to 16 kHz before handing audio to Whisper / pyannote.
     """
     cmd = [
         "ffmpeg", "-y",
@@ -122,10 +117,11 @@ def extract_audio(video_path: str, output_wav: str) -> None:
         "-i", video_path,
         "-vn",                         # drop video stream
         "-acodec", "pcm_s16le",        # PCM 16-bit little-endian
-        "-ac", "1",                    # mono – keep native sample rate
+        "-ac", "1",                    # mono
+        "-ar", "48000",                # 48 kHz – DeepFilterNet's native rate
         output_wav,
     ]
-    logger.info("Extracting audio (native rate): %s", " ".join(cmd))
+    logger.info("Extracting audio (48 kHz): %s", " ".join(cmd))
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(f"FFmpeg failed:\n{result.stderr}")
@@ -143,19 +139,19 @@ def apply_deepfilter(input_wav: str, output_wav: str) -> None:
     cleaned audio to *output_wav* at 16 kHz (the standard rate for Whisper
     and pyannote.audio).
 
-    Quality-first pipeline:
+    *input_wav* is expected at **48 kHz** (DeepFilterNet's native rate), which
+    is what ``extract_audio`` produces.  This means ``load_audio`` performs no
+    internal torchaudio resampling, avoiding the non-contiguous CUDA tensors
+    that cuDNN on Pascal GPUs (P4/P100, sm_60) rejects with
+    CUDNN_STATUS_NOT_SUPPORTED.
 
-    1. *input_wav* is expected at its **native** sample rate (no prior
-       downsampling).  Preserving full bandwidth before noise suppression
-       gives DeepFilterNet the most signal to work with.
-    2. FFmpeg upsamples to 48 kHz – DeepFilterNet's native rate – so that
-       ``load_audio`` inside DeepFilterNet performs **no** internal torchaudio
-       resampling.  torchaudio's sinc_interpolation resampler produces
-       non-contiguous CUDA tensors that cuDNN on Pascal GPUs (P4/P100,
-       compute capability 6.x) rejects with CUDNN_STATUS_NOT_SUPPORTED.
-    3. ``enhance()`` runs fully on GPU at 48 kHz.
-    4. The enhanced 48-kHz audio is saved to a temp file, then FFmpeg
-       downsamples to 16 kHz for Whisper / pyannote (the pipeline standard).
+    Pipeline:
+
+    1. ``load_audio`` reads the 48 kHz file; ``.contiguous()`` ensures a
+       compact memory layout for cuDNN.
+    2. ``enhance()`` runs fully on GPU at 48 kHz.
+    3. FFmpeg downsamples the enhanced audio to 16 kHz for downstream
+       consumers (Whisper / pyannote).
 
     Falls back silently to a raw 16-kHz copy if the library is missing or
     processing fails, so the rest of the pipeline is never blocked.
@@ -171,46 +167,27 @@ def apply_deepfilter(input_wav: str, output_wav: str) -> None:
         _fallback_to_16k(input_wav, output_wav)
         return
 
-    tmp_48k: str | None = None
     tmp_enhanced: str | None = None
     try:
-        # ── Step 1: upsample to 48 kHz so DeepFilterNet needs no resampling ──
-        tmp_fd, tmp_48k = tempfile.mkstemp(suffix=".48k.wav", dir=AUDIO_TMP_DIR)
-        os.close(tmp_fd)
-        result = subprocess.run(
-            [
-                "ffmpeg", "-y", "-i", input_wav,
-                "-ar", "48000", "-ac", "1",
-                "-acodec", "pcm_s16le",
-                tmp_48k,
-            ],
-            capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"FFmpeg upsample to 48 kHz failed:\n{result.stderr}")
-
-        # ── Step 2: run DeepFilterNet on the native-rate WAV (no resampling) ──
+        # ── Step 1: run DeepFilterNet on the 48 kHz WAV (no resampling) ───────
         device = torch.device(DEEPFILTER_DEVICE if torch.cuda.is_available() else "cpu")
 
         model, df_state, _ = init_df()
         model = model.to(device)
 
-        # load_audio with sr=df_state.sr() reads the 48 kHz file without any
-        # internal torchaudio resampling, but the WAV reader may still return
-        # a non-contiguous tensor (e.g. due to stride layout after mono
-        # channel selection).  .contiguous() forces a compact memory layout
-        # which is required for cuDNN on Pascal GPUs (sm_60).
-        audio, sr = load_audio(tmp_48k, sr=df_state.sr())
+        # FFmpeg writes a standard contiguous PCM WAV, but .contiguous() is a
+        # no-op safety measure for any edge-case stride layout.
+        audio, sr = load_audio(input_wav, sr=df_state.sr())
         audio = audio.contiguous()
         enhanced = enhance(model, df_state, audio)
 
-        # Save enhanced audio at 48 kHz to a second temp file.
-        tmp_fd2, tmp_enhanced = tempfile.mkstemp(suffix=".enhanced.wav", dir=AUDIO_TMP_DIR)
-        os.close(tmp_fd2)
+        # Save enhanced audio at 48 kHz to a temp file.
+        tmp_fd, tmp_enhanced = tempfile.mkstemp(suffix=".enhanced.wav", dir=AUDIO_TMP_DIR)
+        os.close(tmp_fd)
         save_audio(tmp_enhanced, enhanced, sr)
 
-        # ── Step 3: downsample to 16 kHz for Whisper / pyannote ──────────────
-        result2 = subprocess.run(
+        # ── Step 2: downsample to 16 kHz for Whisper / pyannote ──────────────
+        result = subprocess.run(
             [
                 "ffmpeg", "-y", "-i", tmp_enhanced,
                 "-ar", "16000", "-ac", "1",
@@ -219,23 +196,22 @@ def apply_deepfilter(input_wav: str, output_wav: str) -> None:
             ],
             capture_output=True, text=True,
         )
-        if result2.returncode != 0:
-            raise RuntimeError(f"FFmpeg downsample to 16 kHz failed:\n{result2.stderr}")
+        if result.returncode != 0:
+            raise RuntimeError(f"FFmpeg downsample to 16 kHz failed:\n{result.stderr}")
 
         logger.info(
-            "DeepFilterNet applied on GPU (native→48kHz→16kHz): %s → %s",
+            "DeepFilterNet applied on GPU (48kHz→16kHz): %s → %s",
             input_wav, output_wav,
         )
     except Exception as exc:
         logger.warning("DeepFilterNet processing failed (non-fatal): %s", exc)
         _fallback_to_16k(input_wav, output_wav)
     finally:
-        for tmp in (tmp_48k, tmp_enhanced):
-            if tmp and os.path.exists(tmp):
-                try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
+        if tmp_enhanced and os.path.exists(tmp_enhanced):
+            try:
+                os.unlink(tmp_enhanced)
+            except OSError:
+                pass
 
 
 def _fallback_to_16k(input_wav: str, output_wav: str) -> None:
