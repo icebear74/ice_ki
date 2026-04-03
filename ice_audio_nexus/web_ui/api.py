@@ -487,6 +487,14 @@ def _extract_tts_snippet(
     if identity is None:
         return None
 
+    # Validate the video path via the same allowlist used by the streaming
+    # endpoints – this prevents command-line injection from a manipulated DB value.
+    try:
+        safe_video_path = str(_resolve_video_path(video_path))
+    except HTTPException:
+        logger.warning("TTS extraction skipped – video path not allowed: %s", video_path)
+        return None
+
     # Use identity name (sanitised) as folder name
     actor_name = re.sub(r'[^\w\-_ ]', '_', identity["name"]).strip()
     ctx_part   = re.sub(r'[^\w\-_ ]', '_', context or "clip").strip() or "clip"
@@ -502,7 +510,7 @@ def _extract_tts_snippet(
         "ffmpeg", "-y",
         "-ss", f"{start_s:.3f}",
         "-to", f"{end_s:.3f}",
-        "-i", video_path,
+        "-i", safe_video_path,
         "-vn",
         "-acodec", "pcm_s16le",
         "-ar", "16000",

@@ -1360,12 +1360,19 @@ async function loadCastingData() {
   _fillCastingDropdowns();
 }
 
+const _CAST_PLACEHOLDER = {
+  "cast-prod":        "Produktion",
+  "cast-role":        "Rolle",
+  "cast-actor":       "Schauspieler",
+  "cast-voice-actor": "Synchronsprecher",
+};
+
 function _fillCastingDropdowns() {
   const setOpts = (selId, items, labelFn) => {
     const sel = document.getElementById(selId);
     if (!sel) return;
     const cur = sel.value;
-    sel.innerHTML = `<option value="">— ${sel.querySelector("option")?.textContent?.split("—")[1]?.trim()||""} —</option>`;
+    sel.innerHTML = `<option value="">— ${_CAST_PLACEHOLDER[selId] || ""} —</option>`;
     items.forEach(it => {
       const opt = document.createElement("option");
       opt.value = it.id;

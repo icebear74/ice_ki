@@ -135,7 +135,6 @@ def apply_deepfilter(input_wav: str, output_wav: str) -> None:
     try:
         # Use the GPU that handles diarization so we stay on the P4
         device_str = DEEPFILTER_DEVICE
-        import torch
         device = torch.device(device_str if torch.cuda.is_available() else "cpu")
 
         # init_df returns (model, df_state, suffix)
