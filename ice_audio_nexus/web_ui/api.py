@@ -1072,7 +1072,7 @@ def api_probe(path: str) -> JSONResponse:
     try:
         result = subprocess.run(
             [
-                "ffprobe", "-v", "quiet",
+                "ffprobe", "-v", "error",
                 "-print_format", "json",
                 "-show_format",
                 str(candidate),

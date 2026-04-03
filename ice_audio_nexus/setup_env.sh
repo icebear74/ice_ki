@@ -65,7 +65,7 @@ if [ -d "venv" ]; then
 fi
 "$PY_BIN" -m venv venv
 source venv/bin/activate
-pip install --upgrade pip setuptools wheel --quiet
+pip install --upgrade pip setuptools wheel
 echo -e "${GREEN}✓ venv bereit: $(python --version)${RESET}"
 
 # ---------------------------------------------------------------------------
@@ -75,16 +75,16 @@ echo -e "${GREEN}✓ venv bereit: $(python --version)${RESET}"
 echo -e "\n${CYAN}🤖 Schritt 3: KI-Pakete installieren (torch kommt danach)...${RESET}"
 
 # numpy<2 must be pinned before anything else pulls in 2.x
-pip install "numpy<2.0.0" --quiet
+pip install "numpy<2.0.0"
 
 # huggingface_hub<0.25 keeps use_auth_token support for pyannote 3.1.1
-pip install "huggingface_hub<0.25.0" --quiet
+pip install "huggingface_hub<0.25.0"
 
 # pyannote.audio 3.1.1 – stable on numpy<2 + old torch
-pip install "pyannote.audio==3.1.1" --quiet
+pip install "pyannote.audio==3.1.1"
 
 # faster-whisper + audio helpers
-pip install faster-whisper librosa soundfile audioread --quiet
+pip install faster-whisper librosa soundfile audioread
 
 # Remove torchcodec – it requires CUDA 12.x+ and breaks Pascal cards
 pip uninstall -y torchcodec 2>/dev/null || true
@@ -103,12 +103,18 @@ pip install \
     aiofiles \
     "python-dotenv" \
     mariadb \
-    "Pillow>=10.0.0" \
-    --quiet
+    "Pillow>=10.0.0"
 
 # deepfilternet – audio noise suppression (Pascal GPU / CUDA 11.8 compatible)
 # Uses the PyTorch version installed in step 5, so install before the torch pin.
-pip install deepfilternet --quiet
+# Requires pre-built wheel; skip gracefully if Rust/Cargo is missing (source build would fail).
+echo -e "${CYAN}  → Installiere deepfilternet (nur Binär-Wheel)...${RESET}"
+if pip install deepfilternet --only-binary :all: ; then
+    echo -e "${GREEN}  ✓ deepfilternet installiert${RESET}"
+else
+    echo -e "${YELLOW}  ⚠ deepfilternet konnte nicht installiert werden (kein passendes Wheel für diese Plattform).${RESET}"
+    echo -e "${YELLOW}    Audio-Rauschunterdrückung wird deaktiviert. Rust installieren und erneut versuchen: https://rustup.rs${RESET}"
+fi
 
 echo -e "${GREEN}✓ Web-UI-Pakete + Pillow + DeepFilterNet installiert${RESET}"
 
