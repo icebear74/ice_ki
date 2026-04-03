@@ -86,6 +86,11 @@ DEEPFILTER_ENABLED = os.getenv("DEEPFILTER_ENABLED", "true").lower() in ("1", "t
 # NOTE: DeepFilterNet hardcodes cuda:0 internally; DEEPFILTER_DEVICE is kept for
 # documentation/logging only and has no effect on actual device placement.
 DEEPFILTER_DEVICE  = os.getenv("DEEPFILTER_DEVICE", "cuda:0")
+# Audio is processed in chunks to avoid OOM for long episodes.  The GRU layers
+# in DeepFilterNet3 allocate O(frames) VRAM; a 21-minute episode at 48 kHz
+# needs ~10 GiB in one pass.  30-second chunks keep peak VRAM under ~1 GiB per
+# chunk while the model weights stay loaded between chunks.
+DEEPFILTER_CHUNK_SECS = int(os.getenv("DEEPFILTER_CHUNK_SECS", "30"))
 
 # ---------------------------------------------------------------------------
 # Configurable temporary file directories
@@ -185,12 +190,29 @@ def apply_deepfilter(input_wav: str, output_wav: str) -> None:
         audio, sr = load_audio(input_wav, sr=df_state.sr())
         # audio must remain on CPU – DF's Rust-backed df_state.analysis()
         # calls .numpy() on it and will raise if it is on a CUDA device.
+        #
+        # Process in DEEPFILTER_CHUNK_SECS-second chunks to stay within VRAM.
+        # DeepFilterNet3's GRU layers allocate O(frames) memory; a ~21-minute
+        # episode at 48 kHz needs ~10 GiB in one pass which OOMs on the P100.
+        # Chunks keep peak activation memory under ~1 GiB each while the model
+        # weights remain loaded for the full run.
+        #
         # Disable cuDNN for the enhance() call: the P100 (Pascal CC 6.0)
         # does not support the RNN/GRU kernels that DeepFilterNet3 uses,
         # causing CUDNN_STATUS_NOT_SUPPORTED.  The non-cuDNN path is slower
         # but correct on all CUDA architectures.
+        chunk_samples = DEEPFILTER_CHUNK_SECS * sr
+        total_samples = audio.shape[-1]
+        enhanced_parts: list = []
         with torch.backends.cudnn.flags(enabled=False):
-            enhanced = enhance(model, df_state, audio)
+            for offset in range(0, total_samples, chunk_samples):
+                chunk = audio[..., offset : offset + chunk_samples]
+                enh_chunk = enhance(model, df_state, chunk)
+                enhanced_parts.append(enh_chunk.cpu())
+                if cuda_available:
+                    torch.cuda.empty_cache()
+        enhanced = torch.cat(enhanced_parts, dim=-1)
+        del enhanced_parts
 
         # enhance() returns a CPU tensor.
         tmp_fd, tmp_enhanced = tempfile.mkstemp(suffix=".enhanced.wav", dir=AUDIO_TMP_DIR)
@@ -216,8 +238,8 @@ def apply_deepfilter(input_wav: str, output_wav: str) -> None:
             raise RuntimeError(f"FFmpeg downsample to 16 kHz failed:\n{result.stderr}")
 
         logger.info(
-            "DeepFilterNet applied on cuda:0 (48kHz→16kHz): %s → %s",
-            input_wav, output_wav,
+            "DeepFilterNet applied on cuda:0 (48kHz→16kHz, %ds chunks): %s → %s",
+            DEEPFILTER_CHUNK_SECS, input_wav, output_wav,
         )
     except Exception as exc:
         logger.warning("DeepFilterNet processing failed (non-fatal): %s", exc)
