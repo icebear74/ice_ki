@@ -175,11 +175,21 @@ def apply_deepfilter(input_wav: str, output_wav: str) -> None:
         model, df_state, _ = init_df()
         model = model.to(device)
 
-        # FFmpeg writes a standard contiguous PCM WAV, but .contiguous() is a
-        # no-op safety measure for any edge-case stride layout.
         audio, sr = load_audio(input_wav, sr=df_state.sr())
         audio = audio.contiguous()
-        enhanced = enhance(model, df_state, audio)
+
+        # Pascal GPUs (sm_60, e.g. P4/P100) reject non-contiguous CUDA tensors
+        # inside cuDNN kernels that DeepFilterNet's forward pass produces
+        # internally (permute / slice operations leave non-contiguous strides).
+        # Disabling cuDNN for this call forces PyTorch's own fallback kernels
+        # which have no contiguity requirement.  We restore the flag afterwards
+        # so nothing else in the process is affected.
+        _prev_cudnn = torch.backends.cudnn.enabled
+        torch.backends.cudnn.enabled = False
+        try:
+            enhanced = enhance(model, df_state, audio)
+        finally:
+            torch.backends.cudnn.enabled = _prev_cudnn
 
         # Save enhanced audio at 48 kHz to a temp file.
         tmp_fd, tmp_enhanced = tempfile.mkstemp(suffix=".enhanced.wav", dir=AUDIO_TMP_DIR)
