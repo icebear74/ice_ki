@@ -65,7 +65,7 @@ if [ -d "venv" ]; then
 fi
 "$PY_BIN" -m venv venv
 source venv/bin/activate
-pip install --upgrade pip setuptools wheel --quiet
+pip install --upgrade pip setuptools wheel
 echo -e "${GREEN}✓ venv bereit: $(python --version)${RESET}"
 
 # ---------------------------------------------------------------------------
@@ -75,16 +75,19 @@ echo -e "${GREEN}✓ venv bereit: $(python --version)${RESET}"
 echo -e "\n${CYAN}🤖 Schritt 3: KI-Pakete installieren (torch kommt danach)...${RESET}"
 
 # numpy<2 must be pinned before anything else pulls in 2.x
-pip install "numpy<2.0.0" --quiet
+pip install "numpy<2.0.0"
 
 # huggingface_hub<0.25 keeps use_auth_token support for pyannote 3.1.1
-pip install "huggingface_hub<0.25.0" --quiet
+pip install "huggingface_hub<0.25.0"
 
 # pyannote.audio 3.1.1 – stable on numpy<2 + old torch
-pip install "pyannote.audio==3.1.1" --quiet
+pip install "pyannote.audio==3.1.1"
 
 # faster-whisper + audio helpers
-pip install faster-whisper librosa soundfile audioread --quiet
+pip install faster-whisper librosa soundfile audioread
+
+# matplotlib – required by pyannote.audio internally (tasks/segmentation/mixins.py)
+pip install matplotlib
 
 # Remove torchcodec – it requires CUDA 12.x+ and breaks Pascal cards
 pip uninstall -y torchcodec 2>/dev/null || true
@@ -92,9 +95,9 @@ pip uninstall -y torchcodec 2>/dev/null || true
 echo -e "${GREEN}✓ KI-Pakete installiert${RESET}"
 
 # ---------------------------------------------------------------------------
-# 4. Web-UI & DB packages
+# 4. Web-UI & DB packages + image processing + audio enhancement
 # ---------------------------------------------------------------------------
-echo -e "\n${CYAN}🌐 Schritt 4: Web-UI-Pakete installieren...${RESET}"
+echo -e "\n${CYAN}>> Schritt 4: Web-UI-Pakete installieren...${RESET}"
 pip install \
     "fastapi[standard]" \
     "uvicorn[standard]" \
@@ -103,8 +106,36 @@ pip install \
     aiofiles \
     "python-dotenv" \
     mariadb \
-    --quiet
-echo -e "${GREEN}✓ Web-UI-Pakete installiert${RESET}"
+    "Pillow>=10.0.0"
+
+# deepfilternet – audio noise suppression (Pascal GPU / CUDA 11.8 compatible)
+# Uses the PyTorch version installed in step 5, so install before the torch pin.
+# deepfilterlib (dependency of deepfilternet) is written in Rust and requires Cargo
+# when no pre-built wheel is available. Install Rust automatically via rustup if missing.
+echo -e "${CYAN}  → Prüfe Rust/Cargo für deepfilternet...${RESET}"
+if ! command -v cargo &>/dev/null; then
+    echo -e "${YELLOW}  ⚠ Rust/Cargo nicht gefunden – installiere via rustup...${RESET}"
+    if curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path; then
+        # shellcheck disable=SC1090
+        source "$HOME/.cargo/env"
+        echo -e "${GREEN}  ✓ Rust $(rustc --version 2>/dev/null | awk '{print $2}') installiert${RESET}"
+    else
+        echo -e "${RED}  ✗ Rust-Installation fehlgeschlagen. deepfilternet wird übersprungen.${RESET}"
+        echo -e "${YELLOW}    Manuell installieren: https://rustup.rs${RESET}"
+    fi
+else
+    echo -e "${GREEN}  ✓ Rust/Cargo bereits vorhanden ($(cargo --version 2>/dev/null))${RESET}"
+fi
+
+echo -e "${CYAN}  → Installiere deepfilternet...${RESET}"
+if pip install deepfilternet; then
+    echo -e "${GREEN}  ✓ deepfilternet installiert${RESET}"
+else
+    echo -e "${YELLOW}  ⚠ deepfilternet konnte nicht installiert werden.${RESET}"
+    echo -e "${YELLOW}    Audio-Rauschunterdrückung wird deaktiviert.${RESET}"
+fi
+
+echo -e "${GREEN}✓ Web-UI-Pakete + Pillow + DeepFilterNet installiert${RESET}"
 
 # ---------------------------------------------------------------------------
 # 5. Force-install compatible torch (CUDA 11.8 – Pascal SM 6.0/6.1 support)
