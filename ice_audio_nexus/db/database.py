@@ -1031,6 +1031,14 @@ def find_nearest_identity(
                 "sample_id": None, "sample_context": None, "distance": None,
                 "second_distance": None}
 
+    # VEC_DISTANCE_COSINE returns NULL when the stored embedding is malformed.
+    # Filter those rows out so float() never receives None.
+    rows = [r for r in rows if r[4] is not None]
+    if not rows:
+        return {"status": "unknown", "identity_id": None, "identity_name": None,
+                "sample_id": None, "sample_context": None, "distance": None,
+                "second_distance": None}
+
     sample_id, identity_id, identity_name, sample_context, distance = rows[0]
 
     # Find the closest sample that belongs to a *different* identity (runner-up).

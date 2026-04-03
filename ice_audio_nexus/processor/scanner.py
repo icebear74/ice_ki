@@ -273,6 +273,40 @@ def _fallback_to_16k(input_wav: str, output_wav: str) -> None:
         shutil.copy2(input_wav, output_wav)
 
 
+def _probe_duration(path: str) -> float:
+    """Return the duration of *path* in seconds via ffprobe, or 0.0 on error.
+
+    Both the format-level and stream-level durations are checked; the largest
+    value is returned so that containers with a missing or wrong format
+    duration (e.g. MKV files without a segment-duration header) are handled
+    correctly.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-print_format", "json",
+                "-show_format",
+                "-show_streams",
+                path,
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+        import json as _json
+        data = _json.loads(result.stdout)
+        duration = float(data.get("format", {}).get("duration", 0) or 0)
+        for stream in data.get("streams", []):
+            try:
+                s_dur = float(stream.get("duration", 0) or 0)
+                if s_dur > duration:
+                    duration = s_dur
+            except (TypeError, ValueError):
+                pass
+        return duration
+    except Exception:
+        return 0.0
+
+
 def transcode_web_preview(video_path: str, output_mp4: str) -> None:
     """
     Transcode *video_path* to a browser-ready H.264/AAC MP4 file stored at
@@ -284,16 +318,23 @@ def transcode_web_preview(video_path: str, output_mp4: str) -> None:
     stays small.  Audio is kept as stereo AAC 128k so voice sync works
     correctly in the Web UI.
     """
-    # Try GPU-accelerated NVENC first; fall back to CPU libx264 if unavailable.
-    _codec_variants = [
-        ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "28"],
-        ["-c:v", "libx264",    "-preset", "fast", "-crf", "28"],
+    # Each tuple: (extra_input_flags, codec_args)
+    # -hwaccel cuda accelerates decoding on GPU but can silently truncate output
+    # for some codecs/formats on older drivers.  It is therefore only used for
+    # the NVENC variant where the GPU pipeline is already required; the CPU
+    # libx264 fallback uses software decoding to guarantee a full-length output.
+    _codec_variants: list[tuple[list[str], list[str]]] = [
+        (["-hwaccel", "cuda"], ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "28"]),
+        ([],                   ["-c:v", "libx264",    "-preset", "fast", "-crf", "28"]),
     ]
+
+    src_duration = _probe_duration(video_path)
     last_stderr = ""
-    for codec_args in _codec_variants:
+
+    for hw_flags, codec_args in _codec_variants:
         cmd = [
             "ffmpeg", "-y",
-            "-hwaccel", "cuda",                   # GPU-accelerated decoding
+            *hw_flags,
             "-i", video_path,
             *codec_args,
             "-profile:v", "baseline", "-level", "3.1",
@@ -306,15 +347,34 @@ def transcode_web_preview(video_path: str, output_mp4: str) -> None:
             "Transcoding web preview (%s): %s → %s", codec_args[1], video_path, output_mp4
         )
         result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode == 0:
-            logger.info("Web preview ready → %s", output_mp4)
-            return
-        last_stderr = result.stderr
-        logger.warning(
-            "Codec %s failed (will try fallback): %s",
-            codec_args[1],
-            last_stderr.splitlines()[-5:],  # last 5 lines avoids mid-char truncation
-        )
+        if result.returncode != 0:
+            last_stderr = result.stderr
+            logger.warning(
+                "Codec %s failed (will try fallback): %s",
+                codec_args[1],
+                last_stderr.splitlines()[-5:],
+            )
+            continue
+
+        # Guard against silent truncation: verify the output covers at least
+        # 95 % of the source duration.  CUDA decoders can exit with code 0
+        # while having produced only a partial file.
+        if src_duration > 0:
+            out_duration = _probe_duration(output_mp4)
+            if out_duration < src_duration * 0.95:
+                logger.warning(
+                    "Web preview truncated (%.1fs vs %.1fs src); retrying with next codec",
+                    out_duration, src_duration,
+                )
+                try:
+                    os.unlink(output_mp4)
+                except OSError:
+                    pass
+                continue
+
+        logger.info("Web preview ready → %s", output_mp4)
+        return
+
     raise RuntimeError(
         f"FFmpeg web-preview transcode failed for all codec variants:\n{last_stderr}"
     )

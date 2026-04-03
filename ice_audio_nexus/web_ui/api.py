@@ -1099,7 +1099,14 @@ def serve_video_preview(path: str) -> FileResponse:
 
 @app.get("/api/probe")
 def api_probe(path: str) -> JSONResponse:
-    """Return the total duration (seconds) of a video file via ffprobe."""
+    """Return the total duration (seconds) of a video file via ffprobe.
+
+    Both the container-level (format) duration and every stream duration are
+    inspected; the largest value wins.  This is necessary because some
+    containers (e.g. MKV files recorded without a proper segment-duration
+    header) report a wrong or very short format duration while the individual
+    video/audio streams carry the correct full duration.
+    """
     candidate = _resolve_video_path(path)
 
     try:
@@ -1108,6 +1115,7 @@ def api_probe(path: str) -> JSONResponse:
                 "ffprobe", "-v", "error",
                 "-print_format", "json",
                 "-show_format",
+                "-show_streams",
                 str(candidate),
             ],
             capture_output=True,
@@ -1115,7 +1123,17 @@ def api_probe(path: str) -> JSONResponse:
             timeout=15,
         )
         data = json.loads(result.stdout)
-        duration = float(data.get("format", {}).get("duration", 0))
+        # Start with the container-level duration (may be 0 or wrong for MKV).
+        duration = float(data.get("format", {}).get("duration", 0) or 0)
+        # Use the longest stream duration as the authoritative value when the
+        # format duration is absent or shorter.
+        for stream in data.get("streams", []):
+            try:
+                s_dur = float(stream.get("duration", 0) or 0)
+                if s_dur > duration:
+                    duration = s_dur
+            except (TypeError, ValueError):
+                pass
     except Exception as exc:
         logger.warning("ffprobe failed for %s: %s", candidate, exc)
         duration = 0.0

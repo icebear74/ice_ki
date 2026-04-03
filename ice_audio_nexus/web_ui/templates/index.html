@@ -1385,10 +1385,12 @@ player.addEventListener("timeupdate", () => {
 });
 
 player.addEventListener("loadedmetadata", () => {
-  // For a .web.mp4 preview player.duration is finite; use it directly.
+  // For a .web.mp4 preview player.duration is finite; use it.
   // For live FFmpeg streams player.duration is Infinity, so we rely on
   // /api/probe which writes _totalDuration asynchronously.
-  if (isFinite(player.duration) && player.duration > 0) {
+  // Guard against truncated web previews: never let player.duration reduce
+  // an already-known _totalDuration that was obtained from /api/probe.
+  if (isFinite(player.duration) && player.duration > _totalDuration) {
     _totalDuration = player.duration;
     videoDuration  = _totalDuration * 1000;
   }
