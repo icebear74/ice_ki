@@ -164,6 +164,10 @@ def apply_deepfilter(input_wav: str, output_wav: str) -> None:
         model = model.to(device)
 
         audio, sr = load_audio(input_wav, sr=df_state.sr())
+        # Pascal GPUs (P4/P100) require contiguous tensors for cuDNN ops.
+        # After resampling the tensor may be non-contiguous, causing
+        # CUDNN_STATUS_NOT_SUPPORTED.  Make it contiguous before enhance().
+        audio = audio.contiguous()
         enhanced = enhance(model, df_state, audio)
         save_audio(output_wav, enhanced, sr)
         logger.info("DeepFilterNet applied: %s → %s", input_wav, output_wav)
