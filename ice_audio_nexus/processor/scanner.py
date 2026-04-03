@@ -147,11 +147,17 @@ def apply_deepfilter(input_wav: str, output_wav: str) -> None:
     Pipeline:
 
     1. ``load_audio`` reads the 48 kHz file as a CPU float32 tensor.
-    2. ``enhance()`` receives the CPU tensor; DF moves data to the GPU
-       internally (``df_state.analysis`` calls ``.numpy()`` and requires CPU
-       input – passing a CUDA tensor here raises a RuntimeError).
-    3. FFmpeg downsamples the enhanced audio (returned as a CPU tensor by DF)
-       to 16 kHz for downstream consumers (Whisper / pyannote).
+    2. ``init_df()`` loads the model and allocates df_state buffers on
+       whatever CUDA device DF chooses internally.  Attempting to override
+       this via ``torch.cuda.set_device()`` or ``model.to(device)`` causes a
+       cross-device mismatch because df_state STFT buffers remain on the
+       original device.
+    3. ``enhance()`` receives the CPU audio tensor (DF's Rust backend calls
+       ``.numpy()`` on it via ``df_state.analysis``; a CUDA tensor would
+       raise a RuntimeError).  DF manages GPU placement internally and
+       returns a CPU tensor.
+    4. FFmpeg downsamples the enhanced audio to 16 kHz for downstream
+       consumers (Whisper / pyannote).
 
     Falls back silently to a raw 16-kHz copy if the library is missing or
     processing fails, so the rest of the pipeline is never blocked.
@@ -170,37 +176,26 @@ def apply_deepfilter(input_wav: str, output_wav: str) -> None:
     tmp_enhanced: str | None = None
     try:
         # ── Step 1: run DeepFilterNet on the 48 kHz WAV (no resampling) ───────
-        device = torch.device(DEEPFILTER_DEVICE if torch.cuda.is_available() else "cpu")
-
-        # init_df() calls model.to("cuda") internally and resolves "cuda" to
-        # whichever device is currently set as default – which is cuda:0 unless
-        # we tell PyTorch otherwise.  If we later do model.to(cuda:1) only the
-        # model moves; the DF state object keeps its internal STFT buffers on
-        # cuda:0, causing a cross-device error inside enhance().
-        # Fix: set the default device *before* init_df() so the entire state
-        # (model + df_state buffers) is initialised on the correct GPU.
-        if device.type == "cuda":
-            torch.cuda.set_device(device)
-
+        # DeepFilterNet's init_df() picks its own CUDA device internally;
+        # attempting to override it via torch.cuda.set_device() or
+        # model.to(device) causes a cross-device mismatch because the
+        # df_state STFT buffers are already allocated on init_df()'s chosen
+        # device while the model ends up on a different one.
+        # Solution: let DF own its device completely.  The audio tensor must
+        # stay on CPU (DF calls .numpy() on it internally via df_state.analysis).
         model, df_state, _ = init_df()
-        model = model.to(device)
 
         audio, sr = load_audio(input_wav, sr=df_state.sr())
-        # Do NOT move audio to the GPU here.  DeepFilterNet's enhance()
-        # calls df_state.analysis(audio.numpy()) internally, which requires
-        # a CPU tensor.  DF manages GPU memory internally and returns a CPU
-        # tensor from enhance().
-
+        # audio must remain on CPU – DF's Rust-backed df_state.analysis()
+        # calls .numpy() on it and will raise if it is on a CUDA device.
         enhanced = enhance(model, df_state, audio)
 
-        # Save enhanced audio at 48 kHz to a temp file.
-        # enhance() returns a CPU tensor, so no .cpu() conversion needed.
+        # enhance() returns a CPU tensor.
         tmp_fd, tmp_enhanced = tempfile.mkstemp(suffix=".enhanced.wav", dir=AUDIO_TMP_DIR)
         os.close(tmp_fd)
         save_audio(tmp_enhanced, enhanced, sr)
 
-        # Release GPU memory so the diarization pipeline (which runs on the
-        # same device right after) finds the VRAM free.
+        # Release GPU memory before diarization starts.
         del enhanced, audio, model, df_state
         torch.cuda.empty_cache()
 
