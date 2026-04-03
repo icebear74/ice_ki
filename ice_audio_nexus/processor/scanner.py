@@ -307,7 +307,11 @@ def _probe_duration(path: str) -> float:
         return 0.0
 
 
-def transcode_web_preview(video_path: str, output_mp4: str) -> None:
+def transcode_web_preview(
+    video_path: str,
+    output_mp4: str,
+    clean_audio_path: str | None = None,
+) -> None:
     """
     Transcode *video_path* to a browser-ready H.264/AAC MP4 file stored at
     *output_mp4*.  The file is written with -movflags +faststart so the moov
@@ -317,6 +321,9 @@ def transcode_web_preview(video_path: str, output_mp4: str) -> None:
     Output is capped at 480p (width scaled to keep aspect ratio) so the file
     stays small.  Audio is kept as stereo AAC 128k so voice sync works
     correctly in the Web UI.
+
+    *clean_audio_path* is accepted but ignored here (kept for API compatibility);
+    the clean variant is generated separately by :func:`transcode_clean_preview`.
     """
     # Each tuple: (extra_input_flags, codec_args)
     # -hwaccel cuda accelerates decoding on GPU but can silently truncate output
@@ -380,6 +387,55 @@ def transcode_web_preview(video_path: str, output_mp4: str) -> None:
     raise RuntimeError(
         f"FFmpeg web-preview transcode failed for all codec variants:\n{last_stderr}"
     )
+
+
+def transcode_clean_preview(
+    web_preview_path: str,
+    clean_audio_path: str,
+    output_mp4: str,
+) -> None:
+    """
+    Build a second browser-ready preview that carries the DeepFilterNet-cleaned
+    audio instead of the original.
+
+    The video stream is copied bit-for-bit from the already-transcoded
+    *web_preview_path* (no re-encode), so this operation is extremely fast
+    (I/O-bound only).  The clean audio is encoded to AAC 128 k stereo.
+
+    Browsers (including Chromium/Edge) do not implement the
+    ``HTMLMediaElement.audioTracks`` API for embedded ``<video>`` elements.
+    The standard workaround is to serve two separate files and switch
+    ``player.src`` at runtime – this function produces the second file.
+    """
+    src_duration = _probe_duration(web_preview_path)
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", web_preview_path,   # source 0: already-transcoded video (H.264/AAC)
+        "-i", clean_audio_path,   # source 1: DeepFilter cleaned WAV
+        "-map", "0:v:0",          # copy video stream unchanged
+        "-map", "1:a:0",          # replace audio with clean track
+        "-c:v", "copy",           # video: no re-encode
+        "-c:a", "aac", "-b:a", "128k", "-ac", "2",
+        "-movflags", "+faststart",
+        output_mp4,
+    ]
+    logger.info("Transcoding clean preview: %s → %s", web_preview_path, output_mp4)
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"FFmpeg clean-preview transcode failed:\n{result.stderr}"
+        )
+    if src_duration > 0:
+        out_duration = _probe_duration(output_mp4)
+        if out_duration < src_duration * 0.95:
+            try:
+                os.unlink(output_mp4)
+            except OSError:
+                pass
+            raise RuntimeError(
+                f"Clean preview truncated ({out_duration:.1f}s vs {src_duration:.1f}s src)"
+            )
+    logger.info("Clean preview ready → %s", output_mp4)
 
 
 # ---------------------------------------------------------------------------
@@ -643,13 +699,15 @@ def scan_video(
 
     ensure_schema()
 
-    # Derive the web-preview path: configured VIDEO_TMP_DIR or same directory
+    # Derive the web-preview paths: configured VIDEO_TMP_DIR or same directory
     # as the source video (original behaviour).
     video_stem = os.path.splitext(os.path.basename(video_path))[0]
     if VIDEO_TMP_DIR:
-        web_preview_path = os.path.join(VIDEO_TMP_DIR, video_stem + ".web.mp4")
+        web_preview_path   = os.path.join(VIDEO_TMP_DIR, video_stem + ".web.mp4")
+        clean_preview_path = os.path.join(VIDEO_TMP_DIR, video_stem + ".clean.web.mp4")
     else:
-        web_preview_path = os.path.splitext(video_path)[0] + ".web.mp4"
+        web_preview_path   = os.path.splitext(video_path)[0] + ".web.mp4"
+        clean_preview_path = os.path.splitext(video_path)[0] + ".clean.web.mp4"
 
     with tempfile.NamedTemporaryFile(suffix=".wav", dir=AUDIO_TMP_DIR, delete=False) as tmp:
         audio_path = tmp.name
@@ -662,19 +720,14 @@ def scan_video(
         # ── Step 1: Extract audio ──────────────────────────────────────────────
         extract_audio(video_path, audio_path)
 
-        # Generate the browser-ready preview in the background so it is ready
-        # by the time the analysis is finished.  Non-fatal if it fails.
-        if not os.path.exists(web_preview_path):
-            try:
-                transcode_web_preview(video_path, web_preview_path)
-            except Exception as exc:
-                logger.warning("Web preview transcode failed (non-fatal): %s", exc)
-
         # ── Step 2: Pre-processing – DeepFilter (cuda:0, brief), then Whisper preload ─
         #
         # DeepFilterNet hardcodes "cuda" → cuda:0 and ignores set_device().
         # Run it sequentially and free it completely before loading Whisper so
         # the two models never share P100 VRAM simultaneously.
+        #
+        # NOTE: transcode_web_preview and transcode_clean_preview are called
+        # AFTER DeepFilter so that clean_audio_path already exists.
 
         if DEEPFILTER_ENABLED:
             logger.info("DeepFilterNet: noise suppression on %s", DEEPFILTER_DEVICE)
@@ -689,6 +742,22 @@ def scan_video(
                 "downsampling raw audio to 16 kHz for pipeline"
             )
             _fallback_to_16k(audio_path, clean_audio_path)
+
+        # Generate the browser-ready previews now that clean_audio_path exists.
+        # stem.web.mp4       = original audio (seekable, for all browsers)
+        # stem.clean.web.mp4 = DeepFilter clean audio (video stream copied, no re-encode)
+        # Both are non-fatal if they fail.
+        if not os.path.exists(web_preview_path):
+            try:
+                transcode_web_preview(video_path, web_preview_path)
+            except Exception as exc:
+                logger.warning("Web preview transcode failed (non-fatal): %s", exc)
+
+        if os.path.exists(web_preview_path) and not os.path.exists(clean_preview_path):
+            try:
+                transcode_clean_preview(web_preview_path, clean_audio_path, clean_preview_path)
+            except Exception as exc:
+                logger.warning("Clean preview transcode failed (non-fatal): %s", exc)
 
         if transcribe:
             logger.info("Pre-loading Whisper model on %s", TRANSCRIPTION_DEVICE)

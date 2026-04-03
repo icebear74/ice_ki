@@ -123,6 +123,18 @@
       display: block;
     }
 
+    /* Audio-track toggle button (bottom-right of player) */
+    .audio-track-btn {
+      position: absolute;
+      bottom: 48px;           /* above native controls */
+      right: 10px;
+      font-size: 12px;
+      padding: 4px 10px;
+      opacity: .85;
+      z-index: 10;
+    }
+    .audio-track-btn.active { background: var(--accent2); color: #0d1117; border-color: transparent; }
+
     /* Speaker overlay badge (top-left of video) */
     #speaker-overlay {
       position: absolute;
@@ -444,6 +456,11 @@
         <div class="speaker-name" id="ov-name">—</div>
         <div class="match-info"  id="ov-match"></div>
       </div>
+      <!-- Audio-track toggle: only visible in Chromium/Edge with dual-track .web.mp4 -->
+      <button id="btn-audio-track" class="btn btn-ghost audio-track-btn" style="display:none"
+              onclick="toggleAudioTrack()" title="Zwischen Originalton und Cleanaudio wechseln">
+        🔊 Originalton
+      </button>
     </div>
 
     <!-- Timeline -->
@@ -610,7 +627,9 @@ let episodeTitle    = "";
 let currentVideoPath = "";  // absolute path currently loaded into the player
 let _streamOffset  = 0;    // seconds: where the current FFmpeg stream starts in the video
 let _totalDuration = 0;    // seconds: full video duration from /api/probe
-let _hasWebPreview = false; // true when a .web.mp4 preview is available
+let _hasWebPreview   = false; // true when a .web.mp4 preview is available
+let _hasCleanPreview = false; // true when a .clean.web.mp4 DeepFilter variant exists
+let _activeAudioTrack = 0;   // 0 = original, 1 = clean
 
 const player      = document.getElementById("player");
 const overlay     = document.getElementById("speaker-overlay");
@@ -637,6 +656,46 @@ function _loadStreamAt(t) {
     player.play().catch(() => {});
   }
 }
+
+// Audio-track toggle: switches player.src between original (.web.mp4) and
+// DeepFilter clean (.clean.web.mp4), preserving the current playback position.
+// This works in ALL browsers — no audioTracks API required.
+function _updateAudioTrackBtn() {
+  const btn = document.getElementById("btn-audio-track");
+  if (!btn) return;
+  if (!_hasCleanPreview) {
+    btn.style.display = "none";
+    return;
+  }
+  btn.style.display = "block";
+  if (_activeAudioTrack === 0) {
+    btn.textContent = "🔊 Originalton";
+    btn.classList.remove("active");
+  } else {
+    btn.textContent = "🎧 Clean Audio";
+    btn.classList.add("active");
+  }
+}
+
+function toggleAudioTrack() {
+  if (!_hasCleanPreview || !currentVideoPath) return;
+  const wasPlaying = !player.paused;
+  const t = player.currentTime;
+  _activeAudioTrack = _activeAudioTrack === 0 ? 1 : 0;
+  const cleanParam = _activeAudioTrack === 1 ? "&clean=true" : "";
+  player.src = `/video?path=${encodeURIComponent(currentVideoPath)}${cleanParam}`;
+  player.load();
+  player.addEventListener("loadedmetadata", () => {
+    player.currentTime = t;
+    if (wasPlaying) player.play().catch(() => {});
+  }, { once: true });
+  _updateAudioTrackBtn();
+}
+
+// Re-evaluate the button whenever a new source is set.
+player.addEventListener("loadedmetadata", () => {
+  _updateAudioTrackBtn();
+});
 
 // Show video errors as toasts.
 player.addEventListener("error", () => {
@@ -1064,6 +1123,8 @@ async function loadEpisode() {
     currentVideoPath = videoPath;
     _streamOffset    = 0;
     _hasWebPreview   = false;
+    _hasCleanPreview = false;
+    _activeAudioTrack = 0;
 
     // Check whether the scanner has already produced a .web.mp4 preview.
     // If yes, serve the pre-transcoded file (supports native seeking + audio).
@@ -1071,18 +1132,21 @@ async function loadEpisode() {
     fetch(`/api/has_preview?path=${encodeURIComponent(videoPath)}`)
       .then(r => r.json())
       .then(d => {
-        _hasWebPreview = !!d.has_preview;
+        _hasWebPreview   = !!d.has_preview;
+        _hasCleanPreview = !!d.has_clean_preview;
         if (_hasWebPreview) {
           player.src = `/video?path=${encodeURIComponent(videoPath)}`;
         } else {
           player.src = `/stream?path=${encodeURIComponent(videoPath)}`;
         }
         player.load();
+        _updateAudioTrackBtn();
       })
       .catch(() => {
         // On network error fall back to stream
         player.src = `/stream?path=${encodeURIComponent(videoPath)}`;
         player.load();
+        _updateAudioTrackBtn();
       });
 
     // Probe total duration (player.duration is Infinity for live FFmpeg streams)

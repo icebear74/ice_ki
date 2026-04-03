@@ -1084,30 +1084,67 @@ def _web_preview_path(video_path: str) -> Path | None:
     return sibling if sibling.exists() else None
 
 
+def _clean_preview_path(video_path: str) -> Path | None:
+    """Return the path to the `.clean.web.mp4` DeepFilter preview, or None.
+
+    Mirrors the same lookup logic as :func:`_web_preview_path`.
+    """
+    stem = os.path.splitext(os.path.basename(video_path))[0]
+
+    if _VIDEO_TMP_DIR:
+        candidate = Path(_VIDEO_TMP_DIR) / (stem + ".clean.web.mp4")
+        if candidate.exists():
+            return candidate
+
+    sibling = Path(os.path.splitext(video_path)[0] + ".clean.web.mp4")
+    return sibling if sibling.exists() else None
+
+
 @app.get("/api/has_preview")
 def api_has_preview(path: str) -> JSONResponse:
-    """Return whether a pre-transcoded .web.mp4 preview exists for *path*."""
+    """Return whether a pre-transcoded .web.mp4 preview exists for *path*.
+
+    Also reports ``has_clean_preview`` when the DeepFilterNet variant
+    (``.clean.web.mp4``) is available so the frontend can show the
+    audio-track toggle button.
+    """
     try:
         candidate = _resolve_video_path(path)
     except HTTPException:
-        return JSONResponse({"has_preview": False})
-    preview = _web_preview_path(str(candidate))
-    return JSONResponse({"has_preview": preview is not None})
+        return JSONResponse({"has_preview": False, "has_clean_preview": False})
+    preview       = _web_preview_path(str(candidate))
+    clean_preview = _clean_preview_path(str(candidate))
+    return JSONResponse({
+        "has_preview":       preview is not None,
+        "has_clean_preview": clean_preview is not None,
+    })
 
 
 @app.get("/video")
-def serve_video_preview(path: str) -> FileResponse:
+def serve_video_preview(path: str, clean: bool = False) -> FileResponse:
     """
     Serve the pre-transcoded .web.mp4 preview file for *path*.
     FastAPI's FileResponse honours HTTP Range requests automatically.
+
+    When ``clean=true`` the DeepFilterNet variant (``.clean.web.mp4``) is
+    served instead.  This lets the browser switch audio tracks without any
+    re-encode by simply swapping ``player.src``.
     """
     candidate = _resolve_video_path(path)
-    preview = _web_preview_path(str(candidate))
-    if preview is None:
-        raise HTTPException(
-            status_code=404,
-            detail="No web preview available for this file. Run the scanner first.",
-        )
+    if clean:
+        preview = _clean_preview_path(str(candidate))
+        if preview is None:
+            raise HTTPException(
+                status_code=404,
+                detail="No clean preview available for this file. Run the scanner first.",
+            )
+    else:
+        preview = _web_preview_path(str(candidate))
+        if preview is None:
+            raise HTTPException(
+                status_code=404,
+                detail="No web preview available for this file. Run the scanner first.",
+            )
     return FileResponse(
         str(preview),
         media_type="video/mp4",
