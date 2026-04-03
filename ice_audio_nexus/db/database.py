@@ -16,6 +16,7 @@ import struct
 import logging
 
 import mariadb
+import numpy as np
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -63,13 +64,16 @@ _DDL = [
         id          INT AUTO_INCREMENT PRIMARY KEY,
         identity_id INT NOT NULL,
         embedding   VECTOR(512) NOT NULL,
-        context     VARCHAR(255) DEFAULT NULL COMMENT 'e.g. TNG Season 1, Picard S3E02',
+        context     VARCHAR(255) DEFAULT NULL COMMENT 'e.g. TNG Season 1, Picard S3E02, SUPERVECTOR',
         is_confirmed BOOLEAN NOT NULL DEFAULT FALSE,
+        is_active   BOOLEAN NOT NULL DEFAULT TRUE
+                    COMMENT 'FALSE = deactivated (e.g. replaced by supervector)',
         created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                                        ON UPDATE CURRENT_TIMESTAMP,
         FOREIGN KEY (identity_id) REFERENCES identities(id) ON DELETE CASCADE,
-        INDEX idx_vs_identity (identity_id)
+        INDEX idx_vs_identity (identity_id),
+        INDEX idx_vs_active (is_active)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
 
@@ -141,6 +145,22 @@ def ensure_schema() -> None:
                 COMMENT 'Raw speaker embedding from diarization'
             """
         )
+        # Migrate pre-existing voice_samples tables: add is_active column if missing.
+        cur.execute(
+            """
+            ALTER TABLE voice_samples
+            ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE
+                COMMENT 'FALSE = deactivated (e.g. replaced by supervector)'
+            """
+        )
+        # Ensure context column is long enough for SUPERVECTOR marker.
+        cur.execute(
+            """
+            ALTER TABLE voice_samples
+            MODIFY COLUMN context VARCHAR(255) DEFAULT NULL
+                COMMENT 'e.g. TNG Season 1, Picard S3E02, SUPERVECTOR'
+            """
+        )
         conn.commit()
         logger.info("Database schema verified / created.")
     finally:
@@ -206,6 +226,89 @@ def update_identity(conn: mariadb.Connection, identity_id: int, name: str, descr
         (name, description, identity_id),
     )
     conn.commit()
+
+
+def delete_identity(conn: mariadb.Connection, identity_id: int) -> None:
+    """Delete an identity and all its voice samples (CASCADE handles samples)."""
+    cur = conn.cursor()
+    cur.execute("DELETE FROM identities WHERE id = ?", (identity_id,))
+    conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Supervector management
+# ---------------------------------------------------------------------------
+
+def refresh_supervectors(conn: mariadb.Connection) -> dict:
+    """
+    For every identity that has at least one non-supervector sample, calculate
+    the mean embedding (centroid) of all its real samples and store it as a new
+    sample with context='SUPERVECTOR' and is_active=TRUE.
+
+    All other (non-supervector) samples for that identity are marked
+    is_active=FALSE so the scanner only uses the supervector for matching.
+
+    Returns a summary dict: {identity_name: sample_count_used, ...}
+    """
+    cur = conn.cursor()
+    summary: dict = {}
+    try:
+        cur.execute("SELECT id, name FROM identities ORDER BY name")
+        identities = cur.fetchall()
+
+        for identity_id, identity_name in identities:
+            # Load all real (non-supervector) embeddings for this identity.
+            cur.execute(
+                """SELECT embedding FROM voice_samples
+                   WHERE identity_id = ?
+                     AND (context IS NULL OR context != 'SUPERVECTOR')""",
+                (identity_id,),
+            )
+            rows = cur.fetchall()
+            if not rows:
+                continue
+
+            embeddings = []
+            for (raw,) in rows:
+                vec = np.frombuffer(raw, dtype=np.float32)
+                if vec.shape[0] == 512:
+                    embeddings.append(vec)
+
+            if not embeddings:
+                continue
+
+            # Compute the centroid (mean across all samples).
+            supervector = np.mean(embeddings, axis=0).astype(np.float32)
+
+            # Remove any old supervector for this identity.
+            cur.execute(
+                "DELETE FROM voice_samples WHERE identity_id = ? AND context = 'SUPERVECTOR'",
+                (identity_id,),
+            )
+            # Mark all real (non-supervector) samples as inactive.
+            cur.execute(
+                """UPDATE voice_samples SET is_active = FALSE
+                   WHERE identity_id = ?
+                     AND (context IS NULL OR context != 'SUPERVECTOR')""",
+                (identity_id,),
+            )
+            # Insert the new supervector as the sole active sample.
+            cur.execute(
+                """INSERT INTO voice_samples
+                       (identity_id, embedding, context, is_confirmed, is_active)
+                   VALUES (?, ?, 'SUPERVECTOR', TRUE, TRUE)""",
+                (identity_id, vector_to_bytes(supervector.tolist())),
+            )
+            summary[identity_name] = len(embeddings)
+
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+
+    return summary
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +441,7 @@ def find_nearest_identity(
     vec_bytes = vector_to_bytes(embedding)
     cur = conn.cursor()
     # Fetch the two closest samples (potentially from different identities)
+    # Only consider active samples (is_active = TRUE).
     cur.execute(
         """
         SELECT vs.id,
@@ -347,6 +451,7 @@ def find_nearest_identity(
                VEC_DISTANCE_COSINE(vs.embedding, ?) AS dist
         FROM voice_samples vs
         JOIN identities i ON i.id = vs.identity_id
+        WHERE vs.is_active = TRUE
         ORDER BY dist ASC
         LIMIT 2
         """,

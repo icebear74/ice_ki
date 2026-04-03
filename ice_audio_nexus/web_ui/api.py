@@ -45,6 +45,8 @@ from db.database import (
     get_identity,
     create_identity,
     update_identity,
+    delete_identity,
+    refresh_supervectors,
     add_voice_sample,
     list_voice_samples,
     confirm_voice_sample,
@@ -148,6 +150,37 @@ def api_update_identity(
             raise HTTPException(status_code=404, detail="Identity not found")
         update_identity(conn, identity_id, name, description)
         return JSONResponse({"status": "ok"})
+    finally:
+        conn.close()
+
+
+@app.delete("/api/identities/{identity_id}")
+def api_delete_identity(identity_id: int) -> JSONResponse:
+    """Delete an identity and all its voice samples."""
+    conn = get_connection()
+    try:
+        if get_identity(conn, identity_id) is None:
+            raise HTTPException(status_code=404, detail="Identity not found")
+        delete_identity(conn, identity_id)
+        return JSONResponse({"status": "ok"})
+    finally:
+        conn.close()
+
+
+@app.post("/api/refresh_supervectors")
+def api_refresh_supervectors() -> JSONResponse:
+    """
+    Calculate the mean embedding (supervector) for every identity from all its
+    real voice samples, store it with context='SUPERVECTOR', and mark all other
+    samples as inactive so the scanner only uses supervectors for matching.
+    """
+    conn = get_connection()
+    try:
+        summary = refresh_supervectors(conn)
+        return JSONResponse({"status": "ok", "updated": summary})
+    except Exception as exc:
+        logger.error("refresh_supervectors failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to generate supervectors. Check server logs.")
     finally:
         conn.close()
 

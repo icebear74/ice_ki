@@ -417,6 +417,12 @@
       <div class="section-title">Bekannte Identitäten</div>
       <div id="identities-list"></div>
 
+      <div style="margin-top:10px;">
+        <button class="btn btn-warn" style="width:100%" onclick="refreshSupervectors()">
+          🧠 Supervektoren generieren
+        </button>
+      </div>
+
       <div class="new-identity-form" style="margin-top:12px;">
         <div class="section-title">Neue Identität anlegen</div>
         <input id="new-id-name" type="text" placeholder="Name (z.B. Jean-Luc Picard)" />
@@ -429,6 +435,24 @@
 
 <!-- Toast container -->
 <div id="toast-container"></div>
+
+<!-- ================================================================== -->
+<!--  Edit Identity Modal                                                -->
+<!-- ================================================================== -->
+<div id="edit-identity-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:900;align-items:center;justify-content:center;">
+  <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:20px;width:340px;max-width:95vw;">
+    <div class="section-title" style="margin-bottom:12px;">Identität bearbeiten</div>
+    <input id="edit-id-id" type="hidden" />
+    <input id="edit-id-name" type="text" placeholder="Name"
+           style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:6px;font-size:13px;margin-bottom:8px;" />
+    <textarea id="edit-id-desc" placeholder="Beschreibung (optional)"
+              style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:6px 8px;border-radius:6px;font-size:13px;margin-bottom:10px;resize:vertical;min-height:60px;"></textarea>
+    <div style="display:flex;gap:8px;">
+      <button class="btn btn-primary" style="flex:1" onclick="saveEditIdentity()">Speichern</button>
+      <button class="btn btn-ghost"   style="flex:1" onclick="closeEditModal()">Abbrechen</button>
+    </div>
+  </div>
+</div>
 
 <!-- ================================================================== -->
 <!--  JavaScript                                                         -->
@@ -640,6 +664,10 @@ function renderIdentities() {
       <div class="id-actions">
         <button class="btn btn-ghost" style="font-size:11px;padding:4px 8px;"
                 onclick="viewSamples(${id.id}, '${esc(id.name)}')">Samples</button>
+        <button class="btn btn-ghost" style="font-size:11px;padding:4px 8px;"
+                onclick="openEditModal(${id.id}, '${esc(id.name)}', '${esc(id.description||'')}')">✏</button>
+        <button class="btn btn-danger" style="font-size:11px;padding:4px 8px;"
+                onclick="deleteIdentity(${id.id}, '${esc(id.name)}')">🗑</button>
       </div>
     </div>
   `).join("");
@@ -661,6 +689,73 @@ async function createIdentity() {
     await loadIdentities();
   } else {
     toast("Fehler beim Anlegen.", "error");
+  }
+}
+
+/* -------------------------------------------------------------------- */
+/*  Supervector generation                                               */
+/* -------------------------------------------------------------------- */
+async function refreshSupervectors() {
+  if (!confirm("Supervektoren für alle Identitäten generieren?\n\nDies berechnet den Mittelwert aller Stimmvektoren pro Person und markiert alle Original-Samples als inaktiv. Der Scanner nutzt danach nur noch die Supervektoren.")) return;
+  const resp = await fetch("/api/refresh_supervectors", { method: "POST" });
+  if (resp.ok) {
+    const data = await resp.json();
+    const count = Object.keys(data.updated || {}).length;
+    toast(`Supervektoren generiert für ${count} Identität(en) ✓`);
+    await loadIdentities();
+  } else {
+    const err = await resp.json().catch(() => ({}));
+    toast("Fehler: " + (err.detail || resp.statusText), "error");
+  }
+}
+
+/* -------------------------------------------------------------------- */
+/*  Edit identity modal                                                  */
+/* -------------------------------------------------------------------- */
+function openEditModal(id, name, description) {
+  document.getElementById("edit-id-id").value   = id;
+  document.getElementById("edit-id-name").value = name;
+  document.getElementById("edit-id-desc").value = description;
+  const modal = document.getElementById("edit-identity-modal");
+  modal.style.display = "flex";
+}
+
+function closeEditModal() {
+  document.getElementById("edit-identity-modal").style.display = "none";
+}
+
+async function saveEditIdentity() {
+  const id   = parseInt(document.getElementById("edit-id-id").value);
+  const name = document.getElementById("edit-id-name").value.trim();
+  const desc = document.getElementById("edit-id-desc").value.trim();
+  if (!name) { toast("Name darf nicht leer sein.", "warn"); return; }
+  const resp = await fetch(`/api/identities/${id}`, {
+    method: "PUT",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({name, description: desc}),
+  });
+  if (resp.ok) {
+    toast("Identität aktualisiert ✓");
+    closeEditModal();
+    await loadIdentities();
+  } else {
+    const err = await resp.json().catch(() => ({}));
+    toast("Fehler: " + (err.detail || resp.statusText), "error");
+  }
+}
+
+/* -------------------------------------------------------------------- */
+/*  Delete identity                                                      */
+/* -------------------------------------------------------------------- */
+async function deleteIdentity(id, name) {
+  if (!confirm(`Identität „${name}" wirklich löschen?\n\nAlle zugehörigen Stimmvektoren werden ebenfalls gelöscht.`)) return;
+  const resp = await fetch(`/api/identities/${id}`, { method: "DELETE" });
+  if (resp.ok) {
+    toast(`Identität „${name}" gelöscht.`);
+    await loadIdentities();
+  } else {
+    const err = await resp.json().catch(() => ({}));
+    toast("Fehler: " + (err.detail || resp.statusText), "error");
   }
 }
 
