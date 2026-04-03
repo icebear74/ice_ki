@@ -222,6 +222,7 @@
     .speaker-card:hover { background: var(--bg-hover); }
     .speaker-card.active { border-color: var(--accent); }
     .speaker-card.suggestion { border-color: var(--warn); }
+    .speaker-card.low-quality { border-color: rgba(210,153,34,.5); background: rgba(210,153,34,.05); }
 
     .sc-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
     .sc-label   { font-weight: 600; font-size: 13px; }
@@ -231,6 +232,7 @@
     .tag-matched    { background: rgba(63,185,80,.2);  color: var(--accent2); }
     .tag-suggest    { background: rgba(210,153,34,.2); color: var(--warn); }
     .tag-unknown    { background: rgba(248,81,73,.15); color: var(--danger); }
+    .tag-lowquality { background: rgba(210,153,34,.2); color: var(--warn); }
     .sc-transcript  { color: var(--text-muted); font-size: 11px; margin-top: 4px; font-style: italic; line-height: 1.4; }
 
     /* Confidence percentage badge – colour-coded by tier */
@@ -865,6 +867,10 @@ function segCard(seg) {
   let matchHtml = "";
   let cardClass = "speaker-card";
 
+  if (seg.is_low_quality) {
+    cardClass += " low-quality";
+  }
+
   if (seg.identity_id) {
     const badge = confBadge(seg.match_distance);
     const ctx = seg.matched_sample_context ? ` via "${seg.matched_sample_context}"` : "";
@@ -883,6 +889,10 @@ function segCard(seg) {
 
   const badge = seg.identity_id ? confBadge(seg.match_distance) : "";
 
+  const lowQualityTag = seg.is_low_quality
+    ? `<span class="match-tag tag-lowquality" title="Niedrige Qualität – möglicherweise Lachen, Rauschen oder zu kurz">⚠️ Geringe Qualität</span>`
+    : "";
+
   const transcript = seg.transcript
     ? `<div class="sc-transcript">"${esc(seg.transcript.slice(0,120))}${seg.transcript.length>120?"…":""}"</div>`
     : "";
@@ -895,6 +905,7 @@ function segCard(seg) {
         <span class="sc-label">${esc(label)}</span>
         <span style="display:flex;align-items:center;gap:6px;">${badge}<span class="sc-time">${start}</span></span>
       </div>
+      ${lowQualityTag ? `<div class="sc-match">${lowQualityTag}</div>` : ""}
       ${matchHtml}
       ${transcript}
     </div>
@@ -939,9 +950,17 @@ function buildAssignPanel(seg) {
         Bestätige oder weise einer anderen Identität zu.
        </div>` : "";
 
+  const lowQualityNote = seg.is_low_quality
+    ? `<div style="color:var(--warn);font-size:11px;margin-bottom:8px;padding:6px 8px;background:rgba(210,153,34,0.12);border-radius:4px;border-left:3px solid var(--warn);">
+        ⚠️ <strong>Geringe Qualität</strong> – Dieses Segment wurde als qualitativ minderwertig eingestuft
+        (z.B. Lachen, Rauschen oder zu kurze Aufnahme). Es kann trotzdem als Sample gespeichert werden,
+        wird aber standardmäßig beim Supervector ignoriert.
+       </div>` : "";
+
   return `
     <div class="assign-panel">
       <h4>🎯 Sprecher zuweisen – Segment ${seg.id}</h4>
+      ${lowQualityNote}
       ${suggestionNote}
       <div>Bestehende Identität:</div>
       <select id="ap-identity-${seg.id}">
@@ -982,6 +1001,17 @@ async function applyAssign(segId) {
   if (!identityId && !newName) {
     toast("Bitte eine Identität wählen oder neuen Namen eingeben.", "warn");
     return;
+  }
+
+  // Warn user before saving a low-quality segment as a voice sample
+  if (addSample && seg && seg.is_low_quality) {
+    const confirmed = window.confirm(
+      "⚠️ Dieses Segment wurde als qualitativ minderwertig eingestuft " +
+      "(z.B. Lachen, Rauschen oder zu kurze Aufnahme).\n\n" +
+      "Es wird beim Erstellen von Supervektoren standardmäßig ignoriert.\n\n" +
+      "Trotzdem als Voice-Sample speichern?"
+    );
+    if (!confirmed) return;
   }
 
   const body = {

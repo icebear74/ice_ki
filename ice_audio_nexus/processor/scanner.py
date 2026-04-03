@@ -240,10 +240,12 @@ def transcribe_segment(
     start_s: float,
     end_s: float,
     model_size: str = "large-v3",
-) -> str:
+) -> tuple[str, float]:
     """
     Transcribe a single audio segment using faster-whisper.
-    Returns the detected text.
+    Returns a tuple of (detected_text, max_no_speech_prob).
+    Language is fixed to German to avoid misidentification during non-speech
+    segments (laughter, noise, music) and to prevent hallucinations.
     """
     model = _get_whisper_model(model_size)
 
@@ -259,8 +261,19 @@ def transcribe_segment(
             tmp_path,
         ]
         subprocess.run(cmd, capture_output=True, check=True)
-        whisper_segments, _ = model.transcribe(tmp_path, beam_size=5)
-        return " ".join(seg.text.strip() for seg in whisper_segments)
+        whisper_segments, _ = model.transcribe(
+            tmp_path,
+            beam_size=5,
+            language="de",
+            task="transcribe",
+        )
+        # Materialise the generator so we can iterate twice (text + no_speech_prob)
+        seg_list = list(whisper_segments)
+        text = " ".join(seg.text.strip() for seg in seg_list)
+        # Use the highest no_speech_prob across all sub-segments as the quality
+        # indicator; default to 0.0 when Whisper provides no segments at all.
+        no_speech_prob = max((seg.no_speech_prob for seg in seg_list), default=0.0)
+        return text, no_speech_prob
     finally:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
@@ -315,15 +328,32 @@ def scan_video(
 
         for seg in segments:
             transcript = ""
+            no_speech_prob = 0.0
             if transcribe and seg["embedding"]:
                 try:
-                    transcript = transcribe_segment(
+                    transcript, no_speech_prob = transcribe_segment(
                         audio_path,
                         seg["start_ms"] / 1000.0,
                         seg["end_ms"]   / 1000.0,
                     )
                 except Exception as exc:
                     logger.warning("Transcription failed: %s", exc)
+
+            # Quality heuristic: flag segments likely to contain laughter,
+            # noise, or too little speech for a reliable voice embedding.
+            duration_s = (seg["end_ms"] - seg["start_ms"]) / 1000.0
+            is_low_quality = (
+                no_speech_prob > 0.45
+                or duration_s < 1.2
+                or len(transcript.strip()) < 5
+            )
+            if is_low_quality:
+                logger.info(
+                    "[%s–%s] %s → marked is_low_quality "
+                    "(no_speech_prob=%.2f, duration=%.2fs, text_len=%d)",
+                    seg["start_ms"], seg["end_ms"], seg["speaker_label"],
+                    no_speech_prob, duration_s, len(transcript.strip()),
+                )
 
             # Multi-vector identity search
             match_result = {"status": "unknown", "identity_id": None,
@@ -362,6 +392,7 @@ def scan_video(
                 match_distance=match_result.get("distance"),
                 transcript=transcript,
                 is_suggestion=(match_result["status"] == "suggest"),
+                is_low_quality=is_low_quality,
             )
 
         logger.info("Scan complete – %d segments stored.", len(segments))
