@@ -142,18 +142,16 @@ def apply_deepfilter(input_wav: str, output_wav: str) -> None:
     and pyannote.audio).
 
     *input_wav* is expected at **48 kHz** (DeepFilterNet's native rate), which
-    is what ``extract_audio`` produces.  This means ``load_audio`` performs no
-    internal torchaudio resampling, avoiding the non-contiguous CUDA tensors
-    that cuDNN on Pascal GPUs (P4/P100, sm_60) rejects with
-    CUDNN_STATUS_NOT_SUPPORTED.
+    is what ``extract_audio`` produces.
 
     Pipeline:
 
-    1. ``load_audio`` reads the 48 kHz file; ``.contiguous()`` ensures a
-       compact memory layout for cuDNN.
-    2. ``enhance()`` runs fully on GPU at 48 kHz.
-    3. FFmpeg downsamples the enhanced audio to 16 kHz for downstream
-       consumers (Whisper / pyannote).
+    1. ``load_audio`` reads the 48 kHz file as a CPU float32 tensor.
+    2. ``enhance()`` receives the CPU tensor; DF moves data to the GPU
+       internally (``df_state.analysis`` calls ``.numpy()`` and requires CPU
+       input – passing a CUDA tensor here raises a RuntimeError).
+    3. FFmpeg downsamples the enhanced audio (returned as a CPU tensor by DF)
+       to 16 kHz for downstream consumers (Whisper / pyannote).
 
     Falls back silently to a raw 16-kHz copy if the library is missing or
     processing fails, so the rest of the pipeline is never blocked.
@@ -188,29 +186,21 @@ def apply_deepfilter(input_wav: str, output_wav: str) -> None:
         model = model.to(device)
 
         audio, sr = load_audio(input_wav, sr=df_state.sr())
-        audio = audio.to(device).contiguous()
+        # Do NOT move audio to the GPU here.  DeepFilterNet's enhance()
+        # calls df_state.analysis(audio.numpy()) internally, which requires
+        # a CPU tensor.  DF manages GPU memory internally and returns a CPU
+        # tensor from enhance().
 
-        # Pascal GPUs (sm_60, e.g. P4/P100) reject non-contiguous CUDA tensors
-        # inside cuDNN kernels that DeepFilterNet's forward pass produces
-        # internally (permute / slice operations leave non-contiguous strides).
-        # Disabling cuDNN for this call forces PyTorch's own fallback kernels
-        # which have no contiguity requirement.  We restore the flag afterwards
-        # so nothing else in the process is affected.
-        _prev_cudnn = torch.backends.cudnn.enabled
-        torch.backends.cudnn.enabled = False
-        try:
-            enhanced = enhance(model, df_state, audio)
-        finally:
-            torch.backends.cudnn.enabled = _prev_cudnn
+        enhanced = enhance(model, df_state, audio)
 
         # Save enhanced audio at 48 kHz to a temp file.
-        # save_audio calls .numpy() internally, which fails on non-CPU tensors.
+        # enhance() returns a CPU tensor, so no .cpu() conversion needed.
         tmp_fd, tmp_enhanced = tempfile.mkstemp(suffix=".enhanced.wav", dir=AUDIO_TMP_DIR)
         os.close(tmp_fd)
-        save_audio(tmp_enhanced, enhanced.cpu(), sr)
+        save_audio(tmp_enhanced, enhanced, sr)
 
-        # Release GPU tensors immediately so the diarization pipeline (which
-        # runs on the same device right after) finds the VRAM free.
+        # Release GPU memory so the diarization pipeline (which runs on the
+        # same device right after) finds the VRAM free.
         del enhanced, audio, model, df_state
         torch.cuda.empty_cache()
 
