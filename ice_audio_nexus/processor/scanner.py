@@ -185,10 +185,12 @@ def apply_deepfilter(input_wav: str, output_wav: str) -> None:
         audio, sr = load_audio(input_wav, sr=df_state.sr())
         # audio must remain on CPU – DF's Rust-backed df_state.analysis()
         # calls .numpy() on it and will raise if it is on a CUDA device.
-        # .contiguous() ensures the underlying memory is a single, dense block;
-        # cuDNN raises CUDNN_STATUS_NOT_SUPPORTED on non-contiguous tensors.
-        audio = audio.contiguous()
-        enhanced = enhance(model, df_state, audio)
+        # Disable cuDNN for the enhance() call: the P100 (Pascal CC 6.0)
+        # does not support the RNN/GRU kernels that DeepFilterNet3 uses,
+        # causing CUDNN_STATUS_NOT_SUPPORTED.  The non-cuDNN path is slower
+        # but correct on all CUDA architectures.
+        with torch.backends.cudnn.flags(enabled=False):
+            enhanced = enhance(model, df_state, audio)
 
         # enhance() returns a CPU tensor.
         tmp_fd, tmp_enhanced = tempfile.mkstemp(suffix=".enhanced.wav", dir=AUDIO_TMP_DIR)
