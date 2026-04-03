@@ -12,6 +12,7 @@ Schema (Multi-Vector Identity + Actor/Role/Production):
   episode_segments – timeline of detected speaker segments per episode
 """
 
+import math
 import os
 import struct
 import logging
@@ -88,19 +89,8 @@ _DDL = [
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
 
-    # 4. Supervector groups – named subsets of voice samples that form one supervector
-    """
-    CREATE TABLE IF NOT EXISTS supervector_groups (
-        id          INT AUTO_INCREMENT PRIMARY KEY,
-        identity_id INT NOT NULL,
-        name        VARCHAR(255) NOT NULL COMMENT 'e.g. TNG Staffel 1-7 or Picard Serie',
-        created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (identity_id) REFERENCES identities(id) ON DELETE CASCADE,
-        INDEX idx_svgroup_identity (identity_id)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """,
-
-    # 5. Identity anchor – voice recognition profile (one per voice actor or character voice)
+    # 4. Identity anchor – voice recognition profile (one per voice actor or character voice)
+    #    NOTE: must be created BEFORE supervector_groups (which has a FK to this table)
     """
     CREATE TABLE IF NOT EXISTS identities (
         id              INT AUTO_INCREMENT PRIMARY KEY,
@@ -120,6 +110,19 @@ _DDL = [
         FOREIGN KEY (voice_actor_id) REFERENCES actors(id) ON DELETE SET NULL,
         INDEX idx_identity_actor       (actor_id),
         INDEX idx_identity_voice_actor (voice_actor_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+
+    # 5. Supervector groups – named subsets of voice samples that form one supervector
+    #    NOTE: identities (index 4) must exist first for the FK constraint
+    """
+    CREATE TABLE IF NOT EXISTS supervector_groups (
+        id          INT AUTO_INCREMENT PRIMARY KEY,
+        identity_id INT NOT NULL,
+        name        VARCHAR(255) NOT NULL COMMENT 'e.g. TNG Staffel 1-7 or Picard Serie',
+        created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (identity_id) REFERENCES identities(id) ON DELETE CASCADE,
+        INDEX idx_svgroup_identity (identity_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
 
@@ -881,6 +884,9 @@ def add_voice_sample(
     is_confirmed: bool = False,
     is_low_quality: bool = False,
 ) -> int:
+    # Replace NaN / ±inf (e.g. from old scanner data) with 0.0 so MariaDB VECTOR
+    # does not reject the row with "Incorrect vector value".
+    embedding = [v if math.isfinite(v) else 0.0 for v in embedding]
     cur = conn.cursor()
     cur.execute(
         """INSERT INTO voice_samples (identity_id, embedding, context, is_confirmed, is_low_quality)

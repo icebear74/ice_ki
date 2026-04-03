@@ -35,6 +35,7 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+import mariadb
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -224,6 +225,8 @@ def api_create_identity(
         new_id = create_identity(conn, name, description, voice_actor_id)
         return JSONResponse({"id": new_id, "name": name, "description": description,
                              "voice_actor_id": voice_actor_id})
+    except mariadb.IntegrityError:
+        raise HTTPException(status_code=409, detail=f"Name bereits vergeben: {name}")
     finally:
         conn.close()
 
@@ -639,6 +642,8 @@ def api_create_actor(
     try:
         new_id = create_actor(conn, name, description)
         return JSONResponse({"id": new_id, "name": name, "description": description})
+    except mariadb.IntegrityError:
+        raise HTTPException(status_code=409, detail=f"Name bereits vergeben: {name}")
     finally:
         conn.close()
 
@@ -723,6 +728,8 @@ def api_create_role(
     try:
         new_id = create_role(conn, name, description)
         return JSONResponse({"id": new_id, "name": name, "description": description})
+    except mariadb.IntegrityError:
+        raise HTTPException(status_code=409, detail=f"Name bereits vergeben: {name}")
     finally:
         conn.close()
 
@@ -809,6 +816,8 @@ def api_create_production(data: dict = Body(...)) -> JSONResponse:
             raise HTTPException(status_code=400, detail="title is required")
         new_id = create_production(conn, title, year, ptype)
         return JSONResponse({"id": new_id, "title": title, "year": year, "type": ptype})
+    except mariadb.IntegrityError:
+        raise HTTPException(status_code=409, detail=f"Titel bereits vergeben: {title}")
     finally:
         conn.close()
 

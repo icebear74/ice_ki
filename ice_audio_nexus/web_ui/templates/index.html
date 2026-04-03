@@ -814,7 +814,8 @@ async function createIdentity() {
     document.getElementById("new-id-desc").value = "";
     await loadIdentities();
   } else {
-    toast("Fehler beim Anlegen.", "error");
+    const err = await resp.json().catch(() => ({}));
+    toast("Fehler: " + (err.detail || resp.statusText), "error");
   }
 }
 
@@ -1651,7 +1652,10 @@ async function createActor() {
     document.getElementById("new-actor-name").value = "";
     document.getElementById("new-actor-desc").value = "";
     await loadCastingData();
-  } else { toast("Fehler beim Anlegen.", "error"); }
+  } else {
+    const err = await resp.json().catch(() => ({}));
+    toast("Fehler: " + (err.detail || resp.statusText), "error");
+  }
 }
 
 async function deleteActor(id, name) {
@@ -1674,7 +1678,10 @@ async function createRole() {
     document.getElementById("new-role-name").value = "";
     document.getElementById("new-role-desc").value = "";
     await loadCastingData();
-  } else { toast("Fehler beim Anlegen.", "error"); }
+  } else {
+    const err = await resp.json().catch(() => ({}));
+    toast("Fehler: " + (err.detail || resp.statusText), "error");
+  }
 }
 
 async function deleteRole(id, name) {
@@ -1698,7 +1705,10 @@ async function createProduction() {
     document.getElementById("new-prod-title").value = "";
     document.getElementById("new-prod-year").value  = "";
     await loadCastingData();
-  } else { toast("Fehler beim Anlegen.", "error"); }
+  } else {
+    const err = await resp.json().catch(() => ({}));
+    toast("Fehler: " + (err.detail || resp.statusText), "error");
+  }
 }
 
 async function deleteProduction(id, title) {
