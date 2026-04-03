@@ -196,8 +196,12 @@ def apply_deepfilter(input_wav: str, output_wav: str) -> None:
         model = model.to(device)
 
         # load_audio with sr=df_state.sr() reads the 48 kHz file without any
-        # internal resampling → tensor is always contiguous → GPU works.
+        # internal torchaudio resampling, but the WAV reader may still return
+        # a non-contiguous tensor (e.g. due to stride layout after mono
+        # channel selection).  .contiguous() forces a compact memory layout
+        # which is required for cuDNN on Pascal GPUs (sm_60).
         audio, sr = load_audio(tmp_48k, sr=df_state.sr())
+        audio = audio.contiguous()
         enhanced = enhance(model, df_state, audio)
 
         # Save enhanced audio at 48 kHz to a second temp file.
