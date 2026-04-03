@@ -336,6 +336,8 @@ def transcode_web_preview(video_path: str, output_mp4: str) -> None:
             "ffmpeg", "-y",
             *hw_flags,
             "-i", video_path,
+            "-map", "0:v:0",               # first video stream only
+            "-map", "0:a:0",               # first audio stream only
             *codec_args,
             "-profile:v", "baseline", "-level", "3.1",
             "-vf", "scale=-2:480",                 # scale to 480p, keep aspect ratio

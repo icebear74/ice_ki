@@ -139,6 +139,10 @@ templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
 VIDEO_DIR = Path(os.getenv("VIDEO_DIR", "/data/videos"))
 
+# Where the scanner writes .web.mp4 transcodes (mirrors VIDEO_TMP_DIR in scanner.py).
+# When set, _web_preview_path() checks this directory first.
+_VIDEO_TMP_DIR: str | None = os.getenv("VIDEO_TMP_DIR", "").strip() or None
+
 # TTS dataset output root
 TTS_DATASET_DIR = Path(os.getenv("TTS_DATASET_DIR", "data/voice_datasets"))
 
@@ -1061,9 +1065,23 @@ async def stream_video(path: str, t: float = 0.0) -> StreamingResponse:
 
 
 def _web_preview_path(video_path: str) -> Path | None:
-    """Return the `.web.mp4` sibling of *video_path* if it exists, else None."""
-    preview = Path(os.path.splitext(video_path)[0] + ".web.mp4")
-    return preview if preview.exists() else None
+    """Return the path to the `.web.mp4` preview for *video_path*, or None.
+
+    The scanner may store previews in a dedicated VIDEO_TMP_DIR directory
+    (stem-only filename) or as a sibling of the source file.  Both locations
+    are checked; VIDEO_TMP_DIR takes priority when set.
+    """
+    stem = os.path.splitext(os.path.basename(video_path))[0]
+
+    # 1. Dedicated output directory (VIDEO_TMP_DIR env var)
+    if _VIDEO_TMP_DIR:
+        candidate = Path(_VIDEO_TMP_DIR) / (stem + ".web.mp4")
+        if candidate.exists():
+            return candidate
+
+    # 2. Sibling next to the source file (original fallback location)
+    sibling = Path(os.path.splitext(video_path)[0] + ".web.mp4")
+    return sibling if sibling.exists() else None
 
 
 @app.get("/api/has_preview")
@@ -1101,13 +1119,18 @@ def serve_video_preview(path: str) -> FileResponse:
 def api_probe(path: str) -> JSONResponse:
     """Return the total duration (seconds) of a video file via ffprobe.
 
+    When a .web.mp4 preview exists it is probed in preference to the original,
+    because the original container may carry a wrong duration header while the
+    re-encoded preview always has accurate timing.
+
     Both the container-level (format) duration and every stream duration are
-    inspected; the largest value wins.  This is necessary because some
-    containers (e.g. MKV files recorded without a proper segment-duration
-    header) report a wrong or very short format duration while the individual
-    video/audio streams carry the correct full duration.
+    inspected; the largest value wins.
     """
     candidate = _resolve_video_path(path)
+
+    # Prefer the web preview: it was re-encoded and always has correct timing.
+    preview = _web_preview_path(str(candidate))
+    probe_target = preview if preview is not None else candidate
 
     try:
         result = subprocess.run(
@@ -1116,7 +1139,7 @@ def api_probe(path: str) -> JSONResponse:
                 "-print_format", "json",
                 "-show_format",
                 "-show_streams",
-                str(candidate),
+                str(probe_target),
             ],
             capture_output=True,
             text=True,
@@ -1135,7 +1158,7 @@ def api_probe(path: str) -> JSONResponse:
             except (TypeError, ValueError):
                 pass
     except Exception as exc:
-        logger.warning("ffprobe failed for %s: %s", candidate, exc)
+        logger.warning("ffprobe failed for %s: %s", probe_target, exc)
         duration = 0.0
 
     return JSONResponse({"duration": duration})
