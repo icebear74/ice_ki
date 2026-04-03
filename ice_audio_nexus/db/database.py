@@ -502,8 +502,7 @@ def list_actors(conn: mariadb.Connection) -> list[dict]:
     cur.execute("""
         SELECT a.id, a.name, a.description,
                (a.image_blob IS NOT NULL) AS has_image,
-               COUNT(i.id) AS identity_count,
-               a.created_at, a.updated_at
+               COUNT(i.id) AS identity_count
         FROM actors a
         LEFT JOIN identities i ON i.voice_actor_id = a.id
         GROUP BY a.id
