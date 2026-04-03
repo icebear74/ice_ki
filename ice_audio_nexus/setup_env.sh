@@ -107,13 +107,29 @@ pip install \
 
 # deepfilternet – audio noise suppression (Pascal GPU / CUDA 11.8 compatible)
 # Uses the PyTorch version installed in step 5, so install before the torch pin.
-# Requires pre-built wheel; skip gracefully if Rust/Cargo is missing (source build would fail).
-echo -e "${CYAN}  → Installiere deepfilternet (nur Binär-Wheel)...${RESET}"
-if pip install deepfilternet --only-binary :all: ; then
+# deepfilterlib (dependency of deepfilternet) is written in Rust and requires Cargo
+# when no pre-built wheel is available. Install Rust automatically via rustup if missing.
+echo -e "${CYAN}  → Prüfe Rust/Cargo für deepfilternet...${RESET}"
+if ! command -v cargo &>/dev/null; then
+    echo -e "${YELLOW}  ⚠ Rust/Cargo nicht gefunden – installiere via rustup...${RESET}"
+    if curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path; then
+        # shellcheck disable=SC1090
+        source "$HOME/.cargo/env"
+        echo -e "${GREEN}  ✓ Rust $(rustc --version 2>/dev/null | awk '{print $2}') installiert${RESET}"
+    else
+        echo -e "${RED}  ✗ Rust-Installation fehlgeschlagen. deepfilternet wird übersprungen.${RESET}"
+        echo -e "${YELLOW}    Manuell installieren: https://rustup.rs${RESET}"
+    fi
+else
+    echo -e "${GREEN}  ✓ Rust/Cargo bereits vorhanden ($(cargo --version 2>/dev/null))${RESET}"
+fi
+
+echo -e "${CYAN}  → Installiere deepfilternet...${RESET}"
+if pip install deepfilternet; then
     echo -e "${GREEN}  ✓ deepfilternet installiert${RESET}"
 else
-    echo -e "${YELLOW}  ⚠ deepfilternet konnte nicht installiert werden (kein passendes Wheel für diese Plattform).${RESET}"
-    echo -e "${YELLOW}    Audio-Rauschunterdrückung wird deaktiviert. Rust installieren und erneut versuchen: https://rustup.rs${RESET}"
+    echo -e "${YELLOW}  ⚠ deepfilternet konnte nicht installiert werden.${RESET}"
+    echo -e "${YELLOW}    Audio-Rauschunterdrückung wird deaktiviert.${RESET}"
 fi
 
 echo -e "${GREEN}✓ Web-UI-Pakete + Pillow + DeepFilterNet installiert${RESET}"
