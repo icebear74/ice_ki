@@ -86,6 +86,9 @@ pip install "pyannote.audio==3.1.1"
 # faster-whisper + audio helpers
 pip install faster-whisper librosa soundfile audioread
 
+# matplotlib – required by pyannote.audio internally (tasks/segmentation/mixins.py)
+pip install matplotlib
+
 # Remove torchcodec – it requires CUDA 12.x+ and breaks Pascal cards
 pip uninstall -y torchcodec 2>/dev/null || true
 

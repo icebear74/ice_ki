@@ -244,7 +244,7 @@ def _iter_diarization_segments(audio_path: str):
         from pyannote.core import Segment as _PyannoteSegment
     except ImportError as exc:
         raise ImportError(
-            "pyannote.audio is not installed. Run setup_env.sh first."
+            f"pyannote.audio dependency missing ({exc}). Run setup_env.sh first."
         ) from exc
 
     hf_token = os.getenv("HF_TOKEN")
