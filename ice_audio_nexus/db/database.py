@@ -68,6 +68,8 @@ _DDL = [
         is_confirmed BOOLEAN NOT NULL DEFAULT FALSE,
         is_active   BOOLEAN NOT NULL DEFAULT TRUE
                     COMMENT 'FALSE = deactivated (e.g. replaced by supervector)',
+        is_low_quality BOOLEAN NOT NULL DEFAULT FALSE
+                    COMMENT 'True = heuristically flagged as laughter/noise/short utterance; excluded from supervectors',
         created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                                        ON UPDATE CURRENT_TIMESTAMP,
@@ -95,6 +97,8 @@ _DDL = [
         confidence      FLOAT DEFAULT NULL,
         is_suggestion   BOOLEAN NOT NULL DEFAULT FALSE
                         COMMENT 'True = proposed match (slightly high distance), needs user confirmation',
+        is_low_quality  BOOLEAN NOT NULL DEFAULT FALSE
+                        COMMENT 'True = heuristically flagged as laughter/noise/short utterance',
         created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                                            ON UPDATE CURRENT_TIMESTAMP,
@@ -159,6 +163,21 @@ def ensure_schema() -> None:
             ALTER TABLE voice_samples
             MODIFY COLUMN context VARCHAR(255) DEFAULT NULL
                 COMMENT 'e.g. TNG Season 1, Picard S3E02, SUPERVECTOR'
+            """
+        )
+        # Migrate pre-existing tables: add is_low_quality column if missing.
+        cur.execute(
+            """
+            ALTER TABLE episode_segments
+            ADD COLUMN IF NOT EXISTS is_low_quality BOOLEAN NOT NULL DEFAULT FALSE
+                COMMENT 'True = heuristically flagged as laughter/noise/short utterance'
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE voice_samples
+            ADD COLUMN IF NOT EXISTS is_low_quality BOOLEAN NOT NULL DEFAULT FALSE
+                COMMENT 'True = heuristically flagged as laughter/noise/short utterance; excluded from supervectors'
             """
         )
         conn.commit()
@@ -258,10 +277,13 @@ def refresh_supervectors(conn: mariadb.Connection) -> dict:
 
         for identity_id, identity_name in identities:
             # Load all real (non-supervector) embeddings for this identity.
+            # Samples flagged as is_low_quality are excluded so that laughter,
+            # noise or very short utterances do not pollute the supervector.
             cur.execute(
                 """SELECT embedding FROM voice_samples
                    WHERE identity_id = ?
-                     AND (context IS NULL OR context != 'SUPERVECTOR')""",
+                     AND (context IS NULL OR context != 'SUPERVECTOR')
+                     AND is_low_quality = FALSE""",
                 (identity_id,),
             )
             rows = cur.fetchall()
@@ -519,6 +541,7 @@ def upsert_segment(conn: mariadb.Connection, **kwargs) -> int:
         "series_name", "episode_title", "video_path", "start_ms", "end_ms",
         "speaker_label", "embedding", "identity_id", "matched_sample_id",
         "match_distance", "transcript", "confidence", "is_suggestion",
+        "is_low_quality",
     )
     data = {k: v for k, v in kwargs.items() if k in _ALLOWED_COLS}
     # Build column list from the verified allowlist (not from caller input)
@@ -604,7 +627,8 @@ def get_episode_segments(
             es.id, es.start_ms, es.end_ms, es.speaker_label,
             es.identity_id, i.name AS identity_name,
             es.matched_sample_id, vs.context AS matched_sample_context,
-            es.match_distance, es.transcript, es.confidence, es.is_suggestion
+            es.match_distance, es.transcript, es.confidence, es.is_suggestion,
+            es.is_low_quality
         FROM episode_segments es
         LEFT JOIN identities i    ON i.id  = es.identity_id
         LEFT JOIN voice_samples vs ON vs.id = es.matched_sample_id
