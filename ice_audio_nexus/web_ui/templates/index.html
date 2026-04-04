@@ -400,6 +400,13 @@
     .free-sample-item .fs-date { color:var(--text-muted); font-size:10px; white-space:nowrap; }
     .badge-confirmed { color:var(--accent2); font-size:10px; }
     .badge-lq { color:var(--warn); font-size:10px; }
+    .badge-outlier { color:var(--danger); font-size:10px; }
+    .variance-track { width:100%; height:3px; background:var(--border); border-radius:2px; margin-top:3px; overflow:hidden; }
+    .variance-fill { height:100%; border-radius:2px; transition:width 0.3s; }
+    .v-good { background:var(--accent2); }
+    .v-ok   { background:var(--warn); }
+    .v-bad  { background:var(--danger); }
+    .sv-consistency { font-size:10px; margin-top:2px; }
   </style>
 </head>
 <body>
@@ -1576,25 +1583,60 @@ async function toggleSvPanel(identityId) {
 async function loadSvPanel(identityId) {
   const panelEl = document.getElementById('sv-panel-' + identityId);
   if (!panelEl) return;
-  const [groupsResp, samplesResp] = await Promise.all([
+  const [groupsResp, samplesResp, statsResp] = await Promise.all([
     fetch(`/api/identities/${identityId}/supervector_groups`),
     fetch(`/api/identities/${identityId}/free_samples`),
+    fetch(`/api/identities/${identityId}/vector_stats`),
   ]);
   const groups  = groupsResp.ok  ? await groupsResp.json()  : [];
   const samples = samplesResp.ok ? await samplesResp.json() : [];
+  const stats   = statsResp.ok   ? await statsResp.json()   : {};
 
-  // Existing supervector groups
+  // Consistency score from variance (lower variance = more consistent)
+  const variance = stats.variance ?? null;
+  let consistencyHtml = '';
+  if (variance !== null && samples.length > 1) {
+    const isNoisy = variance > 0.015;
+    const color   = isNoisy ? 'var(--danger)' : variance > 0.005 ? 'var(--warn)' : 'var(--accent2)';
+    const label   = isNoisy ? '⚠ Inkonsistent/Rauschen' : variance > 0.005 ? '~ Mäßige Varianz' : '✓ Konsistent';
+    consistencyHtml = `<div class="sv-consistency" style="color:${color};">${label}
+      <span style="color:var(--text-muted);margin-left:4px;">(σ²=${variance.toFixed(4)}, ø-Dist=${(stats.avg_distance||0).toFixed(3)})</span></div>`;
+  }
+
+  // Maximum distance among samples (for scaling the bars to 100%)
+  const distById = {};
+  let maxDist = 0;
+  (stats.sample_distances || []).forEach(d => {
+    distById[d.id] = d.distance;
+    if (d.distance > maxDist) maxDist = d.distance;
+  });
+  // Outlier threshold: samples further than mean + 1.5×std are highlighted
+  const dists = (stats.sample_distances || []).map(d => d.distance);
+  let outlierThreshold = Infinity;
+  if (dists.length > 2) {
+    const mean = dists.reduce((a,b) => a+b, 0) / dists.length;
+    const std  = Math.sqrt(dists.reduce((a,b) => a + (b-mean)**2, 0) / dists.length);
+    outlierThreshold = mean + 1.5 * std;
+  }
+
+  // Existing supervector groups — each row has an expand/edit sub-panel
   const groupsHtml = groups.length
     ? groups.map(g => `
-        <div class="sv-group-row">
-          <div class="sv-info">
-            <div class="sv-name">${esc(g.name)}</div>
-            <div class="sv-meta">${g.sample_count} Sample(s) · ${(g.created_at||'').slice(0,10)}</div>
+        <div class="sv-group-row" style="flex-direction:column;align-items:stretch;gap:4px;">
+          <div style="display:flex;align-items:center;gap:6px;">
+            <div class="sv-info" style="flex:1;">
+              <div class="sv-name">${esc(g.name)}</div>
+              <div class="sv-meta">${g.sample_count} Sample(s) · ${(g.created_at||'').slice(0,10)}</div>
+            </div>
+            <button class="btn" style="font-size:11px;padding:3px 8px;flex-shrink:0;background:var(--accent);color:#fff;"
+                    onclick="toggleGroupSamples(${g.id},'${esc(g.name)}',${identityId})"
+                    id="sv-grp-btn-${g.id}"
+                    title="Samples anzeigen / bearbeiten">✏ Bearbeiten</button>
+            <button class="btn btn-warn" style="font-size:11px;padding:3px 8px;flex-shrink:0;"
+                    onclick="revertSvGroup(${g.id},'${esc(g.name)}',${identityId})"
+                    title="Supervektor löschen und Samples reaktivieren">↩ Löschen</button>
           </div>
-          <button class="btn btn-warn" style="font-size:11px;padding:3px 8px;flex-shrink:0;"
-                  onclick="revertSvGroup(${g.id},'${esc(g.name)}',${identityId})"
-                  title="Supervektor löschen und Samples reaktivieren"
-                  >↩ Rückgängig</button>
+          <div id="sv-grp-samples-${g.id}" style="display:none;"></div>
         </div>`).join('')
     : '<div style="color:var(--text-muted);font-size:11px;padding:4px 0 6px;">Noch keine benannten Supervektoren.</div>';
 
@@ -1605,12 +1647,24 @@ async function loadSvPanel(identityId) {
         const dateStr   = (s.created_at || '').slice(0, 10);
         const qualBadge = s.is_low_quality ? ' <span class="badge-lq">⚠ LQ</span>' : '';
         const confBadge = s.is_confirmed   ? ' <span class="badge-confirmed">✓</span>' : '';
+        const dist      = distById[s.id];
+        const isOutlier = dist !== undefined && dist > outlierThreshold;
+        const outlierBadge = isOutlier ? ' <span class="badge-outlier">⚠ Ausreißer</span>' : '';
+        let distBarHtml = '';
+        if (dist !== undefined && maxDist > 0) {
+          const pct    = Math.min(100, (dist / maxDist) * 100);
+          const cls    = dist < outlierThreshold * 0.6 ? 'v-good' : dist < outlierThreshold ? 'v-ok' : 'v-bad';
+          const title  = `Abstand zum Zentrum: ${dist.toFixed(3)}`;
+          distBarHtml  = `<div class="variance-track" title="${title}"><div class="variance-fill ${cls}" style="width:${pct.toFixed(1)}%"></div></div>`;
+        }
         return `
-        <div class="free-sample-item" onclick="toggleCheck(event,'fs-${identityId}-${s.id}')">
+        <div class="free-sample-item" onclick="toggleCheck(event,'fs-${identityId}-${s.id}')"
+             style="${isOutlier ? 'background:rgba(248,81,73,0.06);' : ''}">
           <input type="checkbox" id="fs-${identityId}-${s.id}" value="${s.id}"
                  onclick="event.stopPropagation()" />
           <div class="fs-body">
-            <span class="fs-ctx">${esc(ctx) || '—'}</span>${confBadge}${qualBadge}
+            <span class="fs-ctx">${esc(ctx) || '—'}</span>${confBadge}${qualBadge}${outlierBadge}
+            ${distBarHtml}
           </div>
           <span class="fs-date">${dateStr}</span>
         </div>`;
@@ -1624,6 +1678,7 @@ async function loadSvPanel(identityId) {
     <div class="sv-mgmt-panel">
       <div class="sv-section-title">Bestehende Supervektoren</div>
       ${groupsHtml}
+      ${consistencyHtml}
       <div class="sv-section-title">Freie Samples (${samples.length}) &ndash; Herkunft &amp; Auswahl</div>
       ${samples.length ? `
         <div style="margin-bottom:4px;">
@@ -1634,7 +1689,7 @@ async function loadSvPanel(identityId) {
             <span style="font-size:10px;font-style:italic;margin-left:4px;">(Kontextname = Herkunft des Samples)</span>
           </label>
         </div>` : ''}
-      <div style="max-height:200px;overflow-y:auto;border:1px solid var(--border);
+      <div style="max-height:350px;overflow-y:auto;border:1px solid var(--border);
                   border-radius:6px;padding:0 4px;margin-bottom:8px;">
         ${samplesHtml}
       </div>
@@ -1652,6 +1707,13 @@ async function loadSvPanel(identityId) {
         </div>
         <div style="font-size:10px;color:var(--text-muted);margin-top:4px;">
           ⚠ Samples mit LQ können einbezogen werden – Herkunft vorher prüfen.
+        </div>
+        <div style="margin-top:8px;">
+          <button class="btn" style="font-size:11px;padding:5px 10px;background:var(--accent);color:#fff;white-space:nowrap;"
+                  onclick="rebuildRobustSupervector(${identityId})"
+                  title="Alle bestehenden Supervektoren löschen und aus aktiven, hochwertigen Samples mit Ausreißer-Filterung neu berechnen">
+            🔬 Robusten Supervektor neu berechnen
+          </button>
         </div>` : ''}
     </div>`;
 }
@@ -1660,6 +1722,137 @@ function toggleCheck(event, checkId) {
   if (event.target.tagName === 'INPUT') return;
   const cb = document.getElementById(checkId);
   if (cb) cb.checked = !cb.checked;
+}
+
+async function toggleGroupSamples(groupId, groupName, identityId) {
+  const container = document.getElementById('sv-grp-samples-' + groupId);
+  const btn       = document.getElementById('sv-grp-btn-'     + groupId);
+  if (!container) return;
+  if (container.style.display === 'block') {
+    container.style.display = 'none';
+    if (btn) btn.textContent = '✏ Bearbeiten';
+    return;
+  }
+  container.style.display = 'block';
+  if (btn) btn.textContent = '▲ Schließen';
+  container.innerHTML = '<div style="padding:6px;font-size:11px;color:var(--text-muted);">Lade Samples…</div>';
+  const [samplesResp, statsResp] = await Promise.all([
+    fetch(`/api/supervector_groups/${groupId}/samples`),
+    fetch(`/api/supervector_groups/${groupId}/stats`),
+  ]);
+  if (!samplesResp.ok) {
+    container.innerHTML = '<div style="color:var(--danger);font-size:11px;padding:6px;">Fehler beim Laden.</div>';
+    return;
+  }
+  const samples = await samplesResp.json();
+  const stats   = statsResp.ok ? await statsResp.json() : {};
+  if (!samples.length) {
+    container.innerHTML = '<div style="color:var(--text-muted);font-size:11px;padding:6px;">Keine Samples gefunden.</div>';
+    return;
+  }
+
+  // Build distance lookup and outlier threshold (same logic as loadSvPanel)
+  const distById = {};
+  let maxDist = 0;
+  (stats.sample_distances || []).forEach(d => {
+    distById[d.id] = d.distance;
+    if (d.distance > maxDist) maxDist = d.distance;
+  });
+  const dists = (stats.sample_distances || []).map(d => d.distance);
+  let outlierThreshold = Infinity;
+  if (dists.length > 2) {
+    const mean = dists.reduce((a,b) => a+b, 0) / dists.length;
+    const std  = Math.sqrt(dists.reduce((a,b) => a + (b-mean)**2, 0) / dists.length);
+    outlierThreshold = mean + 1.5 * std;
+  }
+
+  const allId = `grp-all-${groupId}`;
+  const samplesHtml = samples.map(s => {
+    const ctx       = s.context || '—';
+    const dateStr   = (s.created_at || '').slice(0, 10);
+    const qualBadge = s.is_low_quality ? ' <span class="badge-lq">⚠ LQ</span>' : '';
+    const confBadge = s.is_confirmed   ? ' <span class="badge-confirmed">✓</span>' : '';
+    const dist      = distById[s.id];
+    const isOutlier = dist !== undefined && dist > outlierThreshold;
+    const outlierBadge = isOutlier ? ' <span class="badge-outlier">⚠ Ausreißer</span>' : '';
+    let distBarHtml = '';
+    if (dist !== undefined && maxDist > 0) {
+      const pct   = Math.min(100, (dist / maxDist) * 100);
+      const cls   = dist < outlierThreshold * 0.6 ? 'v-good' : dist < outlierThreshold ? 'v-ok' : 'v-bad';
+      const title = `Abstand zum Zentrum: ${dist.toFixed(3)}`;
+      distBarHtml = `<div class="variance-track" title="${title}"><div class="variance-fill ${cls}" style="width:${pct.toFixed(1)}%"></div></div>`;
+    }
+    return `
+      <div class="free-sample-item" onclick="toggleCheck(event,'grp-${groupId}-${s.id}')"
+           style="${isOutlier ? 'background:rgba(248,81,73,0.06);' : ''}">
+        <input type="checkbox" id="grp-${groupId}-${s.id}" value="${s.id}" checked
+               onclick="event.stopPropagation()" />
+        <div class="fs-body">
+          <span class="fs-ctx">${esc(ctx)}</span>${confBadge}${qualBadge}${outlierBadge}
+          ${distBarHtml}
+        </div>
+        <span class="fs-date">${dateStr}</span>
+      </div>`;
+  }).join('');
+  container.innerHTML = `
+    <div style="border:1px solid var(--border);border-radius:6px;padding:6px;margin-top:4px;background:var(--bg-card);">
+      <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">
+        Samples in diesem Supervektor – Häkchen entfernen um Samples auszuschließen, dann neu berechnen:
+      </div>
+      <div style="margin-bottom:4px;">
+        <label style="font-size:11px;color:var(--text-muted);cursor:pointer;display:flex;align-items:center;gap:4px;">
+          <input type="checkbox" id="${allId}" checked
+                 onchange="toggleAllGroupSamples(${groupId},this.checked)" />
+          Alle auswählen
+        </label>
+      </div>
+      <div style="max-height:300px;overflow-y:auto;border:1px solid var(--border);border-radius:4px;padding:0 4px;margin-bottom:8px;">
+        ${samplesHtml}
+      </div>
+      <div style="display:flex;gap:6px;align-items:center;">
+        <input id="grp-rebuild-name-${groupId}" type="text"
+               value="${esc(groupName)}"
+               style="flex:1;background:var(--bg-card);border:1px solid var(--border);
+                      color:var(--text);padding:5px 8px;border-radius:6px;font-size:12px;" />
+        <button class="btn btn-success" style="font-size:11px;padding:5px 10px;white-space:nowrap;"
+                onclick="rebuildSvGroup(${groupId},${identityId})">🔬 Neu berechnen</button>
+      </div>
+      <div style="font-size:10px;color:var(--text-muted);margin-top:4px;">
+        ⚠ Mindestens ein Sample muss ausgewählt bleiben.
+      </div>
+    </div>`;
+}
+
+function toggleAllGroupSamples(groupId, checked) {
+  document.querySelectorAll(`input[id^="grp-${groupId}-"]`)
+    .forEach(cb => { cb.checked = checked; });
+}
+
+async function rebuildSvGroup(groupId, identityId) {
+  const nameEl = document.getElementById('grp-rebuild-name-' + groupId);
+  const name   = nameEl ? nameEl.value.trim() : '';
+  const sample_ids = Array.from(
+    document.querySelectorAll(`input[id^="grp-${groupId}-"]:checked`)
+  ).map(cb => parseInt(cb.value)).filter(n => !isNaN(n));
+  if (!sample_ids.length) { toast('Bitte mindestens ein Sample auswählen.', 'warn'); return; }
+  if (!confirm(
+    `Supervektor "${name || 'Rebuild'}" aus ${sample_ids.length} Sample(s) neu berechnen?\n\n` +
+    'Der bestehende Supervektor wird dabei ersetzt.'
+  )) return;
+  const resp = await fetch(`/api/supervector_groups/${groupId}/rebuild`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({name: name || `Rebuild`, sample_ids}),
+  });
+  if (resp.ok) {
+    const data = await resp.json();
+    toast(`„${name || 'Supervektor'}" aus ${data.sample_count} Sample(s) neu berechnet ✓`);
+    await loadSvPanel(identityId);
+    await loadIdentities();
+  } else {
+    const err = await resp.json().catch(() => ({}));
+    toast('Fehler: ' + (err.detail || resp.statusText), 'error');
+  }
 }
 
 function toggleAllFreeSamples(identityId, checked) {
@@ -1692,13 +1885,36 @@ async function createSvGroup(identityId) {
 
 async function revertSvGroup(groupId, name, identityId) {
   if (!confirm(
-    'Supervektor „' + name + '“ rükgängig machen?\n\n' +
+    'Supervektor „' + name + '“ rückgängig machen?\n\n' +
     'Der Supervektor wird gelöscht und alle ursprünglich verwendeten Samples werden reaktiviert.'
   )) return;
   const resp = await fetch(`/api/supervector_groups/${groupId}`, { method: 'DELETE' });
   if (resp.ok) {
     const data = await resp.json();
-    toast('„' + name + '“ rükgängig – ' + data.reactivated_samples + ' Sample(s) reaktiviert ✓');
+    toast('„' + name + '“ rückgängig – ' + data.reactivated_samples + ' Sample(s) reaktiviert ✓');
+    await loadSvPanel(identityId);
+    await loadIdentities();
+  } else {
+    const err = await resp.json().catch(() => ({}));
+    toast('Fehler: ' + (err.detail || resp.statusText), 'error');
+  }
+}
+
+async function rebuildRobustSupervector(identityId) {
+  if (!confirm(
+    'Robusten Supervektor neu berechnen?\n\n' +
+    'Alle bestehenden Supervektoren werden gelöscht und aus den aktiven, ' +
+    'hochwertigen Samples neu berechnet – Ausreißer (schlechteste 20%) werden ' +
+    'automatisch herausgefiltert.'
+  )) return;
+  const resp = await fetch(`/api/identities/${identityId}/rebuild_supervector`, { method: 'POST' });
+  if (resp.ok) {
+    const data = await resp.json();
+    if (data.sample_count > 0) {
+      toast('Robuster Supervektor aus ' + data.sample_count + ' Sample(s) berechnet ✓');
+    } else {
+      toast(data.message || 'Keine geeigneten Samples gefunden.', 'warn');
+    }
     await loadSvPanel(identityId);
     await loadIdentities();
   } else {

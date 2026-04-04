@@ -216,6 +216,45 @@ def get_connection() -> mariadb.Connection:
 
 
 # ---------------------------------------------------------------------------
+# Vector math helpers
+# ---------------------------------------------------------------------------
+
+def normalize_vector(vec: list[float]) -> list[float]:
+    """L2-normalize *vec* to unit length. Returns the original list if norm ≈ 0."""
+    arr = np.array(vec, dtype=np.float32)
+    norm = float(np.linalg.norm(arr))
+    if norm < 1e-6:
+        return vec
+    return (arr / norm).tolist()
+
+
+def calculate_robust_supervector(
+    embeddings: list[list[float]],
+    outlier_ratio: float = 0.2,
+) -> list[float] | None:
+    """
+    Compute a robust centroid from *embeddings* by:
+      1. L2-normalizing every vector.
+      2. Computing the provisional mean.
+      3. Sorting samples by Euclidean distance to the mean and
+         discarding the worst *outlier_ratio* fraction.
+      4. Re-computing the centroid on the remaining samples.
+      5. L2-normalizing the result.
+
+    Returns None when *embeddings* is empty.
+    """
+    if not embeddings:
+        return None
+    data = np.array([normalize_vector(e) for e in embeddings], dtype=np.float32)
+    mean_v = np.mean(data, axis=0)
+    distances = np.linalg.norm(data - mean_v, axis=1)
+    num_to_keep = max(1, int(len(data) * (1 - outlier_ratio)))
+    idx_to_keep = np.argsort(distances)[:num_to_keep]
+    final_centroid = np.mean(data[idx_to_keep], axis=0)
+    return normalize_vector(final_centroid.tolist())
+
+
+# ---------------------------------------------------------------------------
 # Schema bootstrap
 # ---------------------------------------------------------------------------
 
@@ -503,6 +542,67 @@ def revert_supervectors(conn: mariadb.Connection, identity_id: int) -> int:
     for gid in group_ids:
         total += revert_supervector_group(conn, gid)
     return total
+
+
+def get_identity_vector_stats(
+    conn: mariadb.Connection,
+    identity_id: int,
+) -> dict:
+    """
+    Compute variance and per-sample distance-to-centroid for the active,
+    non-supervector, non-low-quality samples of *identity_id*.
+
+    Returns:
+        {
+          avg_distance:     float  – mean Euclidean distance to the centroid
+                                     (on L2-normalized vectors ≈ cosine metric),
+          variance:         float  – variance of those distances,
+          sample_distances: list[{id: int, distance: float}]
+        }
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, embedding
+        FROM voice_samples
+        WHERE identity_id = ?
+          AND is_active = TRUE
+          AND (context IS NULL OR context != 'SUPERVECTOR')
+          AND is_low_quality = FALSE
+        ORDER BY created_at
+        """,
+        (identity_id,),
+    )
+    rows = cur.fetchall()
+    cur.close()
+
+    if not rows:
+        return {"avg_distance": 0.0, "variance": 0.0, "sample_distances": []}
+
+    ids: list[int] = []
+    vecs: list[list[float]] = []
+    for row in rows:
+        vec = np.frombuffer(row[1], dtype=np.float32)
+        if vec.shape[0] == 512:
+            ids.append(row[0])
+            vecs.append(normalize_vector(vec.tolist()))
+
+    if not vecs:
+        return {"avg_distance": 0.0, "variance": 0.0, "sample_distances": []}
+
+    data = np.array(vecs, dtype=np.float32)
+    centroid = np.mean(data, axis=0)
+    dists = np.linalg.norm(data - centroid, axis=1)
+
+    sample_distances = [
+        {"id": sid, "distance": float(d)}
+        for sid, d in zip(ids, dists)
+    ]
+    return {
+        "avg_distance": float(np.mean(dists)),
+        "variance": float(np.var(dists)),
+        "sample_distances": sample_distances,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -799,8 +899,15 @@ def list_supervector_groups(conn: mariadb.Connection, identity_id: int) -> list[
         """,
         (identity_id,),
     )
-    cols = [d[0] for d in cur.description]
-    return [dict(zip(cols, row)) for row in cur.fetchall()]
+    results = []
+    for row in cur.fetchall():
+        results.append({
+            "id":           row[0],
+            "name":         row[1],
+            "created_at":   str(row[2]) if row[2] is not None else None,
+            "sample_count": row[3],
+        })
+    return results
 
 
 def list_free_samples(conn: mariadb.Connection, identity_id: int) -> list[dict]:
@@ -817,8 +924,90 @@ def list_free_samples(conn: mariadb.Connection, identity_id: int) -> list[dict]:
         """,
         (identity_id,),
     )
-    cols = [d[0] for d in cur.description]
-    return [dict(zip(cols, row)) for row in cur.fetchall()]
+    results = []
+    for row in cur.fetchall():
+        results.append({
+            "id":           row[0],
+            "context":      row[1],
+            "is_confirmed": bool(row[2]),
+            "is_active":    bool(row[3]),
+            "is_low_quality": bool(row[4]),
+            "created_at":   str(row[5]) if row[5] is not None else None,
+        })
+    return results
+
+
+def list_group_samples(conn: mariadb.Connection, group_id: int) -> list[dict]:
+    """Return the source samples that were merged into *group_id*."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, context, is_confirmed, is_low_quality, created_at
+        FROM voice_samples
+        WHERE used_in_group_id = ?
+        ORDER BY created_at
+        """,
+        (group_id,),
+    )
+    results = []
+    for row in cur.fetchall():
+        results.append({
+            "id":             row[0],
+            "context":        row[1],
+            "is_confirmed":   bool(row[2]),
+            "is_low_quality": bool(row[3]),
+            "created_at":     str(row[4]) if row[4] is not None else None,
+        })
+    return results
+
+
+def get_group_vector_stats(conn: mariadb.Connection, group_id: int) -> dict:
+    """
+    Compute per-sample distance-to-centroid for the source samples of *group_id*.
+
+    Returns the same shape as get_identity_vector_stats():
+        {avg_distance: float, variance: float, sample_distances: [{id, distance}, …]}
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, embedding
+        FROM voice_samples
+        WHERE used_in_group_id = ?
+        ORDER BY created_at
+        """,
+        (group_id,),
+    )
+    rows = cur.fetchall()
+    cur.close()
+
+    if not rows:
+        return {"avg_distance": 0.0, "variance": 0.0, "sample_distances": []}
+
+    ids: list[int] = []
+    vecs: list[list[float]] = []
+    for row in rows:
+        vec = np.frombuffer(row[1], dtype=np.float32)
+        if vec.shape[0] == 512:
+            ids.append(row[0])
+            vecs.append(normalize_vector(vec.tolist()))
+
+    if not vecs:
+        return {"avg_distance": 0.0, "variance": 0.0, "sample_distances": []}
+
+    data = np.array(vecs, dtype=np.float32)
+    centroid = np.mean(data, axis=0)
+    dists = np.linalg.norm(data - centroid, axis=1)
+
+    sample_distances = [
+        {"id": sid, "distance": float(d)}
+        for sid, d in zip(ids, dists)
+    ]
+    return {
+        "avg_distance": float(np.mean(dists)),
+        "variance": float(np.var(dists)),
+        "sample_distances": sample_distances,
+    }
 
 
 def create_named_supervector(
@@ -876,7 +1065,10 @@ def create_named_supervector(
     if not embeddings:
         raise ValueError("No valid 512-dim embeddings found in selected samples")
 
-    supervector = np.mean(embeddings, axis=0).astype(np.float32)
+    robust = calculate_robust_supervector([v.tolist() for v in embeddings])
+    if robust is None:
+        raise ValueError("Robust supervector calculation returned no result")
+    supervector = np.array(robust, dtype=np.float32)
 
     try:
         # Create the group record
