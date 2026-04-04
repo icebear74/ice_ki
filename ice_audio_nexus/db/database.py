@@ -1533,15 +1533,27 @@ def find_nearest_identity(
     min_margin: float = 0.07,
 ) -> dict:
     """
-    Search all voice_samples using VEC_DISTANCE_COSINE (MariaDB 11.7+) and
-    return the closest match.
+    Find the nearest identity for *embedding* by comparing it against all active
+    voice samples in the database.
 
-    *min_margin* guards against cross-identity confusion (e.g. two characters
-    whose embeddings land close together).  Even if the best match is within
-    *match_threshold*, the result is only considered a confirmed match when the
-    next-closest sample from a **different** identity is at least *min_margin*
-    further away.  If the margin is too small the result is downgraded:
-      • confirmed → suggest  (if still within suggest_threshold + margin)
+    The search is performed in two passes:
+
+    **Pass 1 – per-identity minimum distance**
+    ``GROUP BY identity_id`` with ``MIN(VEC_DISTANCE_COSINE)`` ensures that an
+    identity with many supervector samples cannot crowd out other identities.
+    The old flat ``LIMIT 10`` query had exactly this failure mode: if one identity
+    had ≥ 10 active supervectors all 10 result rows could be that identity,
+    ``second_distance`` was never populated, ``margin_ok`` was always *True*, and
+    every segment would match the same identity.
+
+    **Pass 2 – closest sample within the winning identity**
+    Retrieves the specific ``sample_id`` and ``context`` of the sample that
+    achieved the best distance, used for display / debugging.
+
+    *min_margin* guards against cross-identity confusion: if the runner-up
+    identity is fewer than *min_margin* away from the winner the result is
+    downgraded:
+      • confirmed → suggest  (if still ≤ suggest_threshold)
       • suggest   → unknown
 
     Returns a dict with keys:
@@ -1551,52 +1563,69 @@ def find_nearest_identity(
       sample_id     – int or None   (which sample triggered the match)
       sample_context– str or None
       distance      – float or None
-      second_distance – float or None  (runner-up distance, useful for debugging)
+      second_distance – float or None  (runner-up identity distance, for debugging)
     """
     vec_bytes = vector_to_bytes(embedding)
     cur = conn.cursor()
-    # Fetch the two closest samples (potentially from different identities)
-    # Only consider active samples (is_active = TRUE).
+
+    # ── Step 1: get the best (minimum) cosine distance per identity ───────────
+    # This ensures that an identity with many supervector samples cannot crowd
+    # out other identities by filling all LIMIT slots with its own rows.
+    # The old LIMIT 10 flat query had exactly that failure mode: if Sheldon had
+    # ≥ 10 active supervectors the entire result set was Sheldon, second_distance
+    # was never set, margin_ok was always True, and everything matched Sheldon.
     cur.execute(
         """
-        SELECT vs.id,
-               vs.identity_id,
+        SELECT vs.identity_id,
                i.name,
-               vs.context,
-               VEC_DISTANCE_COSINE(vs.embedding, ?) AS dist
+               MIN(VEC_DISTANCE_COSINE(vs.embedding, ?)) AS best_dist
         FROM voice_samples vs
         JOIN identities i ON i.id = vs.identity_id
         WHERE vs.is_active = TRUE
-        ORDER BY dist ASC
-        LIMIT 10
+        GROUP BY vs.identity_id, i.name
+        ORDER BY best_dist ASC
+        LIMIT 5
         """,
         (vec_bytes,),
     )
-    rows = cur.fetchall()
-    if not rows:
+    identity_rows = cur.fetchall()
+
+    # VEC_DISTANCE_COSINE returns NULL for malformed embeddings – drop those.
+    identity_rows = [r for r in identity_rows if r[2] is not None]
+
+    if not identity_rows:
+        cur.close()
         return {"status": "unknown", "identity_id": None, "identity_name": None,
                 "sample_id": None, "sample_context": None, "distance": None,
                 "second_distance": None}
 
-    # VEC_DISTANCE_COSINE returns NULL when the stored embedding is malformed.
-    # Filter those rows out so float() never receives None.
-    rows = [r for r in rows if r[4] is not None]
-    if not rows:
-        return {"status": "unknown", "identity_id": None, "identity_name": None,
-                "sample_id": None, "sample_context": None, "distance": None,
-                "second_distance": None}
+    identity_id, identity_name, distance = identity_rows[0]
+    identity_id   = int(identity_id)
+    distance      = float(distance)
 
-    sample_id, identity_id, identity_name, sample_context, distance = rows[0]
-
-    # Find the closest sample that belongs to a *different* identity (runner-up).
+    # second_distance: closest match from any *different* identity
     second_distance: float | None = None
-    if len(rows) > 1:
-        for row in rows[1:]:
-            if row[1] != identity_id:
-                second_distance = float(row[4])
-                break
-        # If both rows share the same identity, the second_distance stays None.
-        # In that case there is no competing identity, so no margin check needed.
+    for row in identity_rows[1:]:
+        if row[0] != identity_id and row[2] is not None:
+            second_distance = float(row[2])
+            break
+
+    # ── Step 2: find the specific sample within the winning identity ──────────
+    cur.execute(
+        """
+        SELECT id, context
+        FROM voice_samples
+        WHERE identity_id = ?
+          AND is_active = TRUE
+        ORDER BY VEC_DISTANCE_COSINE(embedding, ?) ASC
+        LIMIT 1
+        """,
+        (identity_id, vec_bytes),
+    )
+    sample_row = cur.fetchone()
+    cur.close()
+    sample_id      = sample_row[0] if sample_row else None
+    sample_context = sample_row[1] if sample_row else None
 
     # Check whether the winning match is sufficiently separated from the
     # runner-up identity.  If not, downgrade the confidence level.
