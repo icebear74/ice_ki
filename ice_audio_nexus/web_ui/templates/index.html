@@ -1169,56 +1169,74 @@ async function loadClusterDashboard() {
 }
 
 function renderDashboardGrid(ids, clusterResults) {
-  let totalClusters = 0, totalSamples = 0, hitSum = 0, hitCount = 0;
+  let totalClusters = 0, totalRawSamples = 0, totalClusteredSamples = 0;
+  let hitSum = 0, hitCount = 0;
 
   const cards = ids.map((id, i) => {
-    const clusters = clusterResults[i] || [];
-    const numClusters = clusters.length;
-    const samples = clusters.reduce((a, c) => a + (c.sample_count || 0), 0);
-    const avgHit = numClusters
+    const clusters      = clusterResults[i] || [];
+    const numClusters   = clusters.length;
+    const rawSamples    = id.sample_count || 0;
+    const clustSamples  = clusters.reduce((a, c) => a + (c.sample_count || 0), 0);
+    // "Trivial" = every cluster has ≤ 1 source sample → cross-validation is
+    // always 100% because there is no other centroid to distinguish from.
+    const isTrivial     = numClusters > 0 && clusters.every(c => (c.sample_count || 0) <= 1);
+    const avgHit        = numClusters
       ? clusters.reduce((a, c) => a + (c.hit_rate_pct || 0), 0) / numClusters
       : 0;
 
-    totalClusters += numClusters;
-    totalSamples  += samples;
-    if (numClusters > 0) { hitSum += avgHit; hitCount++; }
+    totalClusters         += numClusters;
+    totalRawSamples       += rawSamples;
+    totalClusteredSamples += clustSamples;
+    if (numClusters > 0 && !isTrivial) { hitSum += avgHit; hitCount++; }
 
     const hitColor = numClusters === 0
       ? 'var(--text-muted)'
+      : isTrivial ? 'var(--text-muted)'
       : avgHit >= 80 ? 'var(--accent2)' : avgHit >= 50 ? 'var(--warn)' : 'var(--danger)';
     const barClass = avgHit >= 80 ? 'rel-high' : avgHit >= 50 ? 'rel-mid' : 'rel-low';
 
     // Per-cluster mini-rows inside the card
     const clusterRows = clusters.slice(0, 5).map(c => {
-      const p = c.hit_rate_pct ?? 0;
-      const col = p >= 80 ? 'var(--accent2)' : p >= 50 ? 'var(--warn)' : 'var(--danger)';
+      const p   = c.hit_rate_pct ?? 0;
+      const triv = (c.sample_count || 0) <= 1;
+      const col = triv ? 'var(--text-muted)' : p >= 80 ? 'var(--accent2)' : p >= 50 ? 'var(--warn)' : 'var(--danger)';
+      const pLabel = triv ? '–' : `${p}%`;
       return `<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;font-size:10px;padding:2px 0;border-bottom:1px solid var(--border);">
         <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-muted);"
               title="${esc(c.group_name)}">${esc(c.group_name)}</span>
         <span style="flex-shrink:0;color:var(--text-muted);">${c.sample_count} S</span>
-        <span style="flex-shrink:0;font-weight:700;color:${col};">${p}%</span>
+        <span style="flex-shrink:0;font-weight:700;color:${col};">${pLabel}</span>
       </div>`;
     }).join('');
     const moreRow = clusters.length > 5
       ? `<div style="font-size:10px;color:var(--text-muted);padding-top:2px;">+ ${clusters.length - 5} weitere…</div>`
       : '';
 
+    let integrityLabel;
+    if (numClusters === 0) {
+      integrityLabel = '– keine Supervektoren –';
+    } else if (isTrivial) {
+      integrityLabel = '<span title="Alle Cluster haben nur 1 Sample – keine sinnvolle Kreuzvalidierung möglich">⚠ Einzelsample-Cluster</span>';
+    } else {
+      integrityLabel = `Ø Integrität: ${avgHit.toFixed(1)}%`;
+    }
+
     return `
       <div class="cluster-card">
         <div class="cc-title" style="color:var(--accent);">${esc(id.name)}</div>
-        <div class="cc-meta">${numClusters} Cluster · ${samples} Sample(s)
+        <div class="cc-meta">${numClusters} Cluster · ${rawSamples} Samples
           ${id.casting_role_name ? `<span style="color:var(--text-muted);"> · ${esc(id.casting_role_name)}</span>` : ''}
         </div>
         <div class="cc-reliability" style="margin-bottom:4px;">
           <span style="font-size:11px;color:${hitColor};font-weight:700;white-space:nowrap;">
-            ${numClusters > 0 ? `Ø Integrität: ${avgHit.toFixed(1)}%` : '– keine Supervektoren –'}
+            ${integrityLabel}
           </span>
         </div>
-        ${numClusters > 0 ? `
+        ${numClusters > 0 && !isTrivial ? `
         <div class="reliability-bar-track" style="margin-bottom:8px;">
           <div class="reliability-bar-fill ${barClass}" style="width:${avgHit.toFixed(1)}%"></div>
-        </div>
-        <div style="margin-bottom:8px;">${clusterRows}${moreRow}</div>` : '<div style="height:8px;"></div>'}
+        </div>` : '<div style="height:4px;"></div>'}
+        ${numClusters > 0 ? `<div style="margin-bottom:8px;">${clusterRows}${moreRow}</div>` : ''}
         <div style="display:flex;gap:5px;flex-wrap:wrap;">
           <button class="btn btn-ghost" style="font-size:11px;padding:4px 8px;flex:1;white-space:nowrap;"
                   onclick="_closeClusterDashboard();openIdentityInspector(${id.id},'${esc(id.name)}')">
@@ -1232,30 +1250,49 @@ function renderDashboardGrid(ids, clusterResults) {
       </div>`;
   }).join('');
 
-  const globalAvg = hitCount ? (hitSum / hitCount).toFixed(1) : '–';
-  const globalAvgColor = hitCount === 0
+  const globalAvgNum   = hitCount ? hitSum / hitCount : null;
+  const globalAvgLabel = globalAvgNum !== null ? `${globalAvgNum.toFixed(1)}%` : '–';
+  const globalAvgColor = globalAvgNum === null
     ? 'var(--text-muted)'
-    : globalAvg >= 80 ? 'var(--accent2)' : globalAvg >= 50 ? 'var(--warn)' : 'var(--danger)';
+    : globalAvgNum >= 80 ? 'var(--accent2)' : globalAvgNum >= 50 ? 'var(--warn)' : 'var(--danger)';
+
+  const trivialCount = ids.filter((_, i) => {
+    const c = clusterResults[i] || [];
+    return c.length > 0 && c.every(cl => (cl.sample_count || 0) <= 1);
+  }).length;
+  const trivialNote = trivialCount > 0
+    ? `<div style="font-size:11px;color:var(--warn);margin-bottom:16px;padding:8px 12px;
+                   background:rgba(210,153,34,.1);border:1px solid rgba(210,153,34,.3);border-radius:var(--radius);">
+         ⚠ <strong>${trivialCount} Identität(en)</strong> haben ausschließlich Einzelsample-Cluster
+         (je 1 Sample pro Supervektor). Die angezeigte Integrität von 100% ist trivial
+         und nicht aussagekräftig. Klicke <strong>🔄 Neu clustern</strong> auf einer solchen Karte
+         – oder passe den Clustering-Schwellenwert an.
+       </div>`
+    : '';
 
   return `
-    <div style="display:flex;gap:16px;margin-bottom:20px;flex-wrap:wrap;">
+    <div style="display:flex;gap:16px;margin-bottom:${trivialCount > 0 ? '12' : '20'}px;flex-wrap:wrap;">
       <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:12px 20px;min-width:130px;">
         <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">Identitäten</div>
         <div style="font-size:24px;font-weight:700;color:var(--accent);">${ids.length}</div>
       </div>
       <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:12px 20px;min-width:130px;">
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">Voice Samples</div>
+        <div style="font-size:24px;font-weight:700;color:var(--text);">${totalRawSamples}</div>
+      </div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:12px 20px;min-width:130px;">
         <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">Cluster gesamt</div>
         <div style="font-size:24px;font-weight:700;color:var(--accent2);">${totalClusters}</div>
       </div>
-      <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:12px 20px;min-width:130px;">
-        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">Samples gesamt</div>
-        <div style="font-size:24px;font-weight:700;color:var(--text);">${totalSamples}</div>
-      </div>
       <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:12px 20px;min-width:180px;">
-        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">Ø Cluster-Integrität</div>
-        <div style="font-size:24px;font-weight:700;color:${globalAvgColor};">${globalAvg}%</div>
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">
+          Ø Cluster-Integrität
+          ${hitCount < ids.length ? `<span style="color:var(--warn);font-size:10px;"> (${hitCount} auswertbar)</span>` : ''}
+        </div>
+        <div style="font-size:24px;font-weight:700;color:${globalAvgColor};">${globalAvgLabel}</div>
       </div>
     </div>
+    ${trivialNote}
     <div class="cluster-grid">${cards}</div>`;
 }
 

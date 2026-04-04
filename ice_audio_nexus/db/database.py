@@ -231,8 +231,8 @@ def normalize_vector(vec: list[float]) -> list[float]:
 def compute_adaptive_clusters_for_identity(
     conn: "mariadb.Connection",
     identity_id: int,
-    distance_threshold: float = 0.12,
-    min_samples_for_clustering: int = 8,
+    distance_threshold: float = 0.35,
+    min_samples_for_clustering: int = 4,
     outlier_ratio: float = 0.15,
 ) -> list[list[int]]:
     """
@@ -245,8 +245,14 @@ def compute_adaptive_clusters_for_identity(
       3. If fewer than *min_samples_for_clustering* samples remain → single group.
       4. Otherwise run AgglomerativeClustering (average linkage, cosine
          distance, no upper limit on cluster count) with *distance_threshold*.
-         Samples whose pairwise cosine distance to every existing cluster
+         Samples whose average pairwise cosine distance to an existing cluster
          exceeds the threshold automatically open a new "Expert Cluster".
+
+    *distance_threshold* is a **cosine distance** (0 = identical, 2 = opposite).
+    Typical same-speaker intra-session distance: 0.05–0.15; across episodes:
+    0.10–0.30.  The default of 0.35 allows grouping speaker samples from
+    different recording contexts while still separating genuinely distinct
+    voice characteristics.
 
     Returns a list of sample-ID lists – one sublist per cluster.
     An empty list means no eligible samples exist for this identity.
@@ -711,11 +717,11 @@ def refresh_supervectors(conn: mariadb.Connection) -> dict:
     existing supervector groups (full revert), then re-cluster the free,
     non-low-quality samples using distance-based AgglomerativeClustering.
 
-    • If an identity has fewer than 8 eligible samples a single robust
+    • If an identity has fewer than 4 eligible samples a single robust
       supervector is created (existing behaviour).
     • Otherwise an unlimited number of clusters is formed automatically –
-      every group of samples whose intra-cluster distance exceeds the
-      threshold (default 0.12) opens a new "Expert Cluster".
+      every group of samples whose intra-cluster cosine distance exceeds the
+      threshold (default 0.35) opens a new "Expert Cluster".
 
     Returns a summary dict::
 
