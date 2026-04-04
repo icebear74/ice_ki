@@ -409,9 +409,10 @@
     .sv-consistency { font-size:10px; margin-top:2px; }
 
     /* ------------------------------------------------------------------ */
-    /*  Identity Inspector – fullscreen overlay                            */
+    /*  Identity Inspector & Cluster Dashboard – fullscreen overlays      */
     /* ------------------------------------------------------------------ */
-    #identity-inspector {
+    #identity-inspector,
+    #cluster-dashboard {
       display:none;
       position:fixed;
       inset:0;
@@ -423,6 +424,7 @@
       padding:24px 16px 48px;
     }
     #identity-inspector.open { display:flex; }
+    #cluster-dashboard.open  { display:flex; }
     .inspector-box {
       background:var(--bg-card);
       border:1px solid var(--border);
@@ -520,6 +522,16 @@
 <header>
   <h1>🎙️ ice_audio_nexus</h1>
   <span class="tagline">Multi-Vektor Sprecher-Identifikation · MariaDB 11.7</span>
+  <div style="margin-left:auto;display:flex;gap:8px;align-items:center;">
+    <button class="btn btn-ghost" onclick="openClusterDashboard()"
+            title="Globales Cluster-Dashboard – alle Identitäten auf einen Blick">
+      🗺 Cluster Dashboard
+    </button>
+    <button class="btn btn-warn" onclick="globalRebuildAll(this)"
+            title="Alle Supervektoren für alle Identitäten mit Adaptive Clustering neu berechnen">
+      🔄 ALLE Supervektoren neu
+    </button>
+  </div>
 </header>
 
 <!-- ================================================================== -->
@@ -603,9 +615,13 @@
       <div class="section-title">Bekannte Identitäten</div>
       <div id="identities-list"></div>
 
-      <div style="margin-top:10px;">
-        <button class="btn btn-warn" style="width:100%" onclick="refreshSupervectors()">
-          🧠 Supervektoren generieren
+      <div style="margin-top:10px;display:flex;gap:6px;">
+        <button class="btn btn-warn" style="flex:1" onclick="globalRebuildAll(this)">
+          🔄 ALLE Supervektoren neu berechnen
+        </button>
+        <button class="btn btn-ghost" style="flex-shrink:0;" onclick="openClusterDashboard()"
+                title="Cluster-Dashboard öffnen">
+          🗺
         </button>
       </div>
 
@@ -718,7 +734,32 @@
 </div>
 
 <!-- ================================================================== -->
-<!--  Edit Identity Modal                                                -->
+<!--  Global Cluster Dashboard – fullscreen overlay                      -->
+<!-- ================================================================== -->
+<div id="cluster-dashboard" onclick="closeClusterDashboard(event)">
+  <div class="inspector-box" style="max-width:1100px;" onclick="event.stopPropagation()">
+    <div class="inspector-header">
+      <h2>🗺 Globales Cluster-Dashboard</h2>
+      <button class="btn btn-danger" id="dashboard-rebuild-all-btn"
+              style="font-size:12px;padding:6px 14px;"
+              onclick="globalRebuildAll(this)">
+        🔄 ALLE Identitäten neu clustern
+      </button>
+      <button class="btn btn-ghost" onclick="_closeClusterDashboard()"
+              style="font-size:18px;padding:4px 10px;flex-shrink:0;" title="Schließen">✕</button>
+    </div>
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:16px;">
+      Alle Identitäten auf einen Blick: Cluster-Anzahl, Samples und Qualitäts-Score.
+      Klicke auf <strong>🔍 Details</strong> für die vollständige Cluster-Hierarchie einer Identität
+      oder auf <strong>🔄 Neu clustern</strong> um Adaptive Clustering für eine einzelne Identität zu starten.
+    </div>
+    <div id="cluster-dashboard-content">
+      <div class="inspector-loading">Lade Cluster-Daten…</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================================================================== -->
 <!-- ================================================================== -->
 <div id="edit-identity-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:900;align-items:center;justify-content:center;">
   <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:20px;width:380px;max-width:95vw;">
@@ -1045,21 +1086,210 @@ async function createIdentity() {
 }
 
 /* -------------------------------------------------------------------- */
-/*  Supervector generation                                               */
+/*  Supervector generation / global rebuild                             */
 /* -------------------------------------------------------------------- */
-async function refreshSupervectors() {
-  if (!confirm("Supervektoren für alle Identitäten generieren?\n\nDies berechnet den Mittelwert aller Stimmvektoren pro Person und markiert alle Original-Samples als inaktiv. Der Scanner nutzt danach nur noch die Supervektoren.")) return;
-  const resp = await fetch("/api/refresh_supervectors", { method: "POST" });
+async function globalRebuildAll(btn) {
+  if (!confirm(
+    'ALLE Supervektoren für alle Identitäten neu berechnen?\n\n' +
+    'Dies verwendet Adaptive Clustering (AgglomerativeClustering, cosine distance).\n' +
+    'Alle bestehenden Supervektoren werden gelöscht und automatisch neu geclustert.\n' +
+    'Identitäten mit ≥ 8 Samples erhalten mehrere Experten-Cluster.'
+  )) return;
+
+  const origText = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Berechne alle…'; }
+
+  const resp = await fetch('/api/refresh_supervectors', { method: 'POST' });
+
+  if (btn) { btn.disabled = false; btn.textContent = origText; }
+
   if (resp.ok) {
     const data = await resp.json();
-    const count = Object.keys(data.updated || {}).length;
-    toast(`Supervektoren generiert für ${count} Identität(en) ✓`);
+    const updated = data.updated || {};
+    const count = Object.keys(updated).length;
+    const totalClusters = Object.values(updated).reduce((a, v) => a + (v.clusters || 0), 0);
+    const totalSamples  = Object.values(updated).reduce((a, v) => a + (v.samples  || 0), 0);
+    toast(`${count} Identität(en) neu geclustert · ${totalClusters} Cluster · ${totalSamples} Samples ✓`);
+    await loadIdentities();
+    // Open the dashboard to show the results visually
+    if (!document.getElementById('cluster-dashboard').classList.contains('open')) {
+      await openClusterDashboard();
+    } else {
+      await loadClusterDashboard();
+    }
+  } else {
+    const err = await resp.json().catch(() => ({}));
+    toast('Fehler: ' + (err.detail || resp.statusText), 'error');
+  }
+}
+
+/* -------------------------------------------------------------------- */
+/*  Global Cluster Dashboard                                             */
+/* -------------------------------------------------------------------- */
+async function openClusterDashboard() {
+  document.getElementById('cluster-dashboard').classList.add('open');
+  await loadClusterDashboard();
+}
+
+function closeClusterDashboard(event) {
+  if (event && event.target !== document.getElementById('cluster-dashboard')) return;
+  _closeClusterDashboard();
+}
+
+function _closeClusterDashboard() {
+  document.getElementById('cluster-dashboard').classList.remove('open');
+}
+
+async function loadClusterDashboard() {
+  const content = document.getElementById('cluster-dashboard-content');
+  content.innerHTML = '<div class="inspector-loading">Lade Cluster-Daten für alle Identitäten…</div>';
+
+  // Fetch identities list
+  const idResp = await fetch('/api/identities');
+  if (!idResp.ok) {
+    content.innerHTML = '<div style="color:var(--danger);text-align:center;padding:32px;">Fehler beim Laden der Identitäten.</div>';
+    return;
+  }
+  const ids = await idResp.json();
+  if (!ids.length) {
+    content.innerHTML = '<div class="empty-state">Noch keine Identitäten vorhanden.<br><span style="font-size:12px;">Lade eine Episode und weise Segmenten Identitäten zu.</span></div>';
+    return;
+  }
+
+  // Fetch clusters for all identities in parallel
+  const clusterResults = await Promise.all(
+    ids.map(id =>
+      fetch(`/api/identities/${id.id}/clusters`)
+        .then(r => r.ok ? r.json() : [])
+        .catch(() => [])
+    )
+  );
+
+  content.innerHTML = renderDashboardGrid(ids, clusterResults);
+}
+
+function renderDashboardGrid(ids, clusterResults) {
+  let totalClusters = 0, totalSamples = 0, hitSum = 0, hitCount = 0;
+
+  const cards = ids.map((id, i) => {
+    const clusters = clusterResults[i] || [];
+    const numClusters = clusters.length;
+    const samples = clusters.reduce((a, c) => a + (c.sample_count || 0), 0);
+    const avgHit = numClusters
+      ? clusters.reduce((a, c) => a + (c.hit_rate_pct || 0), 0) / numClusters
+      : 0;
+
+    totalClusters += numClusters;
+    totalSamples  += samples;
+    if (numClusters > 0) { hitSum += avgHit; hitCount++; }
+
+    const hitColor = numClusters === 0
+      ? 'var(--text-muted)'
+      : avgHit >= 80 ? 'var(--accent2)' : avgHit >= 50 ? 'var(--warn)' : 'var(--danger)';
+    const barClass = avgHit >= 80 ? 'rel-high' : avgHit >= 50 ? 'rel-mid' : 'rel-low';
+
+    // Per-cluster mini-rows inside the card
+    const clusterRows = clusters.slice(0, 5).map(c => {
+      const p = c.hit_rate_pct ?? 0;
+      const col = p >= 80 ? 'var(--accent2)' : p >= 50 ? 'var(--warn)' : 'var(--danger)';
+      return `<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;font-size:10px;padding:2px 0;border-bottom:1px solid var(--border);">
+        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-muted);"
+              title="${esc(c.group_name)}">${esc(c.group_name)}</span>
+        <span style="flex-shrink:0;color:var(--text-muted);">${c.sample_count} S</span>
+        <span style="flex-shrink:0;font-weight:700;color:${col};">${p}%</span>
+      </div>`;
+    }).join('');
+    const moreRow = clusters.length > 5
+      ? `<div style="font-size:10px;color:var(--text-muted);padding-top:2px;">+ ${clusters.length - 5} weitere…</div>`
+      : '';
+
+    return `
+      <div class="cluster-card">
+        <div class="cc-title" style="color:var(--accent);">${esc(id.name)}</div>
+        <div class="cc-meta">${numClusters} Cluster · ${samples} Sample(s)
+          ${id.casting_role_name ? `<span style="color:var(--text-muted);"> · ${esc(id.casting_role_name)}</span>` : ''}
+        </div>
+        <div class="cc-reliability" style="margin-bottom:4px;">
+          <span style="font-size:11px;color:${hitColor};font-weight:700;white-space:nowrap;">
+            ${numClusters > 0 ? `Ø Integrität: ${avgHit.toFixed(1)}%` : '– keine Supervektoren –'}
+          </span>
+        </div>
+        ${numClusters > 0 ? `
+        <div class="reliability-bar-track" style="margin-bottom:8px;">
+          <div class="reliability-bar-fill ${barClass}" style="width:${avgHit.toFixed(1)}%"></div>
+        </div>
+        <div style="margin-bottom:8px;">${clusterRows}${moreRow}</div>` : '<div style="height:8px;"></div>'}
+        <div style="display:flex;gap:5px;flex-wrap:wrap;">
+          <button class="btn btn-ghost" style="font-size:11px;padding:4px 8px;flex:1;white-space:nowrap;"
+                  onclick="_closeClusterDashboard();openIdentityInspector(${id.id},'${esc(id.name)}')">
+            🔍 Details
+          </button>
+          <button class="btn btn-warn" style="font-size:11px;padding:4px 8px;flex:1;white-space:nowrap;"
+                  onclick="dashboardRebuildOne(${id.id},'${esc(id.name)}',this)">
+            🔄 Neu clustern
+          </button>
+        </div>
+      </div>`;
+  }).join('');
+
+  const globalAvg = hitCount ? (hitSum / hitCount).toFixed(1) : '–';
+  const globalAvgColor = hitCount === 0
+    ? 'var(--text-muted)'
+    : globalAvg >= 80 ? 'var(--accent2)' : globalAvg >= 50 ? 'var(--warn)' : 'var(--danger)';
+
+  return `
+    <div style="display:flex;gap:16px;margin-bottom:20px;flex-wrap:wrap;">
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:12px 20px;min-width:130px;">
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">Identitäten</div>
+        <div style="font-size:24px;font-weight:700;color:var(--accent);">${ids.length}</div>
+      </div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:12px 20px;min-width:130px;">
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">Cluster gesamt</div>
+        <div style="font-size:24px;font-weight:700;color:var(--accent2);">${totalClusters}</div>
+      </div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:12px 20px;min-width:130px;">
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">Samples gesamt</div>
+        <div style="font-size:24px;font-weight:700;color:var(--text);">${totalSamples}</div>
+      </div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:12px 20px;min-width:180px;">
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">Ø Cluster-Integrität</div>
+        <div style="font-size:24px;font-weight:700;color:${globalAvgColor};">${globalAvg}%</div>
+      </div>
+    </div>
+    <div class="cluster-grid">${cards}</div>`;
+}
+
+async function dashboardRebuildOne(identityId, identityName, btn) {
+  if (!confirm(
+    `Adaptive Cluster für „${identityName}" neu erstellen?\n\n` +
+    'Alle bestehenden Supervektoren dieser Identität werden gelöscht und mit Adaptive Clustering neu geclustert.'
+  )) return;
+  const origText = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Berechne…'; }
+  const resp = await fetch(`/api/identities/${identityId}/rebuild_adaptive_clusters`, { method: 'POST' });
+  if (btn) { btn.disabled = false; btn.textContent = origText; }
+  if (resp.ok) {
+    const data = await resp.json();
+    toast(
+      data.clusters > 0
+        ? `${data.clusters} Cluster für „${identityName}" aus ${data.samples} Sample(s) ✓`
+        : (data.message || 'Keine geeigneten Samples.'),
+      data.clusters > 0 ? 'success' : 'warn'
+    );
+    await loadClusterDashboard();
     await loadIdentities();
   } else {
     const err = await resp.json().catch(() => ({}));
-    toast("Fehler: " + (err.detail || resp.statusText), "error");
+    toast('Fehler: ' + (err.detail || resp.statusText), 'error');
   }
 }
+
+// Close Cluster Dashboard on Escape
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape" && document.getElementById("cluster-dashboard").classList.contains("open")) {
+    _closeClusterDashboard();
+  }
+});
 
 /* -------------------------------------------------------------------- */
 /*  Edit identity modal                                                  */
