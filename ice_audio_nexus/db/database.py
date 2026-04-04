@@ -243,10 +243,10 @@ def compute_adaptive_clusters_for_identity(
       1. L2-normalise every vector.
       2. Remove the worst *outlier_ratio* fraction (distance to provisional mean).
       3. If fewer than *min_samples_for_clustering* samples remain → single group.
-      4. Otherwise run AgglomerativeClustering (average linkage, Euclidean
+      4. Otherwise run AgglomerativeClustering (average linkage, cosine
          distance, no upper limit on cluster count) with *distance_threshold*.
-         Samples whose pairwise distance to every existing cluster exceeds
-         the threshold automatically open a new "Expert Cluster".
+         Samples whose pairwise cosine distance to every existing cluster
+         exceeds the threshold automatically open a new "Expert Cluster".
 
     Returns a list of sample-ID lists – one sublist per cluster.
     An empty list means no eligible samples exist for this identity.

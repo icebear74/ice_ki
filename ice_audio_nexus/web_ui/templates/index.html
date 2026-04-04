@@ -1050,7 +1050,7 @@ function renderIdentities() {
       </div>
       <div class="id-actions">
         <button class="btn btn-ghost" style="font-size:11px;padding:4px 8px;"
-                title="Identity Inspector – Cluster-Übersicht &amp; Validierung"
+                title="Identity Inspector – Cluster-Übersicht & Validierung"
                 onclick="openIdentityInspector(${id.id}, '${esc(id.name)}')">🔍</button>
         <button class="btn btn-ghost" style="font-size:11px;padding:4px 8px;"
                 title="Supervektoren verwalten – Altersgruppen definieren"
@@ -1286,8 +1286,11 @@ async function dashboardRebuildOne(identityId, identityName, btn) {
 
 // Close Cluster Dashboard on Escape
 document.addEventListener("keydown", e => {
-  if (e.key === "Escape" && document.getElementById("cluster-dashboard").classList.contains("open")) {
+  if (e.key !== "Escape") return;
+  if (document.getElementById("cluster-dashboard").classList.contains("open")) {
     _closeClusterDashboard();
+  } else if (document.getElementById("identity-inspector").classList.contains("open")) {
+    _closeInspector();
   }
 });
 
@@ -2313,12 +2316,7 @@ function _closeInspector() {
   _inspectorIdentityName = "";
 }
 
-// Close on Escape key
-document.addEventListener("keydown", e => {
-  if (e.key === "Escape" && document.getElementById("identity-inspector").classList.contains("open")) {
-    _closeInspector();
-  }
-});
+// (Escape key handling for both overlays is consolidated above)
 
 async function loadInspectorClusters() {
   if (!_inspectorIdentityId) return;
