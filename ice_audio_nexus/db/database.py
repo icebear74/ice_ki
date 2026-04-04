@@ -961,6 +961,55 @@ def list_group_samples(conn: mariadb.Connection, group_id: int) -> list[dict]:
     return results
 
 
+def get_group_vector_stats(conn: mariadb.Connection, group_id: int) -> dict:
+    """
+    Compute per-sample distance-to-centroid for the source samples of *group_id*.
+
+    Returns the same shape as get_identity_vector_stats():
+        {avg_distance: float, variance: float, sample_distances: [{id, distance}, …]}
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, embedding
+        FROM voice_samples
+        WHERE used_in_group_id = ?
+        ORDER BY created_at
+        """,
+        (group_id,),
+    )
+    rows = cur.fetchall()
+    cur.close()
+
+    if not rows:
+        return {"avg_distance": 0.0, "variance": 0.0, "sample_distances": []}
+
+    ids: list[int] = []
+    vecs: list[list[float]] = []
+    for row in rows:
+        vec = np.frombuffer(row[1], dtype=np.float32)
+        if vec.shape[0] == 512:
+            ids.append(row[0])
+            vecs.append(normalize_vector(vec.tolist()))
+
+    if not vecs:
+        return {"avg_distance": 0.0, "variance": 0.0, "sample_distances": []}
+
+    data = np.array(vecs, dtype=np.float32)
+    centroid = np.mean(data, axis=0)
+    dists = np.linalg.norm(data - centroid, axis=1)
+
+    sample_distances = [
+        {"id": sid, "distance": float(d)}
+        for sid, d in zip(ids, dists)
+    ]
+    return {
+        "avg_distance": float(np.mean(dists)),
+        "variance": float(np.var(dists)),
+        "sample_distances": sample_distances,
+    }
+
+
 def create_named_supervector(
     conn: mariadb.Connection,
     identity_id: int,

@@ -1736,28 +1736,60 @@ async function toggleGroupSamples(groupId, groupName, identityId) {
   container.style.display = 'block';
   if (btn) btn.textContent = '▲ Schließen';
   container.innerHTML = '<div style="padding:6px;font-size:11px;color:var(--text-muted);">Lade Samples…</div>';
-  const resp = await fetch(`/api/supervector_groups/${groupId}/samples`);
-  if (!resp.ok) {
+  const [samplesResp, statsResp] = await Promise.all([
+    fetch(`/api/supervector_groups/${groupId}/samples`),
+    fetch(`/api/supervector_groups/${groupId}/stats`),
+  ]);
+  if (!samplesResp.ok) {
     container.innerHTML = '<div style="color:var(--danger);font-size:11px;padding:6px;">Fehler beim Laden.</div>';
     return;
   }
-  const samples = await resp.json();
+  const samples = await samplesResp.json();
+  const stats   = statsResp.ok ? await statsResp.json() : {};
   if (!samples.length) {
     container.innerHTML = '<div style="color:var(--text-muted);font-size:11px;padding:6px;">Keine Samples gefunden.</div>';
     return;
   }
+
+  // Build distance lookup and outlier threshold (same logic as loadSvPanel)
+  const distById = {};
+  let maxDist = 0;
+  (stats.sample_distances || []).forEach(d => {
+    distById[d.id] = d.distance;
+    if (d.distance > maxDist) maxDist = d.distance;
+  });
+  const dists = (stats.sample_distances || []).map(d => d.distance);
+  let outlierThreshold = Infinity;
+  if (dists.length > 2) {
+    const mean = dists.reduce((a,b) => a+b, 0) / dists.length;
+    const std  = Math.sqrt(dists.reduce((a,b) => a + (b-mean)**2, 0) / dists.length);
+    outlierThreshold = mean + 1.5 * std;
+  }
+
   const allId = `grp-all-${groupId}`;
   const samplesHtml = samples.map(s => {
     const ctx       = s.context || '—';
     const dateStr   = (s.created_at || '').slice(0, 10);
     const qualBadge = s.is_low_quality ? ' <span class="badge-lq">⚠ LQ</span>' : '';
     const confBadge = s.is_confirmed   ? ' <span class="badge-confirmed">✓</span>' : '';
+    const dist      = distById[s.id];
+    const isOutlier = dist !== undefined && dist > outlierThreshold;
+    const outlierBadge = isOutlier ? ' <span class="badge-outlier">⚠ Ausreißer</span>' : '';
+    let distBarHtml = '';
+    if (dist !== undefined && maxDist > 0) {
+      const pct   = Math.min(100, (dist / maxDist) * 100);
+      const cls   = dist < outlierThreshold * 0.6 ? 'v-good' : dist < outlierThreshold ? 'v-ok' : 'v-bad';
+      const title = `Abstand zum Zentrum: ${dist.toFixed(3)}`;
+      distBarHtml = `<div class="variance-track" title="${title}"><div class="variance-fill ${cls}" style="width:${pct.toFixed(1)}%"></div></div>`;
+    }
     return `
-      <div class="free-sample-item" onclick="toggleCheck(event,'grp-${groupId}-${s.id}')">
+      <div class="free-sample-item" onclick="toggleCheck(event,'grp-${groupId}-${s.id}')"
+           style="${isOutlier ? 'background:rgba(248,81,73,0.06);' : ''}">
         <input type="checkbox" id="grp-${groupId}-${s.id}" value="${s.id}" checked
                onclick="event.stopPropagation()" />
         <div class="fs-body">
-          <span class="fs-ctx">${esc(ctx)}</span>${confBadge}${qualBadge}
+          <span class="fs-ctx">${esc(ctx)}</span>${confBadge}${qualBadge}${outlierBadge}
+          ${distBarHtml}
         </div>
         <span class="fs-date">${dateStr}</span>
       </div>`;

@@ -73,6 +73,7 @@ from db.database import (
     list_processed_episodes,
     # Vector stats
     get_identity_vector_stats,
+    get_group_vector_stats,
     # Actor CRUD
     list_actors,
     get_actor,
@@ -471,6 +472,20 @@ def api_list_group_samples(group_id: int) -> JSONResponse:
     except Exception as exc:
         logger.error("list_group_samples failed: %s", exc)
         raise HTTPException(status_code=500, detail="Failed to list group samples.")
+    finally:
+        conn.close()
+
+
+@app.get("/api/supervector_groups/{group_id}/stats")
+def api_group_vector_stats(group_id: int) -> JSONResponse:
+    """Return per-sample distance-to-centroid stats for a supervector group."""
+    conn = get_connection()
+    try:
+        stats = get_group_vector_stats(conn, group_id)
+        return JSONResponse(stats)
+    except Exception as exc:
+        logger.error("get_group_vector_stats failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to compute group stats.")
     finally:
         conn.close()
 
