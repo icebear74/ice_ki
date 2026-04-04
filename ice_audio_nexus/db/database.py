@@ -937,6 +937,30 @@ def list_free_samples(conn: mariadb.Connection, identity_id: int) -> list[dict]:
     return results
 
 
+def list_group_samples(conn: mariadb.Connection, group_id: int) -> list[dict]:
+    """Return the source samples that were merged into *group_id*."""
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, context, is_confirmed, is_low_quality, created_at
+        FROM voice_samples
+        WHERE used_in_group_id = ?
+        ORDER BY created_at
+        """,
+        (group_id,),
+    )
+    results = []
+    for row in cur.fetchall():
+        results.append({
+            "id":             row[0],
+            "context":        row[1],
+            "is_confirmed":   bool(row[2]),
+            "is_low_quality": bool(row[3]),
+            "created_at":     str(row[4]) if row[4] is not None else None,
+        })
+    return results
+
+
 def create_named_supervector(
     conn: mariadb.Connection,
     identity_id: int,

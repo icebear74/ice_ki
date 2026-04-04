@@ -58,6 +58,7 @@ from db.database import (
     # Named supervector groups
     list_supervector_groups,
     list_free_samples,
+    list_group_samples,
     create_named_supervector,
     revert_supervector_group,
     add_voice_sample,
@@ -456,6 +457,61 @@ def api_revert_supervector_group(group_id: int) -> JSONResponse:
     except Exception as exc:
         logger.error("revert_supervector_group failed: %s", exc)
         raise HTTPException(status_code=500, detail="Failed to revert supervector group.")
+    finally:
+        conn.close()
+
+
+@app.get("/api/supervector_groups/{group_id}/samples")
+def api_list_group_samples(group_id: int) -> JSONResponse:
+    """List the source samples that were merged into a supervector group."""
+    conn = get_connection()
+    try:
+        samples = list_group_samples(conn, group_id)
+        return JSONResponse(samples)
+    except Exception as exc:
+        logger.error("list_group_samples failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to list group samples.")
+    finally:
+        conn.close()
+
+
+@app.post("/api/supervector_groups/{group_id}/rebuild")
+def api_rebuild_supervector_group(group_id: int, data: dict = Body(...)) -> JSONResponse:
+    """
+    Rebuild a supervector group from a (possibly reduced) subset of its samples.
+
+    Body: { name: str, sample_ids: [int, ...] }
+
+    The existing group is reverted first (all its samples are freed back to
+    active), then a new group is created from the provided *sample_ids*.
+    """
+    from datetime import date as _date
+    conn = get_connection()
+    try:
+        name = str(data.get("name", "")).strip() or f"Rebuild {_date.today()}"
+        sample_ids = [int(i) for i in data.get("sample_ids", [])]
+        if not sample_ids:
+            raise HTTPException(status_code=400, detail="sample_ids must not be empty")
+        # We need the identity_id before reverting
+        cur = conn.cursor()
+        cur.execute("SELECT identity_id FROM supervector_groups WHERE id = ?", (group_id,))
+        row = cur.fetchone()
+        cur.close()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Supervector group not found")
+        identity_id = row[0]
+        revert_supervector_group(conn, group_id)
+        try:
+            new_group_id = create_named_supervector(conn, identity_id, name, sample_ids)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse({"status": "ok", "group_id": new_group_id,
+                             "sample_count": len(sample_ids)})
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("rebuild_supervector_group failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to rebuild supervector group.")
     finally:
         conn.close()
 
