@@ -899,8 +899,15 @@ def list_supervector_groups(conn: mariadb.Connection, identity_id: int) -> list[
         """,
         (identity_id,),
     )
-    cols = [d[0] for d in cur.description]
-    return [dict(zip(cols, row)) for row in cur.fetchall()]
+    results = []
+    for row in cur.fetchall():
+        results.append({
+            "id":           row[0],
+            "name":         row[1],
+            "created_at":   str(row[2]) if row[2] is not None else None,
+            "sample_count": row[3],
+        })
+    return results
 
 
 def list_free_samples(conn: mariadb.Connection, identity_id: int) -> list[dict]:
@@ -917,8 +924,17 @@ def list_free_samples(conn: mariadb.Connection, identity_id: int) -> list[dict]:
         """,
         (identity_id,),
     )
-    cols = [d[0] for d in cur.description]
-    return [dict(zip(cols, row)) for row in cur.fetchall()]
+    results = []
+    for row in cur.fetchall():
+        results.append({
+            "id":           row[0],
+            "context":      row[1],
+            "is_confirmed": bool(row[2]),
+            "is_active":    bool(row[3]),
+            "is_low_quality": bool(row[4]),
+            "created_at":   str(row[5]) if row[5] is not None else None,
+        })
+    return results
 
 
 def create_named_supervector(
