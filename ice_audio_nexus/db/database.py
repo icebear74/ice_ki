@@ -228,6 +228,311 @@ def normalize_vector(vec: list[float]) -> list[float]:
     return (arr / norm).tolist()
 
 
+def compute_adaptive_clusters_for_identity(
+    conn: "mariadb.Connection",
+    identity_id: int,
+    distance_threshold: float = 0.35,
+    min_samples_for_clustering: int = 4,
+    outlier_ratio: float = 0.15,
+) -> list[list[int]]:
+    """
+    Fetch all free, non-low-quality, active samples for *identity_id* and
+    group them into adaptive clusters using AgglomerativeClustering.
+
+    Algorithm:
+      1. L2-normalise every vector.
+      2. Remove the worst *outlier_ratio* fraction (distance to provisional mean).
+      3. If fewer than *min_samples_for_clustering* samples remain → single group.
+      4. Otherwise run AgglomerativeClustering (average linkage, cosine
+         distance, no upper limit on cluster count) with *distance_threshold*.
+         Samples whose average pairwise cosine distance to an existing cluster
+         exceeds the threshold automatically open a new "Expert Cluster".
+
+    *distance_threshold* is a **cosine distance** (0 = identical, 2 = opposite).
+    Typical same-speaker intra-session distance: 0.05–0.15; across episodes:
+    0.10–0.30.  The default of 0.35 allows grouping speaker samples from
+    different recording contexts while still separating genuinely distinct
+    voice characteristics.
+
+    Only clusters with **≥ 2 source samples** are returned; single-sample
+    "clusters" remain as free samples so they can be grouped in a future run
+    once more similar samples arrive.  If every cluster is a singleton (i.e.
+    the threshold is still too tight for this identity) the function falls
+    back to a single group containing all filtered samples.
+
+    Returns a list of sample-ID lists – one sublist per cluster.
+    An empty list means no eligible samples exist for this identity.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, embedding FROM voice_samples
+        WHERE identity_id = ?
+          AND (context IS NULL OR context != 'SUPERVECTOR')
+          AND used_in_group_id IS NULL
+          AND is_low_quality = FALSE
+          AND is_active = TRUE
+        ORDER BY created_at
+        """,
+        (identity_id,),
+    )
+    rows = cur.fetchall()
+    cur.close()
+
+    if not rows:
+        return []
+
+    valid_ids: list[int] = []
+    raw_vecs: list[list[float]] = []
+    for row in rows:
+        vec = np.frombuffer(row[1], dtype=np.float32)
+        if vec.shape[0] == 512:
+            valid_ids.append(row[0])
+            raw_vecs.append(normalize_vector(vec.tolist()))
+
+    if not valid_ids:
+        return []
+
+    data = np.array(raw_vecs, dtype=np.float32)
+
+    # Phase 1: outlier rejection
+    mean_v = np.mean(data, axis=0)
+    distances = np.linalg.norm(data - mean_v, axis=1)
+    num_to_keep = max(1, int(len(data) * (1.0 - outlier_ratio)))
+    keep_idx = np.argsort(distances)[:num_to_keep]
+    filtered_data = data[keep_idx]
+    filtered_ids = [valid_ids[i] for i in keep_idx]
+
+    if len(filtered_ids) < min_samples_for_clustering:
+        # Not enough samples for multi-centroid clustering → single group
+        return [filtered_ids]
+
+    # Phase 2: adaptive clustering
+    # NOTE: sklearn is an optional dependency. The lazy import here provides a
+    # graceful fallback to single-cluster behaviour when sklearn is not installed.
+    try:
+        from sklearn.cluster import AgglomerativeClustering  # type: ignore[import]
+    except ImportError:
+        logger.warning(
+            "scikit-learn not available – falling back to single-cluster supervector"
+        )
+        return [filtered_ids]
+
+    # distance_threshold is a cosine distance (0..2 for unit vectors).
+    # sklearn ≥1.2 uses the 'metric' keyword; older versions use 'affinity'.
+    try:
+        clustering = AgglomerativeClustering(
+            n_clusters=None,
+            distance_threshold=distance_threshold,
+            metric="cosine",
+            linkage="average",
+            compute_full_tree=True,
+        )
+    except TypeError:
+        # sklearn < 1.2 compatibility
+        clustering = AgglomerativeClustering(
+            n_clusters=None,
+            distance_threshold=distance_threshold,
+            affinity="cosine",
+            linkage="average",
+            compute_full_tree=True,
+        )
+    labels = clustering.fit_predict(filtered_data)
+
+    cluster_map: dict[int, list[int]] = {}
+    for sample_id, label in zip(filtered_ids, labels):
+        cluster_map.setdefault(int(label), []).append(sample_id)
+
+    # Keep only clusters with ≥ 2 source samples – a single-sample "cluster" is
+    # just an isolated outlier that did not merge with anything.  Those samples
+    # stay free and can be grouped in future runs once more similar samples arrive.
+    # Exception: if *every* cluster is a singleton (threshold still too tight for
+    # this identity), fall back to a single group so at least one supervector is
+    # created.
+    real_clusters = [ids for ids in cluster_map.values() if len(ids) >= 2]
+    if not real_clusters:
+        # All singletons → single group fallback
+        return [filtered_ids]
+    return real_clusters
+
+
+def validate_clusters(
+    conn: "mariadb.Connection",
+    identity_id: int,
+) -> list[dict]:
+    """
+    Cross-validate the active supervector clusters for *identity_id*.
+
+    **Internal cross-validation** (``hit_rate_pct``):
+    For each supervector group (cluster centroid), compute what fraction of
+    the source samples that were used to create it are *correctly* identified
+    as closest to that centroid when compared against **all** other active
+    supervector centroids for the same identity.
+
+    **Segment coverage** (``segment_coverage_pct``, ``segment_count``):
+    For every episode segment assigned to this identity (with a valid
+    embedding), find the nearest centroid.  The *segment_coverage_pct* for a
+    cluster is the fraction of all such segments that map to it.  A cluster
+    with high coverage represents many real occurrences of the speaker in the
+    episode data – not just the training samples.
+
+    Returns a list of dicts, one per group::
+
+        {
+          "group_id":              int,
+          "group_name":            str,
+          "sample_count":          int,
+          "hit_rate_pct":          float,   # 0-100 %  (internal cross-val)
+          "context_distribution":  {context_str: pct_float, …},
+          "segment_coverage_pct":  float | None,  # 0-100 %, None if no segments
+          "segment_count":         int,     # segments nearest to this centroid
+          "total_segments":        int,     # total segments for this identity
+        }
+    """
+    cur = conn.cursor()
+
+    # Fetch all active supervector centroids for this identity
+    cur.execute(
+        """
+        SELECT vs.id, vs.embedding, sg.id AS group_id, sg.name AS group_name
+        FROM voice_samples vs
+        JOIN supervector_groups sg ON sg.id = vs.supervector_group_id
+        WHERE vs.identity_id = ?
+          AND vs.context = 'SUPERVECTOR'
+          AND vs.is_active = TRUE
+        ORDER BY sg.id
+        """,
+        (identity_id,),
+    )
+    sv_rows = cur.fetchall()
+    if not sv_rows:
+        cur.close()
+        return []
+
+    sv_centroids: list[dict] = []
+    for row in sv_rows:
+        vec = np.frombuffer(row[1], dtype=np.float32)
+        if vec.shape[0] == 512:
+            sv_centroids.append({
+                "sv_sample_id": row[0],
+                "embedding":    np.array(normalize_vector(vec.tolist()), dtype=np.float32),
+                "group_id":     row[2],
+                "group_name":   row[3],
+            })
+
+    if not sv_centroids:
+        cur.close()
+        return []
+
+    centroid_matrix = np.stack([c["embedding"] for c in sv_centroids], axis=0)
+    group_ids_order = [c["group_id"] for c in sv_centroids]
+
+    # ── Internal cross-validation ─────────────────────────────────────────
+    results: list[dict] = []
+    for centroid_info in sv_centroids:
+        group_id   = centroid_info["group_id"]
+        group_name = centroid_info["group_name"]
+
+        # Fetch the source samples that were merged into this group
+        cur.execute(
+            """
+            SELECT id, embedding, context
+            FROM voice_samples
+            WHERE used_in_group_id = ?
+            ORDER BY created_at
+            """,
+            (group_id,),
+        )
+        src_rows = cur.fetchall()
+
+        if not src_rows:
+            results.append({
+                "group_id":             group_id,
+                "group_name":           group_name,
+                "sample_count":         0,
+                "hit_rate_pct":         0.0,
+                "context_distribution": {},
+            })
+            continue
+
+        hits = 0
+        valid_count = 0
+        contexts: dict[str, int] = {}
+
+        for src_row in src_rows:
+            src_raw = np.frombuffer(src_row[1], dtype=np.float32)
+            if src_raw.shape[0] != 512:
+                continue
+            src_emb = np.array(normalize_vector(src_raw.tolist()), dtype=np.float32)
+
+            # Euclidean distance on L2-normalised vectors ≈ cosine distance
+            dists = np.linalg.norm(centroid_matrix - src_emb, axis=1)
+            nearest_group_id = group_ids_order[int(np.argmin(dists))]
+
+            if nearest_group_id == group_id:
+                hits += 1
+
+            valid_count += 1
+            ctx = src_row[2] or "unknown"
+            contexts[ctx] = contexts.get(ctx, 0) + 1
+
+        hit_rate = (hits / valid_count * 100.0) if valid_count > 0 else 0.0
+        total_ctx = sum(contexts.values())
+        ctx_dist = (
+            {k: round(v / total_ctx * 100.0, 1) for k, v in contexts.items()}
+            if total_ctx > 0
+            else {}
+        )
+
+        results.append({
+            "group_id":             group_id,
+            "group_name":           group_name,
+            "sample_count":         valid_count,
+            "hit_rate_pct":         round(hit_rate, 1),
+            "context_distribution": ctx_dist,
+        })
+
+    # ── Segment coverage ─────────────────────────────────────────────────
+    # Map each cluster to how many episode segments nearest to it.
+    # Segments come from episode_segments.embedding (diarization embeddings).
+    cur.execute(
+        """
+        SELECT embedding
+        FROM episode_segments
+        WHERE identity_id = ?
+          AND embedding IS NOT NULL
+        """,
+        (identity_id,),
+    )
+    seg_rows = cur.fetchall()
+    cur.close()
+
+    seg_hits: dict[int, int] = {c["group_id"]: 0 for c in sv_centroids}
+    total_segments = 0
+    for seg_row in seg_rows:
+        seg_raw = np.frombuffer(seg_row[0], dtype=np.float32)
+        if seg_raw.shape[0] != 512:
+            continue
+        seg_emb = np.array(normalize_vector(seg_raw.tolist()), dtype=np.float32)
+        dists = np.linalg.norm(centroid_matrix - seg_emb, axis=1)
+        nearest_gid = group_ids_order[int(np.argmin(dists))]
+        seg_hits[nearest_gid] = seg_hits.get(nearest_gid, 0) + 1
+        total_segments += 1
+
+    # Merge segment coverage into results
+    for r in results:
+        gid = r["group_id"]
+        count = seg_hits.get(gid, 0)
+        r["segment_count"]        = count
+        r["total_segments"]       = total_segments
+        r["segment_coverage_pct"] = (
+            round(count / total_segments * 100.0, 1)
+            if total_segments > 0 else None
+        )
+
+    return results
+
+
 def calculate_robust_supervector(
     embeddings: list[list[float]],
     outlier_ratio: float = 0.2,
@@ -408,6 +713,7 @@ def list_identities(conn: mariadb.Connection) -> list[dict]:
                p.title AS casting_production_title
         FROM identities i
         LEFT JOIN voice_samples vs ON vs.identity_id = i.id
+            AND (vs.context IS NULL OR vs.context != 'SUPERVECTOR')
         LEFT JOIN actors a ON a.id = i.voice_actor_id
         LEFT JOIN voice_castings vc ON vc.id = i.voice_casting_id
         LEFT JOIN roles       r ON r.id  = vc.role_id
@@ -473,50 +779,69 @@ def delete_identity(conn: mariadb.Connection, identity_id: int) -> None:
 
 def refresh_supervectors(conn: mariadb.Connection) -> dict:
     """
-    Auto-supervector mode: for every identity, group ALL currently free
-    (not yet merged) non-low-quality samples into a single named supervector
-    group called "Auto <date>".
+    Adaptive multi-centroid supervector mode: for every identity, delete ALL
+    existing supervector groups (full revert), then re-cluster the free,
+    non-low-quality samples using distance-based AgglomerativeClustering.
 
-    This is the quick "merge everything" path.  Users can use
-    create_named_supervector() for fine-grained era-based groups.
+    • If an identity has fewer than 4 eligible samples a single robust
+      supervector is created (existing behaviour).
+    • Otherwise an unlimited number of clusters is formed automatically –
+      every group of samples whose intra-cluster cosine distance exceeds the
+      threshold (default 0.35) opens a new "Expert Cluster".
 
-    Returns a summary dict: {identity_name: sample_count_used, ...}
+    Returns a summary dict::
+
+        {identity_name: {"samples": int, "clusters": int}, …}
     """
     from datetime import date
-    auto_name = f"Auto {date.today()}"
+    today = date.today()
 
     cur = conn.cursor()
     summary: dict = {}
     try:
         cur.execute("SELECT id, name FROM identities ORDER BY name")
         identities_list = cur.fetchall()
-
-        for identity_id, identity_name in identities_list:
-            # Fetch free non-LQ sample IDs
-            cur.execute(
-                """SELECT id FROM voice_samples
-                   WHERE identity_id = ?
-                     AND (context IS NULL OR context != 'SUPERVECTOR')
-                     AND used_in_group_id IS NULL
-                     AND is_low_quality = FALSE""",
-                (identity_id,),
-            )
-            rows = cur.fetchall()
-            if not rows:
-                continue
-
-            sample_ids = [row[0] for row in rows]
-            try:
-                create_named_supervector(conn, identity_id, auto_name, sample_ids)
-                summary[identity_name] = len(sample_ids)
-            except Exception as exc:
-                logger.warning("Auto-supervector skipped for %s: %s", identity_name, exc)
-
-    except Exception:
-        conn.rollback()
-        raise
     finally:
         cur.close()
+
+    for identity_id, identity_name in identities_list:
+        try:
+            # 1. Revert all existing supervectors so samples are free again
+            revert_supervectors(conn, identity_id)
+
+            # 2. Compute adaptive clusters
+            clusters = compute_adaptive_clusters_for_identity(conn, identity_id)
+            if not clusters:
+                continue
+
+            total_samples = 0
+            num_clusters  = len(clusters)
+            for i, cluster_sample_ids in enumerate(clusters, 1):
+                if num_clusters > 1:
+                    cluster_name = f"Auto {today} – Cluster {i}/{num_clusters}"
+                else:
+                    cluster_name = f"Auto {today}"
+                try:
+                    create_named_supervector(
+                        conn, identity_id, cluster_name, cluster_sample_ids
+                    )
+                    total_samples += len(cluster_sample_ids)
+                except Exception as exc:
+                    logger.warning(
+                        "Auto-supervector skipped for %s cluster %d: %s",
+                        identity_name, i, exc,
+                    )
+
+            if total_samples > 0:
+                summary[identity_name] = {
+                    "samples":  total_samples,
+                    "clusters": num_clusters,
+                }
+        except Exception as exc:
+            logger.warning(
+                "refresh_supervectors: identity '%s' failed: %s",
+                identity_name, exc,
+            )
 
     return summary
 
@@ -1208,15 +1533,27 @@ def find_nearest_identity(
     min_margin: float = 0.07,
 ) -> dict:
     """
-    Search all voice_samples using VEC_DISTANCE_COSINE (MariaDB 11.7+) and
-    return the closest match.
+    Find the nearest identity for *embedding* by comparing it against all active
+    voice samples in the database.
 
-    *min_margin* guards against cross-identity confusion (e.g. two characters
-    whose embeddings land close together).  Even if the best match is within
-    *match_threshold*, the result is only considered a confirmed match when the
-    next-closest sample from a **different** identity is at least *min_margin*
-    further away.  If the margin is too small the result is downgraded:
-      • confirmed → suggest  (if still within suggest_threshold + margin)
+    The search is performed in two passes:
+
+    **Pass 1 – per-identity minimum distance**
+    ``GROUP BY identity_id`` with ``MIN(VEC_DISTANCE_COSINE)`` ensures that an
+    identity with many supervector samples cannot crowd out other identities.
+    The old flat ``LIMIT 10`` query had exactly this failure mode: if one identity
+    had ≥ 10 active supervectors all 10 result rows could be that identity,
+    ``second_distance`` was never populated, ``margin_ok`` was always *True*, and
+    every segment would match the same identity.
+
+    **Pass 2 – closest sample within the winning identity**
+    Retrieves the specific ``sample_id`` and ``context`` of the sample that
+    achieved the best distance, used for display / debugging.
+
+    *min_margin* guards against cross-identity confusion: if the runner-up
+    identity is fewer than *min_margin* away from the winner the result is
+    downgraded:
+      • confirmed → suggest  (if still ≤ suggest_threshold)
       • suggest   → unknown
 
     Returns a dict with keys:
@@ -1226,52 +1563,69 @@ def find_nearest_identity(
       sample_id     – int or None   (which sample triggered the match)
       sample_context– str or None
       distance      – float or None
-      second_distance – float or None  (runner-up distance, useful for debugging)
+      second_distance – float or None  (runner-up identity distance, for debugging)
     """
     vec_bytes = vector_to_bytes(embedding)
     cur = conn.cursor()
-    # Fetch the two closest samples (potentially from different identities)
-    # Only consider active samples (is_active = TRUE).
+
+    # ── Step 1: get the best (minimum) cosine distance per identity ───────────
+    # This ensures that an identity with many supervector samples cannot crowd
+    # out other identities by filling all LIMIT slots with its own rows.
+    # The old LIMIT 10 flat query had exactly that failure mode: if Sheldon had
+    # ≥ 10 active supervectors the entire result set was Sheldon, second_distance
+    # was never set, margin_ok was always True, and everything matched Sheldon.
     cur.execute(
         """
-        SELECT vs.id,
-               vs.identity_id,
+        SELECT vs.identity_id,
                i.name,
-               vs.context,
-               VEC_DISTANCE_COSINE(vs.embedding, ?) AS dist
+               MIN(VEC_DISTANCE_COSINE(vs.embedding, ?)) AS best_dist
         FROM voice_samples vs
         JOIN identities i ON i.id = vs.identity_id
         WHERE vs.is_active = TRUE
-        ORDER BY dist ASC
-        LIMIT 10
+        GROUP BY vs.identity_id, i.name
+        ORDER BY best_dist ASC
+        LIMIT 5
         """,
         (vec_bytes,),
     )
-    rows = cur.fetchall()
-    if not rows:
+    identity_rows = cur.fetchall()
+
+    # VEC_DISTANCE_COSINE returns NULL for malformed embeddings – drop those.
+    identity_rows = [r for r in identity_rows if r[2] is not None]
+
+    if not identity_rows:
+        cur.close()
         return {"status": "unknown", "identity_id": None, "identity_name": None,
                 "sample_id": None, "sample_context": None, "distance": None,
                 "second_distance": None}
 
-    # VEC_DISTANCE_COSINE returns NULL when the stored embedding is malformed.
-    # Filter those rows out so float() never receives None.
-    rows = [r for r in rows if r[4] is not None]
-    if not rows:
-        return {"status": "unknown", "identity_id": None, "identity_name": None,
-                "sample_id": None, "sample_context": None, "distance": None,
-                "second_distance": None}
+    identity_id, identity_name, distance = identity_rows[0]
+    identity_id   = int(identity_id)
+    distance      = float(distance)
 
-    sample_id, identity_id, identity_name, sample_context, distance = rows[0]
-
-    # Find the closest sample that belongs to a *different* identity (runner-up).
+    # second_distance: closest match from any *different* identity
     second_distance: float | None = None
-    if len(rows) > 1:
-        for row in rows[1:]:
-            if row[1] != identity_id:
-                second_distance = float(row[4])
-                break
-        # If both rows share the same identity, the second_distance stays None.
-        # In that case there is no competing identity, so no margin check needed.
+    for row in identity_rows[1:]:
+        if row[0] != identity_id and row[2] is not None:
+            second_distance = float(row[2])
+            break
+
+    # ── Step 2: find the specific sample within the winning identity ──────────
+    cur.execute(
+        """
+        SELECT id, context
+        FROM voice_samples
+        WHERE identity_id = ?
+          AND is_active = TRUE
+        ORDER BY VEC_DISTANCE_COSINE(embedding, ?) ASC
+        LIMIT 1
+        """,
+        (identity_id, vec_bytes),
+    )
+    sample_row = cur.fetchone()
+    cur.close()
+    sample_id      = sample_row[0] if sample_row else None
+    sample_context = sample_row[1] if sample_row else None
 
     # Check whether the winning match is sufficiently separated from the
     # runner-up identity.  If not, downgrade the confidence level.

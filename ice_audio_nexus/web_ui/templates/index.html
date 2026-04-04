@@ -407,6 +407,111 @@
     .v-ok   { background:var(--warn); }
     .v-bad  { background:var(--danger); }
     .sv-consistency { font-size:10px; margin-top:2px; }
+
+    /* ------------------------------------------------------------------ */
+    /*  Identity Inspector & Cluster Dashboard – fullscreen overlays      */
+    /* ------------------------------------------------------------------ */
+    #identity-inspector,
+    #cluster-dashboard {
+      display:none;
+      position:fixed;
+      inset:0;
+      background:rgba(0,0,0,.82);
+      z-index:950;
+      align-items:flex-start;
+      justify-content:center;
+      overflow-y:auto;
+      padding:24px 16px 48px;
+    }
+    #identity-inspector.open { display:flex; }
+    #cluster-dashboard.open  { display:flex; }
+    .inspector-box {
+      background:var(--bg-card);
+      border:1px solid var(--border);
+      border-radius:12px;
+      width:100%;
+      max-width:900px;
+      padding:24px;
+    }
+    .inspector-header {
+      display:flex;
+      align-items:center;
+      gap:12px;
+      margin-bottom:20px;
+      flex-wrap:wrap;
+    }
+    .inspector-header h2 { font-size:18px; color:var(--accent); flex:1; margin:0; }
+    .cluster-grid {
+      display:grid;
+      grid-template-columns:repeat(auto-fill, minmax(260px, 1fr));
+      gap:14px;
+      margin-bottom:20px;
+    }
+    .cluster-card {
+      background:var(--bg);
+      border:1px solid var(--border);
+      border-radius:var(--radius);
+      padding:14px;
+    }
+    .cluster-card .cc-title {
+      font-weight:700;
+      font-size:13px;
+      color:var(--accent2);
+      margin-bottom:6px;
+      word-break:break-word;
+    }
+    .cluster-card .cc-meta {
+      font-size:11px;
+      color:var(--text-muted);
+      margin-bottom:8px;
+    }
+    .cluster-card .cc-reliability {
+      display:flex;
+      align-items:center;
+      gap:8px;
+      margin-bottom:8px;
+    }
+    .reliability-bar-track {
+      flex:1;
+      height:8px;
+      background:var(--border);
+      border-radius:4px;
+      overflow:hidden;
+    }
+    .reliability-bar-fill {
+      height:100%;
+      border-radius:4px;
+      transition:width .4s;
+    }
+    .rel-high { background:var(--accent2); }
+    .rel-mid  { background:var(--warn); }
+    .rel-low  { background:var(--danger); }
+    .cluster-card .cc-contexts {
+      font-size:10px;
+      color:var(--text-muted);
+      line-height:1.7;
+    }
+    .ctx-row {
+      display:flex;
+      justify-content:space-between;
+      gap:8px;
+    }
+    .ctx-row .ctx-label {
+      overflow:hidden;
+      text-overflow:ellipsis;
+      white-space:nowrap;
+      flex:1;
+    }
+    .ctx-row .ctx-pct {
+      flex-shrink:0;
+      font-weight:600;
+    }
+    .inspector-loading {
+      color:var(--text-muted);
+      text-align:center;
+      padding:40px;
+      font-size:14px;
+    }
   </style>
 </head>
 <body>
@@ -417,6 +522,16 @@
 <header>
   <h1>🎙️ ice_audio_nexus</h1>
   <span class="tagline">Multi-Vektor Sprecher-Identifikation · MariaDB 11.7</span>
+  <div style="margin-left:auto;display:flex;gap:8px;align-items:center;">
+    <button class="btn btn-ghost" onclick="openClusterDashboard()"
+            title="Globales Cluster-Dashboard – alle Identitäten auf einen Blick">
+      🗺 Cluster Dashboard
+    </button>
+    <button class="btn btn-warn" onclick="globalRebuildAll(this)"
+            title="Alle Supervektoren für alle Identitäten mit Adaptive Clustering neu berechnen">
+      🔄 ALLE Supervektoren neu
+    </button>
+  </div>
 </header>
 
 <!-- ================================================================== -->
@@ -500,9 +615,13 @@
       <div class="section-title">Bekannte Identitäten</div>
       <div id="identities-list"></div>
 
-      <div style="margin-top:10px;">
-        <button class="btn btn-warn" style="width:100%" onclick="refreshSupervectors()">
-          🧠 Supervektoren generieren
+      <div style="margin-top:10px;display:flex;gap:6px;">
+        <button class="btn btn-warn" style="flex:1" onclick="globalRebuildAll(this)">
+          🔄 ALLE Supervektoren neu berechnen
+        </button>
+        <button class="btn btn-ghost" style="flex-shrink:0;" onclick="openClusterDashboard()"
+                title="Cluster-Dashboard öffnen">
+          🗺
         </button>
       </div>
 
@@ -589,7 +708,58 @@
 <div id="toast-container"></div>
 
 <!-- ================================================================== -->
-<!--  Edit Identity Modal                                                -->
+<!--  Identity Inspector – fullscreen overlay                            -->
+<!-- ================================================================== -->
+<div id="identity-inspector" onclick="closeIdentityInspector(event)">
+  <div class="inspector-box" onclick="event.stopPropagation()">
+    <div class="inspector-header">
+      <h2 id="inspector-title">🔍 Identity Inspector</h2>
+      <button class="btn btn-ghost" onclick="closeIdentityInspector()"
+              style="font-size:18px;padding:4px 10px;flex-shrink:0;" title="Schließen">✕</button>
+    </div>
+    <div style="margin-bottom:16px;display:flex;gap:8px;flex-wrap:wrap;">
+      <button class="btn" id="inspector-rebuild-btn"
+              style="background:var(--danger);color:#fff;font-size:12px;padding:6px 14px;"
+              onclick="rebuildAdaptiveClusters()">
+        🔄 Alle Cluster neu erstellen (Adaptive Clustering)
+      </button>
+      <span style="font-size:11px;color:var(--text-muted);align-self:center;">
+        Löscht alle Supervektoren und gruppiert neu – unbegrenzte Cluster-Anzahl
+      </span>
+    </div>
+    <div id="inspector-content">
+      <div class="inspector-loading">Lade Cluster-Daten…</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================================================================== -->
+<!--  Global Cluster Dashboard – fullscreen overlay                      -->
+<!-- ================================================================== -->
+<div id="cluster-dashboard" onclick="closeClusterDashboard(event)">
+  <div class="inspector-box" style="max-width:1100px;" onclick="event.stopPropagation()">
+    <div class="inspector-header">
+      <h2>🗺 Globales Cluster-Dashboard</h2>
+      <button class="btn btn-danger" id="dashboard-rebuild-all-btn"
+              style="font-size:12px;padding:6px 14px;"
+              onclick="globalRebuildAll(this)">
+        🔄 ALLE Identitäten neu clustern
+      </button>
+      <button class="btn btn-ghost" onclick="_closeClusterDashboard()"
+              style="font-size:18px;padding:4px 10px;flex-shrink:0;" title="Schließen">✕</button>
+    </div>
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:16px;">
+      Alle Identitäten auf einen Blick: Cluster-Anzahl, Samples und Qualitäts-Score.
+      Klicke auf <strong>🔍 Details</strong> für die vollständige Cluster-Hierarchie einer Identität
+      oder auf <strong>🔄 Neu clustern</strong> um Adaptive Clustering für eine einzelne Identität zu starten.
+    </div>
+    <div id="cluster-dashboard-content">
+      <div class="inspector-loading">Lade Cluster-Daten…</div>
+    </div>
+  </div>
+</div>
+
+<!-- ================================================================== -->
 <!-- ================================================================== -->
 <div id="edit-identity-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:900;align-items:center;justify-content:center;">
   <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:20px;width:380px;max-width:95vw;">
@@ -880,6 +1050,9 @@ function renderIdentities() {
       </div>
       <div class="id-actions">
         <button class="btn btn-ghost" style="font-size:11px;padding:4px 8px;"
+                title="Identity Inspector – Cluster-Übersicht & Validierung"
+                onclick="openIdentityInspector(${id.id}, '${esc(id.name)}')">🔍</button>
+        <button class="btn btn-ghost" style="font-size:11px;padding:4px 8px;"
                 title="Supervektoren verwalten – Altersgruppen definieren"
                 onclick="toggleSvPanel(${id.id})">🧬 Supervektoren</button>
         <button class="btn btn-ghost" style="font-size:11px;padding:4px 8px;"
@@ -913,21 +1086,250 @@ async function createIdentity() {
 }
 
 /* -------------------------------------------------------------------- */
-/*  Supervector generation                                               */
+/*  Supervector generation / global rebuild                             */
 /* -------------------------------------------------------------------- */
-async function refreshSupervectors() {
-  if (!confirm("Supervektoren für alle Identitäten generieren?\n\nDies berechnet den Mittelwert aller Stimmvektoren pro Person und markiert alle Original-Samples als inaktiv. Der Scanner nutzt danach nur noch die Supervektoren.")) return;
-  const resp = await fetch("/api/refresh_supervectors", { method: "POST" });
+async function globalRebuildAll(btn) {
+  if (!confirm(
+    'ALLE Supervektoren für alle Identitäten neu berechnen?\n\n' +
+    'Dies verwendet Adaptive Clustering (AgglomerativeClustering, cosine distance).\n' +
+    'Alle bestehenden Supervektoren werden gelöscht und automatisch neu geclustert.\n' +
+    'Identitäten mit ≥ 8 Samples erhalten mehrere Experten-Cluster.'
+  )) return;
+
+  const origText = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Berechne alle…'; }
+
+  const resp = await fetch('/api/refresh_supervectors', { method: 'POST' });
+
+  if (btn) { btn.disabled = false; btn.textContent = origText; }
+
   if (resp.ok) {
     const data = await resp.json();
-    const count = Object.keys(data.updated || {}).length;
-    toast(`Supervektoren generiert für ${count} Identität(en) ✓`);
+    const updated = data.updated || {};
+    const count = Object.keys(updated).length;
+    const totalClusters = Object.values(updated).reduce((a, v) => a + (v.clusters || 0), 0);
+    const totalSamples  = Object.values(updated).reduce((a, v) => a + (v.samples  || 0), 0);
+    toast(`${count} Identität(en) neu geclustert · ${totalClusters} Cluster · ${totalSamples} Samples ✓`);
+    await loadIdentities();
+    // Open the dashboard to show the results visually
+    if (!document.getElementById('cluster-dashboard').classList.contains('open')) {
+      await openClusterDashboard();
+    } else {
+      await loadClusterDashboard();
+    }
+  } else {
+    const err = await resp.json().catch(() => ({}));
+    toast('Fehler: ' + (err.detail || resp.statusText), 'error');
+  }
+}
+
+/* -------------------------------------------------------------------- */
+/*  Global Cluster Dashboard                                             */
+/* -------------------------------------------------------------------- */
+async function openClusterDashboard() {
+  document.getElementById('cluster-dashboard').classList.add('open');
+  await loadClusterDashboard();
+}
+
+function closeClusterDashboard(event) {
+  if (event && event.target !== document.getElementById('cluster-dashboard')) return;
+  _closeClusterDashboard();
+}
+
+function _closeClusterDashboard() {
+  document.getElementById('cluster-dashboard').classList.remove('open');
+}
+
+async function loadClusterDashboard() {
+  const content = document.getElementById('cluster-dashboard-content');
+  content.innerHTML = '<div class="inspector-loading">Lade Cluster-Daten für alle Identitäten…</div>';
+
+  // Fetch identities list
+  const idResp = await fetch('/api/identities');
+  if (!idResp.ok) {
+    content.innerHTML = '<div style="color:var(--danger);text-align:center;padding:32px;">Fehler beim Laden der Identitäten.</div>';
+    return;
+  }
+  const ids = await idResp.json();
+  if (!ids.length) {
+    content.innerHTML = '<div class="empty-state">Noch keine Identitäten vorhanden.<br><span style="font-size:12px;">Lade eine Episode und weise Segmenten Identitäten zu.</span></div>';
+    return;
+  }
+
+  // Fetch clusters for all identities in parallel
+  const clusterResults = await Promise.all(
+    ids.map(id =>
+      fetch(`/api/identities/${id.id}/clusters`)
+        .then(r => r.ok ? r.json() : [])
+        .catch(() => [])
+    )
+  );
+
+  content.innerHTML = renderDashboardGrid(ids, clusterResults);
+}
+
+function renderDashboardGrid(ids, clusterResults) {
+  let totalClusters = 0, totalRawSamples = 0, totalClusteredSamples = 0;
+  let hitSum = 0, hitCount = 0;
+
+  const cards = ids.map((id, i) => {
+    const clusters      = clusterResults[i] || [];
+    const numClusters   = clusters.length;
+    const rawSamples    = id.sample_count || 0;
+    const clustSamples  = clusters.reduce((a, c) => a + (c.sample_count || 0), 0);
+    // "Trivial" = every cluster has ≤ 1 source sample → cross-validation is
+    // always 100% because there is no other centroid to distinguish from.
+    const isTrivial     = numClusters > 0 && clusters.every(c => (c.sample_count || 0) <= 1);
+    const avgHit        = numClusters
+      ? clusters.reduce((a, c) => a + (c.hit_rate_pct || 0), 0) / numClusters
+      : 0;
+
+    totalClusters         += numClusters;
+    totalRawSamples       += rawSamples;
+    totalClusteredSamples += clustSamples;
+    if (numClusters > 0 && !isTrivial) { hitSum += avgHit; hitCount++; }
+
+    const hitColor = numClusters === 0
+      ? 'var(--text-muted)'
+      : isTrivial ? 'var(--text-muted)'
+      : avgHit >= 80 ? 'var(--accent2)' : avgHit >= 50 ? 'var(--warn)' : 'var(--danger)';
+    const barClass = avgHit >= 80 ? 'rel-high' : avgHit >= 50 ? 'rel-mid' : 'rel-low';
+
+    // Per-cluster mini-rows inside the card
+    const clusterRows = clusters.slice(0, 5).map(c => {
+      const p   = c.hit_rate_pct ?? 0;
+      const triv = (c.sample_count || 0) <= 1;
+      const col = triv ? 'var(--text-muted)' : p >= 80 ? 'var(--accent2)' : p >= 50 ? 'var(--warn)' : 'var(--danger)';
+      const pLabel = triv ? '–' : `${p}%`;
+      return `<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;font-size:10px;padding:2px 0;border-bottom:1px solid var(--border);">
+        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-muted);"
+              title="${esc(c.group_name)}">${esc(c.group_name)}</span>
+        <span style="flex-shrink:0;color:var(--text-muted);">${c.sample_count} S</span>
+        <span style="flex-shrink:0;font-weight:700;color:${col};">${pLabel}</span>
+      </div>`;
+    }).join('');
+    const moreRow = clusters.length > 5
+      ? `<div style="font-size:10px;color:var(--text-muted);padding-top:2px;">+ ${clusters.length - 5} weitere…</div>`
+      : '';
+
+    let integrityLabel;
+    if (numClusters === 0) {
+      integrityLabel = '– keine Supervektoren –';
+    } else if (isTrivial) {
+      integrityLabel = '<span title="Alle Cluster haben nur 1 Sample – keine sinnvolle Kreuzvalidierung möglich">⚠ Einzelsample-Cluster</span>';
+    } else {
+      integrityLabel = `Ø Integrität: ${avgHit.toFixed(1)}%`;
+    }
+
+    return `
+      <div class="cluster-card">
+        <div class="cc-title" style="color:var(--accent);">${esc(id.name)}</div>
+        <div class="cc-meta">${numClusters} Cluster · ${rawSamples} Samples
+          ${id.casting_role_name ? `<span style="color:var(--text-muted);"> · ${esc(id.casting_role_name)}</span>` : ''}
+        </div>
+        <div class="cc-reliability" style="margin-bottom:4px;">
+          <span style="font-size:11px;color:${hitColor};font-weight:700;white-space:nowrap;">
+            ${integrityLabel}
+          </span>
+        </div>
+        ${numClusters > 0 && !isTrivial ? `
+        <div class="reliability-bar-track" style="margin-bottom:8px;">
+          <div class="reliability-bar-fill ${barClass}" style="width:${avgHit.toFixed(1)}%"></div>
+        </div>` : '<div style="height:4px;"></div>'}
+        ${numClusters > 0 ? `<div style="margin-bottom:8px;">${clusterRows}${moreRow}</div>` : ''}
+        <div style="display:flex;gap:5px;flex-wrap:wrap;">
+          <button class="btn btn-ghost" style="font-size:11px;padding:4px 8px;flex:1;white-space:nowrap;"
+                  onclick="_closeClusterDashboard();openIdentityInspector(${id.id},'${esc(id.name)}')">
+            🔍 Details
+          </button>
+          <button class="btn btn-warn" style="font-size:11px;padding:4px 8px;flex:1;white-space:nowrap;"
+                  onclick="dashboardRebuildOne(${id.id},'${esc(id.name)}',this)">
+            🔄 Neu clustern
+          </button>
+        </div>
+      </div>`;
+  }).join('');
+
+  const globalAvgNum   = hitCount ? hitSum / hitCount : null;
+  const globalAvgLabel = globalAvgNum !== null ? `${globalAvgNum.toFixed(1)}%` : '–';
+  const globalAvgColor = globalAvgNum === null
+    ? 'var(--text-muted)'
+    : globalAvgNum >= 80 ? 'var(--accent2)' : globalAvgNum >= 50 ? 'var(--warn)' : 'var(--danger)';
+
+  const trivialCount = ids.filter((_, i) => {
+    const c = clusterResults[i] || [];
+    return c.length > 0 && c.every(cl => (cl.sample_count || 0) <= 1);
+  }).length;
+  const trivialNote = trivialCount > 0
+    ? `<div style="font-size:11px;color:var(--warn);margin-bottom:16px;padding:8px 12px;
+                   background:rgba(210,153,34,.1);border:1px solid rgba(210,153,34,.3);border-radius:var(--radius);">
+         ⚠ <strong>${trivialCount} Identität(en)</strong> haben ausschließlich Einzelsample-Cluster
+         (je 1 Sample pro Supervektor). Die angezeigte Integrität von 100% ist trivial
+         und nicht aussagekräftig. Klicke <strong>🔄 Neu clustern</strong> auf einer solchen Karte
+         – oder passe den Clustering-Schwellenwert an.
+       </div>`
+    : '';
+
+  return `
+    <div style="display:flex;gap:16px;margin-bottom:${trivialCount > 0 ? '12' : '20'}px;flex-wrap:wrap;">
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:12px 20px;min-width:130px;">
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">Identitäten</div>
+        <div style="font-size:24px;font-weight:700;color:var(--accent);">${ids.length}</div>
+      </div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:12px 20px;min-width:130px;">
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">Voice Samples</div>
+        <div style="font-size:24px;font-weight:700;color:var(--text);">${totalRawSamples}</div>
+      </div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:12px 20px;min-width:130px;">
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">Cluster gesamt</div>
+        <div style="font-size:24px;font-weight:700;color:var(--accent2);">${totalClusters}</div>
+      </div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:12px 20px;min-width:180px;">
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">
+          Ø Cluster-Integrität
+          ${hitCount < ids.length ? `<span style="color:var(--warn);font-size:10px;"> (${hitCount} auswertbar)</span>` : ''}
+        </div>
+        <div style="font-size:24px;font-weight:700;color:${globalAvgColor};">${globalAvgLabel}</div>
+      </div>
+    </div>
+    ${trivialNote}
+    <div class="cluster-grid">${cards}</div>`;
+}
+
+async function dashboardRebuildOne(identityId, identityName, btn) {
+  if (!confirm(
+    `Adaptive Cluster für „${identityName}" neu erstellen?\n\n` +
+    'Alle bestehenden Supervektoren dieser Identität werden gelöscht und mit Adaptive Clustering neu geclustert.'
+  )) return;
+  const origText = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Berechne…'; }
+  const resp = await fetch(`/api/identities/${identityId}/rebuild_adaptive_clusters`, { method: 'POST' });
+  if (btn) { btn.disabled = false; btn.textContent = origText; }
+  if (resp.ok) {
+    const data = await resp.json();
+    toast(
+      data.clusters > 0
+        ? `${data.clusters} Cluster für „${identityName}" aus ${data.samples} Sample(s) ✓`
+        : (data.message || 'Keine geeigneten Samples.'),
+      data.clusters > 0 ? 'success' : 'warn'
+    );
+    await loadClusterDashboard();
     await loadIdentities();
   } else {
     const err = await resp.json().catch(() => ({}));
-    toast("Fehler: " + (err.detail || resp.statusText), "error");
+    toast('Fehler: ' + (err.detail || resp.statusText), 'error');
   }
 }
+
+// Close Cluster Dashboard on Escape
+document.addEventListener("keydown", e => {
+  if (e.key !== "Escape") return;
+  if (document.getElementById("cluster-dashboard").classList.contains("open")) {
+    _closeClusterDashboard();
+  } else if (document.getElementById("identity-inspector").classList.contains("open")) {
+    _closeInspector();
+  }
+});
 
 /* -------------------------------------------------------------------- */
 /*  Edit identity modal                                                  */
@@ -1920,6 +2322,202 @@ async function rebuildRobustSupervector(identityId) {
   } else {
     const err = await resp.json().catch(() => ({}));
     toast('Fehler: ' + (err.detail || resp.statusText), 'error');
+  }
+}
+
+/* -------------------------------------------------------------------- */
+/*  Identity Inspector – Fullscreen Cluster Dashboard                   */
+/* -------------------------------------------------------------------- */
+let _inspectorIdentityId   = null;
+let _inspectorIdentityName = "";
+
+async function openIdentityInspector(identityId, identityName) {
+  _inspectorIdentityId   = identityId;
+  _inspectorIdentityName = identityName;
+  document.getElementById("inspector-title").textContent =
+    `🔍 Identity Inspector – ${identityName}`;
+  document.getElementById("inspector-content").innerHTML =
+    '<div class="inspector-loading">Lade Cluster-Daten…</div>';
+  document.getElementById("identity-inspector").classList.add("open");
+  await loadInspectorClusters();
+}
+
+function closeIdentityInspector(event) {
+  if (event && event.target !== document.getElementById("identity-inspector")) return;
+  _closeInspector();
+}
+
+function _closeInspector() {
+  document.getElementById("identity-inspector").classList.remove("open");
+  _inspectorIdentityId   = null;
+  _inspectorIdentityName = "";
+}
+
+// (Escape key handling for both overlays is consolidated above)
+
+async function loadInspectorClusters() {
+  if (!_inspectorIdentityId) return;
+  const resp = await fetch(`/api/identities/${_inspectorIdentityId}/clusters`);
+  const contentEl = document.getElementById("inspector-content");
+  if (!resp.ok) {
+    contentEl.innerHTML = `<div style="color:var(--danger);text-align:center;padding:32px;">
+      Fehler beim Laden der Cluster-Daten.</div>`;
+    return;
+  }
+  const clusters = await resp.json();
+  if (!clusters.length) {
+    contentEl.innerHTML = `<div style="color:var(--text-muted);text-align:center;padding:32px;">
+      Noch keine Supervektoren für diese Identität.<br>
+      <span style="font-size:12px;">Klicke auf „Alle Cluster neu erstellen" um Adaptive Clustering zu starten.</span>
+    </div>`;
+    return;
+  }
+  contentEl.innerHTML = renderClusterGrid(clusters);
+}
+
+function renderClusterGrid(clusters) {
+  const cards = clusters.map(c => {
+    const pct      = c.hit_rate_pct ?? 0;
+    const isTrivial = (c.sample_count || 0) <= 1;
+    const cls      = pct >= 80 ? 'rel-high' : pct >= 50 ? 'rel-mid' : 'rel-low';
+    const color    = isTrivial ? 'var(--text-muted)'
+                   : pct >= 80 ? 'var(--accent2)' : pct >= 50 ? 'var(--warn)' : 'var(--danger)';
+    const pctLabel = isTrivial ? '–' : `${pct}%`;
+
+    // Segment coverage
+    const segCov  = c.segment_coverage_pct;
+    const segCnt  = c.segment_count  ?? 0;
+    const totSegs = c.total_segments ?? 0;
+    let segHtml = '';
+    if (totSegs > 0) {
+      const segColor = segCov >= 20 ? 'var(--accent2)' : segCov >= 5 ? 'var(--warn)' : 'var(--text-muted)';
+      segHtml = `
+        <div style="margin-top:8px;padding-top:6px;border-top:1px solid var(--border);">
+          <div style="font-size:10px;text-transform:uppercase;letter-spacing:.4px;
+                      color:var(--text-muted);margin-bottom:3px;">Segment-Abdeckung</div>
+          <div style="font-size:12px;font-weight:700;color:${segColor};">
+            ${segCov !== null ? segCov.toFixed(1) + '%' : '–'}
+            <span style="font-size:10px;font-weight:400;color:var(--text-muted);">(${segCnt} / ${totSegs} Segmente)</span>
+          </div>
+        </div>`;
+    }
+
+    // Context distribution rows
+    const ctxHtml = Object.entries(c.context_distribution || {})
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
+      .map(([ctx, p]) =>
+        `<div class="ctx-row">
+           <span class="ctx-label" title="${esc(ctx)}">${esc(ctx)}</span>
+           <span class="ctx-pct">${p}%</span>
+         </div>`
+      ).join("") || '<span style="color:var(--text-muted);">—</span>';
+
+    return `
+      <div class="cluster-card">
+        <div class="cc-title">${esc(c.group_name)}</div>
+        <div class="cc-meta">${c.sample_count} Sample(s)</div>
+        <div class="cc-reliability">
+          <span style="font-size:11px;white-space:nowrap;color:${color};font-weight:700;">
+            Match-Zuverlässigkeit: ${pctLabel}
+          </span>
+        </div>
+        ${!isTrivial ? `<div class="reliability-bar-track">
+          <div class="reliability-bar-fill ${cls}" style="width:${pct.toFixed(1)}%"></div>
+        </div>` : '<div style="height:4px;"></div>'}
+        ${Object.keys(c.context_distribution || {}).length > 0 ? `
+        <div style="margin-top:10px;">
+          <div style="font-size:10px;text-transform:uppercase;letter-spacing:.4px;
+                      color:var(--text-muted);margin-bottom:4px;">Kontext-Verteilung</div>
+          <div class="cc-contexts">${ctxHtml}</div>
+        </div>` : ''}
+        ${segHtml}
+      </div>`;
+  }).join("");
+
+  const totalSamples    = clusters.reduce((a, c) => a + (c.sample_count || 0), 0);
+  const totalSegments   = clusters.length ? (clusters[0].total_segments ?? 0) : 0;
+  const trivialCount    = clusters.filter(c => (c.sample_count || 0) <= 1).length;
+  const nonTrivial      = clusters.filter(c => (c.sample_count || 0) > 1);
+  const avgHitRateNum   = nonTrivial.length
+    ? nonTrivial.reduce((a, c) => a + (c.hit_rate_pct || 0), 0) / nonTrivial.length
+    : null;
+  const avgHitRate      = avgHitRateNum !== null ? avgHitRateNum.toFixed(1) : null;
+  const avgHitRateColor = avgHitRateNum === null ? 'var(--text-muted)'
+    : avgHitRateNum >= 80 ? 'var(--accent2)' : avgHitRateNum >= 50 ? 'var(--warn)' : 'var(--danger)';
+
+  const trivialNote = trivialCount > 0
+    ? `<div style="font-size:11px;color:var(--warn);margin-bottom:12px;padding:8px 12px;
+                   background:rgba(210,153,34,.1);border:1px solid rgba(210,153,34,.3);border-radius:var(--radius);">
+         ⚠ <strong>${trivialCount} Cluster</strong> mit nur 1 Sample – Kreuzvalidierung nicht aussagekräftig.
+         Diese Cluster verbleiben bis weitere ähnliche Samples hinzukommen oder der Schwellenwert angepasst wird.
+       </div>`
+    : '';
+
+  return `
+    <div style="display:flex;gap:20px;margin-bottom:${trivialNote ? '12' : '16'}px;flex-wrap:wrap;">
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);
+                  padding:12px 20px;min-width:140px;">
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">Cluster gesamt</div>
+        <div style="font-size:24px;font-weight:700;color:var(--accent);">${clusters.length}</div>
+      </div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);
+                  padding:12px 20px;min-width:140px;">
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">In Cluster</div>
+        <div style="font-size:24px;font-weight:700;color:var(--accent2);">${totalSamples}</div>
+      </div>
+      ${totalSegments > 0 ? `
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);
+                  padding:12px 20px;min-width:140px;">
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">Segmente (Episode)</div>
+        <div style="font-size:24px;font-weight:700;color:var(--text);">${totalSegments}</div>
+      </div>` : ''}
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);
+                  padding:12px 20px;min-width:180px;">
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">
+          Ø Cluster-Integrität
+          ${trivialCount > 0 && nonTrivial.length > 0 ? `<span style="color:var(--warn);font-size:10px;">(${nonTrivial.length} auswertbar)</span>` : ''}
+        </div>
+        <div style="font-size:24px;font-weight:700;color:${avgHitRateColor};">
+          ${avgHitRate !== null ? avgHitRate + '%' : '–'}
+        </div>
+      </div>
+    </div>
+    ${trivialNote}
+    <div class="cluster-grid">${cards}</div>`;
+}
+
+async function rebuildAdaptiveClusters() {
+  if (!_inspectorIdentityId) return;
+  if (!confirm(
+    `Adaptive Cluster für „${_inspectorIdentityName}" neu erstellen?\n\n` +
+    'Alle bestehenden Supervektoren werden gelöscht.\n' +
+    'Das System gruppiert die Samples automatisch in so viele Cluster wie nötig ' +
+    '(keine Obergrenze). Ausreißer (schlechteste 15%) werden vorab herausgefiltert.'
+  )) return;
+
+  const btn = document.getElementById("inspector-rebuild-btn");
+  if (btn) { btn.disabled = true; btn.textContent = "⏳ Berechne…"; }
+
+  const resp = await fetch(
+    `/api/identities/${_inspectorIdentityId}/rebuild_adaptive_clusters`,
+    { method: "POST" }
+  );
+
+  if (btn) { btn.disabled = false; btn.textContent = "🔄 Alle Cluster neu erstellen (Adaptive Clustering)"; }
+
+  if (resp.ok) {
+    const data = await resp.json();
+    if (data.clusters > 0) {
+      toast(`${data.clusters} Cluster aus ${data.samples} Sample(s) erstellt ✓`);
+    } else {
+      toast(data.message || "Keine geeigneten Samples gefunden.", "warn");
+    }
+    await loadInspectorClusters();
+    await loadIdentities();
+  } else {
+    const err = await resp.json().catch(() => ({}));
+    toast("Fehler: " + (err.detail || resp.statusText), "error");
   }
 }
 /* -------------------------------------------------------------------- */
