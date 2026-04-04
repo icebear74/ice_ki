@@ -489,6 +489,21 @@
       color:var(--text-muted);
       line-height:1.7;
     }
+    .ctx-row {
+      display:flex;
+      justify-content:space-between;
+      gap:8px;
+    }
+    .ctx-row .ctx-label {
+      overflow:hidden;
+      text-overflow:ellipsis;
+      white-space:nowrap;
+      flex:1;
+    }
+    .ctx-row .ctx-pct {
+      flex-shrink:0;
+      font-weight:600;
+    }
     .inspector-loading {
       color:var(--text-muted);
       text-align:center;
@@ -2106,10 +2121,9 @@ function renderClusterGrid(clusters) {
       .sort((a, b) => b[1] - a[1])
       .slice(0, 8)
       .map(([ctx, p]) =>
-        `<div style="display:flex;justify-content:space-between;gap:8px;">
-           <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;"
-                 title="${esc(ctx)}">${esc(ctx)}</span>
-           <span style="flex-shrink:0;font-weight:600;">${p}%</span>
+        `<div class="ctx-row">
+           <span class="ctx-label" title="${esc(ctx)}">${esc(ctx)}</span>
+           <span class="ctx-pct">${p}%</span>
          </div>`
       ).join("") || '<span style="color:var(--text-muted);">—</span>';
 

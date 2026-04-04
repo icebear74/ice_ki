@@ -296,6 +296,8 @@ def compute_adaptive_clusters_for_identity(
         return [filtered_ids]
 
     # Phase 2: adaptive clustering
+    # NOTE: sklearn is an optional dependency. The lazy import here provides a
+    # graceful fallback to single-cluster behaviour when sklearn is not installed.
     try:
         from sklearn.cluster import AgglomerativeClustering  # type: ignore[import]
     except ImportError:
