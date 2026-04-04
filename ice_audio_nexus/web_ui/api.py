@@ -633,10 +633,10 @@ def _extract_tts_snippet(
 # ---------------------------------------------------------------------------
 
 @app.get("/api/actors")
-def api_list_actors() -> JSONResponse:
+def api_list_actors(production_id: int | None = None) -> JSONResponse:
     conn = get_connection()
     try:
-        return JSONResponse(list_actors(conn))
+        return JSONResponse(list_actors(conn, production_id))
     finally:
         conn.close()
 

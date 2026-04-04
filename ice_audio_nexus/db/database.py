@@ -509,17 +509,35 @@ def revert_supervectors(conn: mariadb.Connection, identity_id: int) -> int:
 # Actor CRUD
 # ---------------------------------------------------------------------------
 
-def list_actors(conn: mariadb.Connection) -> list[dict]:
+def list_actors(conn: mariadb.Connection, production_id: int | None = None) -> list[dict]:
     cur = conn.cursor()
-    cur.execute("""
-        SELECT a.id, a.name, a.description,
-               (a.image_blob IS NOT NULL) AS has_image,
-               COUNT(i.id) AS identity_count
-        FROM actors a
-        LEFT JOIN identities i ON i.voice_actor_id = a.id
-        GROUP BY a.id
-        ORDER BY a.name
-    """)
+    if production_id is not None:
+        cur.execute(
+            """
+            SELECT a.id, a.name, a.description,
+                   (a.image_blob IS NOT NULL) AS has_image,
+                   COUNT(DISTINCT i.id) AS identity_count,
+                   (COUNT(DISTINCT vc.id) > 0) AS in_production
+            FROM actors a
+            LEFT JOIN identities i ON i.voice_actor_id = a.id
+            LEFT JOIN voice_castings vc
+                   ON (vc.actor_id = a.id OR vc.voice_actor_id = a.id)
+                  AND vc.production_id = ?
+            GROUP BY a.id
+            ORDER BY in_production DESC, a.name
+            """,
+            (production_id,),
+        )
+    else:
+        cur.execute("""
+            SELECT a.id, a.name, a.description,
+                   (a.image_blob IS NOT NULL) AS has_image,
+                   COUNT(i.id) AS identity_count
+            FROM actors a
+            LEFT JOIN identities i ON i.voice_actor_id = a.id
+            GROUP BY a.id
+            ORDER BY a.name
+        """)
     cols = [d[0] for d in cur.description]
     return [dict(zip(cols, row)) for row in cur.fetchall()]
 
