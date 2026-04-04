@@ -70,6 +70,8 @@ from db.database import (
     get_segment_embedding,
     get_segment,
     list_processed_episodes,
+    # Vector stats
+    get_identity_vector_stats,
     # Actor CRUD
     list_actors,
     get_actor,
@@ -327,16 +329,87 @@ def api_list_supervector_groups(identity_id: int) -> JSONResponse:
 
 @app.get("/api/identities/{identity_id}/free_samples")
 def api_list_free_samples(identity_id: int) -> JSONResponse:
-    """List active raw samples for an identity that are not yet in any supervector group."""
+    """List active raw samples for an identity that are not yet in any supervector group.
+
+    Each sample entry includes a ``distance_to_centroid`` field (float or null)
+    so the UI can render quality bars and highlight outliers.
+    """
     conn = get_connection()
     try:
         if get_identity(conn, identity_id) is None:
             raise HTTPException(status_code=404, detail="Identity not found")
         samples = list_free_samples(conn, identity_id)
-        # Strip embeddings – browser only needs metadata + id for selection
+        # Build a distance lookup from the vector-stats computation
+        stats = get_identity_vector_stats(conn, identity_id)
+        dist_by_id = {d["id"]: d["distance"] for d in stats.get("sample_distances", [])}
         for s in samples:
             s.pop("embedding", None)
+            s["distance_to_centroid"] = dist_by_id.get(s["id"])
         return JSONResponse(samples)
+    finally:
+        conn.close()
+
+
+@app.get("/api/identities/{identity_id}/vector_stats")
+def api_vector_stats(identity_id: int) -> JSONResponse:
+    """Return variance and per-sample distance-to-centroid for an identity's samples."""
+    conn = get_connection()
+    try:
+        if get_identity(conn, identity_id) is None:
+            raise HTTPException(status_code=404, detail="Identity not found")
+        stats = get_identity_vector_stats(conn, identity_id)
+        return JSONResponse(stats)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("get_identity_vector_stats failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to compute vector stats.")
+    finally:
+        conn.close()
+
+
+@app.post("/api/identities/{identity_id}/rebuild_supervector")
+def api_rebuild_supervector(identity_id: int) -> JSONResponse:
+    """
+    Revert all existing supervectors for *identity_id* and rebuild a single
+    robust supervector from all active, non-low-quality free samples using
+    centroid-based outlier rejection and L2 normalisation.
+    """
+    from datetime import date
+    conn = get_connection()
+    try:
+        if get_identity(conn, identity_id) is None:
+            raise HTTPException(status_code=404, detail="Identity not found")
+        revert_supervectors(conn, identity_id)
+        # Fetch all free non-LQ sample IDs
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT id FROM voice_samples
+               WHERE identity_id = ?
+                 AND (context IS NULL OR context != 'SUPERVECTOR')
+                 AND used_in_group_id IS NULL
+                 AND is_low_quality = FALSE
+                 AND is_active = TRUE""",
+            (identity_id,),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        if not rows:
+            return JSONResponse({"status": "ok", "message": "No eligible samples found.",
+                                 "sample_count": 0})
+        sample_ids = [row[0] for row in rows]
+        auto_name = f"Robust {date.today()}"
+        try:
+            group_id = create_named_supervector(conn, identity_id, auto_name, sample_ids)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse({"status": "ok", "group_id": group_id,
+                             "sample_count": len(sample_ids)})
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("rebuild_supervector failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to rebuild supervector.")
     finally:
         conn.close()
 

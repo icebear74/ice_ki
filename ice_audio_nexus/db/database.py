@@ -216,6 +216,45 @@ def get_connection() -> mariadb.Connection:
 
 
 # ---------------------------------------------------------------------------
+# Vector math helpers
+# ---------------------------------------------------------------------------
+
+def normalize_vector(vec: list[float]) -> list[float]:
+    """L2-normalise *vec* to unit length. Returns the original list if norm ≈ 0."""
+    arr = np.array(vec, dtype=np.float32)
+    norm = float(np.linalg.norm(arr))
+    if norm < 1e-6:
+        return vec
+    return (arr / norm).tolist()
+
+
+def calculate_robust_supervector(
+    embeddings: list[list[float]],
+    outlier_ratio: float = 0.2,
+) -> list[float] | None:
+    """
+    Compute a robust centroid from *embeddings* by:
+      1. L2-normalising every vector.
+      2. Computing the provisional mean.
+      3. Sorting samples by Euclidean distance to the mean and
+         discarding the worst *outlier_ratio* fraction.
+      4. Re-computing the centroid on the remaining samples.
+      5. L2-normalising the result.
+
+    Returns None when *embeddings* is empty.
+    """
+    if not embeddings:
+        return None
+    data = np.array([normalize_vector(e) for e in embeddings], dtype=np.float32)
+    mean_v = np.mean(data, axis=0)
+    distances = np.linalg.norm(data - mean_v, axis=1)
+    num_to_keep = max(1, int(len(data) * (1 - outlier_ratio)))
+    idx_to_keep = np.argsort(distances)[:num_to_keep]
+    final_centroid = np.mean(data[idx_to_keep], axis=0)
+    return normalize_vector(final_centroid.tolist())
+
+
+# ---------------------------------------------------------------------------
 # Schema bootstrap
 # ---------------------------------------------------------------------------
 
@@ -503,6 +542,67 @@ def revert_supervectors(conn: mariadb.Connection, identity_id: int) -> int:
     for gid in group_ids:
         total += revert_supervector_group(conn, gid)
     return total
+
+
+def get_identity_vector_stats(
+    conn: mariadb.Connection,
+    identity_id: int,
+) -> dict:
+    """
+    Compute variance and per-sample distance-to-centroid for the active,
+    non-supervector, non-low-quality samples of *identity_id*.
+
+    Returns:
+        {
+          avg_distance:     float  – mean Euclidean distance to the centroid
+                                     (on L2-normalised vectors ≈ cosine metric),
+          variance:         float  – variance of those distances,
+          sample_distances: list[{id: int, distance: float}]
+        }
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, embedding
+        FROM voice_samples
+        WHERE identity_id = ?
+          AND is_active = TRUE
+          AND (context IS NULL OR context != 'SUPERVECTOR')
+          AND is_low_quality = FALSE
+        ORDER BY created_at
+        """,
+        (identity_id,),
+    )
+    rows = cur.fetchall()
+    cur.close()
+
+    if not rows:
+        return {"avg_distance": 0.0, "variance": 0.0, "sample_distances": []}
+
+    ids: list[int] = []
+    vecs: list[list[float]] = []
+    for row in rows:
+        vec = np.frombuffer(row[1], dtype=np.float32)
+        if vec.shape[0] == 512:
+            ids.append(row[0])
+            vecs.append(normalize_vector(vec.tolist()))
+
+    if not vecs:
+        return {"avg_distance": 0.0, "variance": 0.0, "sample_distances": []}
+
+    data = np.array(vecs, dtype=np.float32)
+    centroid = np.mean(data, axis=0)
+    dists = np.linalg.norm(data - centroid, axis=1)
+
+    sample_distances = [
+        {"id": sid, "distance": float(d)}
+        for sid, d in zip(ids, dists)
+    ]
+    return {
+        "avg_distance": float(np.mean(dists)),
+        "variance": float(np.var(dists)),
+        "sample_distances": sample_distances,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -876,7 +976,10 @@ def create_named_supervector(
     if not embeddings:
         raise ValueError("No valid 512-dim embeddings found in selected samples")
 
-    supervector = np.mean(embeddings, axis=0).astype(np.float32)
+    robust = calculate_robust_supervector([v.tolist() for v in embeddings])
+    if robust is None:
+        raise ValueError("Robust supervector calculation returned no result")
+    supervector = np.array(robust, dtype=np.float32)
 
     try:
         # Create the group record
