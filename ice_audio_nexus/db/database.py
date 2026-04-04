@@ -306,13 +306,25 @@ def compute_adaptive_clusters_for_identity(
         )
         return [filtered_ids]
 
-    clustering = AgglomerativeClustering(
-        n_clusters=None,
-        distance_threshold=distance_threshold,
-        metric="euclidean",
-        linkage="average",
-        compute_full_tree=True,
-    )
+    # distance_threshold is a cosine distance (0..2 for unit vectors).
+    # sklearn ≥1.2 uses the 'metric' keyword; older versions use 'affinity'.
+    try:
+        clustering = AgglomerativeClustering(
+            n_clusters=None,
+            distance_threshold=distance_threshold,
+            metric="cosine",
+            linkage="average",
+            compute_full_tree=True,
+        )
+    except TypeError:
+        # sklearn < 1.2 compatibility
+        clustering = AgglomerativeClustering(
+            n_clusters=None,
+            distance_threshold=distance_threshold,
+            affinity="cosine",
+            linkage="average",
+            compute_full_tree=True,
+        )
     labels = clustering.fit_predict(filtered_data)
 
     cluster_map: dict[int, list[int]] = {}
