@@ -2377,9 +2377,30 @@ async function loadInspectorClusters() {
 
 function renderClusterGrid(clusters) {
   const cards = clusters.map(c => {
-    const pct   = c.hit_rate_pct ?? 0;
-    const cls   = pct >= 80 ? 'rel-high' : pct >= 50 ? 'rel-mid' : 'rel-low';
-    const color = pct >= 80 ? 'var(--accent2)' : pct >= 50 ? 'var(--warn)' : 'var(--danger)';
+    const pct      = c.hit_rate_pct ?? 0;
+    const isTrivial = (c.sample_count || 0) <= 1;
+    const cls      = pct >= 80 ? 'rel-high' : pct >= 50 ? 'rel-mid' : 'rel-low';
+    const color    = isTrivial ? 'var(--text-muted)'
+                   : pct >= 80 ? 'var(--accent2)' : pct >= 50 ? 'var(--warn)' : 'var(--danger)';
+    const pctLabel = isTrivial ? '–' : `${pct}%`;
+
+    // Segment coverage
+    const segCov  = c.segment_coverage_pct;
+    const segCnt  = c.segment_count  ?? 0;
+    const totSegs = c.total_segments ?? 0;
+    let segHtml = '';
+    if (totSegs > 0) {
+      const segColor = segCov >= 20 ? 'var(--accent2)' : segCov >= 5 ? 'var(--warn)' : 'var(--text-muted)';
+      segHtml = `
+        <div style="margin-top:8px;padding-top:6px;border-top:1px solid var(--border);">
+          <div style="font-size:10px;text-transform:uppercase;letter-spacing:.4px;
+                      color:var(--text-muted);margin-bottom:3px;">Segment-Abdeckung</div>
+          <div style="font-size:12px;font-weight:700;color:${segColor};">
+            ${segCov !== null ? segCov.toFixed(1) + '%' : '–'}
+            <span style="font-size:10px;font-weight:400;color:var(--text-muted);">(${segCnt} / ${totSegs} Segmente)</span>
+          </div>
+        </div>`;
+    }
 
     // Context distribution rows
     const ctxHtml = Object.entries(c.context_distribution || {})
@@ -2398,28 +2419,43 @@ function renderClusterGrid(clusters) {
         <div class="cc-meta">${c.sample_count} Sample(s)</div>
         <div class="cc-reliability">
           <span style="font-size:11px;white-space:nowrap;color:${color};font-weight:700;">
-            Match-Zuverlässigkeit: ${pct}%
+            Match-Zuverlässigkeit: ${pctLabel}
           </span>
         </div>
-        <div class="reliability-bar-track">
+        ${!isTrivial ? `<div class="reliability-bar-track">
           <div class="reliability-bar-fill ${cls}" style="width:${pct.toFixed(1)}%"></div>
-        </div>
+        </div>` : '<div style="height:4px;"></div>'}
         ${Object.keys(c.context_distribution || {}).length > 0 ? `
         <div style="margin-top:10px;">
           <div style="font-size:10px;text-transform:uppercase;letter-spacing:.4px;
                       color:var(--text-muted);margin-bottom:4px;">Kontext-Verteilung</div>
           <div class="cc-contexts">${ctxHtml}</div>
         </div>` : ''}
+        ${segHtml}
       </div>`;
   }).join("");
 
-  const totalSamples = clusters.reduce((a, c) => a + (c.sample_count || 0), 0);
-  const avgHitRate   = clusters.length
-    ? (clusters.reduce((a, c) => a + (c.hit_rate_pct || 0), 0) / clusters.length).toFixed(1)
-    : 0;
+  const totalSamples    = clusters.reduce((a, c) => a + (c.sample_count || 0), 0);
+  const totalSegments   = clusters.length ? (clusters[0].total_segments ?? 0) : 0;
+  const trivialCount    = clusters.filter(c => (c.sample_count || 0) <= 1).length;
+  const nonTrivial      = clusters.filter(c => (c.sample_count || 0) > 1);
+  const avgHitRateNum   = nonTrivial.length
+    ? nonTrivial.reduce((a, c) => a + (c.hit_rate_pct || 0), 0) / nonTrivial.length
+    : null;
+  const avgHitRate      = avgHitRateNum !== null ? avgHitRateNum.toFixed(1) : null;
+  const avgHitRateColor = avgHitRateNum === null ? 'var(--text-muted)'
+    : avgHitRateNum >= 80 ? 'var(--accent2)' : avgHitRateNum >= 50 ? 'var(--warn)' : 'var(--danger)';
+
+  const trivialNote = trivialCount > 0
+    ? `<div style="font-size:11px;color:var(--warn);margin-bottom:12px;padding:8px 12px;
+                   background:rgba(210,153,34,.1);border:1px solid rgba(210,153,34,.3);border-radius:var(--radius);">
+         ⚠ <strong>${trivialCount} Cluster</strong> mit nur 1 Sample – Kreuzvalidierung nicht aussagekräftig.
+         Diese Cluster verbleiben bis weitere ähnliche Samples hinzukommen oder der Schwellenwert angepasst wird.
+       </div>`
+    : '';
 
   return `
-    <div style="display:flex;gap:20px;margin-bottom:16px;flex-wrap:wrap;">
+    <div style="display:flex;gap:20px;margin-bottom:${trivialNote ? '12' : '16'}px;flex-wrap:wrap;">
       <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);
                   padding:12px 20px;min-width:140px;">
         <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">Cluster gesamt</div>
@@ -2427,18 +2463,27 @@ function renderClusterGrid(clusters) {
       </div>
       <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);
                   padding:12px 20px;min-width:140px;">
-        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">Samples gesamt</div>
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">In Cluster</div>
         <div style="font-size:24px;font-weight:700;color:var(--accent2);">${totalSamples}</div>
       </div>
+      ${totalSegments > 0 ? `
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);
+                  padding:12px 20px;min-width:140px;">
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">Segmente (Episode)</div>
+        <div style="font-size:24px;font-weight:700;color:var(--text);">${totalSegments}</div>
+      </div>` : ''}
       <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);
                   padding:12px 20px;min-width:180px;">
-        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">Ø Cluster-Integrität</div>
-        <div style="font-size:24px;font-weight:700;
-                    color:${avgHitRate>=80?'var(--accent2)':avgHitRate>=50?'var(--warn)':'var(--danger)'};">
-          ${avgHitRate}%
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">
+          Ø Cluster-Integrität
+          ${trivialCount > 0 && nonTrivial.length > 0 ? `<span style="color:var(--warn);font-size:10px;">(${nonTrivial.length} auswertbar)</span>` : ''}
+        </div>
+        <div style="font-size:24px;font-weight:700;color:${avgHitRateColor};">
+          ${avgHitRate !== null ? avgHitRate + '%' : '–'}
         </div>
       </div>
     </div>
+    ${trivialNote}
     <div class="cluster-grid">${cards}</div>`;
 }
 

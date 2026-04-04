@@ -425,7 +425,9 @@ def api_rebuild_adaptive_clusters(identity_id: int) -> JSONResponse:
     """
     Revert all existing supervector groups for *identity_id*, then rebuild
     using adaptive multi-centroid clustering (AgglomerativeClustering with
-    distance threshold 0.12).  No upper limit on the number of clusters.
+    distance threshold 0.35, cosine metric).  Clusters with only one source
+    sample are skipped – those samples stay free.  No upper limit on the
+    number of resulting clusters.
     """
     from datetime import date
     conn = get_connection()
@@ -498,7 +500,7 @@ def api_rebuild_adaptive_clusters(identity_id: int) -> JSONResponse:
 def api_get_clusters(identity_id: int) -> JSONResponse:
     """
     Return the cluster hierarchy for *identity_id* including per-cluster
-    validation (hit-rate) percentages.
+    validation (hit-rate) percentages and segment coverage.
 
     Response schema::
 
@@ -507,8 +509,11 @@ def api_get_clusters(identity_id: int) -> JSONResponse:
             "group_id":              int,
             "group_name":            str,
             "sample_count":          int,
-            "hit_rate_pct":          float,   // 0-100 %
+            "hit_rate_pct":          float,   // 0-100 %  (internal cross-val)
             "context_distribution":  {ctx: pct, …},
+            "segment_coverage_pct":  float | null,  // 0-100 % of identity's segments
+            "segment_count":         int,     // segments nearest to this centroid
+            "total_segments":        int,     // total segments for this identity
           },
           …
         ]

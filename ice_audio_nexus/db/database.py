@@ -254,6 +254,12 @@ def compute_adaptive_clusters_for_identity(
     different recording contexts while still separating genuinely distinct
     voice characteristics.
 
+    Only clusters with **≥ 2 source samples** are returned; single-sample
+    "clusters" remain as free samples so they can be grouped in a future run
+    once more similar samples arrive.  If every cluster is a singleton (i.e.
+    the threshold is still too tight for this identity) the function falls
+    back to a single group containing all filtered samples.
+
     Returns a list of sample-ID lists – one sublist per cluster.
     An empty list means no eligible samples exist for this identity.
     """
@@ -337,7 +343,17 @@ def compute_adaptive_clusters_for_identity(
     for sample_id, label in zip(filtered_ids, labels):
         cluster_map.setdefault(int(label), []).append(sample_id)
 
-    return list(cluster_map.values())
+    # Keep only clusters with ≥ 2 source samples – a single-sample "cluster" is
+    # just an isolated outlier that did not merge with anything.  Those samples
+    # stay free and can be grouped in future runs once more similar samples arrive.
+    # Exception: if *every* cluster is a singleton (threshold still too tight for
+    # this identity), fall back to a single group so at least one supervector is
+    # created.
+    real_clusters = [ids for ids in cluster_map.values() if len(ids) >= 2]
+    if not real_clusters:
+        # All singletons → single group fallback
+        return [filtered_ids]
+    return real_clusters
 
 
 def validate_clusters(
@@ -347,10 +363,18 @@ def validate_clusters(
     """
     Cross-validate the active supervector clusters for *identity_id*.
 
+    **Internal cross-validation** (``hit_rate_pct``):
     For each supervector group (cluster centroid), compute what fraction of
     the source samples that were used to create it are *correctly* identified
     as closest to that centroid when compared against **all** other active
     supervector centroids for the same identity.
+
+    **Segment coverage** (``segment_coverage_pct``, ``segment_count``):
+    For every episode segment assigned to this identity (with a valid
+    embedding), find the nearest centroid.  The *segment_coverage_pct* for a
+    cluster is the fraction of all such segments that map to it.  A cluster
+    with high coverage represents many real occurrences of the speaker in the
+    episode data – not just the training samples.
 
     Returns a list of dicts, one per group::
 
@@ -358,8 +382,11 @@ def validate_clusters(
           "group_id":              int,
           "group_name":            str,
           "sample_count":          int,
-          "hit_rate_pct":          float,   # 0-100 %
+          "hit_rate_pct":          float,   # 0-100 %  (internal cross-val)
           "context_distribution":  {context_str: pct_float, …},
+          "segment_coverage_pct":  float | None,  # 0-100 %, None if no segments
+          "segment_count":         int,     # segments nearest to this centroid
+          "total_segments":        int,     # total segments for this identity
         }
     """
     cur = conn.cursor()
@@ -400,6 +427,7 @@ def validate_clusters(
     centroid_matrix = np.stack([c["embedding"] for c in sv_centroids], axis=0)
     group_ids_order = [c["group_id"] for c in sv_centroids]
 
+    # ── Internal cross-validation ─────────────────────────────────────────
     results: list[dict] = []
     for centroid_info in sv_centroids:
         group_id   = centroid_info["group_id"]
@@ -464,7 +492,44 @@ def validate_clusters(
             "context_distribution": ctx_dist,
         })
 
+    # ── Segment coverage ─────────────────────────────────────────────────
+    # Map each cluster to how many episode segments nearest to it.
+    # Segments come from episode_segments.embedding (diarization embeddings).
+    cur.execute(
+        """
+        SELECT embedding
+        FROM episode_segments
+        WHERE identity_id = ?
+          AND embedding IS NOT NULL
+        """,
+        (identity_id,),
+    )
+    seg_rows = cur.fetchall()
     cur.close()
+
+    seg_hits: dict[int, int] = {c["group_id"]: 0 for c in sv_centroids}
+    total_segments = 0
+    for seg_row in seg_rows:
+        seg_raw = np.frombuffer(seg_row[0], dtype=np.float32)
+        if seg_raw.shape[0] != 512:
+            continue
+        seg_emb = np.array(normalize_vector(seg_raw.tolist()), dtype=np.float32)
+        dists = np.linalg.norm(centroid_matrix - seg_emb, axis=1)
+        nearest_gid = group_ids_order[int(np.argmin(dists))]
+        seg_hits[nearest_gid] = seg_hits.get(nearest_gid, 0) + 1
+        total_segments += 1
+
+    # Merge segment coverage into results
+    for r in results:
+        gid = r["group_id"]
+        count = seg_hits.get(gid, 0)
+        r["segment_count"]        = count
+        r["total_segments"]       = total_segments
+        r["segment_coverage_pct"] = (
+            round(count / total_segments * 100.0, 1)
+            if total_segments > 0 else None
+        )
+
     return results
 
 
@@ -648,6 +713,7 @@ def list_identities(conn: mariadb.Connection) -> list[dict]:
                p.title AS casting_production_title
         FROM identities i
         LEFT JOIN voice_samples vs ON vs.identity_id = i.id
+            AND (vs.context IS NULL OR vs.context != 'SUPERVECTOR')
         LEFT JOIN actors a ON a.id = i.voice_actor_id
         LEFT JOIN voice_castings vc ON vc.id = i.voice_casting_id
         LEFT JOIN roles       r ON r.id  = vc.role_id
