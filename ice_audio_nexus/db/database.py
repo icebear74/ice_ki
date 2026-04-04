@@ -436,7 +436,7 @@ def validate_clusters(
         # Fetch the source samples that were merged into this group
         cur.execute(
             """
-            SELECT id, embedding, context
+            SELECT id, embedding, context, embedding_model, drift_score
             FROM voice_samples
             WHERE used_in_group_id = ?
             ORDER BY created_at
@@ -452,12 +452,16 @@ def validate_clusters(
                 "sample_count":         0,
                 "hit_rate_pct":         0.0,
                 "context_distribution": {},
+                "embedding_model":      None,
+                "drift_avg_score":      None,
             })
             continue
 
         hits = 0
         valid_count = 0
         contexts: dict[str, int] = {}
+        model_counts: dict[str, int] = {}
+        drift_scores: list[float] = []
 
         for src_row in src_rows:
             src_raw = np.frombuffer(src_row[1], dtype=np.float32)
@@ -476,6 +480,18 @@ def validate_clusters(
             ctx = src_row[2] or "unknown"
             contexts[ctx] = contexts.get(ctx, 0) + 1
 
+            # Aggregate embedding_model distribution
+            mdl = src_row[3] or "unknown"
+            model_counts[mdl] = model_counts.get(mdl, 0) + 1
+
+            # Collect drift scores (non-NULL)
+            ds = src_row[4]
+            if ds is not None:
+                try:
+                    drift_scores.append(float(ds))
+                except (TypeError, ValueError):
+                    pass
+
         hit_rate = (hits / valid_count * 100.0) if valid_count > 0 else 0.0
         total_ctx = sum(contexts.values())
         ctx_dist = (
@@ -484,13 +500,39 @@ def validate_clusters(
             else {}
         )
 
+        # Dominant embedding model for this group
+        dominant_model = (
+            max(model_counts, key=model_counts.__getitem__)
+            if model_counts else None
+        )
+        drift_avg = round(sum(drift_scores) / len(drift_scores), 4) if drift_scores else None
+
         results.append({
             "group_id":             group_id,
             "group_name":           group_name,
             "sample_count":         valid_count,
             "hit_rate_pct":         round(hit_rate, 1),
             "context_distribution": ctx_dist,
+            "embedding_model":      dominant_model,
+            "drift_avg_score":      drift_avg,
         })
+
+    # ── Identity-level drift rejection count ─────────────────────────────
+    # Count voice_samples for this identity that were rejected due to high
+    # drift (is_low_quality=TRUE with drift_score set).  This is the same
+    # value for all groups of the identity.
+    cur.execute(
+        """
+        SELECT COUNT(*)
+        FROM voice_samples
+        WHERE identity_id = ?
+          AND drift_score IS NOT NULL
+          AND is_low_quality = TRUE
+          AND (context IS NULL OR context != 'SUPERVECTOR')
+        """,
+        (identity_id,),
+    )
+    drift_rejected_count = int((cur.fetchone() or [0])[0])
 
     # ── Segment coverage ─────────────────────────────────────────────────
     # Map each cluster to how many episode segments nearest to it.
@@ -519,7 +561,7 @@ def validate_clusters(
         seg_hits[nearest_gid] = seg_hits.get(nearest_gid, 0) + 1
         total_segments += 1
 
-    # Merge segment coverage into results
+    # Merge segment coverage + identity-level drift into results
     for r in results:
         gid = r["group_id"]
         count = seg_hits.get(gid, 0)
@@ -529,6 +571,7 @@ def validate_clusters(
             round(count / total_segments * 100.0, 1)
             if total_segments > 0 else None
         )
+        r["drift_rejected_count"] = drift_rejected_count
 
     return results
 
@@ -672,6 +715,30 @@ def ensure_schema() -> None:
             ALTER TABLE voice_samples
             ADD COLUMN IF NOT EXISTS is_low_quality BOOLEAN NOT NULL DEFAULT FALSE
                 COMMENT 'True = heuristically flagged as laughter/noise/short utterance; excluded from supervectors'
+            """
+        )
+        # voice_samples: embedding provenance (which model produced this vector)
+        cur.execute(
+            """
+            ALTER TABLE voice_samples
+            ADD COLUMN IF NOT EXISTS embedding_model VARCHAR(100) NULL
+                COMMENT 'e.g. pyannote-embedding, wespeaker-english'
+            """
+        )
+        # voice_samples: drift score (max pairwise cosine distance across sub-segment embeddings)
+        cur.execute(
+            """
+            ALTER TABLE voice_samples
+            ADD COLUMN IF NOT EXISTS drift_score FLOAT NULL
+                COMMENT 'Max cosine distance across 3 sub-segment embeddings; NULL = not computed'
+            """
+        )
+        # episode_segments: embedding provenance
+        cur.execute(
+            """
+            ALTER TABLE episode_segments
+            ADD COLUMN IF NOT EXISTS embedding_model VARCHAR(100) NULL
+                COMMENT 'Model that generated the embedding column'
             """
         )
 
@@ -879,16 +946,17 @@ def get_identity_vector_stats(
 
     Returns:
         {
-          avg_distance:     float  – mean Euclidean distance to the centroid
-                                     (on L2-normalized vectors ≈ cosine metric),
-          variance:         float  – variance of those distances,
-          sample_distances: list[{id: int, distance: float}]
+          avg_distance:              float  – mean Euclidean distance to the centroid
+                                             (on L2-normalized vectors ≈ cosine metric),
+          variance:                  float  – variance of those distances,
+          sample_distances:          list[{id: int, distance: float}],
+          embedding_model_distribution: {model_name: count, …},
         }
     """
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT id, embedding
+        SELECT id, embedding, embedding_model
         FROM voice_samples
         WHERE identity_id = ?
           AND is_active = TRUE
@@ -902,18 +970,23 @@ def get_identity_vector_stats(
     cur.close()
 
     if not rows:
-        return {"avg_distance": 0.0, "variance": 0.0, "sample_distances": []}
+        return {"avg_distance": 0.0, "variance": 0.0, "sample_distances": [],
+                "embedding_model_distribution": {}}
 
     ids: list[int] = []
     vecs: list[list[float]] = []
+    model_dist: dict[str, int] = {}
     for row in rows:
         vec = np.frombuffer(row[1], dtype=np.float32)
         if vec.shape[0] == 512:
             ids.append(row[0])
             vecs.append(normalize_vector(vec.tolist()))
+        mdl = row[2] or "unknown"
+        model_dist[mdl] = model_dist.get(mdl, 0) + 1
 
     if not vecs:
-        return {"avg_distance": 0.0, "variance": 0.0, "sample_distances": []}
+        return {"avg_distance": 0.0, "variance": 0.0, "sample_distances": [],
+                "embedding_model_distribution": model_dist}
 
     data = np.array(vecs, dtype=np.float32)
     centroid = np.mean(data, axis=0)
@@ -927,6 +1000,7 @@ def get_identity_vector_stats(
         "avg_distance": float(np.mean(dists)),
         "variance": float(np.var(dists)),
         "sample_distances": sample_distances,
+        "embedding_model_distribution": model_dist,
     }
 
 
@@ -1472,25 +1546,67 @@ def add_voice_sample(
     context: str = "",
     is_confirmed: bool = False,
     is_low_quality: bool = False,
+    embedding_model: str | None = None,
+    drift_score: float | None = None,
 ) -> int:
     # Replace NaN / ±inf (e.g. from old scanner data) with 0.0 so MariaDB VECTOR
     # does not reject the row with "Incorrect vector value".
     embedding = [v if math.isfinite(v) else 0.0 for v in embedding]
     cur = conn.cursor()
     cur.execute(
-        """INSERT INTO voice_samples (identity_id, embedding, context, is_confirmed, is_low_quality)
-           VALUES (?, ?, ?, ?, ?)""",
-        (identity_id, vector_to_bytes(embedding), context or None, is_confirmed, is_low_quality),
+        """INSERT INTO voice_samples
+               (identity_id, embedding, context, is_confirmed, is_low_quality,
+                embedding_model, drift_score)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (identity_id, vector_to_bytes(embedding), context or None, is_confirmed,
+         is_low_quality, embedding_model or None, drift_score),
     )
     conn.commit()
     return cur.lastrowid
+
+
+def update_voice_sample_embedding(
+    conn: mariadb.Connection,
+    sample_id: int,
+    embedding: list[float],
+    embedding_model: str | None = None,
+    drift_score: float | None = None,
+    is_low_quality: bool | None = None,
+) -> None:
+    """
+    Replace the embedding vector of an existing voice_sample and update its
+    provenance metadata.  Used by the Auto-Migration routine to re-embed
+    existing samples with a new model (e.g. WeSpeaker).
+
+    *is_low_quality* is only updated when explicitly provided (not None).
+    """
+    embedding = [v if math.isfinite(v) else 0.0 for v in embedding]
+    cur = conn.cursor()
+    if is_low_quality is not None:
+        cur.execute(
+            """UPDATE voice_samples
+               SET embedding = ?, embedding_model = ?, drift_score = ?,
+                   is_low_quality = ?
+               WHERE id = ?""",
+            (vector_to_bytes(embedding), embedding_model or None,
+             drift_score, is_low_quality, sample_id),
+        )
+    else:
+        cur.execute(
+            """UPDATE voice_samples
+               SET embedding = ?, embedding_model = ?, drift_score = ?
+               WHERE id = ?""",
+            (vector_to_bytes(embedding), embedding_model or None,
+             drift_score, sample_id),
+        )
+    conn.commit()
 
 
 def list_voice_samples(conn: mariadb.Connection, identity_id: int) -> list[dict]:
     cur = conn.cursor()
     cur.execute(
         """SELECT id, identity_id, embedding, context, is_confirmed, is_active,
-                  is_low_quality, created_at
+                  is_low_quality, embedding_model, drift_score, created_at
            FROM voice_samples WHERE identity_id = ? ORDER BY created_at""",
         (identity_id,),
     )
@@ -1504,7 +1620,9 @@ def list_voice_samples(conn: mariadb.Connection, identity_id: int) -> list[dict]
             "is_confirmed":   bool(row[4]),
             "is_active":      bool(row[5]),
             "is_low_quality": bool(row[6]),
-            "created_at":     str(row[7]),
+            "embedding_model": row[7],
+            "drift_score":    row[8],
+            "created_at":     str(row[9]),
         })
     return results
 
@@ -1671,7 +1789,7 @@ def upsert_segment(conn: mariadb.Connection, **kwargs) -> int:
         "series_name", "episode_title", "video_path", "start_ms", "end_ms",
         "speaker_label", "embedding", "identity_id", "matched_sample_id",
         "match_distance", "transcript", "confidence", "is_suggestion",
-        "is_low_quality",
+        "is_low_quality", "embedding_model",
     )
     data = {k: v for k, v in kwargs.items() if k in _ALLOWED_COLS}
     if "match_distance" in data:
@@ -1722,6 +1840,7 @@ def update_segment_match(
     embedding: bytes | None = None,
     transcript: str | None = None,
     is_low_quality: bool = False,
+    embedding_model: str | None = None,
 ) -> None:
     """Update only the auto-detected fields; preserve manual identity assignments."""
     match_distance = _sanitize_float(match_distance)
@@ -1730,19 +1849,20 @@ def update_segment_match(
         cur.execute(
             """UPDATE episode_segments
                SET identity_id = ?, matched_sample_id = ?, match_distance = ?,
-                   is_suggestion = ?, embedding = ?, transcript = ?, is_low_quality = ?
+                   is_suggestion = ?, embedding = ?, transcript = ?, is_low_quality = ?,
+                   embedding_model = ?
                WHERE id = ?""",
             (identity_id, matched_sample_id, match_distance, is_suggestion,
-             embedding, transcript, is_low_quality, segment_id),
+             embedding, transcript, is_low_quality, embedding_model, segment_id),
         )
     else:
         cur.execute(
             """UPDATE episode_segments
                SET identity_id = ?, matched_sample_id = ?, match_distance = ?,
-                   is_suggestion = ?, is_low_quality = ?
+                   is_suggestion = ?, is_low_quality = ?, embedding_model = COALESCE(?, embedding_model)
                WHERE id = ?""",
             (identity_id, matched_sample_id, match_distance, is_suggestion,
-             is_low_quality, segment_id),
+             is_low_quality, embedding_model, segment_id),
         )
     conn.commit()
 

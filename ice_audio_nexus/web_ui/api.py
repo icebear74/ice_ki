@@ -68,6 +68,7 @@ from db.database import (
     list_voice_samples,
     confirm_voice_sample,
     delete_voice_sample,
+    update_voice_sample_embedding,
     update_segment_identity,
     update_segment_tts_path,
     get_episode_segments,
@@ -514,6 +515,9 @@ def api_get_clusters(identity_id: int) -> JSONResponse:
             "segment_coverage_pct":  float | null,  // 0-100 % of identity's segments
             "segment_count":         int,     // segments nearest to this centroid
             "total_segments":        int,     // total segments for this identity
+            "embedding_model":       str | null,  // dominant model of source samples
+            "drift_avg_score":       float | null, // mean drift score of source samples
+            "drift_rejected_count":  int,     // LQ samples rejected by drift (identity-level)
           },
           …
         ]
@@ -521,13 +525,82 @@ def api_get_clusters(identity_id: int) -> JSONResponse:
     conn = get_connection()
     try:
         if get_identity(conn, identity_id) is None:
-            raise HTTPException(status_code=404, detail="Identity not found")
+            raise HTTPException(status_code=404, detail="Identität nicht gefunden")
         try:
             result = validate_clusters(conn, identity_id)
         except Exception as exc:
             logger.error("validate_clusters failed: %s", exc)
-            raise HTTPException(status_code=500, detail="Failed to compute cluster validation.")
+            raise HTTPException(status_code=500, detail="Cluster-Validierung fehlgeschlagen.")
         return JSONResponse(result)
+    except HTTPException:
+        raise
+    finally:
+        conn.close()
+
+
+@app.post("/api/identities/{identity_id}/remigrate")
+def api_remigrate_identity(identity_id: int, data: dict = Body(default={})) -> JSONResponse:
+    """
+    WeSpeaker-Migrations-Routine für eine einzelne Identität.
+
+    Re-embeds all eligible voice_samples using WeSpeaker + DeepFilterNet,
+    runs a drift check on each sample, marks drifting samples as low-quality,
+    and rebuilds supervector clusters afterwards.
+
+    Optional body: { "dry_run": true }  – Vorschau ohne DB-Änderungen.
+
+    Antwort::
+
+        {
+          "status":         "ok",
+          "processed":      int,   // samples re-embedded
+          "rejected_drift": int,   // samples rejected due to speaker drift
+          "legacy":         int,   // samples without WAV → marked pyannote-legacy
+          "skipped":        int,   // failed for other reasons
+          "supervectors":   {identity_name: {"samples": int, "clusters": int}, …}
+        }
+    """
+    dry_run = bool((data or {}).get("dry_run", False))
+    conn = get_connection()
+    try:
+        if get_identity(conn, identity_id) is None:
+            raise HTTPException(status_code=404, detail="Identität nicht gefunden")
+
+        try:
+            # Import lazily so a missing wespeaker install only fails at call time
+            from processor.remigrate import remigrate_identity  # noqa: PLC0415
+        except ImportError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Remigrations-Modul nicht verfügbar: {exc}",
+            ) from exc
+
+        try:
+            stats = remigrate_identity(conn, identity_id, dry_run=dry_run)
+        except Exception as exc:
+            logger.error("remigrate_identity failed for %d: %s", identity_id, exc)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Migrations-Fehler: {exc}",
+            ) from exc
+
+        # Rebuild supervectors after re-embedding (skip on dry-run)
+        sv_summary: dict = {}
+        if not dry_run:
+            try:
+                sv_summary = refresh_supervectors(conn)
+            except Exception as exc:
+                logger.warning("refresh_supervectors nach Migration fehlgeschlagen: %s", exc)
+
+        return JSONResponse({
+            "status":         "ok",
+            "dry_run":        dry_run,
+            "processed":      stats.get("processed", 0),
+            "rejected_drift": stats.get("rejected_drift", 0),
+            "legacy":         stats.get("legacy", 0),
+            "skipped":        stats.get("skipped", 0),
+            "supervectors":   sv_summary,
+        })
     except HTTPException:
         raise
     finally:

@@ -5,6 +5,7 @@ Analyses a video file using:
   • FFmpeg v8 (CUDA) for audio extraction
   • DeepFilterNet 3 for noise suppression   (Tesla P100 / cuda:0 – temporary, freed before Whisper)
   • pyannote.audio for speaker diarization  (Tesla P4   / cuda:1)
+  • WeSpeaker for per-segment speaker embeddings (same device as diarization)
   • faster-whisper for transcription         (Tesla P100 / cuda:0)
 
 For each detected segment it searches MariaDB using VECTOR_DISTANCE against
@@ -91,6 +92,24 @@ DEEPFILTER_DEVICE  = os.getenv("DEEPFILTER_DEVICE", "cuda:0")
 # needs ~10 GiB in one pass.  30-second chunks keep peak VRAM under ~1 GiB per
 # chunk while the model weights stay loaded between chunks.
 DEEPFILTER_CHUNK_SECS = int(os.getenv("DEEPFILTER_CHUNK_SECS", "30"))
+
+# WeSpeaker speaker-embedding model
+# The model identifier is passed to wespeaker.load_model().  Common values:
+#   'english'  – voxceleb pretrained ResNet34 (256-dim, padded to 512 in DB)
+#   'chinese'  – cnceleb pretrained model
+# WeSpeaker models respect torch.cuda.set_device() and follow DIARIZATION_DEVICE.
+WESPEAKER_MODEL  = os.getenv("WESPEAKER_MODEL", "english")
+WESPEAKER_DEVICE = os.getenv("WESPEAKER_DEVICE", DIARIZATION_DEVICE)
+# Tag stored in voice_samples.embedding_model / episode_segments.embedding_model
+_WESPEAKER_EMBED_TAG = f"wespeaker-{WESPEAKER_MODEL}"
+
+# Drift-check parameters
+# DRIFT_CHECK_ENABLED – if True, compute drift_score for every diarization
+#   segment during live scanning.  Disabled by default because it triples the
+#   number of WeSpeaker calls per segment.  Enable for high-quality dataset
+#   curation pipelines where false-positive speaker turns must be caught early.
+DRIFT_CHECK_ENABLED = os.getenv("DRIFT_CHECK_ENABLED", "false").lower() in ("1", "true", "yes")
+DRIFT_THRESHOLD     = float(os.getenv("DRIFT_THRESHOLD", "0.15"))
 
 # ---------------------------------------------------------------------------
 # Configurable temporary file directories
@@ -442,24 +461,172 @@ def transcode_clean_preview(
 # Diarization
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# WeSpeaker speaker-embedding helpers
+# ---------------------------------------------------------------------------
+
+_wespeaker_model = None  # module-level cache
+
+
+def _get_wespeaker_model():
+    """Return a cached WeSpeaker model instance (loaded once per process)."""
+    global _wespeaker_model
+    if _wespeaker_model is None:
+        try:
+            import torch
+            import wespeaker  # type: ignore[import]
+        except ImportError as exc:
+            raise ImportError(
+                f"wespeaker not installed ({exc}). "
+                "Run: pip install wespeaker"
+            ) from exc
+
+        logger.info("Loading WeSpeaker model '%s' on %s …", WESPEAKER_MODEL, WESPEAKER_DEVICE)
+        model = wespeaker.load_model(WESPEAKER_MODEL)
+        # WeSpeaker respects torch device assignment (unlike DeepFilterNet).
+        if torch.cuda.is_available() and WESPEAKER_DEVICE.startswith("cuda"):
+            model.set_device(WESPEAKER_DEVICE)
+        _wespeaker_model = model
+        logger.info("WeSpeaker model loaded.")
+    return _wespeaker_model
+
+
+def _extract_wespeaker_embedding(
+    audio_data: "np.ndarray",
+    sample_rate: int,
+) -> list[float]:
+    """
+    Extract a speaker embedding from a 1-D float32 audio array using WeSpeaker.
+
+    The output vector is padded or truncated to exactly 512 dimensions to match
+    the VECTOR(512) schema.  Padding with zeros is semantically equivalent
+    to the original embedding for cosine similarity after L2 normalisation:
+    the zero-padded dimensions contribute zero to the dot product and are
+    scaled to zero during normalisation, so the cosine distance equals the
+    cosine distance of the unpadded vectors.
+
+    Returns an empty list on failure so callers degrade gracefully.
+    """
+    try:
+        model = _get_wespeaker_model()
+    except ImportError as exc:
+        logger.warning("WeSpeaker unavailable: %s", exc)
+        return []
+
+    try:
+        import soundfile as sf
+
+        # WeSpeaker's file-based API is most portable; write segment to temp WAV.
+        tmp_fd, tmp_wav = tempfile.mkstemp(suffix=".wav", dir=AUDIO_TMP_DIR)
+        os.close(tmp_fd)
+        try:
+            sf.write(tmp_wav, audio_data, sample_rate, subtype="PCM_16")
+            emb = model.extract_embedding(tmp_wav)
+        finally:
+            try:
+                os.unlink(tmp_wav)
+            except OSError:
+                pass
+
+        if emb is None:
+            return []
+
+        emb_list = emb.flatten().tolist()
+        # Replace non-finite values (short/silent segments) with 0.0
+        emb_list = [v if (v == v and abs(v) != float("inf")) else 0.0 for v in emb_list]
+        # Pad to 512 or truncate – cosine-equivalent for padded zeros after L2-norm
+        if len(emb_list) < 512:
+            emb_list = emb_list + [0.0] * (512 - len(emb_list))
+        else:
+            emb_list = emb_list[:512]
+        return emb_list
+    except Exception as exc:
+        logger.debug("WeSpeaker embedding extraction failed: %s", exc)
+        return []
+
+
+def compute_drift_score(
+    audio_data: "np.ndarray",
+    sample_rate: int,
+) -> float | None:
+    """
+    Compute a drift score for *audio_data* by splitting it into 3 equal
+    sub-segments, extracting a WeSpeaker embedding for each, and returning
+    the maximum pairwise cosine distance.
+
+    A high drift score (> DRIFT_THRESHOLD, default 0.15) indicates a speaker
+    turn or a noise burst within the segment – the sample should be flagged
+    ``is_low_quality``.
+
+    Returns ``None`` when the audio is too short to analyse reliably (< 1.5 s)
+    or when embedding extraction fails for all sub-segments.
+    """
+    try:
+        duration = len(audio_data) / sample_rate
+        if duration < 1.5:
+            return None
+
+        n = len(audio_data)
+        third = n // 3
+        sub_segs = [
+            audio_data[:third],
+            audio_data[third : 2 * third],
+            audio_data[2 * third :],
+        ]
+
+        embeddings: list[list[float]] = []
+        for seg in sub_segs:
+            emb = _extract_wespeaker_embedding(seg, sample_rate)
+            if emb:
+                embeddings.append(emb)
+
+        if len(embeddings) < 2:
+            return None
+
+        norm_embs = []
+        for emb in embeddings:
+            arr = np.array(emb, dtype=np.float32)
+            norm = float(np.linalg.norm(arr))
+            if norm > 1e-6:
+                norm_embs.append(arr / norm)
+
+        if len(norm_embs) < 2:
+            return None
+
+        max_cos_dist = 0.0
+        for i in range(len(norm_embs)):
+            for j in range(i + 1, len(norm_embs)):
+                cos_sim = float(np.dot(norm_embs[i], norm_embs[j]))
+                # Clamp to [-1, 1] to handle floating-point rounding
+                cos_sim = max(-1.0, min(1.0, cos_sim))
+                cos_dist = 1.0 - cos_sim
+                if cos_dist > max_cos_dist:
+                    max_cos_dist = cos_dist
+
+        return round(max_cos_dist, 4)
+    except Exception as exc:
+        logger.debug("compute_drift_score failed: %s", exc)
+        return None
+
+
+
 def _iter_diarization_segments(audio_path: str):
     """
     Internal generator.  Runs the full diarization pipeline on *audio_path*,
     then yields one segment dict per speaker turn as embeddings are extracted.
 
-    Per-segment speaker embeddings are computed via ``Inference.crop()`` with
-    ``window="whole"`` (same quality as the original implementation).  Because
-    segments are yielded one-by-one, a consumer thread can start transcribing
-    while embedding extraction for later segments is still in progress on the
-    diarization GPU (cuda:1 / P4).
+    Per-segment speaker embeddings are computed via WeSpeaker.  The audio file
+    is loaded once with soundfile; each segment is sliced in-memory and passed
+    to WeSpeaker via a temporary WAV file.  Because segments are yielded
+    one-by-one, a consumer thread can start transcribing while embedding
+    extraction for later segments is still in progress.
 
-    Yields dicts: {start_ms, end_ms, speaker_label, embedding}
+    Yields dicts: {start_ms, end_ms, speaker_label, embedding, embedding_model}
     """
     try:
         import torch
-        from pyannote.audio import Pipeline, Model, Inference
+        from pyannote.audio import Pipeline
         from pyannote.audio.pipelines.utils.hook import ProgressHook
-        from pyannote.core import Segment as _PyannoteSegment
     except ImportError as exc:
         raise ImportError(
             f"pyannote.audio dependency missing ({exc}). Run setup_env.sh first."
@@ -488,14 +655,26 @@ def _iter_diarization_segments(audio_path: str):
     with ProgressHook() as hook:
         diarization = pipeline(audio_path, hook=hook)
 
-    # Load embedding model once; all per-segment crops share the same instance.
-    inference = None
+    # Pre-load audio once for in-memory segment slicing (WeSpeaker embedding).
+    audio_data: "np.ndarray | None" = None
+    audio_sr: int = 16000
     try:
-        emb_model = Model.from_pretrained("pyannote/embedding", token=hf_token)
-        emb_model = emb_model.to(device)
-        inference = Inference(emb_model, window="whole")
-    except Exception:
-        logger.warning("Could not load embedding model; embeddings will be empty.")
+        import soundfile as sf
+        audio_data, audio_sr = sf.read(audio_path, dtype="float32", always_2d=False)
+    except Exception as exc:
+        logger.warning("Could not pre-load audio for WeSpeaker slicing: %s", exc)
+
+    # Pre-load WeSpeaker model (cached after first call).
+    wespeaker_ready = False
+    try:
+        _get_wespeaker_model()
+        wespeaker_ready = True
+        logger.info("WeSpeaker model ready for embedding extraction.")
+    except ImportError as exc:
+        logger.warning(
+            "WeSpeaker not available – embeddings will be empty. "
+            "Install with: pip install wespeaker  (%s)", exc
+        )
 
     count = 0
     for turn, _, speaker in diarization.itertracks(yield_label=True):
@@ -503,27 +682,23 @@ def _iter_diarization_segments(audio_path: str):
         end_ms   = int(turn.end   * 1000)
 
         embedding: list[float] = []
-        if inference is not None:
+        if wespeaker_ready and audio_data is not None:
             try:
-                emb = inference.crop(audio_path, _PyannoteSegment(turn.start, turn.end))
-                # Replace NaN / ±inf (produced by very short segments) with 0.0
-                # so MariaDB VECTOR does not reject the row.
-                emb_clean = np.where(np.isfinite(emb), emb, 0.0)
-                embedding = emb_clean.flatten().tolist()
-                # Pad or truncate to exactly 512 dimensions
-                if len(embedding) < 512:
-                    embedding = embedding + [0.0] * (512 - len(embedding))
-                else:
-                    embedding = embedding[:512]
+                start_sample = int(turn.start * audio_sr)
+                end_sample   = int(turn.end   * audio_sr)
+                seg_audio    = audio_data[start_sample:end_sample]
+                if len(seg_audio) > 0:
+                    embedding = _extract_wespeaker_embedding(seg_audio, audio_sr)
             except Exception as exc:
-                logger.debug("Embedding extraction failed for %s: %s", speaker, exc)
+                logger.debug("WeSpeaker extraction failed for %s: %s", speaker, exc)
 
         count += 1
         yield {
-            "start_ms":      start_ms,
-            "end_ms":        end_ms,
-            "speaker_label": speaker,
-            "embedding":     embedding,
+            "start_ms":        start_ms,
+            "end_ms":          end_ms,
+            "speaker_label":   speaker,
+            "embedding":       embedding,
+            "embedding_model": _WESPEAKER_EMBED_TAG if embedding else None,
         }
 
     logger.info("Diarization complete: %d segments", count)
@@ -836,17 +1011,35 @@ def scan_video(
                 # Quality heuristic: flag segments likely to contain laughter,
                 # noise, or too little speech for a reliable voice embedding.
                 duration_s = (seg["end_ms"] - seg["start_ms"]) / 1000.0
+
+                # Optional drift check: split the segment into 3 sub-segments
+                # and compute WeSpeaker variance.  Adds ~3× embedding overhead
+                # per segment; disabled by default (DRIFT_CHECK_ENABLED=false).
+                drift_score: float | None = None
+                if DRIFT_CHECK_ENABLED and seg["embedding"] and audio_data is not None:
+                    try:
+                        start_s = seg["start_ms"] / 1000.0
+                        end_s   = seg["end_ms"]   / 1000.0
+                        seg_audio = audio_data[
+                            int(start_s * sample_rate) : int(end_s * sample_rate)
+                        ]
+                        drift_score = compute_drift_score(seg_audio, sample_rate)
+                    except Exception as exc:
+                        logger.debug("Drift check failed for segment: %s", exc)
+
                 is_low_quality = (
                     no_speech_prob > 0.45
                     or duration_s < 1.2
                     or len(transcript.strip()) < 5
+                    or (drift_score is not None and drift_score > DRIFT_THRESHOLD)
                 )
                 if is_low_quality:
                     logger.info(
                         "[%s–%s] %s → marked is_low_quality "
-                        "(no_speech_prob=%.2f, duration=%.2fs, text_len=%d)",
+                        "(no_speech_prob=%.2f, duration=%.2fs, text_len=%d, drift=%.3f)",
                         seg["start_ms"], seg["end_ms"], seg["speaker_label"],
                         no_speech_prob, duration_s, len(transcript.strip()),
+                        drift_score if drift_score is not None else -1.0,
                     )
 
                 # Multi-vector identity search against latest supervectors
@@ -872,7 +1065,8 @@ def scan_video(
                             match_result.get("sample_context", ""),
                         )
 
-                emb_bytes = vector_to_bytes(seg["embedding"]) if seg["embedding"] else None
+                emb_bytes       = vector_to_bytes(seg["embedding"]) if seg["embedding"] else None
+                embedding_model = seg.get("embedding_model")
 
                 # ── Update mode: check for an existing segment at this timecode ──
                 existing = None
@@ -904,6 +1098,7 @@ def scan_video(
                             embedding=emb_bytes,
                             transcript=transcript,
                             is_low_quality=is_low_quality,
+                            embedding_model=embedding_model,
                         )
                         segments_updated += 1
                         logger.debug(
@@ -931,6 +1126,7 @@ def scan_video(
                         transcript=transcript,
                         is_suggestion=(match_result["status"] == "suggest"),
                         is_low_quality=is_low_quality,
+                        embedding_model=embedding_model,
                     )
                     segments_stored += 1
 
