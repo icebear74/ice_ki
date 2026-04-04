@@ -373,7 +373,7 @@ def api_rebuild_supervector(identity_id: int) -> JSONResponse:
     """
     Revert all existing supervectors for *identity_id* and rebuild a single
     robust supervector from all active, non-low-quality free samples using
-    centroid-based outlier rejection and L2 normalisation.
+    centroid-based outlier rejection and L2 normalization.
     """
     from datetime import date
     conn = get_connection()

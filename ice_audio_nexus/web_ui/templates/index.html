@@ -1748,13 +1748,13 @@ async function createSvGroup(identityId) {
 
 async function revertSvGroup(groupId, name, identityId) {
   if (!confirm(
-    'Supervektor „' + name + '“ rükgängig machen?\n\n' +
+    'Supervektor „' + name + '“ rückgängig machen?\n\n' +
     'Der Supervektor wird gelöscht und alle ursprünglich verwendeten Samples werden reaktiviert.'
   )) return;
   const resp = await fetch(`/api/supervector_groups/${groupId}`, { method: 'DELETE' });
   if (resp.ok) {
     const data = await resp.json();
-    toast('„' + name + '“ rükgängig – ' + data.reactivated_samples + ' Sample(s) reaktiviert ✓');
+    toast('„' + name + '“ rückgängig – ' + data.reactivated_samples + ' Sample(s) reaktiviert ✓');
     await loadSvPanel(identityId);
     await loadIdentities();
   } else {

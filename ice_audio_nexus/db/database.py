@@ -220,7 +220,7 @@ def get_connection() -> mariadb.Connection:
 # ---------------------------------------------------------------------------
 
 def normalize_vector(vec: list[float]) -> list[float]:
-    """L2-normalise *vec* to unit length. Returns the original list if norm ≈ 0."""
+    """L2-normalize *vec* to unit length. Returns the original list if norm ≈ 0."""
     arr = np.array(vec, dtype=np.float32)
     norm = float(np.linalg.norm(arr))
     if norm < 1e-6:
@@ -234,12 +234,12 @@ def calculate_robust_supervector(
 ) -> list[float] | None:
     """
     Compute a robust centroid from *embeddings* by:
-      1. L2-normalising every vector.
+      1. L2-normalizing every vector.
       2. Computing the provisional mean.
       3. Sorting samples by Euclidean distance to the mean and
          discarding the worst *outlier_ratio* fraction.
       4. Re-computing the centroid on the remaining samples.
-      5. L2-normalising the result.
+      5. L2-normalizing the result.
 
     Returns None when *embeddings* is empty.
     """
@@ -555,7 +555,7 @@ def get_identity_vector_stats(
     Returns:
         {
           avg_distance:     float  – mean Euclidean distance to the centroid
-                                     (on L2-normalised vectors ≈ cosine metric),
+                                     (on L2-normalized vectors ≈ cosine metric),
           variance:         float  – variance of those distances,
           sample_distances: list[{id: int, distance: float}]
         }
