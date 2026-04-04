@@ -407,6 +407,94 @@
     .v-ok   { background:var(--warn); }
     .v-bad  { background:var(--danger); }
     .sv-consistency { font-size:10px; margin-top:2px; }
+
+    /* ------------------------------------------------------------------ */
+    /*  Identity Inspector – fullscreen overlay                            */
+    /* ------------------------------------------------------------------ */
+    #identity-inspector {
+      display:none;
+      position:fixed;
+      inset:0;
+      background:rgba(0,0,0,.82);
+      z-index:950;
+      align-items:flex-start;
+      justify-content:center;
+      overflow-y:auto;
+      padding:24px 16px 48px;
+    }
+    #identity-inspector.open { display:flex; }
+    .inspector-box {
+      background:var(--bg-card);
+      border:1px solid var(--border);
+      border-radius:12px;
+      width:100%;
+      max-width:900px;
+      padding:24px;
+    }
+    .inspector-header {
+      display:flex;
+      align-items:center;
+      gap:12px;
+      margin-bottom:20px;
+      flex-wrap:wrap;
+    }
+    .inspector-header h2 { font-size:18px; color:var(--accent); flex:1; margin:0; }
+    .cluster-grid {
+      display:grid;
+      grid-template-columns:repeat(auto-fill, minmax(260px, 1fr));
+      gap:14px;
+      margin-bottom:20px;
+    }
+    .cluster-card {
+      background:var(--bg);
+      border:1px solid var(--border);
+      border-radius:var(--radius);
+      padding:14px;
+    }
+    .cluster-card .cc-title {
+      font-weight:700;
+      font-size:13px;
+      color:var(--accent2);
+      margin-bottom:6px;
+      word-break:break-word;
+    }
+    .cluster-card .cc-meta {
+      font-size:11px;
+      color:var(--text-muted);
+      margin-bottom:8px;
+    }
+    .cluster-card .cc-reliability {
+      display:flex;
+      align-items:center;
+      gap:8px;
+      margin-bottom:8px;
+    }
+    .reliability-bar-track {
+      flex:1;
+      height:8px;
+      background:var(--border);
+      border-radius:4px;
+      overflow:hidden;
+    }
+    .reliability-bar-fill {
+      height:100%;
+      border-radius:4px;
+      transition:width .4s;
+    }
+    .rel-high { background:var(--accent2); }
+    .rel-mid  { background:var(--warn); }
+    .rel-low  { background:var(--danger); }
+    .cluster-card .cc-contexts {
+      font-size:10px;
+      color:var(--text-muted);
+      line-height:1.7;
+    }
+    .inspector-loading {
+      color:var(--text-muted);
+      text-align:center;
+      padding:40px;
+      font-size:14px;
+    }
   </style>
 </head>
 <body>
@@ -587,6 +675,32 @@
 
 <!-- Toast container -->
 <div id="toast-container"></div>
+
+<!-- ================================================================== -->
+<!--  Identity Inspector – fullscreen overlay                            -->
+<!-- ================================================================== -->
+<div id="identity-inspector" onclick="closeIdentityInspector(event)">
+  <div class="inspector-box" onclick="event.stopPropagation()">
+    <div class="inspector-header">
+      <h2 id="inspector-title">🔍 Identity Inspector</h2>
+      <button class="btn btn-ghost" onclick="closeIdentityInspector()"
+              style="font-size:18px;padding:4px 10px;flex-shrink:0;" title="Schließen">✕</button>
+    </div>
+    <div style="margin-bottom:16px;display:flex;gap:8px;flex-wrap:wrap;">
+      <button class="btn" id="inspector-rebuild-btn"
+              style="background:var(--danger);color:#fff;font-size:12px;padding:6px 14px;"
+              onclick="rebuildAdaptiveClusters()">
+        🔄 Alle Cluster neu erstellen (Adaptive Clustering)
+      </button>
+      <span style="font-size:11px;color:var(--text-muted);align-self:center;">
+        Löscht alle Supervektoren und gruppiert neu – unbegrenzte Cluster-Anzahl
+      </span>
+    </div>
+    <div id="inspector-content">
+      <div class="inspector-loading">Lade Cluster-Daten…</div>
+    </div>
+  </div>
+</div>
 
 <!-- ================================================================== -->
 <!--  Edit Identity Modal                                                -->
@@ -879,6 +993,9 @@ function renderIdentities() {
         <div class="id-count">${id.sample_count} Vektor(en)${id.casting_role_name ? ` · <span style="color:var(--accent)">${esc(id.casting_role_name)}</span> (${esc(id.casting_production_title||'')} · ${esc(id.casting_language||'')})` : ""}</div>
       </div>
       <div class="id-actions">
+        <button class="btn btn-ghost" style="font-size:11px;padding:4px 8px;"
+                title="Identity Inspector – Cluster-Übersicht &amp; Validierung"
+                onclick="openIdentityInspector(${id.id}, '${esc(id.name)}')">🔍</button>
         <button class="btn btn-ghost" style="font-size:11px;padding:4px 8px;"
                 title="Supervektoren verwalten – Altersgruppen definieren"
                 onclick="toggleSvPanel(${id.id})">🧬 Supervektoren</button>
@@ -1920,6 +2037,163 @@ async function rebuildRobustSupervector(identityId) {
   } else {
     const err = await resp.json().catch(() => ({}));
     toast('Fehler: ' + (err.detail || resp.statusText), 'error');
+  }
+}
+
+/* -------------------------------------------------------------------- */
+/*  Identity Inspector – Fullscreen Cluster Dashboard                   */
+/* -------------------------------------------------------------------- */
+let _inspectorIdentityId   = null;
+let _inspectorIdentityName = "";
+
+async function openIdentityInspector(identityId, identityName) {
+  _inspectorIdentityId   = identityId;
+  _inspectorIdentityName = identityName;
+  document.getElementById("inspector-title").textContent =
+    `🔍 Identity Inspector – ${identityName}`;
+  document.getElementById("inspector-content").innerHTML =
+    '<div class="inspector-loading">Lade Cluster-Daten…</div>';
+  document.getElementById("identity-inspector").classList.add("open");
+  await loadInspectorClusters();
+}
+
+function closeIdentityInspector(event) {
+  if (event && event.target !== document.getElementById("identity-inspector")) return;
+  _closeInspector();
+}
+
+function _closeInspector() {
+  document.getElementById("identity-inspector").classList.remove("open");
+  _inspectorIdentityId   = null;
+  _inspectorIdentityName = "";
+}
+
+// Close on Escape key
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape" && document.getElementById("identity-inspector").classList.contains("open")) {
+    _closeInspector();
+  }
+});
+
+async function loadInspectorClusters() {
+  if (!_inspectorIdentityId) return;
+  const resp = await fetch(`/api/identities/${_inspectorIdentityId}/clusters`);
+  const contentEl = document.getElementById("inspector-content");
+  if (!resp.ok) {
+    contentEl.innerHTML = `<div style="color:var(--danger);text-align:center;padding:32px;">
+      Fehler beim Laden der Cluster-Daten.</div>`;
+    return;
+  }
+  const clusters = await resp.json();
+  if (!clusters.length) {
+    contentEl.innerHTML = `<div style="color:var(--text-muted);text-align:center;padding:32px;">
+      Noch keine Supervektoren für diese Identität.<br>
+      <span style="font-size:12px;">Klicke auf „Alle Cluster neu erstellen" um Adaptive Clustering zu starten.</span>
+    </div>`;
+    return;
+  }
+  contentEl.innerHTML = renderClusterGrid(clusters);
+}
+
+function renderClusterGrid(clusters) {
+  const cards = clusters.map(c => {
+    const pct   = c.hit_rate_pct ?? 0;
+    const cls   = pct >= 80 ? 'rel-high' : pct >= 50 ? 'rel-mid' : 'rel-low';
+    const color = pct >= 80 ? 'var(--accent2)' : pct >= 50 ? 'var(--warn)' : 'var(--danger)';
+
+    // Context distribution rows
+    const ctxHtml = Object.entries(c.context_distribution || {})
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
+      .map(([ctx, p]) =>
+        `<div style="display:flex;justify-content:space-between;gap:8px;">
+           <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;"
+                 title="${esc(ctx)}">${esc(ctx)}</span>
+           <span style="flex-shrink:0;font-weight:600;">${p}%</span>
+         </div>`
+      ).join("") || '<span style="color:var(--text-muted);">—</span>';
+
+    return `
+      <div class="cluster-card">
+        <div class="cc-title">${esc(c.group_name)}</div>
+        <div class="cc-meta">${c.sample_count} Sample(s)</div>
+        <div class="cc-reliability">
+          <span style="font-size:11px;white-space:nowrap;color:${color};font-weight:700;">
+            Match-Zuverlässigkeit: ${pct}%
+          </span>
+        </div>
+        <div class="reliability-bar-track">
+          <div class="reliability-bar-fill ${cls}" style="width:${pct.toFixed(1)}%"></div>
+        </div>
+        ${Object.keys(c.context_distribution || {}).length > 0 ? `
+        <div style="margin-top:10px;">
+          <div style="font-size:10px;text-transform:uppercase;letter-spacing:.4px;
+                      color:var(--text-muted);margin-bottom:4px;">Kontext-Verteilung</div>
+          <div class="cc-contexts">${ctxHtml}</div>
+        </div>` : ''}
+      </div>`;
+  }).join("");
+
+  const totalSamples = clusters.reduce((a, c) => a + (c.sample_count || 0), 0);
+  const avgHitRate   = clusters.length
+    ? (clusters.reduce((a, c) => a + (c.hit_rate_pct || 0), 0) / clusters.length).toFixed(1)
+    : 0;
+
+  return `
+    <div style="display:flex;gap:20px;margin-bottom:16px;flex-wrap:wrap;">
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);
+                  padding:12px 20px;min-width:140px;">
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">Cluster gesamt</div>
+        <div style="font-size:24px;font-weight:700;color:var(--accent);">${clusters.length}</div>
+      </div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);
+                  padding:12px 20px;min-width:140px;">
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">Samples gesamt</div>
+        <div style="font-size:24px;font-weight:700;color:var(--accent2);">${totalSamples}</div>
+      </div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);
+                  padding:12px 20px;min-width:180px;">
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">Ø Cluster-Integrität</div>
+        <div style="font-size:24px;font-weight:700;
+                    color:${avgHitRate>=80?'var(--accent2)':avgHitRate>=50?'var(--warn)':'var(--danger)'};">
+          ${avgHitRate}%
+        </div>
+      </div>
+    </div>
+    <div class="cluster-grid">${cards}</div>`;
+}
+
+async function rebuildAdaptiveClusters() {
+  if (!_inspectorIdentityId) return;
+  if (!confirm(
+    `Adaptive Cluster für „${_inspectorIdentityName}" neu erstellen?\n\n` +
+    'Alle bestehenden Supervektoren werden gelöscht.\n' +
+    'Das System gruppiert die Samples automatisch in so viele Cluster wie nötig ' +
+    '(keine Obergrenze). Ausreißer (schlechteste 15%) werden vorab herausgefiltert.'
+  )) return;
+
+  const btn = document.getElementById("inspector-rebuild-btn");
+  if (btn) { btn.disabled = true; btn.textContent = "⏳ Berechne…"; }
+
+  const resp = await fetch(
+    `/api/identities/${_inspectorIdentityId}/rebuild_adaptive_clusters`,
+    { method: "POST" }
+  );
+
+  if (btn) { btn.disabled = false; btn.textContent = "🔄 Alle Cluster neu erstellen (Adaptive Clustering)"; }
+
+  if (resp.ok) {
+    const data = await resp.json();
+    if (data.clusters > 0) {
+      toast(`${data.clusters} Cluster aus ${data.samples} Sample(s) erstellt ✓`);
+    } else {
+      toast(data.message || "Keine geeigneten Samples gefunden.", "warn");
+    }
+    await loadInspectorClusters();
+    await loadIdentities();
+  } else {
+    const err = await resp.json().catch(() => ({}));
+    toast("Fehler: " + (err.detail || resp.statusText), "error");
   }
 }
 /* -------------------------------------------------------------------- */

@@ -61,6 +61,9 @@ from db.database import (
     list_group_samples,
     create_named_supervector,
     revert_supervector_group,
+    # Adaptive multi-centroid clustering
+    compute_adaptive_clusters_for_identity,
+    validate_clusters,
     add_voice_sample,
     list_voice_samples,
     confirm_voice_sample,
@@ -276,9 +279,10 @@ def api_delete_identity(identity_id: int) -> JSONResponse:
 @app.post("/api/refresh_supervectors")
 def api_refresh_supervectors() -> JSONResponse:
     """
-    Calculate the mean embedding (supervector) for every identity from all its
-    real voice samples, store it with context='SUPERVECTOR', and mark all other
-    samples as inactive so the scanner only uses supervectors for matching.
+    Adaptive multi-centroid supervector refresh:
+    For every identity, revert all existing supervectors, then re-cluster
+    free non-LQ samples using distance-based AgglomerativeClustering.
+    Identities with ≥ 8 samples receive multiple expert clusters automatically.
     """
     conn = get_connection()
     try:
@@ -412,6 +416,115 @@ def api_rebuild_supervector(identity_id: int) -> JSONResponse:
     except Exception as exc:
         logger.error("rebuild_supervector failed: %s", exc)
         raise HTTPException(status_code=500, detail="Failed to rebuild supervector.")
+    finally:
+        conn.close()
+
+
+@app.post("/api/identities/{identity_id}/rebuild_adaptive_clusters")
+def api_rebuild_adaptive_clusters(identity_id: int) -> JSONResponse:
+    """
+    Revert all existing supervector groups for *identity_id*, then rebuild
+    using adaptive multi-centroid clustering (AgglomerativeClustering with
+    distance threshold 0.12).  No upper limit on the number of clusters.
+    """
+    from datetime import date
+    conn = get_connection()
+    try:
+        if get_identity(conn, identity_id) is None:
+            raise HTTPException(status_code=404, detail="Identity not found")
+
+        # 1. Revert all existing supervectors
+        revert_supervectors(conn, identity_id)
+
+        # 2. Adaptive clustering
+        clusters = compute_adaptive_clusters_for_identity(conn, identity_id)
+        if not clusters:
+            return JSONResponse({
+                "status":   "ok",
+                "message":  "No eligible samples found.",
+                "clusters": 0,
+                "samples":  0,
+            })
+
+        today = date.today()
+        num_clusters  = len(clusters)
+        total_samples = 0
+        group_ids: list[int] = []
+        for i, cluster_sample_ids in enumerate(clusters, 1):
+            cluster_name = (
+                f"Adaptive {today} – Cluster {i}/{num_clusters}"
+                if num_clusters > 1
+                else f"Adaptive {today}"
+            )
+            try:
+                gid = create_named_supervector(
+                    conn, identity_id, cluster_name, cluster_sample_ids
+                )
+                group_ids.append(gid)
+                total_samples += len(cluster_sample_ids)
+            except ValueError as exc:
+                logger.warning(
+                    "rebuild_adaptive_clusters: cluster %d skipped for identity %d: %s",
+                    i, identity_id, exc,
+                )
+
+        # 3. Return validation results
+        try:
+            validation = validate_clusters(conn, identity_id)
+        except Exception as val_exc:
+            logger.warning("validate_clusters failed (non-fatal): %s", val_exc)
+            validation = []
+
+        return JSONResponse({
+            "status":     "ok",
+            "clusters":   num_clusters,
+            "samples":    total_samples,
+            "group_ids":  group_ids,
+            "validation": validation,
+        })
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("rebuild_adaptive_clusters failed: %s", exc)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to rebuild adaptive clusters.",
+        )
+    finally:
+        conn.close()
+
+
+@app.get("/api/identities/{identity_id}/clusters")
+def api_get_clusters(identity_id: int) -> JSONResponse:
+    """
+    Return the cluster hierarchy for *identity_id* including per-cluster
+    validation (hit-rate) percentages.
+
+    Response schema::
+
+        [
+          {
+            "group_id":              int,
+            "group_name":            str,
+            "sample_count":          int,
+            "hit_rate_pct":          float,   // 0-100 %
+            "context_distribution":  {ctx: pct, …},
+          },
+          …
+        ]
+    """
+    conn = get_connection()
+    try:
+        if get_identity(conn, identity_id) is None:
+            raise HTTPException(status_code=404, detail="Identity not found")
+        try:
+            result = validate_clusters(conn, identity_id)
+        except Exception as exc:
+            logger.error("validate_clusters failed: %s", exc)
+            raise HTTPException(status_code=500, detail="Failed to compute cluster validation.")
+        return JSONResponse(result)
+    except HTTPException:
+        raise
     finally:
         conn.close()
 

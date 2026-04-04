@@ -228,6 +228,226 @@ def normalize_vector(vec: list[float]) -> list[float]:
     return (arr / norm).tolist()
 
 
+def compute_adaptive_clusters_for_identity(
+    conn: "mariadb.Connection",
+    identity_id: int,
+    distance_threshold: float = 0.12,
+    min_samples_for_clustering: int = 8,
+    outlier_ratio: float = 0.15,
+) -> list[list[int]]:
+    """
+    Fetch all free, non-low-quality, active samples for *identity_id* and
+    group them into adaptive clusters using AgglomerativeClustering.
+
+    Algorithm:
+      1. L2-normalise every vector.
+      2. Remove the worst *outlier_ratio* fraction (distance to provisional mean).
+      3. If fewer than *min_samples_for_clustering* samples remain → single group.
+      4. Otherwise run AgglomerativeClustering (average linkage, Euclidean
+         distance, no upper limit on cluster count) with *distance_threshold*.
+         Samples whose pairwise distance to every existing cluster exceeds
+         the threshold automatically open a new "Expert Cluster".
+
+    Returns a list of sample-ID lists – one sublist per cluster.
+    An empty list means no eligible samples exist for this identity.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, embedding FROM voice_samples
+        WHERE identity_id = ?
+          AND (context IS NULL OR context != 'SUPERVECTOR')
+          AND used_in_group_id IS NULL
+          AND is_low_quality = FALSE
+          AND is_active = TRUE
+        ORDER BY created_at
+        """,
+        (identity_id,),
+    )
+    rows = cur.fetchall()
+    cur.close()
+
+    if not rows:
+        return []
+
+    valid_ids: list[int] = []
+    raw_vecs: list[list[float]] = []
+    for row in rows:
+        vec = np.frombuffer(row[1], dtype=np.float32)
+        if vec.shape[0] == 512:
+            valid_ids.append(row[0])
+            raw_vecs.append(normalize_vector(vec.tolist()))
+
+    if not valid_ids:
+        return []
+
+    data = np.array(raw_vecs, dtype=np.float32)
+
+    # Phase 1: outlier rejection
+    mean_v = np.mean(data, axis=0)
+    distances = np.linalg.norm(data - mean_v, axis=1)
+    num_to_keep = max(1, int(len(data) * (1.0 - outlier_ratio)))
+    keep_idx = np.argsort(distances)[:num_to_keep]
+    filtered_data = data[keep_idx]
+    filtered_ids = [valid_ids[i] for i in keep_idx]
+
+    if len(filtered_ids) < min_samples_for_clustering:
+        # Not enough samples for multi-centroid clustering → single group
+        return [filtered_ids]
+
+    # Phase 2: adaptive clustering
+    try:
+        from sklearn.cluster import AgglomerativeClustering  # type: ignore[import]
+    except ImportError:
+        logger.warning(
+            "scikit-learn not available – falling back to single-cluster supervector"
+        )
+        return [filtered_ids]
+
+    clustering = AgglomerativeClustering(
+        n_clusters=None,
+        distance_threshold=distance_threshold,
+        metric="euclidean",
+        linkage="average",
+        compute_full_tree=True,
+    )
+    labels = clustering.fit_predict(filtered_data)
+
+    cluster_map: dict[int, list[int]] = {}
+    for sample_id, label in zip(filtered_ids, labels):
+        cluster_map.setdefault(int(label), []).append(sample_id)
+
+    return list(cluster_map.values())
+
+
+def validate_clusters(
+    conn: "mariadb.Connection",
+    identity_id: int,
+) -> list[dict]:
+    """
+    Cross-validate the active supervector clusters for *identity_id*.
+
+    For each supervector group (cluster centroid), compute what fraction of
+    the source samples that were used to create it are *correctly* identified
+    as closest to that centroid when compared against **all** other active
+    supervector centroids for the same identity.
+
+    Returns a list of dicts, one per group::
+
+        {
+          "group_id":              int,
+          "group_name":            str,
+          "sample_count":          int,
+          "hit_rate_pct":          float,   # 0-100 %
+          "context_distribution":  {context_str: pct_float, …},
+        }
+    """
+    cur = conn.cursor()
+
+    # Fetch all active supervector centroids for this identity
+    cur.execute(
+        """
+        SELECT vs.id, vs.embedding, sg.id AS group_id, sg.name AS group_name
+        FROM voice_samples vs
+        JOIN supervector_groups sg ON sg.id = vs.supervector_group_id
+        WHERE vs.identity_id = ?
+          AND vs.context = 'SUPERVECTOR'
+          AND vs.is_active = TRUE
+        ORDER BY sg.id
+        """,
+        (identity_id,),
+    )
+    sv_rows = cur.fetchall()
+    if not sv_rows:
+        cur.close()
+        return []
+
+    sv_centroids: list[dict] = []
+    for row in sv_rows:
+        vec = np.frombuffer(row[1], dtype=np.float32)
+        if vec.shape[0] == 512:
+            sv_centroids.append({
+                "sv_sample_id": row[0],
+                "embedding":    np.array(normalize_vector(vec.tolist()), dtype=np.float32),
+                "group_id":     row[2],
+                "group_name":   row[3],
+            })
+
+    if not sv_centroids:
+        cur.close()
+        return []
+
+    centroid_matrix = np.stack([c["embedding"] for c in sv_centroids], axis=0)
+    group_ids_order = [c["group_id"] for c in sv_centroids]
+
+    results: list[dict] = []
+    for centroid_info in sv_centroids:
+        group_id   = centroid_info["group_id"]
+        group_name = centroid_info["group_name"]
+
+        # Fetch the source samples that were merged into this group
+        cur.execute(
+            """
+            SELECT id, embedding, context
+            FROM voice_samples
+            WHERE used_in_group_id = ?
+            ORDER BY created_at
+            """,
+            (group_id,),
+        )
+        src_rows = cur.fetchall()
+
+        if not src_rows:
+            results.append({
+                "group_id":             group_id,
+                "group_name":           group_name,
+                "sample_count":         0,
+                "hit_rate_pct":         0.0,
+                "context_distribution": {},
+            })
+            continue
+
+        hits = 0
+        valid_count = 0
+        contexts: dict[str, int] = {}
+
+        for src_row in src_rows:
+            src_raw = np.frombuffer(src_row[1], dtype=np.float32)
+            if src_raw.shape[0] != 512:
+                continue
+            src_emb = np.array(normalize_vector(src_raw.tolist()), dtype=np.float32)
+
+            # Euclidean distance on L2-normalised vectors ≈ cosine distance
+            dists = np.linalg.norm(centroid_matrix - src_emb, axis=1)
+            nearest_group_id = group_ids_order[int(np.argmin(dists))]
+
+            if nearest_group_id == group_id:
+                hits += 1
+
+            valid_count += 1
+            ctx = src_row[2] or "unknown"
+            contexts[ctx] = contexts.get(ctx, 0) + 1
+
+        hit_rate = (hits / valid_count * 100.0) if valid_count > 0 else 0.0
+        total_ctx = sum(contexts.values())
+        ctx_dist = (
+            {k: round(v / total_ctx * 100.0, 1) for k, v in contexts.items()}
+            if total_ctx > 0
+            else {}
+        )
+
+        results.append({
+            "group_id":             group_id,
+            "group_name":           group_name,
+            "sample_count":         valid_count,
+            "hit_rate_pct":         round(hit_rate, 1),
+            "context_distribution": ctx_dist,
+        })
+
+    cur.close()
+    return results
+
+
 def calculate_robust_supervector(
     embeddings: list[list[float]],
     outlier_ratio: float = 0.2,
@@ -473,50 +693,69 @@ def delete_identity(conn: mariadb.Connection, identity_id: int) -> None:
 
 def refresh_supervectors(conn: mariadb.Connection) -> dict:
     """
-    Auto-supervector mode: for every identity, group ALL currently free
-    (not yet merged) non-low-quality samples into a single named supervector
-    group called "Auto <date>".
+    Adaptive multi-centroid supervector mode: for every identity, delete ALL
+    existing supervector groups (full revert), then re-cluster the free,
+    non-low-quality samples using distance-based AgglomerativeClustering.
 
-    This is the quick "merge everything" path.  Users can use
-    create_named_supervector() for fine-grained era-based groups.
+    • If an identity has fewer than 8 eligible samples a single robust
+      supervector is created (existing behaviour).
+    • Otherwise an unlimited number of clusters is formed automatically –
+      every group of samples whose intra-cluster distance exceeds the
+      threshold (default 0.12) opens a new "Expert Cluster".
 
-    Returns a summary dict: {identity_name: sample_count_used, ...}
+    Returns a summary dict::
+
+        {identity_name: {"samples": int, "clusters": int}, …}
     """
     from datetime import date
-    auto_name = f"Auto {date.today()}"
+    today = date.today()
 
     cur = conn.cursor()
     summary: dict = {}
     try:
         cur.execute("SELECT id, name FROM identities ORDER BY name")
         identities_list = cur.fetchall()
-
-        for identity_id, identity_name in identities_list:
-            # Fetch free non-LQ sample IDs
-            cur.execute(
-                """SELECT id FROM voice_samples
-                   WHERE identity_id = ?
-                     AND (context IS NULL OR context != 'SUPERVECTOR')
-                     AND used_in_group_id IS NULL
-                     AND is_low_quality = FALSE""",
-                (identity_id,),
-            )
-            rows = cur.fetchall()
-            if not rows:
-                continue
-
-            sample_ids = [row[0] for row in rows]
-            try:
-                create_named_supervector(conn, identity_id, auto_name, sample_ids)
-                summary[identity_name] = len(sample_ids)
-            except Exception as exc:
-                logger.warning("Auto-supervector skipped for %s: %s", identity_name, exc)
-
-    except Exception:
-        conn.rollback()
-        raise
     finally:
         cur.close()
+
+    for identity_id, identity_name in identities_list:
+        try:
+            # 1. Revert all existing supervectors so samples are free again
+            revert_supervectors(conn, identity_id)
+
+            # 2. Compute adaptive clusters
+            clusters = compute_adaptive_clusters_for_identity(conn, identity_id)
+            if not clusters:
+                continue
+
+            total_samples = 0
+            num_clusters  = len(clusters)
+            for i, cluster_sample_ids in enumerate(clusters, 1):
+                if num_clusters > 1:
+                    cluster_name = f"Auto {today} – Cluster {i}/{num_clusters}"
+                else:
+                    cluster_name = f"Auto {today}"
+                try:
+                    create_named_supervector(
+                        conn, identity_id, cluster_name, cluster_sample_ids
+                    )
+                    total_samples += len(cluster_sample_ids)
+                except Exception as exc:
+                    logger.warning(
+                        "Auto-supervector skipped for %s cluster %d: %s",
+                        identity_name, i, exc,
+                    )
+
+            if total_samples > 0:
+                summary[identity_name] = {
+                    "samples":  total_samples,
+                    "clusters": num_clusters,
+                }
+        except Exception as exc:
+            logger.warning(
+                "refresh_supervectors: identity '%s' failed: %s",
+                identity_name, exc,
+            )
 
     return summary
 
