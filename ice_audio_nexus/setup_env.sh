@@ -172,6 +172,15 @@ else
     echo -e "${YELLOW}  ⚠ openai-whisper konnte nicht installiert werden – wespeaker/s3prl wird fehlschlagen.${RESET}"
 fi
 
+# peft – benötigt von wespeaker beim Import (LoRA/Adapter-Support für Embedding-Modelle)
+# wespeaker importiert peft direkt beim Laden des Moduls; fehlt peft → ImportError → leere Embeddings.
+echo -e "${CYAN}  → Installiere peft (wespeaker-Abhängigkeit)...${RESET}"
+if pip install peft; then
+    echo -e "${GREEN}  ✓ peft installiert${RESET}"
+else
+    echo -e "${YELLOW}  ⚠ peft konnte nicht installiert werden – wespeaker wird fehlschlagen.${RESET}"
+fi
+
 # ⚠ KRITISCH: huggingface_hub, transformers und numpy nach wespeaker/s3prl erneut pinnen!
 # Abhängigkeitskette: s3prl → transformers 5.x → huggingface_hub >= 1.5
 # Beide Pins sind nötig:
@@ -333,13 +342,19 @@ try:
 except ImportError as e:
     warn("deepfilternet (optional)", str(e))
 
-# ── WeSpeaker (Speaker-Embeddings) ───────────────────────────────────────────
+# ── WeSpeaker + Abhängigkeiten (Speaker-Embeddings) ─────────────────────────
 print(f"\n── Speaker-Embeddings ──────────────────────────────────────────")
+# peft zuerst – wespeaker importiert es direkt, ohne eigenes try/except
+try:
+    import peft  # noqa: F401
+    ok("peft", pkg_ver("peft") or "?")
+except ImportError as e:
+    fail("peft", f"{e}  →  pip install peft")
 try:
     import wespeaker  # noqa: F401
     ok("wespeaker")
 except ImportError as e:
-    warn("wespeaker (optional)", str(e))
+    fail("wespeaker", f"{e}  →  pip install git+https://github.com/wenet-e2e/wespeaker.git")
 
 # ── MariaDB-Connector ─────────────────────────────────────────────────────────
 print(f"\n── Datenbank ───────────────────────────────────────────────────")
