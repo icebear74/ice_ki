@@ -9,8 +9,11 @@
 #   torch:           2.4.1+cu118  (Pascal support; cu130 breaks CUBLAS)
 #   torchaudio:      2.4.1+cu118
 #   numpy:           <2.0.0       (avoid AttributeError: np.NaN)
-#   huggingface_hub: <0.25.0      (keep use_auth_token param)
+#   huggingface_hub: <0.25.0      (keep use_auth_token param for pyannote 3.1.1)
+#                    ⚠ MUSS nach wespeaker/s3prl erneut gepinnt werden –
+#                    s3prl zieht eine neuere Version nach!
 #   pyannote.audio:  ==3.1.1      (stable for numpy<2 + old PyTorch)
+#   s3prl:           (wespeaker-Abhängigkeit, nicht automatisch mitinstalliert)
 #
 # Usage:
 #   cd ice_audio_nexus
@@ -146,6 +149,22 @@ else
     echo -e "${YELLOW}    Manuell installieren: pip install git+https://github.com/wenet-e2e/wespeaker.git${RESET}"
 fi
 
+# s3prl – Pflichtabhängigkeit von wespeaker (wird nicht automatisch mitinstalliert)
+# Ohne s3prl schlägt wespeaker.load_model() mit "No module named 's3prl'" fehl.
+echo -e "${CYAN}  → Installiere s3prl (wespeaker-Abhängigkeit)...${RESET}"
+if pip install s3prl; then
+    echo -e "${GREEN}  ✓ s3prl installiert${RESET}"
+else
+    echo -e "${YELLOW}  ⚠ s3prl konnte nicht installiert werden – wespeaker wird möglicherweise fehlschlagen.${RESET}"
+fi
+
+# ⚠ KRITISCH: huggingface_hub und numpy nach wespeaker/s3prl erneut pinnen!
+# s3prl zieht eine neuere huggingface_hub-Version nach (>= 0.25), die den
+# use_auth_token-Parameter entfernt hat und damit pyannote.audio 3.1.1 bricht.
+echo -e "${CYAN}  → Stelle huggingface_hub < 0.25.0 und numpy < 2.0.0 sicher (Re-Pin nach s3prl)...${RESET}"
+pip install "huggingface_hub<0.25.0" "numpy<2.0.0"
+echo -e "${GREEN}  ✓ huggingface_hub und numpy korrekt gepinnt${RESET}"
+
 echo -e "${GREEN}✓ Web-UI-Pakete + Pillow + DeepFilterNet installiert${RESET}"
 
 # ---------------------------------------------------------------------------
@@ -185,6 +204,12 @@ if tuple(int(x) for x in np.__version__.split(".")[:2]) >= (2, 0):
 import importlib.metadata
 hf_ver = importlib.metadata.version("huggingface_hub")
 print(f"huggingface_hub: {hf_ver}")
+hf_parts = tuple(int(x) for x in hf_ver.split(".")[:2])
+if hf_parts >= (0, 25):
+    print(f"❌ FEHLER: huggingface_hub {hf_ver} >= 0.25 – use_auth_token fehlt!")
+    print("   Pyannote.audio 3.1.1 wird abstürzen. Bitte ausführen:")
+    print("   pip install 'huggingface_hub<0.25.0'")
+    sys.exit(1)
 
 if torch.cuda.is_available():
     for i in range(torch.cuda.device_count()):
