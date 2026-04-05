@@ -11,7 +11,9 @@
 #   numpy:           <2.0.0       (avoid AttributeError: np.NaN)
 #   huggingface_hub: <0.25.0      (keep use_auth_token param for pyannote 3.1.1)
 #                    ⚠ MUSS nach wespeaker/s3prl erneut gepinnt werden –
-#                    s3prl zieht eine neuere Version nach!
+#                    s3prl → transformers 5.x zieht eine neuere Version nach!
+#   transformers:    <5.0.0       (transformers 5.x braucht hub>=1.5, inkompatibel)
+#                    ⚠ MUSS ebenfalls nach s3prl erneut gepinnt werden!
 #   pyannote.audio:  ==3.1.1      (stable for numpy<2 + old PyTorch)
 #   s3prl:           (wespeaker-Abhängigkeit, nicht automatisch mitinstalliert)
 #
@@ -158,12 +160,15 @@ else
     echo -e "${YELLOW}  ⚠ s3prl konnte nicht installiert werden – wespeaker wird möglicherweise fehlschlagen.${RESET}"
 fi
 
-# ⚠ KRITISCH: huggingface_hub und numpy nach wespeaker/s3prl erneut pinnen!
-# s3prl zieht eine neuere huggingface_hub-Version nach (>= 0.25), die den
-# use_auth_token-Parameter entfernt hat und damit pyannote.audio 3.1.1 bricht.
-echo -e "${CYAN}  → Stelle huggingface_hub < 0.25.0 und numpy < 2.0.0 sicher (Re-Pin nach s3prl)...${RESET}"
-pip install "huggingface_hub<0.25.0" "numpy<2.0.0"
-echo -e "${GREEN}  ✓ huggingface_hub und numpy korrekt gepinnt${RESET}"
+# ⚠ KRITISCH: huggingface_hub, transformers und numpy nach wespeaker/s3prl erneut pinnen!
+# Abhängigkeitskette: s3prl → transformers 5.x → huggingface_hub >= 1.5
+# Beide Pins sind nötig:
+#   huggingface_hub < 0.25.0  → pyannote.audio 3.1.1 braucht use_auth_token-Parameter
+#   transformers    < 5.0.0   → transformers 5.x importiert is_offline_mode, das in hub 0.24.x
+#                               nicht (mehr) auf Modulebene verfügbar ist
+echo -e "${CYAN}  → Stelle huggingface_hub < 0.25.0, transformers < 5.0.0 und numpy < 2.0.0 sicher (Re-Pin nach s3prl)...${RESET}"
+pip install "huggingface_hub<0.25.0" "transformers<5.0.0" "numpy<2.0.0"
+echo -e "${GREEN}  ✓ huggingface_hub, transformers und numpy korrekt gepinnt${RESET}"
 
 echo -e "${GREEN}✓ Web-UI-Pakete + Pillow + DeepFilterNet installiert${RESET}"
 
@@ -210,6 +215,18 @@ if hf_parts >= (0, 25):
     print("   Pyannote.audio 3.1.1 wird abstürzen. Bitte ausführen:")
     print("   pip install 'huggingface_hub<0.25.0'")
     sys.exit(1)
+
+try:
+    tr_ver = importlib.metadata.version("transformers")
+    print(f"transformers:    {tr_ver}")
+    tr_parts = tuple(int(x) for x in tr_ver.split(".")[:2])
+    if tr_parts >= (5, 0):
+        print(f"❌ FEHLER: transformers {tr_ver} >= 5.0 – is_offline_mode nicht in hub 0.24.x!")
+        print("   Pyannote.audio wird beim Import abstürzen. Bitte ausführen:")
+        print("   pip install 'transformers<5.0.0'")
+        sys.exit(1)
+except importlib.metadata.PackageNotFoundError:
+    print("transformers:    (nicht installiert – ok)")
 
 if torch.cuda.is_available():
     for i in range(torch.cuda.device_count()):
