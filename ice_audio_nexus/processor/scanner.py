@@ -494,6 +494,23 @@ def _get_wespeaker_model():
         # WeSpeaker respects torch device assignment (unlike DeepFilterNet).
         if torch.cuda.is_available() and WESPEAKER_DEVICE.startswith("cuda"):
             model.set_device(WESPEAKER_DEVICE)
+            # WeSpeaker's extract_embedding() creates input tensors on CPU internally
+            # (via compute_fbank / torch.FloatTensor) even when the model weights are
+            # on CUDA.  This causes a device-mismatch RuntimeError at the first Conv2d.
+            # Patch the inner model's forward to automatically move the input tensor to
+            # the correct device before the forward pass.  This is the minimal,
+            # non-invasive fix that keeps the public WeSpeaker API intact.
+            _target_device = WESPEAKER_DEVICE
+            _inner_model   = model.model
+            _orig_forward  = _inner_model.forward
+
+            def _device_aware_forward(feats, *args, **kwargs):
+                return _orig_forward(feats.to(_target_device), *args, **kwargs)
+
+            _inner_model.forward = _device_aware_forward
+            logger.debug(
+                "WeSpeaker inner model patched: inputs auto-moved to %s", _target_device
+            )
         _wespeaker_model = model
         logger.info("WeSpeaker model loaded.")
     return _wespeaker_model
