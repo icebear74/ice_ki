@@ -115,6 +115,24 @@ DRIFT_CHECK_ENABLED = os.getenv("DRIFT_CHECK_ENABLED", "false").lower() in ("1",
 DRIFT_THRESHOLD     = float(os.getenv("DRIFT_THRESHOLD", "0.15"))
 
 # ---------------------------------------------------------------------------
+# Word-level realignment (post-diarization boundary refinement)
+# ---------------------------------------------------------------------------
+# REALIGN_ENABLED – when True, Whisper is asked for word-level timestamps.
+#   The word-level data is used to:
+#     1. Trim each diarization segment's start_ms/end_ms to the actual first
+#        and last spoken word (removes leading/trailing silence).
+#     2. Split segments at silence gaps longer than REALIGN_SPLIT_THRESHOLD
+#        seconds.  Each resulting sub-segment gets its own transcript and –
+#        when audio_data is in memory – a fresh WeSpeaker embedding so that
+#        split sub-segments can still be matched independently.
+#
+# REALIGN_SPLIT_THRESHOLD – minimum silence gap (seconds) that triggers a
+#   split.  0.8 s is safe for conversational drama; increase to 1.2 s if
+#   you get too many false splits on speakers who naturally pause mid-sentence.
+REALIGN_ENABLED         = os.getenv("REALIGN_ENABLED", "false").lower() in ("1", "true", "yes")
+REALIGN_SPLIT_THRESHOLD = float(os.getenv("REALIGN_SPLIT_THRESHOLD", "0.8"))
+
+# ---------------------------------------------------------------------------
 # Quality-filter thresholds
 # ---------------------------------------------------------------------------
 # A segment is marked is_low_quality=TRUE when ANY of these conditions is met:
@@ -902,6 +920,127 @@ def transcribe_segment(
 
 
 # ---------------------------------------------------------------------------
+# Word-level transcription helper (used by realign)
+# ---------------------------------------------------------------------------
+
+def transcribe_with_words(
+    audio_source: "str | np.ndarray",
+    start_s: float,
+    end_s: float,
+    sample_rate: int = 16000,
+    model_size: str = "large-v3-turbo",
+) -> tuple[str, float, list[dict]]:
+    """Like transcribe_segment() but also requests word-level timestamps.
+
+    Returns ``(text, no_speech_prob, words)`` where *words* is a list of dicts::
+
+        {"word": str, "start": float, "end": float}
+
+    with *start* and *end* as **absolute episode times in seconds**
+    (i.e. ``start_s + word.start`` from the faster-whisper output).
+
+    Falls back to :func:`transcribe_segment` (empty word list) when the audio
+    source is a file path or when word extraction raises an exception.
+    """
+    model = _get_whisper_model(model_size)
+
+    if isinstance(audio_source, np.ndarray):
+        start_sample = int(start_s * sample_rate)
+        end_sample   = int(end_s   * sample_rate)
+        audio_chunk  = audio_source[start_sample:end_sample]
+        try:
+            whisper_segments, _ = model.transcribe(
+                audio_chunk,
+                beam_size=5,
+                language="de",
+                task="transcribe",
+                word_timestamps=True,
+            )
+            seg_list       = list(whisper_segments)
+            text           = " ".join(seg.text.strip() for seg in seg_list)
+            no_speech_prob = max((seg.no_speech_prob for seg in seg_list), default=0.0)
+            words: list[dict] = []
+            for seg in seg_list:
+                if seg.words:
+                    for w in seg.words:
+                        # Convert chunk-relative times to absolute episode time.
+                        words.append({
+                            "word":  w.word,
+                            "start": start_s + w.start,
+                            "end":   start_s + w.end,
+                        })
+            return text, no_speech_prob, words
+        except Exception as exc:
+            logger.warning(
+                "Word-timestamp transcription failed, falling back to segment mode: %s", exc
+            )
+
+    # File-path source or fallback: delegate to the regular transcribe_segment.
+    txt, nsp = transcribe_segment(audio_source, start_s, end_s, sample_rate, model_size)
+    return txt, nsp, []
+
+
+def _realign_segment(
+    seg: dict,
+    words: list[dict],
+    audio_data: "np.ndarray | None",
+    sample_rate: int,
+) -> list[dict]:
+    """Trim and optionally split a diarization segment using Whisper word timestamps.
+
+    Returns a list of one or more segment dicts.  Each dict has the same keys
+    as *seg* plus ``"_realign_transcript"`` holding the text for that sub-segment.
+
+    Behaviour:
+      - Empty *words* → returns ``[seg]`` unchanged.
+      - Single group (no gap ≥ threshold) → trims start_ms/end_ms to word
+        boundaries and returns one element.
+      - Multiple groups → returns one element per group; each sub-segment
+        whose audio sub-array is long enough receives a freshly extracted
+        WeSpeaker embedding so that identity matching works independently.
+    """
+    if not words:
+        return [seg]
+
+    # Partition words into groups separated by gaps >= REALIGN_SPLIT_THRESHOLD.
+    groups: list[list[dict]] = []
+    current: list[dict] = [words[0]]
+    for w in words[1:]:
+        if w["start"] - current[-1]["end"] >= REALIGN_SPLIT_THRESHOLD:
+            groups.append(current)
+            current = [w]
+        else:
+            current.append(w)
+    groups.append(current)
+
+    result: list[dict] = []
+    for group in groups:
+        sub = dict(seg)
+        sub["start_ms"]            = int(group[0]["start"] * 1000)
+        sub["end_ms"]              = int(group[-1]["end"]  * 1000)
+        sub["_realign_transcript"] = "".join(w["word"] for w in group).strip()
+
+        # Re-extract WeSpeaker embedding for sub-segments produced by a split.
+        # Trimming without splitting keeps the original embedding (same audio).
+        if audio_data is not None and len(groups) > 1:
+            s = int(sub["start_ms"] / 1000.0 * sample_rate)
+            e = int(sub["end_ms"]   / 1000.0 * sample_rate)
+            sub_audio = audio_data[s:e]
+            if len(sub_audio) >= _WESPEAKER_MIN_SAMPLES:
+                try:
+                    new_emb = _extract_wespeaker_embedding(sub_audio, sample_rate)
+                    if new_emb:
+                        sub["embedding"]       = new_emb
+                        sub["embedding_model"] = _WESPEAKER_EMBED_TAG
+                except Exception as exc:
+                    logger.debug("Realign: WeSpeaker re-embed failed for sub-segment: %s", exc)
+
+        result.append(sub)
+
+    return result if result else [seg]
+
+
+# ---------------------------------------------------------------------------
 # Main scan pipeline
 # ---------------------------------------------------------------------------
 
@@ -1069,141 +1208,172 @@ def scan_video(
                 if seg is None:
                     break
 
-                transcript = ""
+                transcript     = ""
                 no_speech_prob = 0.0
+                words: list[dict] = []
+
                 if transcribe:
                     try:
-                        transcript, no_speech_prob = transcribe_segment(
-                            audio_data if audio_data is not None else audio_for_pipeline,
-                            seg["start_ms"] / 1000.0,
-                            seg["end_ms"]   / 1000.0,
-                            sample_rate=sample_rate,
-                            model_size=model_size,
-                        )
+                        if REALIGN_ENABLED:
+                            # Request word-level timestamps so _realign_segment()
+                            # can trim boundaries and split on silence gaps.
+                            transcript, no_speech_prob, words = transcribe_with_words(
+                                audio_data if audio_data is not None else audio_for_pipeline,
+                                seg["start_ms"] / 1000.0,
+                                seg["end_ms"]   / 1000.0,
+                                sample_rate=sample_rate,
+                                model_size=model_size,
+                            )
+                        else:
+                            transcript, no_speech_prob = transcribe_segment(
+                                audio_data if audio_data is not None else audio_for_pipeline,
+                                seg["start_ms"] / 1000.0,
+                                seg["end_ms"]   / 1000.0,
+                                sample_rate=sample_rate,
+                                model_size=model_size,
+                            )
                     except Exception as exc:
                         logger.warning("Transcription failed: %s", exc)
 
-                # Quality heuristic: flag segments likely to contain laughter,
-                # noise, or too little speech for a reliable voice embedding.
-                duration_s = (seg["end_ms"] - seg["start_ms"]) / 1000.0
-
-                # Optional drift check: split the segment into 3 sub-segments
-                # and compute WeSpeaker variance.  Adds ~3× embedding overhead
-                # per segment; disabled by default (DRIFT_CHECK_ENABLED=false).
-                drift_score: float | None = None
-                if DRIFT_CHECK_ENABLED and seg["embedding"] and audio_data is not None:
-                    try:
-                        start_s = seg["start_ms"] / 1000.0
-                        end_s   = seg["end_ms"]   / 1000.0
-                        seg_audio = audio_data[
-                            int(start_s * sample_rate) : int(end_s * sample_rate)
-                        ]
-                        drift_score = compute_drift_score(seg_audio, sample_rate)
-                    except Exception as exc:
-                        logger.debug("Drift check failed for segment: %s", exc)
-
-                is_low_quality = (
-                    no_speech_prob > LOW_QUALITY_NO_SPEECH_PROB
-                    or duration_s < LOW_QUALITY_MIN_DURATION_S
-                    or len(transcript.strip()) < LOW_QUALITY_MIN_TRANSCRIPT_LEN
-                    or (drift_score is not None and drift_score > DRIFT_THRESHOLD)
-                )
-                if is_low_quality:
-                    logger.info(
-                        "[%s–%s] %s → marked is_low_quality "
-                        "(no_speech_prob=%.2f, duration=%.2fs, text_len=%d, drift=%.3f)",
-                        seg["start_ms"], seg["end_ms"], seg["speaker_label"],
-                        no_speech_prob, duration_s, len(transcript.strip()),
-                        drift_score if drift_score is not None else -1.0,
-                    )
-
-                # Multi-vector identity search against latest supervectors
-                match_result = {"status": "unknown", "identity_id": None,
-                                "sample_id": None, "distance": None}
-                if seg["embedding"]:
-                    match_result = find_nearest_identity(
-                        conn,
-                        seg["embedding"],
-                        match_threshold=MATCH_THRESHOLD,
-                        suggest_threshold=SUGGEST_THRESHOLD,
-                        min_margin=MIN_MARGIN,
-                    )
-                    if match_result["status"] != "unknown":
+                # Realign: produce 1..N sub-segments with refined boundaries.
+                # Without realign (or when no word data is available) this is
+                # just [seg] and the loop runs exactly once.
+                if REALIGN_ENABLED and words:
+                    sub_segs = _realign_segment(seg, words, audio_data, sample_rate)
+                    if len(sub_segs) > 1:
                         logger.info(
-                            "[%s–%s] %s → %s (dist=%.3f, status=%s, via sample %s '%s')",
-                            seg["start_ms"], seg["end_ms"],
-                            seg["speaker_label"],
-                            match_result.get("identity_name"),
-                            match_result.get("distance", 0),
-                            match_result["status"],
-                            match_result.get("sample_id"),
-                            match_result.get("sample_context", ""),
+                            "[%s–%s] %s realigned → %d sub-segments",
+                            seg["start_ms"], seg["end_ms"], seg["speaker_label"],
+                            len(sub_segs),
+                        )
+                else:
+                    sub_segs = [seg]
+
+                for sub_seg in sub_segs:
+                    # Per-sub-segment transcript when realign produced a split.
+                    sub_transcript = sub_seg.pop("_realign_transcript", transcript)
+
+                    # Quality heuristic: flag segments likely to contain laughter,
+                    # noise, or too little speech for a reliable voice embedding.
+                    duration_s = (sub_seg["end_ms"] - sub_seg["start_ms"]) / 1000.0
+
+                    # Optional drift check: split the segment into 3 sub-segments
+                    # and compute WeSpeaker variance.  Adds ~3× embedding overhead
+                    # per segment; disabled by default (DRIFT_CHECK_ENABLED=false).
+                    drift_score: float | None = None
+                    if DRIFT_CHECK_ENABLED and sub_seg["embedding"] and audio_data is not None:
+                        try:
+                            start_s = sub_seg["start_ms"] / 1000.0
+                            end_s   = sub_seg["end_ms"]   / 1000.0
+                            seg_audio = audio_data[
+                                int(start_s * sample_rate) : int(end_s * sample_rate)
+                            ]
+                            drift_score = compute_drift_score(seg_audio, sample_rate)
+                        except Exception as exc:
+                            logger.debug("Drift check failed for segment: %s", exc)
+
+                    is_low_quality = (
+                        no_speech_prob > LOW_QUALITY_NO_SPEECH_PROB
+                        or duration_s < LOW_QUALITY_MIN_DURATION_S
+                        or len(sub_transcript.strip()) < LOW_QUALITY_MIN_TRANSCRIPT_LEN
+                        or (drift_score is not None and drift_score > DRIFT_THRESHOLD)
+                    )
+                    if is_low_quality:
+                        logger.info(
+                            "[%s–%s] %s → marked is_low_quality "
+                            "(no_speech_prob=%.2f, duration=%.2fs, text_len=%d, drift=%.3f)",
+                            sub_seg["start_ms"], sub_seg["end_ms"], sub_seg["speaker_label"],
+                            no_speech_prob, duration_s, len(sub_transcript.strip()),
+                            drift_score if drift_score is not None else -1.0,
                         )
 
-                emb_bytes       = vector_to_bytes(seg["embedding"]) if seg["embedding"] else None
-                embedding_model = seg.get("embedding_model")
-
-                # ── Update mode: check for an existing segment at this timecode ──
-                existing = None
-                if update_mode:
-                    existing = get_existing_segment(
-                        conn, series_name, episode_title,
-                        seg["start_ms"], seg["end_ms"],
-                    )
-
-                if existing is not None:
-                    # Preserve any manual identity assignment the user made; only
-                    # refresh auto-detected (non-manual) assignments.
-                    # A segment is considered manually assigned when is_suggestion
-                    # was FALSE and identity_id was set – meaning the user confirmed
-                    # or assigned it via the Web UI.
-                    has_manual = (
-                        existing["identity_id"] is not None
-                        and not existing["is_suggestion"]
-                    )
-                    if not has_manual:
-                        # No manual assignment – safe to overwrite with fresh match
-                        update_segment_match(
+                    # Multi-vector identity search against latest supervectors
+                    match_result = {"status": "unknown", "identity_id": None,
+                                    "sample_id": None, "distance": None}
+                    if sub_seg["embedding"]:
+                        match_result = find_nearest_identity(
                             conn,
-                            segment_id=existing["id"],
+                            sub_seg["embedding"],
+                            match_threshold=MATCH_THRESHOLD,
+                            suggest_threshold=SUGGEST_THRESHOLD,
+                            min_margin=MIN_MARGIN,
+                        )
+                        if match_result["status"] != "unknown":
+                            logger.info(
+                                "[%s–%s] %s → %s (dist=%.3f, status=%s, via sample %s '%s')",
+                                sub_seg["start_ms"], sub_seg["end_ms"],
+                                sub_seg["speaker_label"],
+                                match_result.get("identity_name"),
+                                match_result.get("distance", 0),
+                                match_result["status"],
+                                match_result.get("sample_id"),
+                                match_result.get("sample_context", ""),
+                            )
+
+                    emb_bytes       = vector_to_bytes(sub_seg["embedding"]) if sub_seg["embedding"] else None
+                    embedding_model = sub_seg.get("embedding_model")
+
+                    # ── Update mode: check for an existing segment at this timecode ──
+                    existing = None
+                    if update_mode:
+                        existing = get_existing_segment(
+                            conn, series_name, episode_title,
+                            sub_seg["start_ms"], sub_seg["end_ms"],
+                        )
+
+                    if existing is not None:
+                        # Preserve any manual identity assignment the user made; only
+                        # refresh auto-detected (non-manual) assignments.
+                        # A segment is considered manually assigned when is_suggestion
+                        # was FALSE and identity_id was set – meaning the user confirmed
+                        # or assigned it via the Web UI.
+                        has_manual = (
+                            existing["identity_id"] is not None
+                            and not existing["is_suggestion"]
+                        )
+                        if not has_manual:
+                            # No manual assignment – safe to overwrite with fresh match
+                            update_segment_match(
+                                conn,
+                                segment_id=existing["id"],
+                                identity_id=match_result.get("identity_id"),
+                                matched_sample_id=match_result.get("sample_id"),
+                                match_distance=match_result.get("distance"),
+                                is_suggestion=(match_result["status"] == "suggest"),
+                                embedding=emb_bytes,
+                                transcript=sub_transcript,
+                                is_low_quality=is_low_quality,
+                                embedding_model=embedding_model,
+                            )
+                            segments_updated += 1
+                            logger.debug(
+                                "[%s–%s] updated existing segment %s",
+                                sub_seg["start_ms"], sub_seg["end_ms"], existing["id"],
+                            )
+                        else:
+                            logger.debug(
+                                "[%s–%s] segment %s has manual assignment – skipped",
+                                sub_seg["start_ms"], sub_seg["end_ms"], existing["id"],
+                            )
+                    else:
+                        upsert_segment(
+                            conn,
+                            series_name=series_name,
+                            episode_title=episode_title,
+                            video_path=video_path,
+                            start_ms=sub_seg["start_ms"],
+                            end_ms=sub_seg["end_ms"],
+                            speaker_label=sub_seg["speaker_label"],
+                            embedding=emb_bytes,
                             identity_id=match_result.get("identity_id"),
                             matched_sample_id=match_result.get("sample_id"),
                             match_distance=match_result.get("distance"),
+                            transcript=sub_transcript,
                             is_suggestion=(match_result["status"] == "suggest"),
-                            embedding=emb_bytes,
-                            transcript=transcript,
                             is_low_quality=is_low_quality,
                             embedding_model=embedding_model,
                         )
-                        segments_updated += 1
-                        logger.debug(
-                            "[%s–%s] updated existing segment %s",
-                            seg["start_ms"], seg["end_ms"], existing["id"],
-                        )
-                    else:
-                        logger.debug(
-                            "[%s–%s] segment %s has manual assignment – skipped",
-                            seg["start_ms"], seg["end_ms"], existing["id"],
-                        )
-                else:
-                    upsert_segment(
-                        conn,
-                        series_name=series_name,
-                        episode_title=episode_title,
-                        video_path=video_path,
-                        start_ms=seg["start_ms"],
-                        end_ms=seg["end_ms"],
-                        speaker_label=seg["speaker_label"],
-                        embedding=emb_bytes,
-                        identity_id=match_result.get("identity_id"),
-                        matched_sample_id=match_result.get("sample_id"),
-                        match_distance=match_result.get("distance"),
-                        transcript=transcript,
-                        is_suggestion=(match_result["status"] == "suggest"),
-                        is_low_quality=is_low_quality,
-                        embedding_model=embedding_model,
-                    )
-                    segments_stored += 1
+                        segments_stored += 1
 
         finally:
             conn.close()
