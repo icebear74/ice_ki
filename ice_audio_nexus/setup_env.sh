@@ -135,6 +135,17 @@ else
     echo -e "${YELLOW}    Audio-Rauschunterdrückung wird deaktiviert.${RESET}"
 fi
 
+# wespeaker – Speaker-Embedding-Modell (nicht auf PyPI – Installation über GitHub)
+# Offizielle Quelle: https://github.com/wenet-e2e/wespeaker
+echo -e "${CYAN}  → Installiere wespeaker (von GitHub)...${RESET}"
+if pip install git+https://github.com/wenet-e2e/wespeaker.git; then
+    echo -e "${GREEN}  ✓ wespeaker installiert${RESET}"
+else
+    echo -e "${YELLOW}  ⚠ wespeaker konnte nicht installiert werden.${RESET}"
+    echo -e "${YELLOW}    Speaker-Embedding-Extraktion wird deaktiviert (Fallback auf leere Vektoren).${RESET}"
+    echo -e "${YELLOW}    Manuell installieren: pip install git+https://github.com/wenet-e2e/wespeaker.git${RESET}"
+fi
+
 echo -e "${GREEN}✓ Web-UI-Pakete + Pillow + DeepFilterNet installiert${RESET}"
 
 # ---------------------------------------------------------------------------

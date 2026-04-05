@@ -485,8 +485,8 @@ def _get_wespeaker_model():
             import wespeaker  # type: ignore[import]
         except ImportError as exc:
             raise ImportError(
-                f"wespeaker not installed ({exc}). "
-                "Run: pip install wespeaker"
+                f"wespeaker nicht installiert ({exc}). "
+                "Installieren mit: pip install git+https://github.com/wenet-e2e/wespeaker.git"
             ) from exc
 
         logger.info("Loading WeSpeaker model '%s' on %s …", WESPEAKER_MODEL, WESPEAKER_DEVICE)
@@ -680,8 +680,8 @@ def _iter_diarization_segments(audio_path: str):
         logger.info("WeSpeaker model ready for embedding extraction.")
     except ImportError as exc:
         logger.warning(
-            "WeSpeaker not available – embeddings will be empty. "
-            "Install with: pip install wespeaker  (%s)", exc
+            "WeSpeaker nicht verfügbar – Embeddings werden leer sein. "
+            "Installieren mit: pip install git+https://github.com/wenet-e2e/wespeaker.git  (%s)", exc
         )
 
     count = 0
