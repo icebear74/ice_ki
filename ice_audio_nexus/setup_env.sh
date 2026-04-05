@@ -174,21 +174,25 @@ fi
 
 # peft – benötigt von wespeaker beim Import (LoRA/Adapter-Support für Embedding-Modelle)
 # wespeaker importiert peft direkt beim Laden des Moduls; fehlt peft → ImportError → leere Embeddings.
-echo -e "${CYAN}  → Installiere peft (wespeaker-Abhängigkeit)...${RESET}"
-if pip install peft; then
-    echo -e "${GREEN}  ✓ peft installiert${RESET}"
+# ⚠ KRITISCH: peft >= 0.13.x benötigt huggingface_hub >= 0.25.0 und importiert LocalEntryNotFoundError,
+#   das in hub 0.24.x nicht existiert. Daher explizit peft == 0.11.0 (letzte Version mit hub < 0.25 Compat.)
+echo -e "${CYAN}  → Installiere peft==0.11.0 (wespeaker-Abhängigkeit, kompatibel mit huggingface_hub<0.25.0)...${RESET}"
+if pip install "peft==0.11.0"; then
+    echo -e "${GREEN}  ✓ peft 0.11.0 installiert${RESET}"
 else
     echo -e "${YELLOW}  ⚠ peft konnte nicht installiert werden – wespeaker wird fehlschlagen.${RESET}"
 fi
 
-# ⚠ KRITISCH: huggingface_hub, transformers und numpy nach wespeaker/s3prl erneut pinnen!
+# ⚠ KRITISCH: huggingface_hub, transformers, peft und numpy nach wespeaker/s3prl/peft erneut pinnen!
 # Abhängigkeitskette: s3prl → transformers 5.x → huggingface_hub >= 1.5
-# Beide Pins sind nötig:
+#                     peft → kann hub und transformers hochziehen
+# Pins sind nötig:
 #   huggingface_hub < 0.25.0  → pyannote.audio 3.1.1 braucht use_auth_token-Parameter
 #   transformers    < 5.0.0   → transformers 5.x importiert is_offline_mode, das in hub 0.24.x
 #                               nicht (mehr) auf Modulebene verfügbar ist
-echo -e "${CYAN}  → Stelle huggingface_hub < 0.25.0, transformers < 5.0.0 und numpy < 2.0.0 sicher (Re-Pin nach s3prl)...${RESET}"
-pip install "huggingface_hub<0.25.0" "transformers<5.0.0" "numpy<2.0.0"
+#   peft            == 0.11.0 → peft >= 0.13 braucht hub >= 0.25 (LocalEntryNotFoundError)
+echo -e "${CYAN}  → Stelle huggingface_hub < 0.25.0, transformers < 5.0.0, peft == 0.11.0 und numpy < 2.0.0 sicher (Re-Pin)...${RESET}"
+pip install "huggingface_hub<0.25.0" "transformers<5.0.0" "peft==0.11.0" "numpy<2.0.0"
 echo -e "${GREEN}  ✓ huggingface_hub, transformers und numpy korrekt gepinnt${RESET}"
 
 echo -e "${GREEN}✓ Web-UI-Pakete + Pillow + DeepFilterNet installiert${RESET}"
@@ -345,11 +349,13 @@ except ImportError as e:
 # ── WeSpeaker + Abhängigkeiten (Speaker-Embeddings) ─────────────────────────
 print(f"\n── Speaker-Embeddings ──────────────────────────────────────────")
 # peft zuerst – wespeaker importiert es direkt, ohne eigenes try/except
+# peft >= 0.13.x braucht huggingface_hub >= 0.25.0 → nur peft == 0.11.0 kompatibel mit hub 0.24.x
 try:
     import peft  # noqa: F401
-    ok("peft", pkg_ver("peft") or "?")
+    peft_ver = pkg_ver("peft") or "?"
+    ok("peft", peft_ver)
 except ImportError as e:
-    fail("peft", f"{e}  →  pip install peft")
+    fail("peft", f"{e}  →  pip install 'peft==0.11.0'")
 try:
     import wespeaker  # noqa: F401
     ok("wespeaker")
