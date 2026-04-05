@@ -549,7 +549,7 @@ def _extract_wespeaker_embedding(
             emb_list = emb_list[:512]
         return emb_list
     except Exception as exc:
-        logger.debug("WeSpeaker embedding extraction failed: %s", exc)
+        logger.warning("WeSpeaker embedding extraction failed: %s", exc)
         return []
 
 
@@ -663,6 +663,12 @@ def _iter_diarization_segments(audio_path: str):
     with ProgressHook() as hook:
         diarization = pipeline(audio_path, hook=hook)
 
+    # Release pyannote from cuda:1 before WeSpeaker embedding extraction starts so
+    # the two models never compete for the same limited P4 VRAM (~7.6 GB).
+    del pipeline
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     # Pre-load audio once for in-memory segment slicing (WeSpeaker embedding).
     audio_data: "np.ndarray | None" = None
     audio_sr: int = 16000
@@ -685,6 +691,7 @@ def _iter_diarization_segments(audio_path: str):
         )
 
     count = 0
+    embed_ok = 0
     for turn, _, speaker in diarization.itertracks(yield_label=True):
         start_ms = int(turn.start * 1000)
         end_ms   = int(turn.end   * 1000)
@@ -698,8 +705,10 @@ def _iter_diarization_segments(audio_path: str):
                 if len(seg_audio) > 0:
                     embedding = _extract_wespeaker_embedding(seg_audio, audio_sr)
             except Exception as exc:
-                logger.debug("WeSpeaker extraction failed for %s: %s", speaker, exc)
+                logger.warning("WeSpeaker extraction failed for %s: %s", speaker, exc)
 
+        if embedding:
+            embed_ok += 1
         count += 1
         yield {
             "start_ms":        start_ms,
@@ -709,7 +718,10 @@ def _iter_diarization_segments(audio_path: str):
             "embedding_model": _WESPEAKER_EMBED_TAG if embedding else None,
         }
 
-    logger.info("Diarization complete: %d segments", count)
+    logger.info(
+        "Diarization complete: %d segments, %d/%d with WeSpeaker embeddings",
+        count, embed_ok, count,
+    )
 
 
 def run_diarization(audio_path: str) -> list[dict]:
@@ -1004,7 +1016,7 @@ def scan_video(
 
                 transcript = ""
                 no_speech_prob = 0.0
-                if transcribe and seg["embedding"]:
+                if transcribe:
                     try:
                         transcript, no_speech_prob = transcribe_segment(
                             audio_data if audio_data is not None else audio_for_pipeline,
