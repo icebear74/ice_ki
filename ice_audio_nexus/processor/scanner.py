@@ -142,6 +142,10 @@ _DRIFT_MIN_DURATION_SECS: float = 1.5
 _DRIFT_SUBSEGMENT_COUNT: int = 3
 # L2-norm threshold below which a vector is treated as zero (avoid division by zero).
 _NORM_EPSILON: float = 1e-6
+# WeSpeaker's fbank uses a 25 ms window = 400 samples at 16 kHz.  Audio shorter
+# than this raises "choose a window size 400 that is [2, N]".  We skip extraction
+# silently for sub-threshold segments rather than emitting a spurious WARNING.
+_WESPEAKER_MIN_SAMPLES: int = 400
 
 # ---------------------------------------------------------------------------
 # Configurable temporary file directories
@@ -562,6 +566,16 @@ def _extract_wespeaker_embedding(
         logger.warning("WeSpeaker unavailable: %s", exc)
         return []
 
+    # Guard: WeSpeaker's fbank requires at least _WESPEAKER_MIN_SAMPLES (400) samples.
+    # Segments shorter than one fbank window raise a ValueError – skip them silently.
+    if len(audio_data) < _WESPEAKER_MIN_SAMPLES:
+        logger.debug(
+            "Skipping WeSpeaker embedding: audio too short (%d samples < %d required)",
+            len(audio_data),
+            _WESPEAKER_MIN_SAMPLES,
+        )
+        return []
+
     try:
         import soundfile as sf
 
@@ -743,7 +757,7 @@ def _iter_diarization_segments(audio_path: str):
                 start_sample = int(turn.start * audio_sr)
                 end_sample   = int(turn.end   * audio_sr)
                 seg_audio    = audio_data[start_sample:end_sample]
-                if len(seg_audio) > 0:
+                if len(seg_audio) >= _WESPEAKER_MIN_SAMPLES:
                     embedding = _extract_wespeaker_embedding(seg_audio, audio_sr)
             except Exception as exc:
                 logger.warning("WeSpeaker extraction failed for %s: %s", speaker, exc)
