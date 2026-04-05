@@ -288,8 +288,9 @@ def remigrate_identity(
             )
 
         logger.info(
-            "Sample %d re-embedded: drift=%.4f, model=%s",
-            sample_id, drift_score if drift_score is not None else -1.0,
+            "Sample %d re-embedded: drift=%s, model=%s",
+            sample_id,
+            f"{drift_score:.4f}" if drift_score is not None else "N/A",
             _WESPEAKER_EMBED_TAG,
         )
         stats["processed"] += 1

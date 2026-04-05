@@ -111,6 +111,14 @@ _WESPEAKER_EMBED_TAG = f"wespeaker-{WESPEAKER_MODEL}"
 DRIFT_CHECK_ENABLED = os.getenv("DRIFT_CHECK_ENABLED", "false").lower() in ("1", "true", "yes")
 DRIFT_THRESHOLD     = float(os.getenv("DRIFT_THRESHOLD", "0.15"))
 
+# Minimum segment duration (seconds) to run drift analysis.  Segments shorter
+# than this cannot be meaningfully split into 3 sub-segments.
+_DRIFT_MIN_DURATION_SECS: float = 1.5
+# Number of equal sub-segments used for the drift check.
+_DRIFT_SUBSEGMENT_COUNT: int = 3
+# L2-norm threshold below which a vector is treated as zero (avoid division by zero).
+_NORM_EPSILON: float = 1e-6
+
 # ---------------------------------------------------------------------------
 # Configurable temporary file directories
 # ---------------------------------------------------------------------------
@@ -533,7 +541,7 @@ def _extract_wespeaker_embedding(
 
         emb_list = emb.flatten().tolist()
         # Replace non-finite values (short/silent segments) with 0.0
-        emb_list = [v if (v == v and abs(v) != float("inf")) else 0.0 for v in emb_list]
+        emb_list = [v if np.isfinite(v) else 0.0 for v in emb_list]
         # Pad to 512 or truncate – cosine-equivalent for padded zeros after L2-norm
         if len(emb_list) < 512:
             emb_list = emb_list + [0.0] * (512 - len(emb_list))
@@ -563,11 +571,11 @@ def compute_drift_score(
     """
     try:
         duration = len(audio_data) / sample_rate
-        if duration < 1.5:
+        if duration < _DRIFT_MIN_DURATION_SECS:
             return None
 
         n = len(audio_data)
-        third = n // 3
+        third = n // _DRIFT_SUBSEGMENT_COUNT
         sub_segs = [
             audio_data[:third],
             audio_data[third : 2 * third],
@@ -587,7 +595,7 @@ def compute_drift_score(
         for emb in embeddings:
             arr = np.array(emb, dtype=np.float32)
             norm = float(np.linalg.norm(arr))
-            if norm > 1e-6:
+            if norm > _NORM_EPSILON:
                 norm_embs.append(arr / norm)
 
         if len(norm_embs) < 2:

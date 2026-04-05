@@ -223,6 +223,8 @@ def normalize_vector(vec: list[float]) -> list[float]:
     """L2-normalize *vec* to unit length. Returns the original list if norm ≈ 0."""
     arr = np.array(vec, dtype=np.float32)
     norm = float(np.linalg.norm(arr))
+    # 1e-6: threshold below which the vector is treated as the zero vector to
+    # avoid division-by-zero for silent/padded segments.
     if norm < 1e-6:
         return vec
     return (arr / norm).tolist()

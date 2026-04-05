@@ -2415,7 +2415,10 @@ function renderClusterGrid(clusters) {
       const driftColor = driftAvg < 0.08 ? 'var(--accent2)'
                        : driftAvg < 0.15 ? 'var(--warn)'
                        : 'var(--danger)';
-      const driftPct   = Math.min(100, driftAvg * 400); // scale 0..0.25 → 0..100%
+      // Scale drift 0..0.25 → 0..100% for the progress bar (factor 400).
+      // Drift scores above 0.25 are already clearly indicative of a speaker
+      // turn and the bar simply clamps to 100%.
+      const driftPct   = Math.min(100, driftAvg * 400);
       driftHtml = `
         <div style="margin-top:8px;padding-top:6px;border-top:1px solid var(--border);">
           <div style="font-size:10px;text-transform:uppercase;letter-spacing:.4px;
