@@ -35,8 +35,10 @@ import tempfile
 import numpy as np
 from dotenv import load_dotenv
 
-# Load .env from the project root
-load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+# Load config (.env) and secrets (.env.secrets) from the project root.
+_ENV_DIR = os.path.join(os.path.dirname(__file__), "..")
+load_dotenv(os.path.join(_ENV_DIR, ".env"))
+load_dotenv(os.path.join(_ENV_DIR, ".env.secrets"))
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(

@@ -44,9 +44,12 @@ import numpy as np
 
 from dotenv import load_dotenv
 
-# Load .env from the project root (parent of the processor package), so the
-# script works regardless of the current working directory.
-load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+# Load config (.env) and secrets (.env.secrets) from the project root.
+# Both files are searched relative to this file so the script works regardless
+# of the current working directory.
+_ENV_DIR = os.path.join(os.path.dirname(__file__), "..")
+load_dotenv(os.path.join(_ENV_DIR, ".env"))
+load_dotenv(os.path.join(_ENV_DIR, ".env.secrets"))
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(

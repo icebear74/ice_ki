@@ -38,7 +38,10 @@ from fastapi.templating import Jinja2Templates
 import mariadb
 from dotenv import load_dotenv
 
-load_dotenv()
+# Load config (.env) and secrets (.env.secrets) from the project root.
+_ENV_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(_ENV_DIR / ".env")
+load_dotenv(_ENV_DIR / ".env.secrets")
 
 # Ensure the project root is on sys.path when running via uvicorn from web_ui/
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent

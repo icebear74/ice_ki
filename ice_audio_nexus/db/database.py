@@ -21,7 +21,10 @@ import mariadb
 import numpy as np
 from dotenv import load_dotenv
 
-load_dotenv()
+# Load config (.env) and secrets (.env.secrets) from the project root.
+_ENV_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+load_dotenv(os.path.join(_ENV_DIR, ".env"))
+load_dotenv(os.path.join(_ENV_DIR, ".env.secrets"))
 
 logger = logging.getLogger(__name__)
 
