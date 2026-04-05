@@ -197,70 +197,174 @@ pip install --no-cache-dir \
 echo -e "${GREEN}✓ PyTorch 2.4.1+cu118 installiert${RESET}"
 
 # ---------------------------------------------------------------------------
-# 6. Verify installation
+# 6. Full smoke-test: import every key module + version pins + GPU matmul
+#    Faster than a full pipeline run – catches dependency hell immediately.
 # ---------------------------------------------------------------------------
-echo -e "\n${CYAN}🔍 Schritt 6: Hardware-Kompatibilitätstest...${RESET}"
+echo -e "\n${CYAN}🔍 Schritt 6: Vollständiger Import-Smoke-Test...${RESET}"
 python3 << 'PYCHECK'
 import sys
-import torch
-
-print(f"Python:  {sys.version.split()[0]}")
-print(f"PyTorch: {torch.__version__}")
-
-# Ensure we actually got cu118
-if "cu118" not in torch.__version__:
-    print(f"❌ FEHLER: Falsche Torch-Version! Erwartet cu118, gefunden: {torch.__version__}")
-    sys.exit(1)
-
-import numpy as np
-print(f"NumPy:   {np.__version__}")
-if tuple(int(x) for x in np.__version__.split(".")[:2]) >= (2, 0):
-    print("❌ FEHLER: NumPy >= 2.0 – bitte 'pip install numpy<2.0.0' ausführen")
-    sys.exit(1)
-
+import importlib
 import importlib.metadata
-hf_ver = importlib.metadata.version("huggingface_hub")
-print(f"huggingface_hub: {hf_ver}")
-hf_parts = tuple(int(x) for x in hf_ver.split(".")[:2])
-if hf_parts >= (0, 25):
-    print(f"❌ FEHLER: huggingface_hub {hf_ver} >= 0.25 – use_auth_token fehlt!")
-    print("   Pyannote.audio 3.1.1 wird abstürzen. Bitte ausführen:")
-    print("   pip install 'huggingface_hub<0.25.0'")
-    sys.exit(1)
 
-try:
-    tr_ver = importlib.metadata.version("transformers")
-    print(f"transformers:    {tr_ver}")
-    tr_parts = tuple(int(x) for x in tr_ver.split(".")[:2])
-    if tr_parts >= (5, 0):
-        print(f"❌ FEHLER: transformers {tr_ver} >= 5.0 – is_offline_mode nicht in hub 0.24.x!")
-        print("   Pyannote.audio wird beim Import abstürzen. Bitte ausführen:")
-        print("   pip install 'transformers<5.0.0'")
-        sys.exit(1)
-except importlib.metadata.PackageNotFoundError:
-    print("transformers:    (nicht installiert – ok)")
+CRITICAL_FAIL = False   # will sys.exit(1) at the end if True
 
-if torch.cuda.is_available():
-    for i in range(torch.cuda.device_count()):
-        name = torch.cuda.get_device_name(i)
-        major, minor = torch.cuda.get_device_capability(i)
-        mem_mb = torch.cuda.get_device_properties(i).total_memory // (1024 * 1024)
-        print(f"GPU {i}: {name}  (SM {major}.{minor}, {mem_mb} MB)")
+def ok(label, detail=""):
+    suffix = f"  ({detail})" if detail else ""
+    print(f"  ✅ {label}{suffix}")
 
-    # Real matrix-multiply test (this was the CUBLAS crash point)
+def warn(label, detail=""):
+    suffix = f"  ({detail})" if detail else ""
+    print(f"  ⚠️  {label}{suffix}")
+
+def fail(label, detail=""):
+    global CRITICAL_FAIL
+    CRITICAL_FAIL = True
+    suffix = f"\n       {detail}" if detail else ""
+    print(f"  ❌ {label}{suffix}")
+
+def pkg_ver(name):
     try:
-        a = torch.randn(64, 64, device="cuda")
-        b = torch.randn(64, 64, device="cuda")
-        _ = a @ b
-        torch.cuda.synchronize()
-        print("✅ GPU-MatMul erfolgreich – Pascal-Karten funktionieren!")
-    except Exception as e:
-        print(f"❌ GPU-MatMul fehlgeschlagen: {e}")
-        sys.exit(1)
-else:
-    print("⚠  CUDA nicht verfügbar – läuft auf CPU")
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return None
 
-print("\n✅ Alle Checks bestanden. Scanner kann gestartet werden.")
+# ── Python ──────────────────────────────────────────────────────────────────
+print(f"\n── Python / Basis ──────────────────────────────────────────────")
+print(f"  Python {sys.version.split()[0]}")
+
+# ── PyTorch ─────────────────────────────────────────────────────────────────
+print(f"\n── PyTorch & CUDA ──────────────────────────────────────────────")
+try:
+    import torch
+    ver = torch.__version__
+    if "cu118" not in ver:
+        fail("PyTorch", f"Erwartet cu118, gefunden: {ver}  →  pip install torch==2.4.1+cu118 ...")
+    else:
+        ok("PyTorch", ver)
+
+    if torch.cuda.is_available():
+        for i in range(torch.cuda.device_count()):
+            name  = torch.cuda.get_device_name(i)
+            maj, mn = torch.cuda.get_device_capability(i)
+            mem  = torch.cuda.get_device_properties(i).total_memory // (1024*1024)
+            ok(f"GPU {i}: {name}", f"SM {maj}.{mn}, {mem} MB")
+        # MatMul smoke-test (war der CUBLAS-Absturzpunkt auf Pascal)
+        try:
+            a = torch.randn(64, 64, device="cuda")
+            _ = a @ a
+            torch.cuda.synchronize()
+            ok("GPU MatMul (CUBLAS)")
+        except Exception as e:
+            fail("GPU MatMul", str(e))
+    else:
+        warn("CUDA nicht verfügbar – läuft auf CPU")
+except ImportError as e:
+    fail("PyTorch", str(e))
+
+# ── NumPy ────────────────────────────────────────────────────────────────────
+print(f"\n── NumPy ───────────────────────────────────────────────────────")
+try:
+    import numpy as np
+    ver = np.__version__
+    if tuple(int(x) for x in ver.split(".")[:2]) >= (2, 0):
+        fail("NumPy", f"{ver} >= 2.0  →  pip install 'numpy<2.0.0'")
+    else:
+        ok("NumPy", ver)
+except ImportError as e:
+    fail("NumPy", str(e))
+
+# ── huggingface_hub + transformers ──────────────────────────────────────────
+print(f"\n── HuggingFace ─────────────────────────────────────────────────")
+hf_ver = pkg_ver("huggingface_hub")
+if hf_ver is None:
+    fail("huggingface_hub", "nicht installiert")
+else:
+    parts = tuple(int(x) for x in hf_ver.split(".")[:2])
+    if parts >= (0, 25):
+        fail("huggingface_hub", f"{hf_ver} >= 0.25 bricht pyannote use_auth_token  →  pip install 'huggingface_hub<0.25.0'")
+    else:
+        ok("huggingface_hub", hf_ver)
+
+tr_ver = pkg_ver("transformers")
+if tr_ver is None:
+    warn("transformers", "nicht installiert")
+else:
+    parts = tuple(int(x) for x in tr_ver.split(".")[:2])
+    if parts >= (5, 0):
+        fail("transformers", f"{tr_ver} >= 5.0 importiert is_offline_mode (fehlt in hub 0.24.x)  →  pip install 'transformers<5.0.0'")
+    else:
+        # Tatsächlich importieren – testet die hub-Kompatibilität live
+        try:
+            import transformers  # noqa: F401
+            ok("transformers", tr_ver)
+        except Exception as e:
+            fail("transformers import", str(e))
+
+# ── Audio I/O ────────────────────────────────────────────────────────────────
+print(f"\n── Audio I/O ───────────────────────────────────────────────────")
+for mod in ("soundfile", "librosa"):
+    try:
+        importlib.import_module(mod)
+        ok(mod, pkg_ver(mod) or "?")
+    except ImportError as e:
+        fail(mod, str(e))
+
+# ── faster-whisper (Transkription) ───────────────────────────────────────────
+print(f"\n── Transkription ───────────────────────────────────────────────")
+try:
+    from faster_whisper import WhisperModel  # noqa: F401
+    ok("faster-whisper", pkg_ver("faster-whisper") or "?")
+except ImportError as e:
+    fail("faster-whisper", str(e))
+
+# ── pyannote.audio (Diarisierung) ────────────────────────────────────────────
+print(f"\n── Diarisierung ────────────────────────────────────────────────")
+try:
+    from pyannote.audio import Pipeline  # noqa: F401
+    ok("pyannote.audio", pkg_ver("pyannote.audio") or "?")
+except ImportError as e:
+    fail("pyannote.audio", str(e))
+
+# ── DeepFilterNet (Rauschunterdrückung) ──────────────────────────────────────
+print(f"\n── Rauschunterdrückung ─────────────────────────────────────────")
+try:
+    from df.enhance import enhance, init_df  # noqa: F401
+    ok("deepfilternet", pkg_ver("deepfilternet") or "?")
+except ImportError as e:
+    warn("deepfilternet (optional)", str(e))
+
+# ── WeSpeaker (Speaker-Embeddings) ───────────────────────────────────────────
+print(f"\n── Speaker-Embeddings ──────────────────────────────────────────")
+try:
+    import wespeaker  # noqa: F401
+    ok("wespeaker")
+except ImportError as e:
+    warn("wespeaker (optional)", str(e))
+
+# ── MariaDB-Connector ─────────────────────────────────────────────────────────
+print(f"\n── Datenbank ───────────────────────────────────────────────────")
+try:
+    import mariadb  # noqa: F401
+    ok("mariadb", pkg_ver("mariadb") or "?")
+except ImportError as e:
+    fail("mariadb", str(e))
+
+# ── Web-UI ────────────────────────────────────────────────────────────────────
+print(f"\n── Web-UI ──────────────────────────────────────────────────────")
+for mod, pkg in (("fastapi", "fastapi"), ("uvicorn", "uvicorn")):
+    try:
+        importlib.import_module(mod)
+        ok(mod, pkg_ver(pkg) or "?")
+    except ImportError as e:
+        warn(f"{mod} (optional)", str(e))
+
+# ── Ergebnis ──────────────────────────────────────────────────────────────────
+print()
+if CRITICAL_FAIL:
+    print("❌ Mindestens ein kritischer Check fehlgeschlagen – bitte oben beheben!")
+    sys.exit(1)
+else:
+    print("✅ Alle kritischen Checks bestanden. Scanner kann gestartet werden.")
 PYCHECK
 
 echo ""
