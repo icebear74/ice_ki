@@ -111,6 +111,27 @@ _WESPEAKER_EMBED_TAG = f"wespeaker-{WESPEAKER_MODEL}"
 DRIFT_CHECK_ENABLED = os.getenv("DRIFT_CHECK_ENABLED", "false").lower() in ("1", "true", "yes")
 DRIFT_THRESHOLD     = float(os.getenv("DRIFT_THRESHOLD", "0.15"))
 
+# ---------------------------------------------------------------------------
+# Quality-filter thresholds
+# ---------------------------------------------------------------------------
+# A segment is marked is_low_quality=TRUE when ANY of these conditions is met:
+#
+#   LOW_QUALITY_NO_SPEECH_PROB  – Whisper's no_speech_prob exceeds this value
+#       (high value = likely background noise, laughter, music, silence).
+#       DeepFilterNet removes most laugh-track energy, so 0.45 is a safe
+#       threshold even for sitcoms.  Increase to 0.60 if too many real speech
+#       segments are still being filtered on cleaned audio.
+#
+#   LOW_QUALITY_MIN_DURATION_S  – segment shorter than this (seconds).
+#       Conversational drama / sitcoms have many short turns ("Okay.", "What?").
+#       0.5 s keeps those; 1.2 s (old default) discarded ~90 % of segments.
+#
+#   LOW_QUALITY_MIN_TRANSCRIPT_LEN  – transcript shorter than this (characters).
+#       3 keeps single-word turns ("No", "Hi"); 5 discards them.
+LOW_QUALITY_NO_SPEECH_PROB    = float(os.getenv("LOW_QUALITY_NO_SPEECH_PROB",    "0.45"))
+LOW_QUALITY_MIN_DURATION_S    = float(os.getenv("LOW_QUALITY_MIN_DURATION_S",    "0.5"))
+LOW_QUALITY_MIN_TRANSCRIPT_LEN = int(os.getenv("LOW_QUALITY_MIN_TRANSCRIPT_LEN", "3"))
+
 # Minimum segment duration (seconds) to run drift analysis.  Segments shorter
 # than this cannot be meaningfully split into 3 sub-segments.
 _DRIFT_MIN_DURATION_SECS: float = 1.5
@@ -1065,9 +1086,9 @@ def scan_video(
                         logger.debug("Drift check failed for segment: %s", exc)
 
                 is_low_quality = (
-                    no_speech_prob > 0.45
-                    or duration_s < 1.2
-                    or len(transcript.strip()) < 5
+                    no_speech_prob > LOW_QUALITY_NO_SPEECH_PROB
+                    or duration_s < LOW_QUALITY_MIN_DURATION_S
+                    or len(transcript.strip()) < LOW_QUALITY_MIN_TRANSCRIPT_LEN
                     or (drift_score is not None and drift_score > DRIFT_THRESHOLD)
                 )
                 if is_low_quality:
