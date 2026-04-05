@@ -160,6 +160,18 @@ else
     echo -e "${YELLOW}  ⚠ s3prl konnte nicht installiert werden – wespeaker wird möglicherweise fehlschlagen.${RESET}"
 fi
 
+# openai-whisper – transitiv benötigt von s3prl (s3prl.upstream.whisper wird beim Import geladen)
+# s3prl importiert ALLE Upstream-Module beim Start (eager). Der Whisper-Upstream macht kein
+# try/except um 'import whisper', weshalb ohne openai-whisper ein ImportError auftritt der
+# wespeaker bricht – auch wenn wir für Transkription faster-whisper nutzen.
+# openai-whisper und faster-whisper koexistieren: Module heißen 'whisper' vs 'faster_whisper'.
+echo -e "${CYAN}  → Installiere openai-whisper (s3prl-Abhängigkeit für whisper-Upstream)...${RESET}"
+if pip install openai-whisper; then
+    echo -e "${GREEN}  ✓ openai-whisper installiert${RESET}"
+else
+    echo -e "${YELLOW}  ⚠ openai-whisper konnte nicht installiert werden – wespeaker/s3prl wird fehlschlagen.${RESET}"
+fi
+
 # ⚠ KRITISCH: huggingface_hub, transformers und numpy nach wespeaker/s3prl erneut pinnen!
 # Abhängigkeitskette: s3prl → transformers 5.x → huggingface_hub >= 1.5
 # Beide Pins sind nötig:
