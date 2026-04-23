@@ -3,8 +3,10 @@ set -euo pipefail
 
 # create_py311_venv.sh
 # Erzeugt eine virtuelle Umgebung mit einer wählbaren Python-Executable.
+# Unterstützt Python 3.11 und 3.12 sowie CUDA 13 (cu128-Wheel).
 # Usage:
 #   ./create_py311_venv.sh --python /usr/bin/python3.11 --venv venv --install-requirements --install-torch
+#   ./create_py311_venv.sh --python /usr/bin/python3.12 --venv venv --install-requirements --install-torch
 #
 VENV_DIR="venv-py311"
 PY_BIN=""
@@ -63,10 +65,13 @@ fi
 PY_VER=$($PY_BIN -c 'import sys; print("{}.{}".format(*sys.version_info[:2]))' 2>/dev/null || echo "unbekannt")
 echolog "Verwende Python: $PY_BIN (Version: $PY_VER)"
 
-# optional: enforce 3.11 if desired (nicht erzwungen, nur Hinweis)
-if ! $PY_BIN -c 'import sys; sys.exit(0 if sys.version_info[:2]==(3,11) else 1)' 2>/dev/null; then
-  echolog "Hinweis: ausgewählte Python-Version ist nicht 3.11."
-  echolog "Wenn du strikt Python 3.11 möchtest, starte mit einer passenden --python-Executable."
+# Accept Python 3.11 and 3.12 as fully supported; warn about others.
+PY_MINOR_CHECK=$($PY_BIN -c 'import sys; print(sys.version_info[1])' 2>/dev/null || echo "0")
+if $PY_BIN -c 'import sys; sys.exit(0 if sys.version_info[:2] in ((3,11),(3,12)) else 1)' 2>/dev/null; then
+  echolog "✓ Python ${PY_VER} — vollständig unterstützt (3.11 / 3.12)."
+else
+  echolog "Hinweis: ausgewählte Python-Version ${PY_VER} ist nicht 3.11 oder 3.12."
+  echolog "Empfehlung: --python /usr/bin/python3.11  oder  --python /usr/bin/python3.12"
 fi
 
 # venv handling
@@ -126,13 +131,46 @@ if [ "$INSTALL_TORCH" = true ]; then
     CUDA_VER=$(echo "$CUDA_LINE" | grep -oE '[0-9]+\.[0-9]+' | head -1 || true)
     echolog "Gefundene CUDA-Version: ${CUDA_VER:-none}"
     if [ -n "$CUDA_VER" ]; then
-      # fallback: use cu118 index for >=11.8, otherwise CPU
-      major_minor=$(echo "$CUDA_VER" | awk -F. '{printf "%.1f", $1+$2/10}')
-      if awk "BEGIN{exit !($major_minor >= 11.8)}"; then
-        echolog "Installiere torch + torchvision (cu118 wheel index)..."
-        pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+      CUDA_MAJOR=$(echo "$CUDA_VER" | cut -d'.' -f1)
+      CUDA_MINOR=$(echo "$CUDA_VER" | cut -d'.' -f2)
+      # Select best compatible PyTorch wheel index.
+      # CUDA is backward-compatible: newer driver versions run older CUDA wheels.
+      if [ "$CUDA_MAJOR" -ge 13 ]; then
+        echolog "CUDA ${CUDA_VER} erkannt (≥13) — verwende cu128-Wheel (Abwärtskompatibilität)"
+        WHEEL_INDEX="https://download.pytorch.org/whl/cu128"
+        WHEEL_FALLBACK="https://download.pytorch.org/whl/cu124"
+      elif [ "$CUDA_MAJOR" -eq 12 ] && [ "$CUDA_MINOR" -ge 8 ]; then
+        echolog "CUDA ${CUDA_VER} erkannt (12.8+) — verwende cu128-Wheel"
+        WHEEL_INDEX="https://download.pytorch.org/whl/cu128"
+        WHEEL_FALLBACK="https://download.pytorch.org/whl/cu124"
+      elif [ "$CUDA_MAJOR" -eq 12 ] && [ "$CUDA_MINOR" -ge 4 ]; then
+        echolog "CUDA ${CUDA_VER} erkannt (12.4+) — verwende cu124-Wheel"
+        WHEEL_INDEX="https://download.pytorch.org/whl/cu124"
+        WHEEL_FALLBACK="https://download.pytorch.org/whl/cu121"
       else
-        echolog "CUDA < 11.8 erkannt — installiere CPU-Version als Fallback."
+        # CUDA 12.x < 12.4 or CUDA 11.x  → fallback heuristic (original logic)
+        major_minor=$(echo "$CUDA_VER" | awk -F. '{printf "%.1f", $1+$2/10}')
+        if awk "BEGIN{exit !($major_minor >= 11.8)}"; then
+          echolog "CUDA ${CUDA_VER} erkannt — verwende cu118-Wheel"
+          WHEEL_INDEX="https://download.pytorch.org/whl/cu118"
+          WHEEL_FALLBACK=""
+        else
+          echolog "CUDA < 11.8 erkannt — installiere CPU-Version als Fallback."
+          WHEEL_INDEX=""
+          WHEEL_FALLBACK=""
+        fi
+      fi
+      if [ -n "$WHEEL_INDEX" ]; then
+        echolog "Installiere torch + torchvision (${WHEEL_INDEX})..."
+        if ! pip install torch torchvision --index-url "$WHEEL_INDEX"; then
+          if [ -n "${WHEEL_FALLBACK:-}" ]; then
+            echolog "Primärer Index fehlgeschlagen — Fallback auf ${WHEEL_FALLBACK}..."
+            pip install torch torchvision --index-url "$WHEEL_FALLBACK"
+          else
+            echo "Torch-Installation fehlgeschlagen."; exit 1
+          fi
+        fi
+      else
         pip install torch torchvision
       fi
     else

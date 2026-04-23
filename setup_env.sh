@@ -26,6 +26,7 @@ VENV_DIR="venv"
 INSTALL_TORCH=true   # torch is installed by default; use --no-torch to skip
 # Allow PYTHON_EXECUTABLE env variable as override; CLI --python overrides that
 PY_BIN="${PYTHON_EXECUTABLE:-}"
+TORCH_INDEX_FALLBACK=""  # populated later when a fallback wheel-index is available
 
 # ---- Parse CLI args ----
 while [[ $# -gt 0 ]]; do
@@ -60,9 +61,11 @@ if [ -n "${PY_BIN}" ]; then
     exit 1
   fi
 else
-  # Prefer python3.11 over generic python3 (avoids accidentally using 3.12+)
+  # Prefer python3.11 > python3.12 > generic python3
   if command -v python3.11 &>/dev/null; then
     PY_BIN="python3.11"
+  elif command -v python3.12 &>/dev/null; then
+    PY_BIN="python3.12"
   elif command -v python3 &>/dev/null; then
     PY_BIN="python3"
   else
@@ -73,15 +76,18 @@ else
 fi
 
 PYTHON_VERSION=$("$PY_BIN" -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')
+PY_MAJOR=$("$PY_BIN" -c 'import sys; print(sys.version_info[0])')
+PY_MINOR=$("$PY_BIN" -c 'import sys; print(sys.version_info[1])')
 echo -e "${GREEN}✓ Python ${PYTHON_VERSION} (${PY_BIN})${RESET}"
 
-# Warn if version is newer than 3.11 (some packages may not yet support it)
-PY_MINOR=$("$PY_BIN" -c 'import sys; print(sys.version_info[1])')
-PY_MAJOR=$("$PY_BIN" -c 'import sys; print(sys.version_info[0])')
-if [ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -gt 11 ]; then
-  echo -e "${YELLOW}⚠ Python ${PYTHON_VERSION} > 3.11 erkannt. Einige Pakete (z.B. ältere torch-Wheels)${RESET}"
-  echo -e "${YELLOW}  unterstützen möglicherweise diese Version noch nicht vollständig.${RESET}"
-  echo -e "${YELLOW}  Empfehlung: --python /usr/bin/python3.11 für maximale Kompatibilität.${RESET}"
+# Python 3.11 and 3.12 are both fully supported by current PyTorch.
+# Warn only for versions beyond 3.12.
+if [ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -gt 12 ]; then
+  echo -e "${YELLOW}⚠ Python ${PYTHON_VERSION} > 3.12 erkannt.${RESET}"
+  echo -e "${YELLOW}  PyTorch-Wheels bis 3.12 sind offiziell getestet.${RESET}"
+  echo -e "${YELLOW}  Empfehlung: --python /usr/bin/python3.11 für maximale Stabilität.${RESET}"
+elif [ "$PY_MAJOR" -eq 3 ] && [ "$PY_MINOR" -eq 12 ]; then
+  echo -e "${GREEN}✓ Python 3.12 — vollständig unterstützt durch aktuelle PyTorch-Releases${RESET}"
 fi
 
 # Check if we have pip (use the selected Python's pip module — avoids issues when
@@ -122,12 +128,29 @@ if command -v nvidia-smi &>/dev/null; then
     CUDA_MAJOR=$(echo "$CUDA_VERSION" | cut -d'.' -f1)
     CUDA_MINOR=$(echo "$CUDA_VERSION" | cut -d'.' -f2)
 
-    if [ "$CUDA_MAJOR" -gt 12 ] || { [ "$CUDA_MAJOR" -eq 12 ] && [ "$CUDA_MINOR" -ge 1 ]; }; then
+    if [ "$CUDA_MAJOR" -ge 13 ]; then
+      # CUDA 13 — use the latest stable PyTorch wheel (cu128).
+      # CUDA is backward-compatible: a cu128 wheel runs correctly on a CUDA 13 host.
+      # Fallback: cu124 in case the primary index doesn't carry all packages yet.
+      TORCH_INDEX_URL="https://download.pytorch.org/whl/cu128"
+      TORCH_INDEX_FALLBACK="https://download.pytorch.org/whl/cu124"
+      echo -e "${CYAN}  → Wheel-Index: cu128 (CUDA ${CUDA_VERSION} — via CUDA Backward Compatibility)${RESET}"
+      echo -e "${YELLOW}  Hinweis: CUDA 13 erkannt. PyTorch cu128-Wheels sind auf CUDA-13-Systemen${RESET}"
+      echo -e "${YELLOW}  vollständig lauffähig (CUDA-Abwärtskompatibilität). Fallback: cu124.${RESET}"
+    elif [ "$CUDA_MAJOR" -eq 12 ] && [ "$CUDA_MINOR" -ge 8 ]; then
+      TORCH_INDEX_URL="https://download.pytorch.org/whl/cu128"
+      TORCH_INDEX_FALLBACK="https://download.pytorch.org/whl/cu124"
+      echo -e "${CYAN}  → Wheel-Index: cu128 (CUDA ≥ 12.8)${RESET}"
+    elif [ "$CUDA_MAJOR" -eq 12 ] && [ "$CUDA_MINOR" -ge 4 ]; then
+      TORCH_INDEX_URL="https://download.pytorch.org/whl/cu124"
+      TORCH_INDEX_FALLBACK="https://download.pytorch.org/whl/cu121"
+      echo -e "${CYAN}  → Wheel-Index: cu124 (CUDA ≥ 12.4)${RESET}"
+    elif [ "$CUDA_MAJOR" -eq 12 ] && [ "$CUDA_MINOR" -ge 1 ]; then
       TORCH_INDEX_URL="https://download.pytorch.org/whl/cu121"
-      echo -e "${CYAN}  → Wheel-Index: cu121 (CUDA ≥ 12.1)${RESET}"
+      echo -e "${CYAN}  → Wheel-Index: cu121 (CUDA 12.1–12.3)${RESET}"
     elif [ "$CUDA_MAJOR" -gt 11 ] || { [ "$CUDA_MAJOR" -eq 11 ] && [ "$CUDA_MINOR" -ge 8 ]; }; then
       TORCH_INDEX_URL="https://download.pytorch.org/whl/cu118"
-      echo -e "${CYAN}  → Wheel-Index: cu118 (CUDA ≥ 11.8)${RESET}"
+      echo -e "${CYAN}  → Wheel-Index: cu118 (CUDA 11.8–11.x)${RESET}"
     else
       echo -e "${YELLOW}⚠ CUDA ${CUDA_VERSION} < 11.8 — CPU-Fallback wird verwendet${RESET}"
     fi
@@ -213,7 +236,15 @@ if [ "$INSTALL_TORCH" = true ]; then
 
   if [ -n "$TORCH_INDEX_URL" ]; then
     echo -e "${CYAN}Installiere torch + torchvision (${TORCH_INDEX_URL})...${RESET}"
-    pip install torch torchvision --index-url "$TORCH_INDEX_URL" --quiet
+    if ! pip install torch torchvision --index-url "$TORCH_INDEX_URL" --quiet; then
+      if [ -n "$TORCH_INDEX_FALLBACK" ]; then
+        echo -e "${YELLOW}  Primärer Wheel-Index fehlgeschlagen — Fallback auf ${TORCH_INDEX_FALLBACK}...${RESET}"
+        pip install torch torchvision --index-url "$TORCH_INDEX_FALLBACK" --quiet
+      else
+        echo -e "${RED}  PyTorch-Installation fehlgeschlagen und kein Fallback verfügbar!${RESET}"
+        exit 1
+      fi
+    fi
   else
     echo -e "${YELLOW}Kein passendes CUDA-Wheel — installiere CPU-Version...${RESET}"
     pip install torch torchvision --quiet
