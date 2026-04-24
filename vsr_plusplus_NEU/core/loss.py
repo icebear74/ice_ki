@@ -158,7 +158,10 @@ class HybridLoss(nn.Module):
         if perceptual_w > 0:
             if self.perceptual_loss is None:
                 self.perceptual_loss = PerceptualLoss().to(pred.device)
-            perceptual_loss = self.perceptual_loss(pred, target)
+            # VGG16 always runs in float32 (for stability and because it is never
+            # converted to half()).  Cast pred/target to float32 here so that the
+            # call works correctly when the SR model itself is in float16.
+            perceptual_loss = self.perceptual_loss(pred.float(), target.float())
         else:
             perceptual_loss = torch.tensor(0.0, device=pred.device)
         
