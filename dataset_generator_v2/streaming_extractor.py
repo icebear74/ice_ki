@@ -320,24 +320,48 @@ def libplacebo_available() -> bool:
 
 
 def qsv_available() -> bool:
-    """Return True when Intel QSV hw-accel is listed by the local FFmpeg build.
+    """Return True when Intel QSV hw-accel is usable at runtime.
 
-    Requires ``--enable-libvpl`` (Intel oneVPL, successor to libmfx) or
-    ``--enable-libmfx`` in the FFmpeg configure flags, plus an Intel CPU with
-    a hardware video engine and the matching user-space driver installed at
-    runtime.
+    Two-stage check:
+    1. Verify that ``qsv`` is listed by ``ffmpeg -hwaccels`` (i.e. the FFmpeg
+       binary was compiled with ``--enable-libvpl`` or ``--enable-libmfx``).
+    2. Perform a functional hardware probe by asking FFmpeg to actually
+       initialise a QSV device (``-init_hw_device qsv=qsv:hw``).  This step
+       fails with a non-zero exit code when no Intel iGPU / Quick Sync engine
+       is present at runtime — even if the binary was compiled with QSV
+       support.  Without this probe, machines with only NVIDIA GPUs would
+       still pick the QSV path because the binary check passes, but then
+       decode 0 frames silently.
 
     The result is cached after the first call so repeated checks are free.
     """
     global _qsv_avail
     if _qsv_avail is None:
         try:
+            # Stage 1: compiled-in check.
             out = subprocess.check_output(
                 ["ffmpeg", "-hide_banner", "-hwaccels"],
                 stderr=subprocess.DEVNULL,
                 timeout=5,
             ).decode(errors="replace")
-            _qsv_avail = "qsv" in out.lower()
+            if "qsv" not in out.lower():
+                _qsv_avail = False
+                return _qsv_avail
+
+            # Stage 2: functional runtime probe — try to open the QSV device.
+            # FFmpeg exits non-zero when the Intel hardware driver is missing.
+            probe = subprocess.run(
+                [
+                    "ffmpeg", "-hide_banner", "-loglevel", "error",
+                    "-init_hw_device", "qsv=qsv:hw",
+                    "-f", "lavfi", "-i", "nullsrc=duration=0",
+                    "-frames:v", "0", "-f", "null", "-",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+            _qsv_avail = probe.returncode == 0
         except Exception:
             _qsv_avail = False
     return _qsv_avail
