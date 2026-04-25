@@ -61,6 +61,10 @@ from streaming_extractor import (
     is_black_frame as _streaming_is_black_frame,
     is_hdr_transfer,
     build_vf_filter,
+    cuda_available,
+    scale_cuda_available,
+    tonemap_cuda_available,
+    _get_ffmpeg_major_version,
 )
 from utils.progress_tracker import ProgressTracker
 from generation_plan import GenerationPlan
@@ -89,6 +93,31 @@ _TEMPLATES_FILENAME = "templates.json"
 _ACTIVE_CONFIG_FILENAME = "generator_config.json"
 
 
+def _detect_nvidia_gpus() -> List[Tuple[int, str]]:
+    """Return ``[(device_index, gpu_name), …]`` for all NVIDIA GPUs.
+
+    Queries ``nvidia-smi``.  Returns an empty list when ``nvidia-smi`` is not
+    installed, the driver is unavailable, or no NVIDIA GPU is present.
+    """
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=index,name", "--format=csv,noheader"],
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        ).decode(errors="replace").strip()
+        gpus: List[Tuple[int, str]] = []
+        for line in out.splitlines():
+            parts = line.split(",", 1)
+            if len(parts) == 2:
+                try:
+                    gpus.append((int(parts[0].strip()), parts[1].strip()))
+                except ValueError:
+                    pass
+        return gpus
+    except Exception:
+        return []
+
+
 class DatasetGeneratorV2UHD:
     """
     Dataset Generator V2 – dynamic, template-driven, no hard-coded formats.
@@ -104,14 +133,18 @@ class DatasetGeneratorV2UHD:
 
     MAX_DISPLAYED_PRIORITIES = 10
 
-    def __init__(self, config_dir: Optional[str] = None):
+    def __init__(self, config_dir: Optional[str] = None, force_benchmark: bool = False):
         """
         Initialise the generator.
 
         Args:
-            config_dir: Directory that contains ``templates.json`` and
-                        ``generator_config.json``.  Defaults to the
-                        directory that contains this script.
+            config_dir:       Directory that contains ``templates.json`` and
+                              ``generator_config.json``.  Defaults to the
+                              directory that contains this script.
+            force_benchmark:  When ``True``, always re-run the decode pipeline
+                              benchmark even if a recent cached result exists in
+                              ``<base_dir>/decode_benchmark.json``.  Pass
+                              ``--benchmark`` on the command line to set this.
         """
         if config_dir is None:
             config_dir = os.path.dirname(os.path.abspath(__file__))
@@ -165,8 +198,10 @@ class DatasetGeneratorV2UHD:
         sys.logger = self.logger
 
         # ── CUDA ──────────────────────────────────────────────────────────────
-        from streaming_extractor import cuda_available
-        self.use_cuda = cuda_available()
+        self.use_cuda: bool = cuda_available()
+        # cuda_device is the CUDA device ordinal used for hardware-accelerated
+        # decoding.  0 = first GPU (default).  Updated by _run_decode_benchmark.
+        self.cuda_device: int = 0
         if self.use_cuda:
             self.logger.info("🚀 CUDA/GPU mode enabled (hardware-accelerated decoding & scaling)")
         else:
@@ -231,6 +266,527 @@ class DatasetGeneratorV2UHD:
         # Signal handlers
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
+
+        # ── Decode pipeline benchmark ─────────────────────────────────────────
+        # Runs at startup to pick the fastest GPU/CPU decode pipeline.
+        # Results are cached in <base_dir>/decode_benchmark.json and reused on
+        # subsequent runs unless force_benchmark=True (--benchmark CLI flag).
+        self._run_decode_benchmark(force=force_benchmark)
+
+    # ── Decode pipeline benchmark ─────────────────────────────────────────────
+
+    def _run_decode_benchmark(self, force: bool = False) -> None:
+        """Run a short FFmpeg decode-throughput benchmark and select the fastest pipeline.
+
+        Tests every meaningful decode pipeline variant (CPU-only, CUDA NVDEC per
+        GPU, CUDA NVDEC + scale_cuda per GPU, full-GPU tonemap_cuda per GPU when
+        HDR source and libnpp are available) plus 2-worker parallel variants that
+        simulate a future parallel video-processing loop.
+
+        All FFmpeg child processes are started at idle nice priority (same value
+        as the main extraction loop uses) to avoid disturbing other system
+        activity and to keep measurements consistent.
+
+        Results are printed to stdout in a detailed table so the operator can
+        see exactly which pipeline won and by how much.
+
+        The winning configuration is written to::
+
+            <base_dir>/decode_benchmark.json
+
+        and the instance attributes ``self.use_cuda`` and ``self.cuda_device``
+        are updated so every subsequent call to
+        ``extract_and_save_streaming_distributed`` uses the optimal backend.
+
+        The file is re-used on the next run when it is younger than
+        ``CACHE_MAX_AGE_DAYS`` days, unless *force* is ``True`` (triggered by
+        the ``--benchmark`` CLI flag).
+
+        Notes
+        -----
+        * Multi-category videos are fully handled in a single FFmpeg pass by the
+          extractor, so benchmarking one-pass 4 K decode is representative even
+          for videos that belong to several categories simultaneously.
+        * Parallel variants test two FFmpeg processes running concurrently to
+          quantify the benefit of distributing future parallel workers across
+          separate GPUs.
+        """
+        CACHE_MAX_AGE_DAYS = 7
+        WARMUP_FRAMES      = 20
+        BENCH_FRAMES       = 80
+        SEEK_SEC           = 60.0   # skip opening credits / black frames
+        W, H               = STREAM_4K_WIDTH, STREAM_4K_HEIGHT
+        FRAME_BYTES        = W * H * 3   # BGR24
+
+        cache_path = os.path.join(self.base_dir, "decode_benchmark.json")
+
+        # ── Load cache ────────────────────────────────────────────────────────
+        if not force:
+            try:
+                if os.path.exists(cache_path):
+                    cache = json.loads(Path(cache_path).read_text())
+                    age_days = (time.time() - cache.get("_ts", 0)) / 86400.0
+                    if age_days < CACHE_MAX_AGE_DAYS:
+                        best = cache.get("best", {})
+                        self.cuda_device = best.get("cuda_device", 0)
+                        self.use_cuda    = best.get("use_cuda", self.use_cuda)
+                        print(
+                            f"\n  ♻️  Decode benchmark cache ({age_days:.1f}d old) — "
+                            f"skipping re-run.\n"
+                            f"  Best pipeline : {best.get('label', '?')}\n"
+                            f"  Throughput    : {best.get('fps', 0):.1f} fps  "
+                            f"(use_cuda={self.use_cuda}, cuda_device={self.cuda_device})\n"
+                            f"  Cache file    : {cache_path}\n"
+                            f"  Tip           : run with --benchmark to force a fresh measurement.\n"
+                        )
+                        self.logger.info(
+                            f"Decode backend from cache: {best.get('label','?')} "
+                            f"[cuda_device={self.cuda_device}, use_cuda={self.use_cuda}, "
+                            f"fps={best.get('fps',0):.1f}]"
+                        )
+                        return
+            except Exception:
+                pass  # corrupt / unreadable cache → run fresh
+
+        # ── Find a test video ─────────────────────────────────────────────────
+        test_video: Optional[str] = None
+        test_is_hdr: bool         = True
+        for v in self.videos:
+            p = v.get("path", "")
+            if os.path.exists(p):
+                meta = self._get_video_metadata(p)
+                if meta:
+                    test_video  = p
+                    test_is_hdr = meta.get("is_hdr", True)
+                    if test_is_hdr:
+                        break   # prefer HDR for most demanding / realistic test
+
+        if not test_video:
+            print(
+                "\n  ⚠️  Decode benchmark skipped: no accessible video found in the config.\n"
+                "       Add at least one reachable video path to generator_config.json.\n"
+            )
+            self.logger.warning("Decode benchmark skipped — no accessible video found")
+            return
+
+        # ── Detect GPUs ───────────────────────────────────────────────────────
+        available_gpus: List[Tuple[int, str]] = _detect_nvidia_gpus()
+
+        # ── FFmpeg version ────────────────────────────────────────────────────
+        ffmpeg_ver = _get_ffmpeg_major_version()
+
+        # ── Print header ──────────────────────────────────────────────────────
+        _W = 72
+        _SEP  = "═" * _W
+        _SEP2 = "─" * _W
+        print(f"\n{_SEP}")
+        print(f"  FFmpeg Decode Benchmark  –  {W}×{H} BGR24 (4 K)")
+        print(_SEP2)
+        print(f"  Test video    : {os.path.basename(test_video)}")
+        print(f"  Content type  : {'HDR (PQ/HLG)' if test_is_hdr else 'SDR (BT.709)'}")
+        if available_gpus:
+            for idx, name in available_gpus:
+                print(f"  GPU {idx}          : {name}")
+        else:
+            print(f"  GPUs          : none detected via nvidia-smi")
+        print(f"  Benchmark     : {BENCH_FRAMES} frames timed  +  {WARMUP_FRAMES} warmup frames")
+        print(f"  Seek offset   : {SEEK_SEC:.0f} s  (skip credits / black frames)")
+        print(f"  Output dir    : {self.base_dir}")
+        print(_SEP)
+
+        # ── Build filter chains ───────────────────────────────────────────────
+        # Filter chains are constructed explicitly for each tier so the benchmark
+        # can test each independently, regardless of which tier build_vf_filter()
+        # would auto-select.
+
+        def _cpu_filter(hdr: bool) -> str:
+            if hdr:
+                return (
+                    "zscale=t=linear:npl=100:filter=bilinear,"
+                    "format=gbrpf32le,"
+                    "zscale=p=bt709:filter=bilinear,"
+                    "tonemap=tonemap=reinhard:desat=0,"
+                    "zscale=t=bt709:m=bt709:range=full:filter=bilinear,"
+                    f"scale={W}:{H}:flags=lanczos,"
+                    "format=bgr24"
+                )
+            return f"scale={W}:{H}:flags=lanczos,format=bgr24"
+
+        def _scale_gpu_filter(hdr: bool) -> str:
+            if hdr:
+                return (
+                    f"scale_cuda={W}:{H}:interp_algo=bicubic,"
+                    "hwdownload,"
+                    "format=p010,"
+                    "zscale=t=linear:npl=100:filter=bilinear,"
+                    "format=gbrpf32le,"
+                    "zscale=p=bt709:filter=bilinear,"
+                    "tonemap=tonemap=reinhard:desat=0,"
+                    "zscale=t=bt709:m=bt709:range=full:filter=bilinear,"
+                    "format=bgr24"
+                )
+            return (
+                f"scale_cuda={W}:{H}:interp_algo=bicubic,"
+                "hwdownload,"
+                "format=bgr24"
+            )
+
+        def _full_gpu_filter() -> str:
+            return (
+                "tonemap_cuda=tonemap=mobius:desat=0:peak=100,"
+                f"scale_cuda={W}:{H}:interp_algo=bicubic,"
+                "hwdownload,"
+                "scale=iw:ih,"
+                "format=yuv420p,"
+                "format=bgr24"
+            )
+
+        # ── Build variant list ────────────────────────────────────────────────
+        # Each entry: (variant_id, label, hw_args, filter_chain)
+        _cpu_fchain = _cpu_filter(test_is_hdr)
+        variants: List[Tuple[str, str, List[str], str]] = [
+            ("cpu", "CPU-only", [], _cpu_fchain),
+        ]
+        if self.use_cuda:
+            for gpu_idx, gpu_name in available_gpus:
+                hw_init   = ["-init_hw_device", f"cuda=hw:{gpu_idx}"]
+                hw_decode = [*hw_init, "-hwaccel", "cuda"]
+                hw_cuda   = [*hw_init, "-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
+
+                # Tier A: NVDEC decode only, CPU filter chain
+                variants.append((
+                    f"gpu{gpu_idx}_decode",
+                    f"GPU {gpu_idx} ({gpu_name})  NVDEC decode only",
+                    hw_decode,
+                    _cpu_fchain,
+                ))
+
+                # Tier B: NVDEC + scale_cuda (GPU scale, CPU tonemap when HDR)
+                if scale_cuda_available():
+                    variants.append((
+                        f"gpu{gpu_idx}_scale",
+                        f"GPU {gpu_idx} ({gpu_name})  NVDEC + scale_cuda",
+                        hw_cuda,
+                        _scale_gpu_filter(test_is_hdr),
+                    ))
+
+                # Tier C: full-GPU tonemap (HDR only, requires libnpp)
+                if test_is_hdr and tonemap_cuda_available():
+                    variants.append((
+                        f"gpu{gpu_idx}_full",
+                        f"GPU {gpu_idx} ({gpu_name})  full-GPU tonemap_cuda+scale_cuda",
+                        hw_cuda,
+                        _full_gpu_filter(),
+                    ))
+
+        # ── Core single-run helper ─────────────────────────────────────────────
+        nice_val = self.config.get("processing", {}).get("ffmpeg_nice", 10)
+
+        def _bench_one(hw_args: List[str], fchain: str) -> Optional[float]:
+            """Decode WARMUP+BENCH frames through the pipeline; return fps or None."""
+            total   = WARMUP_FRAMES + BENCH_FRAMES
+            fc_fd, fc_path = tempfile.mkstemp(suffix=".txt", prefix="bench_fc_")
+            try:
+                with os.fdopen(fc_fd, "w") as fh:
+                    fh.write(f"[0:v]{fchain}[vout]")
+
+                fc_args = (
+                    ["-/filter_complex", fc_path]
+                    if ffmpeg_ver >= 7
+                    else ["-filter_complex_script", fc_path]
+                )
+                vsync = (
+                    ["-fps_mode", "passthrough"]
+                    if ffmpeg_ver >= 5
+                    else ["-vsync", "0"]
+                )
+                cmd = [
+                    "ffmpeg",
+                    "-threads", "0", "-filter_threads", "0",
+                    "-loglevel", "error",
+                    *hw_args,
+                    "-probesize", "100M", "-analyzeduration", "100M",
+                    "-ss", str(SEEK_SEC),
+                    "-i", test_video,
+                    "-frames:v", str(total),
+                    *fc_args,
+                    "-map", "[vout]",
+                    "-f", "rawvideo", "-pix_fmt", "bgr24",
+                    *vsync,
+                    "pipe:1",   # direct raw-frame output to stdout for Python to read
+                ]
+                proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+                )
+                try:
+                    psutil.Process(proc.pid).nice(nice_val)
+                except Exception:
+                    pass
+
+                # Warmup: run the pipeline hot before timing begins
+                for _ in range(WARMUP_FRAMES):
+                    if len(proc.stdout.read(FRAME_BYTES)) < FRAME_BYTES:
+                        proc.kill(); proc.wait()
+                        return None
+
+                # Timed benchmark
+                t0 = time.monotonic()
+                received = 0
+                for _ in range(BENCH_FRAMES):
+                    if len(proc.stdout.read(FRAME_BYTES)) < FRAME_BYTES:
+                        break
+                    received += 1
+                elapsed = time.monotonic() - t0
+
+                try:
+                    proc.stdout.close()
+                except Exception:
+                    pass
+                proc.kill(); proc.wait()
+
+                if received < 10 or elapsed <= 0:
+                    return None
+                return received / elapsed
+
+            except Exception:
+                return None
+            finally:
+                try:
+                    os.unlink(fc_path)
+                except Exception:
+                    pass
+
+        # ── Run single-worker variants ────────────────────────────────────────
+        COL = 55
+        print(f"\n  {'Variant':<{COL}}  {'fps':>8}  Status")
+        print(f"  {'─'*COL}  {'─'*8}  ──────")
+
+        single_results: List[dict] = []
+        n_total = len(variants)
+        for i, (vid, label, hw_args, fchain) in enumerate(variants, 1):
+            # Print the variant label with a trailing ellipsis while running
+            prefix = f"  [{i}/{n_total}] {label}"
+            print(f"{prefix:<{COL + 10}} …", end="", flush=True)
+
+            fps = _bench_one(hw_args, fchain)
+
+            if fps is not None:
+                line = f"\r  [{i}/{n_total}] {label:<{COL - 7}}   {fps:7.1f}   ✓ OK"
+            else:
+                line = f"\r  [{i}/{n_total}] {label:<{COL - 7}}      n/a   ✗ pipeline unavailable"
+            print(line)
+
+            single_results.append({
+                "variant_id": vid, "label": label, "fps": fps,
+                "hw_args": hw_args, "filter": fchain,
+            })
+
+        # ── Parallel 2-worker variants ────────────────────────────────────────
+        # Simulate two simultaneously executing FFmpeg jobs (as would happen with
+        # a parallel video-processing loop) and measure combined decode fps.
+        # This directly answers whether distributing workers across two GPUs
+        # yields more total throughput than doubling up on one GPU.
+
+        valid_singles  = [r for r in single_results if r["fps"] is not None]
+        best_single    = max(valid_singles, key=lambda r: r["fps"]) if valid_singles else None
+        parallel_results: List[dict] = []
+
+        if best_single:
+            print(f"\n  {'Parallel variants (2 workers)':<{COL}}  {'fps':>8}  {'vs 1×':>8}")
+            print(f"  {'─'*COL}  {'─'*8}  {'─'*8}")
+
+            def _bench_parallel(
+                hw_a: List[str], fc_a: str,
+                hw_b: List[str], fc_b: str,
+            ) -> Optional[float]:
+                """Run two FFmpeg workers concurrently; return combined fps."""
+                fps_slots: List[Optional[float]] = [None, None]
+
+                def _worker(slot: int, hw: List[str], fc: str) -> None:
+                    fps_slots[slot] = _bench_one(hw, fc)
+
+                threads = [
+                    threading.Thread(target=_worker, args=(0, hw_a, fc_a)),
+                    threading.Thread(target=_worker, args=(1, hw_b, fc_b)),
+                ]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join()
+                valid = [f for f in fps_slots if f is not None]
+                return sum(valid) if valid else None
+
+            p_count = 0
+
+            # P1: 2× best single pipeline on the same config
+            bs_hw  = best_single["hw_args"]
+            bs_fc  = best_single["filter"]
+            p1_lbl = f"2 × {best_single['label']}"
+            p_count += 1
+            print(f"  [P{p_count}] {p1_lbl:<{COL - 5}} …", end="", flush=True)
+            p1_fps = _bench_parallel(bs_hw, bs_fc, bs_hw, bs_fc)
+            ratio1 = f"×{p1_fps / best_single['fps']:.2f}" if (p1_fps and best_single["fps"]) else "  n/a"
+            if p1_fps:
+                print(f"\r  [P{p_count}] {p1_lbl:<{COL - 5}}   {p1_fps:7.1f}  {ratio1:>8}")
+            else:
+                print(f"\r  [P{p_count}] {p1_lbl:<{COL - 5}}      n/a    n/a")
+            parallel_results.append({
+                "variant_id": "parallel_2x_best", "label": p1_lbl,
+                "fps": p1_fps, "n_workers": 2,
+            })
+
+            # P2: best GPU for GPU-0 + best GPU for GPU-1 (round-robin, if ≥2 GPUs)
+            gpu_best: Dict[str, dict] = {}
+            for r in single_results:
+                if r["fps"] and not r["variant_id"].startswith("cpu"):
+                    # variant_id format: "gpu<N>_<tier>" e.g. "gpu0_decode", "gpu1_scale"
+                    gkey = r["variant_id"].split("_")[0]   # → "gpu0", "gpu1", …
+                    if gkey not in gpu_best or (r["fps"] or 0) > (gpu_best[gkey]["fps"] or 0):
+                        gpu_best[gkey] = r
+            sorted_gpu = sorted(gpu_best.values(), key=lambda r: r["fps"] or 0, reverse=True)
+
+            if len(sorted_gpu) >= 2:
+                g0, g1 = sorted_gpu[0], sorted_gpu[1]
+                p2_lbl = (
+                    f"GPU {g0['variant_id'].split('_')[0].replace('gpu','')} best  "
+                    f"+  GPU {g1['variant_id'].split('_')[0].replace('gpu','')} best  "
+                    f"(round-robin)"
+                )
+                p_count += 1
+                print(f"  [P{p_count}] {p2_lbl:<{COL - 5}} …", end="", flush=True)
+                p2_fps = _bench_parallel(
+                    g0["hw_args"], g0["filter"],
+                    g1["hw_args"], g1["filter"],
+                )
+                base2 = max(g0["fps"], g1["fps"])
+                ratio2 = f"×{p2_fps / base2:.2f}" if (p2_fps and base2) else "  n/a"
+                if p2_fps:
+                    print(f"\r  [P{p_count}] {p2_lbl:<{COL - 5}}   {p2_fps:7.1f}  {ratio2:>8}")
+                else:
+                    print(f"\r  [P{p_count}] {p2_lbl:<{COL - 5}}      n/a    n/a")
+                parallel_results.append({
+                    "variant_id": "parallel_gpu_rr", "label": p2_lbl,
+                    "fps": p2_fps, "n_workers": 2,
+                })
+
+            # P3: 2× CPU-only
+            cpu_fps = next((r["fps"] for r in single_results if r["variant_id"] == "cpu"), None)
+            if cpu_fps:
+                p3_lbl = "2 × CPU-only"
+                p_count += 1
+                print(f"  [P{p_count}] {p3_lbl:<{COL - 5}} …", end="", flush=True)
+                p3_fps = _bench_parallel([], _cpu_fchain, [], _cpu_fchain)
+                ratio3 = f"×{p3_fps / cpu_fps:.2f}" if (p3_fps and cpu_fps) else "  n/a"
+                if p3_fps:
+                    print(f"\r  [P{p_count}] {p3_lbl:<{COL - 5}}   {p3_fps:7.1f}  {ratio3:>8}")
+                else:
+                    print(f"\r  [P{p_count}] {p3_lbl:<{COL - 5}}      n/a    n/a")
+                parallel_results.append({
+                    "variant_id": "parallel_2x_cpu", "label": p3_lbl,
+                    "fps": p3_fps, "n_workers": 2,
+                })
+
+        # ── Summary ───────────────────────────────────────────────────────────
+        all_valid = [r for r in single_results if r["fps"] is not None]
+        winner    = max(all_valid, key=lambda r: r["fps"]) if all_valid else None
+
+        all_par_valid = [r for r in parallel_results if r["fps"] is not None]
+        par_winner    = (
+            max(all_par_valid, key=lambda r: r["fps"]) if all_par_valid else None
+        )
+
+        print(f"\n  {_SEP2}")
+        if winner:
+            print(
+                f"  🏆 Best single   : {winner['label']:<{COL - 5}}  {winner['fps']:7.1f} fps"
+            )
+        if par_winner:
+            print(
+                f"  🏆 Best parallel : {par_winner['label']:<{COL - 5}}  "
+                f"{par_winner['fps']:7.1f} fps  (2 workers combined)"
+            )
+
+        if not all_valid:
+            print("  ⚠️  All variants failed — keeping default decode settings.")
+            print(f"\n{_SEP}\n")
+            return
+
+        # ── Apply winner to instance ──────────────────────────────────────────
+        vid      = winner["variant_id"]
+        use_cuda = not vid.startswith("cpu")
+        cuda_device = 0
+        if use_cuda:
+            try:
+                cuda_device = int(vid.split("_")[0].replace("gpu", ""))
+            except Exception:
+                cuda_device = 0
+
+        self.use_cuda    = use_cuda
+        self.cuda_device = cuda_device
+
+        print(
+            f"\n  ✅ Generator configured: use_cuda={use_cuda}, "
+            f"cuda_device={cuda_device}"
+        )
+
+        # ── Save results to output dir ────────────────────────────────────────
+        os.makedirs(self.base_dir, exist_ok=True)
+        cache: dict = {
+            "_ts":          time.time(),
+            "_test_video":  test_video,
+            "_is_hdr":      test_is_hdr,
+            "_benchmark":   (
+                f"{BENCH_FRAMES} frames timed + {WARMUP_FRAMES} warmup at "
+                f"{W}×{H}, seek {SEEK_SEC:.0f}s"
+            ),
+            "best": {
+                "variant_id":  vid,
+                "label":       winner["label"],
+                "use_cuda":    use_cuda,
+                "cuda_device": cuda_device,
+                "fps":         winner["fps"],
+            },
+            "best_parallel": (
+                {
+                    "variant_id": par_winner["variant_id"],
+                    "label":      par_winner["label"],
+                    "fps":        par_winner["fps"],
+                    "n_workers":  par_winner["n_workers"],
+                }
+                if par_winner else None
+            ),
+            "single_results": [
+                {
+                    "variant_id": r["variant_id"],
+                    "label":      r["label"],
+                    "fps":        round(r["fps"], 2) if r["fps"] else None,
+                }
+                for r in single_results
+            ],
+            "parallel_results": [
+                {
+                    "variant_id": r["variant_id"],
+                    "label":      r["label"],
+                    "fps":        round(r["fps"], 2) if r["fps"] else None,
+                    "n_workers":  r["n_workers"],
+                }
+                for r in parallel_results
+            ],
+        }
+        try:
+            Path(cache_path).write_text(
+                json.dumps(cache, indent=2, ensure_ascii=False)
+            )
+            print(f"  📝 Results saved → {cache_path}")
+        except Exception as exc:
+            print(f"  ⚠️  Could not save benchmark results: {exc}")
+            self.logger.warning(f"Could not save benchmark results: {exc}")
+
+        print(f"\n{_SEP}\n")
+        self.logger.info(
+            f"Decode benchmark complete — best: {winner['label']}  "
+            f"[use_cuda={use_cuda}, cuda_device={cuda_device}, fps={winner['fps']:.1f}]"
+        )
 
     # ── Config helpers ────────────────────────────────────────────────────────
 
@@ -1234,6 +1790,7 @@ class DatasetGeneratorV2UHD:
             center_snap_seconds=self.config.get("processing", {}).get("center_snap_seconds", 1.0),
             stream_width=STREAM_4K_WIDTH,
             stream_height=STREAM_4K_HEIGHT,
+            cuda_device=self.cuda_device,
         )
 
         # Merge final result into patches_created.
@@ -1756,25 +2313,58 @@ def main():
     """
     Main entry point.
 
-    Usage:
-        python make_dataset_v2_uhd.py [config_dir]
+    Usage::
 
-    *config_dir* (optional) – directory that contains both
-    ``templates.json`` and ``generator_config.json``.
-    Defaults to the directory where this script resides.
+        python make_dataset_v2_uhd.py [config_dir] [--benchmark]
+
+    Arguments
+    ---------
+    config_dir   (optional) Directory that contains both ``templates.json``
+                 and ``generator_config.json``.  Defaults to the directory
+                 where this script resides.
+
+    --benchmark  Force a fresh decode-pipeline benchmark at startup even when a
+                 cached result already exists in ``<output_dir>/decode_benchmark.json``.
+                 Use this after installing a new GPU driver, replacing a GPU, or
+                 whenever you want to re-measure decode throughput.
 
     The active config and templates are loaded, validated, and then the
     generator is started.  Run ``video_manager.py`` first to create or edit
     the config files.
     """
+    import argparse
+
     script_dir = Path(__file__).parent
     os.chdir(script_dir)
 
-    # Optional: allow passing a config directory as the first argument.
-    if len(sys.argv) > 1:
-        config_dir = sys.argv[1]
-    else:
-        config_dir = str(script_dir)
+    parser = argparse.ArgumentParser(
+        prog="make_dataset_v2_uhd.py",
+        description="Dataset Generator V2 – UHD Quality",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "config_dir",
+        nargs="?",
+        default=str(script_dir),
+        help=(
+            "Directory containing templates.json and generator_config.json "
+            "(default: same directory as this script)"
+        ),
+    )
+    parser.add_argument(
+        "--benchmark",
+        action="store_true",
+        default=False,
+        help=(
+            "Force re-run of the FFmpeg decode pipeline benchmark at startup. "
+            "Results are normally cached in <output_dir>/decode_benchmark.json "
+            "and reused for 7 days."
+        ),
+    )
+    args = parser.parse_args()
+
+    config_dir     = args.config_dir
+    force_benchmark = args.benchmark
 
     active_cfg = Path(config_dir) / _ACTIVE_CONFIG_FILENAME
     if not active_cfg.exists():
@@ -1786,12 +2376,17 @@ def main():
         )
         sys.exit(1)
 
-    print(f"📂 Config directory: {config_dir}")
-    print(f"   templates  : {Path(config_dir) / _TEMPLATES_FILENAME}")
-    print(f"   active cfg : {active_cfg.name}")
+    print(f"📂 Config directory : {config_dir}")
+    print(f"   templates        : {Path(config_dir) / _TEMPLATES_FILENAME}")
+    print(f"   active cfg       : {active_cfg.name}")
+    if force_benchmark:
+        print(f"   --benchmark      : decode pipeline benchmark will be re-run")
 
     try:
-        generator = DatasetGeneratorV2UHD(config_dir=config_dir)
+        generator = DatasetGeneratorV2UHD(
+            config_dir=config_dir,
+            force_benchmark=force_benchmark,
+        )
         generator.run()
     except KeyboardInterrupt:
         show_cursor()

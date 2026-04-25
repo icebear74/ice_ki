@@ -1527,6 +1527,13 @@ def extract_and_save_streaming_distributed(
                              (3840) to stream at 4K for the 720/720_169 formats.
         stream_height:       Height of the decoded frame (default ``STREAM_HEIGHT``
                              = 1080).  Pass ``STREAM_4K_HEIGHT`` (2160) for 4K.
+        cuda_device:         CUDA device ordinal used for hardware-accelerated
+                             decoding (default 0 = first GPU).  Passed to FFmpeg
+                             as ``-init_hw_device cuda=hw:<cuda_device>``.  Has no
+                             effect when ``use_cuda`` is ``False`` or CUDA is not
+                             available in the local FFmpeg build.  Use the index
+                             reported by ``nvidia-smi`` to target a specific GPU
+                             when multiple are present.
 
     Returns:
         ``{category: patches_saved_count}``
@@ -1759,7 +1766,9 @@ def extract_and_save_streaming_distributed(
     # before demuxing begins.  Without this flag some FFmpeg builds silently
     # fall back to software decoding when the GPU context fails to auto-init,
     # causing the GPU filter chain to receive CPU frames and crash.
-    _CUDA_HW_INIT = ["-init_hw_device", "cuda=hw"]
+    # Device index is parameterised so callers can target a specific GPU
+    # (e.g. GPU 1 on a dual-GPU system) without setting CUDA_VISIBLE_DEVICES.
+    _CUDA_HW_INIT = ["-init_hw_device", f"cuda=hw:{cuda_device}"]
 
     hdr_label = "HDR" if is_hdr else "SDR"
     if _full_gpu:
@@ -2198,6 +2207,7 @@ def extract_and_save_streaming_distributed(
             center_snap_seconds=center_snap_seconds,
             stream_width=stream_width,
             stream_height=stream_height,
+            cuda_device=cuda_device,
         )
 
     total = sum(patches_created.values())
@@ -2239,6 +2249,7 @@ def extract_and_save_streaming_dual(
     is_hdr: bool = True,
     degrade_cfg: Optional[dict] = None,
     center_snap_seconds: float = 0.0,
+    cuda_device: int = 0,
 ) -> Dict[str, int]:
     """Deprecated compatibility shim — forwards to extract_and_save_streaming_distributed.
 
@@ -2266,4 +2277,5 @@ def extract_and_save_streaming_dual(
         center_snap_seconds=center_snap_seconds,
         stream_width=STREAM_4K_WIDTH,
         stream_height=STREAM_4K_HEIGHT,
+        cuda_device=cuda_device,
     )
