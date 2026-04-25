@@ -202,6 +202,14 @@ class DatasetGeneratorV2UHD:
         # cuda_device is the CUDA device ordinal used for hardware-accelerated
         # decoding.  0 = first GPU (default).  Updated by _run_decode_benchmark.
         self.cuda_device: int = 0
+        # List of all available GPU ordinals for round-robin assignment across
+        # parallel workers.  Falls back to [0] when CUDA is enabled but
+        # nvidia-smi returns nothing, or to [] for CPU-only mode.
+        _detected = _detect_nvidia_gpus()
+        self._available_gpu_indices: List[int] = (
+            [idx for idx, _ in _detected] if _detected
+            else ([0] if self.use_cuda else [])
+        )
         if self.use_cuda:
             self.logger.info("🚀 CUDA/GPU mode enabled (hardware-accelerated decoding & scaling)")
         else:
