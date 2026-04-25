@@ -4,12 +4,21 @@ Video super-resolution training dataset generator – v2 architecture.
 
 ---
 
+## Config File Naming Convention
+
+| File | Purpose |
+|---|---|
+| `generator_config.json` | **The only config file used at runtime.** Listed in `.gitignore` (machine-local, never committed). All tools load this file. |
+| `generator_config_active.json` | Read-only review snapshot given to AI agents. **Never loaded by any code.** The user creates it by copying `generator_config.json` before sharing. |
+
+---
+
 ## Architecture Overview
 
 ```
 dataset_generator_v2/
 ├── templates.json                     # Reusable format & degradation templates
-├── generator_config_v2.active.json   # Active project config (videos, categories, …)
+├── generator_config.json   # Active project config (videos, categories, …)
 ├── video_manager.py                  # Central management UI (this is your main tool)
 ├── make_dataset_v2_uhd.py            # Generator (Task 2 – to be rebuilt)
 ├── streaming_extractor.py            # Frame extractor (Task 2 – to be rebuilt)
@@ -35,7 +44,7 @@ Defines **reusable** building blocks referenced from the active config.
 
 Templates are **never modified by the generator** – only by `video_manager.py` (option 18).
 
-### `generator_config_v2.active.json`
+### `generator_config.json`
 
 The live project config. Contains:
 
@@ -116,11 +125,11 @@ python video_manager.py
 
 ## First Start Behavior
 
-If `generator_config_v2.active.json` is missing, `video_manager.py` creates a minimal
+If `generator_config.json` is missing, `video_manager.py` creates a minimal
 default. If `templates.json` is missing it is also created with default templates.
 
 After first start:
-1. Edit `root_path` in `generator_config_v2.active.json`
+1. Edit `root_path` in `generator_config.json`
 2. Add source directories (option 14)
 3. Run a rescan (option 17) to populate the video list
 4. Assign videos to categories (options 5/6/7)
@@ -143,7 +152,7 @@ Optional: pass a custom config directory as the first argument:
 python make_dataset_v2_uhd.py /path/to/config_dir
 ```
 
-The generator loads `templates.json` and `generator_config_v2.active.json` from
+The generator loads `templates.json` and `generator_config.json` from
 the config directory, validates both at startup, then processes all videos in the
 configured categories.
 
@@ -190,10 +199,10 @@ Parameters are sampled **once per scene window** so all LR frames share consiste
 |---|---|
 | What formats exist? | `templates.json → format_templates` |
 | What degradation profiles exist? | `templates.json → degradation_templates` |
-| Which categories exist? | `generator_config_v2.active.json → categories` |
+| Which categories exist? | `generator_config.json → categories` |
 | How many patches per category? | `categories[name].target_total` |
-| Which videos are assigned? | `generator_config_v2.active.json → videos` |
-| Where is the output? | `generator_config_v2.active.json → root_path` |
+| Which videos are assigned? | `generator_config.json → videos` |
+| Where is the output? | `generator_config.json → root_path` |
 
 Modify both files exclusively via `video_manager.py`.  Do **not** hand-edit the JSON
 while the generator is running.

@@ -1338,7 +1338,7 @@ class _App:
 
     def _create_config(self):
         ts           = datetime.now().strftime("%Y%m%d_%H%M%S")
-        default_name = f"generator_config_new_{ts}.active.json"
+        default_name = f"generator_config_{ts}.json"
         name         = self._input("Output filename:", default=default_name,
                                    title="Create Config File")
         if not name:
@@ -1361,7 +1361,7 @@ class _App:
 
 def main():
     script_dir         = Path(__file__).parent
-    active_config_path = script_dir / "generator_config_v2.active.json"
+    active_config_path = script_dir / "generator_config.json"
     templates_path     = script_dir / "templates.json"
 
     if not active_config_path.exists():

@@ -4,13 +4,20 @@ Dataset Generator V2 – UHD Quality
 
 Loads configuration exclusively from:
   - dataset_generator_v2/templates.json
-  - dataset_generator_v2/generator_config_v2.active.json
+  - dataset_generator_v2/generator_config.json
 
 via the shared config utility (utils/config_io.py) introduced in Task 1.
 
 No hard-coded format names, category names, output paths, or distribution
 assumptions.  All functional decisions are driven entirely by the active config
 and the templates file.
+
+NOTE – config file naming convention
+=====================================
+generator_config.json       → the ONLY file used at runtime by all tools.
+                              It is listed in .gitignore (machine-local, not committed).
+generator_config_active.json → a read-only snapshot given to AI agents for review.
+                              It is NEVER loaded by any code; only humans/agents read it.
 """
 
 import os
@@ -79,7 +86,7 @@ logger = logging.getLogger(__name__)
 
 # Default config file names (relative to the script directory)
 _TEMPLATES_FILENAME = "templates.json"
-_ACTIVE_CONFIG_FILENAME = "generator_config_v2.active.json"
+_ACTIVE_CONFIG_FILENAME = "generator_config.json"
 
 
 class DatasetGeneratorV2UHD:
@@ -87,8 +94,8 @@ class DatasetGeneratorV2UHD:
     Dataset Generator V2 – dynamic, template-driven, no hard-coded formats.
 
     Configuration is loaded exclusively from:
-      * ``templates.json``              – format and degradation templates
-      * ``generator_config_v2.active.json`` – categories, videos, settings
+      * ``templates.json``         – format and degradation templates
+      * ``generator_config.json``  – categories, videos, settings
 
     Both files are validated at startup via ``utils/config_io.py``.  The
     generator fails early with a clear error message when a required field is
@@ -103,7 +110,7 @@ class DatasetGeneratorV2UHD:
 
         Args:
             config_dir: Directory that contains ``templates.json`` and
-                        ``generator_config_v2.active.json``.  Defaults to the
+                        ``generator_config.json``.  Defaults to the
                         directory that contains this script.
         """
         if config_dir is None:
@@ -1751,7 +1758,7 @@ def main():
         python make_dataset_v2_uhd.py [config_dir]
 
     *config_dir* (optional) – directory that contains both
-    ``templates.json`` and ``generator_config_v2.active.json``.
+    ``templates.json`` and ``generator_config.json``.
     Defaults to the directory where this script resides.
 
     The active config and templates are loaded, validated, and then the
@@ -1773,7 +1780,7 @@ def main():
             f"❌ Active config not found: {active_cfg}\n"
             "   Please create it first with video_manager.py:\n"
             "       python video_manager.py\n"
-            "   Then edit the generated generator_config_v2.active.json."
+            "   Then edit the generated generator_config.json."
         )
         sys.exit(1)
 
