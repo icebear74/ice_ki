@@ -33,15 +33,19 @@ class InteractiveSelector:
         self.scroll_offset = 0
         
     def run(self) -> Optional[List[int]]:
-        """Run the interactive selector. Returns list of selected indices or None if cancelled."""
+        """Run the interactive selector (standalone, starts own curses session)."""
         if not self.items:
             return []
-        
         try:
-            result = curses.wrapper(self._curses_main)
-            return result
+            return curses.wrapper(self._curses_main)
         except KeyboardInterrupt:
             return None
+
+    def run_with_screen(self, stdscr) -> Optional[List[int]]:
+        """Run inside an already-active curses session (no nested wrapper)."""
+        if not self.items:
+            return []
+        return self._curses_main(stdscr)
     
     def _curses_main(self, stdscr):
         """Main curses loop."""
@@ -168,18 +172,22 @@ class InteractiveSelector:
                 return None
 
 
-def select_items(items: List[Any], 
+def select_items(items: List[Any],
                 title: str = "Select items",
                 get_label: Callable[[Any], str] = str,
                 get_details: Callable[[Any], str] = lambda x: "",
-                preselected: Optional[List[int]] = None) -> Optional[List[int]]:
+                preselected: Optional[List[int]] = None,
+                stdscr=None) -> Optional[List[int]]:
     """
     Convenience function for interactive selection.
-    
+
+    Pass stdscr to reuse an existing curses session (avoids nested wrapper).
     Returns:
         List of selected indices, or None if cancelled
     """
     selector = InteractiveSelector(items, title, get_label, get_details, preselected)
+    if stdscr is not None:
+        return selector.run_with_screen(stdscr)
     return selector.run()
 
 

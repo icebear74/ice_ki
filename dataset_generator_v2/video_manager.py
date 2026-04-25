@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
 VIDEO CATEGORY MANAGER  (v2 – new config model)
-Central management UI for dataset_generator_v2.
+Curses full-screen TUI: bordered menus, popup dialogs, category detail view.
 """
 
+import curses
 import json
 import os
 import sys
@@ -12,12 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from ui import (
-    console, Choice, Separator,
-    ask_text, ask_int, ask_confirm, ask_select, ask_checkbox,
-    print_success, print_error, print_warn, print_info,
-    print_banner, print_rule, make_table,
-)
+import tui
 
 from category_utils import (
     normalize_categories,
@@ -44,6 +40,8 @@ from utils.config_io import (
 )
 
 
+# ── Utilities ──────────────────────────────────────────────────────────────────
+
 def _short_path(full_path: str, depth: int = 2) -> str:
     parts = Path(full_path).parts
     return str(Path(*parts[-depth:])) if len(parts) >= depth else full_path
@@ -59,52 +57,50 @@ def _sorted_videos(videos: List[tuple]) -> List[tuple]:
     )
 
 
+# ── VideoManager (data + logic, no UI) ────────────────────────────────────────
+
 class VideoManager:
-    """Central manager for videos, categories, formats and templates."""
+    """Central data model for videos, categories, formats and templates."""
 
     def __init__(self, config_path: str, templates_path: str = None):
         self.config_path = config_path
         script_dir = Path(config_path).parent
         self.templates_path = templates_path or str(script_dir / "templates.json")
-        self.config: dict = {}
+        self.config:    dict = {}
         self.templates: dict = {}
-        self.videos: List[dict] = []
+        self.videos:    List[dict] = []
         self.categories: dict = {}
-        self.modified = False
+        self.modified           = False
         self.templates_modified = False
 
     def load(self):
         self.templates = ensure_templates_file(self.templates_path)
-        self.config = load_active_config(self.config_path)
-        self.videos = self.config.get("videos", [])
+        self.config    = load_active_config(self.config_path)
+        self.videos    = self.config.get("videos", [])
         self.videos.sort(key=lambda v: v.get("name", "").lower())
         self.categories = self.config.get("categories", {})
-        cat_names = ", ".join(sorted(self.categories.keys())) or "(none)"
-        print_success(f"Loaded {len(self.videos)} videos")
-        print_info(f"Categories: {cat_names}")
 
     def save(self, backup: bool = True):
-        def _sort_key(video):
-            cats = get_video_categories(video)
-            return (-len(cats) if cats else 999, cats[0] if cats else "zzz", video.get("name", "").lower())
-        self.videos.sort(key=_sort_key)
-        self.config["videos"] = self.videos
+        def _key(v):
+            cats = get_video_categories(v)
+            return (-len(cats) if cats else 999, cats[0] if cats else "zzz", v.get("name", "").lower())
+        self.videos.sort(key=_key)
+        self.config["videos"]     = self.videos
         self.config["categories"] = self.categories
         save_active_config(self.config, self.config_path)
-        print_success(f"Saved to {Path(self.config_path).name}")
         self.modified = False
 
-    def save_templates(self, backup: bool = True):
-        if backup and os.path.exists(self.templates_path):
+    def save_templates(self):
+        if os.path.exists(self.templates_path):
             with open(self.templates_path, "r", encoding="utf-8") as f:
                 old = f.read()
             with open(self.templates_path + ".backup", "w", encoding="utf-8") as f:
                 f.write(old)
         _save_templates_io(self.templates, self.templates_path)
-        print_success(f"Templates saved to {Path(self.templates_path).name}")
         self.templates_modified = False
 
-    def list_videos(self, filter_pattern=None, category=None, show_unassigned=False, use_simple_search=False):
+    def list_videos(self, filter_pattern=None, category=None,
+                    show_unassigned=False, use_simple_search=False):
         import re
         filtered = []
         for i, video in enumerate(self.videos):
@@ -126,50 +122,11 @@ class VideoManager:
             filtered.append((i, video))
         return filtered
 
-    def print_video_list(self, videos, max_display=20):
-        if not videos:
-            print_warn("No videos found.")
-            return
-        sorted_vids = _sorted_videos(videos)
-        display = sorted_vids if not max_display else sorted_vids[:max_display]
-        t = make_table("ID", "Path", "Name", "Categories")
-        for i, video in display:
-            path_short = _short_path(video.get("path", ""), depth=3)[:34]
-            cats = video.get("categories", [])
-            cat_str = ", ".join(cats) if cats else "[dim]unassigned[/]"
-            forced = video.get("forced_frames", {})
-            if forced:
-                parts = [f"{cat}:{n:,}" for cat, n in sorted(forced.items()) if n > 0]
-                if parts:
-                    cat_str += "  ⚡ " + "  ".join(parts)
-            t.add_row(str(i), path_short, video["name"][:40], cat_str)
-        console.print(t)
-        if max_display and len(sorted_vids) > max_display:
-            print_warn(f"… and {len(sorted_vids) - max_display} more (pass max_display=None to show all)")
-
-    def assign_videos(self, video_indices, categories, mode="ask"):
-        if not video_indices:
-            return
-        has_existing = any(
-            bool(get_video_categories(self.videos[i]))
-            for i in video_indices if 0 <= i < len(self.videos)
-        )
-        actual_mode = mode
-        if mode == "ask" and has_existing:
-            choice = ask_select(
-                "Some videos already have categories – what to do?",
-                [
-                    Choice("Add to existing categories", value="add"),
-                    Choice("Replace all categories",     value="replace"),
-                ],
-            )
-            actual_mode = choice if choice else "add"
-        elif mode == "ask":
-            actual_mode = "replace"
+    def assign_videos(self, video_indices, categories, mode="replace"):
         count = 0
         for idx in video_indices:
             if 0 <= idx < len(self.videos):
-                if actual_mode == "add":
+                if mode == "add":
                     existing = get_video_categories(self.videos[idx])
                     combined = existing.copy()
                     for cat in categories:
@@ -180,8 +137,7 @@ class VideoManager:
                     self.videos[idx]["categories"] = categories
                 count += 1
         self.modified = True
-        mode_text = "Added to" if actual_mode == "add" else "Replaced with"
-        print_success(f"{mode_text} {count} videos: {categories}")
+        return count
 
     def remove_from_category(self, video_indices, category):
         count = 0
@@ -193,168 +149,543 @@ class VideoManager:
                     self.videos[idx]["categories"] = cats
                     count += 1
         self.modified = True
-        print_success(f"Removed {count} videos from category '{category}'")
+        return count
 
-    def reset_all(self):
-        ok = ask_confirm("Reset ALL video assignments? This cannot be undone!", default=False)
-        if not ok:
-            print_info("Cancelled.")
-            return
+    def reset_all_assignments(self):
         for video in self.videos:
             video["categories"] = []
         self.modified = True
-        print_success(f"Reset {len(self.videos)} videos")
 
-    def interactive_select_videos(self, initial_filter=None):
-        videos = (self.list_videos(filter_pattern=initial_filter, use_simple_search=True)
-                  if initial_filter else self.list_videos())
-        if not videos:
-            print_warn("No videos found.")
+    def set_forced_frames_for(self, video_idx: int, cat: str, value: Optional[int]):
+        """value=None → keep, value=0 → remove override, value>0 → set."""
+        video  = self.videos[video_idx]
+        forced = dict(video.get("forced_frames", {}))
+        if value is None:
+            pass
+        elif value == 0:
+            forced.pop(cat, None)
+        else:
+            forced[cat] = value
+        if forced:
+            video["forced_frames"] = forced
+        else:
+            video.pop("forced_frames", None)
+        self.modified = True
+
+    def rescan(self):
+        """Scan source_dirs and update videos list.  Returns (kept, added)."""
+        source_dirs = self.config.get("source_dirs", [])
+        existing_by_path = {v.get("path", ""): v for v in self.config.get("videos", [])}
+        found_paths: List[str] = []
+        seen: set = set()
+        missing_dirs: List[str] = []
+        for dir_cfg in source_dirs:
+            video_dir  = dir_cfg.get("path", "")
+            extensions = dir_cfg.get("extensions", [".mkv", ".mp4", ".avi"])
+            if not os.path.exists(video_dir):
+                missing_dirs.append(video_dir)
+                continue
+            exts_lower = {e.lower() for e in extensions}
+            for p in Path(video_dir).rglob("*"):
+                if p.is_file() and p.suffix.lower() in exts_lower:
+                    ps = str(p)
+                    if ps not in seen:
+                        seen.add(ps)
+                        found_paths.append(ps)
+        new_videos: List[dict] = []
+        added = kept = 0
+        for path in sorted(found_paths):
+            if path in existing_by_path:
+                new_videos.append(existing_by_path[path])
+                kept += 1
+            else:
+                new_videos.append({"name": Path(path).stem, "path": path, "categories": []})
+                added += 1
+        self.config["videos"] = new_videos
+        self.videos = new_videos
+        self.modified = True
+        return kept, added, missing_dirs
+
+    def validation_report(self):
+        """Return list of error strings (empty = OK)."""
+        return validate_templates(self.templates) + validate_active_config(self.config, self.templates)
+
+
+# ── Category detail computation ────────────────────────────────────────────────
+
+def compute_category_detail(manager: VideoManager, cat_name: str) -> List[str]:
+    """
+    Build a detailed breakdown of what will be generated for a category.
+    Returns a list of text lines suitable for tui.message_box().
+    """
+    cat_cfg    = manager.categories.get(cat_name, {})
+    target     = cat_cfg.get("target_total", 0)
+    fmt_tmpls  = manager.templates.get("format_templates", {})
+    formats    = cat_cfg.get("formats", [])
+    videos_in  = [v for v in manager.videos if cat_name in get_video_categories(v)]
+    forced_map = {}
+    for v in videos_in:
+        for c, n in v.get("forced_frames", {}).items():
+            if c == cat_name and n > 0:
+                forced_map[v.get("name", "?")] = n
+
+    total_weight = sum(f.get("weight", 0) for f in formats) or 1
+
+    lines: List[str] = []
+    lines.append(f"Category  : {cat_name}")
+    lines.append(f"Target    : {target:,} scenes")
+    lines.append(f"Videos    : {len(videos_in)}")
+    if forced_map:
+        forced_total = sum(forced_map.values())
+        lines.append(f"Forced    : {forced_total:,} scenes across {len(forced_map)} video(s)")
+    lines.append("")
+
+    if not formats:
+        lines.append("  (no format entries configured)")
+        return lines
+
+    lines.append("═" * 62)
+    lines.append("  FORMAT BREAKDOWN")
+    lines.append("═" * 62)
+
+    for i, fmt in enumerate(formats):
+        tmpl_name = fmt.get("template", "?")
+        mode      = fmt.get("source_mode", "?")
+        weight    = fmt.get("weight", 0)
+        share     = weight / total_weight
+        scenes    = round(target * share)
+
+        spec    = fmt_tmpls.get(tmpl_name, {})
+        gt_size = spec.get("gt_size", "?")
+        lr_size = spec.get("lr_size", "?")
+        gt_str  = f"{gt_size[0]}×{gt_size[1]}" if isinstance(gt_size, list) else str(gt_size)
+        lr_str  = f"{lr_size[0]}×{lr_size[1]}" if isinstance(lr_size, list) else str(lr_size)
+
+        lines.append("")
+        lines.append(f"  [{i}] Template : {tmpl_name}")
+        lines.append(f"      GT → LR  : {gt_str}  →  {lr_str}")
+        lines.append(f"      Mode     : {mode}")
+        lines.append(f"      Weight   : {weight}  /  share: {share*100:.1f}%")
+        lines.append(f"      Scenes   : {scenes:,}")
+
+        deg_mix = fmt.get("degradation_mix", {})
+        if deg_mix:
+            total_dw = sum(deg_mix.values()) or 1
+            lines.append(f"      Degradation mix:")
+            for dname, dw in sorted(deg_mix.items(), key=lambda x: -x[1]):
+                dshare  = dw / total_dw
+                dscenes = round(scenes * dshare)
+                lines.append(
+                    f"        {dname:<34} w={dw:>3}  {dshare*100:.1f}%  → {dscenes:,} scenes"
+                )
+        else:
+            lines.append(f"      Degradation: (none configured)")
+
+    lines.append("")
+    lines.append("═" * 62)
+    lines.append(f"  TOTAL : {target:,} scenes")
+    lines.append(f"  GT/LR pairs per format are independent of degradation.")
+    return lines
+
+
+# ── TUI Application ────────────────────────────────────────────────────────────
+
+class _App:
+    """Full-screen curses TUI for VideoManager."""
+
+    def __init__(self, manager: VideoManager):
+        self.m      = manager
+        self.stdscr = None
+        self._status     = ""
+        self._status_err = False
+
+    # ── helpers ────────────────────────────────────────────────────────────────
+
+    def _bg(self) -> None:
+        """Redraw the desktop background."""
+        n  = len(self.m.videos)
+        na = sum(1 for v in self.m.videos if not v.get("categories"))
+        nc = len(self.m.categories)
+        stats = f"videos:{n}  unassigned:{na}  categories:{nc}"
+        if self.m.modified:
+            stats += "  [config *]"
+        if self.m.templates_modified:
+            stats += "  [tpl *]"
+        tui.draw_background(self.stdscr, stats=stats,
+                            status=self._status, is_error=self._status_err)
+        self._status     = ""
+        self._status_err = False
+
+    def _ok(self, msg: str) -> None:
+        self._status     = "✓  " + msg
+        self._status_err = False
+
+    def _err(self, msg: str) -> None:
+        tui.message_box(self.stdscr, [msg], "Error")
+        self._status     = "✗  " + msg
+        self._status_err = True
+
+    def _warn(self, msg: str) -> None:
+        tui.message_box(self.stdscr, [msg], "Warning")
+
+    def _menu(self, title: str, items) -> Optional[str]:
+        """items: list of (label, value) tuples."""
+        return tui.menu_box(self.stdscr, title, items)
+
+    def _confirm(self, msg: str, title: str = "Confirm", default: bool = True) -> bool:
+        return tui.confirm_box(self.stdscr, msg, title, default)
+
+    def _input(self, prompt: str, default: str = "", title: str = "Input") -> Optional[str]:
+        return tui.input_box(self.stdscr, prompt, default, title)
+
+    def _int(self, prompt: str, default: int = 0, min_val: int = 0,
+             title: str = "Input") -> Optional[int]:
+        return tui.int_box(self.stdscr, prompt, default, min_val, title)
+
+    def _show(self, lines: List[str], title: str = "") -> None:
+        tui.message_box(self.stdscr, lines, title)
+
+    def _table(self, title: str, headers: List[str], rows: List[List[str]]) -> None:
+        self._show(tui.text_table(headers, rows), title)
+
+    def _checkbox(self, title: str, labels: List[str],
+                  pre: Optional[List[int]] = None) -> Optional[List[int]]:
+        return tui.checkbox_box(self.stdscr, title, labels, pre)
+
+    # ── main run loop ──────────────────────────────────────────────────────────
+
+    def run(self) -> None:
+        curses.wrapper(self._main)
+
+    def _main(self, stdscr) -> None:
+        self.stdscr = stdscr
+        tui.setup(stdscr)
+
+        while True:
+            self._bg()
+            n_vids = len(self.m.videos)
+            n_unas = sum(1 for v in self.m.videos if not v.get("categories"))
+            n_srcs = len(self.m.config.get("source_dirs", []))
+            fmt_c  = len(self.m.templates.get("format_templates", {}))
+            deg_c  = len(self.m.templates.get("degradation_templates", {}))
+            cfg_flag = " *" if self.m.modified else ""
+            tpl_flag = " *" if self.m.templates_modified else ""
+
+            items = [
+                (f"Videos  ({n_vids} total, {n_unas} unassigned)",
+                 "videos"),
+                (f"Categories & Formats  ({len(self.m.categories)} categories)",
+                 "categories"),
+                (f"Source Directories  ({n_srcs} dirs)",
+                 "sources"),
+                (f"Templates  ({fmt_c} format, {deg_c} degradation)",
+                 "templates"),
+                ("Config & Validation",
+                 "config"),
+                ("───", None),
+                (f"Save config{cfg_flag}",      "save_config"),
+                (f"Save templates{tpl_flag}",   "save_templates"),
+                ("───", None),
+                ("Quit",                        "quit"),
+            ]
+            action = self._menu("ice_ki  Video Manager  v2", items)
+
+            if action is None or action == "quit":
+                if self.m.modified or self.m.templates_modified:
+                    if self._confirm("Save changes before quitting?"):
+                        if self.m.modified:
+                            self.m.save()
+                        if self.m.templates_modified:
+                            self.m.save_templates()
+                break
+
+            try:
+                if action == "videos":
+                    self._section_videos()
+                elif action == "categories":
+                    self._section_categories()
+                elif action == "sources":
+                    self._section_sources()
+                elif action == "templates":
+                    self._section_templates()
+                elif action == "config":
+                    self._section_config()
+                elif action == "save_config":
+                    if self.m.modified:
+                        self.m.save()
+                        self._ok(f"Config saved → {Path(self.m.config_path).name}")
+                    else:
+                        self._ok("No config changes to save.")
+                elif action == "save_templates":
+                    if self.m.templates_modified:
+                        self.m.save_templates()
+                        self._ok(f"Templates saved → {Path(self.m.templates_path).name}")
+                    else:
+                        self._ok("No template changes to save.")
+            except KeyboardInterrupt:
+                self._status = "Interrupted"
+
+    # ── VIDEOS section ─────────────────────────────────────────────────────────
+
+    def _section_videos(self):
+        while True:
+            self._bg()
+            action = self._menu("Videos", [
+                ("List all videos",          "list_all"),
+                ("List by category",          "list_by_cat"),
+                ("List unassigned",           "list_unassigned"),
+                ("Search by name",            "search"),
+                ("───", None),
+                ("Assign to category",        "assign"),
+                ("Assign by pattern",         "assign_pattern"),
+                ("Interactive multi-select",  "interactive"),
+                ("Remove from category",      "remove_from_cat"),
+                ("───", None),
+                ("Set forced frames",         "forced"),
+                ("Reset ALL assignments",     "reset"),
+                ("───", None),
+                ("← Back",                   "back"),
+            ])
+            if action is None or action == "back":
+                break
+
+            elif action == "list_all":
+                vids = self.m.list_videos()
+                if not vids:
+                    self._warn("No videos found.")
+                else:
+                    rows = [[str(i),
+                             _short_path(v.get("path", ""), depth=3)[:32],
+                             v["name"][:36],
+                             ", ".join(get_video_categories(v)) or "(unassigned)"]
+                            for i, v in _sorted_videos(vids)]
+                    self._table(f"All videos ({len(vids)})",
+                                ["ID", "Path", "Name", "Categories"], rows)
+
+            elif action == "list_by_cat":
+                cats = sorted(self.m.categories.keys())
+                if not cats:
+                    self._warn("No categories configured.")
+                    continue
+                cat = self._menu("Select category",
+                                 [(c, c) for c in cats] + [("───", None), ("← Cancel", None)])
+                if not cat:
+                    continue
+                vids = self.m.list_videos(category=cat)
+                rows = [[str(i), v["name"][:40], _short_path(v.get("path", ""), depth=3)[:34]]
+                        for i, v in _sorted_videos(vids)]
+                self._table(f"Category: {cat}  ({len(vids)} videos)",
+                            ["ID", "Name", "Path"], rows)
+
+            elif action == "list_unassigned":
+                vids = self.m.list_videos(show_unassigned=True)
+                rows = [[str(i), v["name"][:40], _short_path(v.get("path", ""), depth=3)[:34]]
+                        for i, v in _sorted_videos(vids)]
+                self._table(f"Unassigned videos ({len(vids)})",
+                            ["ID", "Name", "Path"], rows)
+
+            elif action == "search":
+                pattern = self._input("Search (text or regex):", title="Search Videos")
+                if not pattern or not pattern.strip():
+                    continue
+                vids = self.m.list_videos(filter_pattern=pattern.strip())
+                if not vids:
+                    self._warn(f"No matches for: {pattern.strip()}")
+                    continue
+                rows = [[str(i), v["name"][:40], ", ".join(get_video_categories(v)) or "(unassigned)"]
+                        for i, v in _sorted_videos(vids)]
+                self._table(f"Search: '{pattern.strip()}'  ({len(vids)} results)",
+                            ["ID", "Name", "Categories"], rows)
+
+            elif action == "assign":
+                self._do_assign()
+
+            elif action == "assign_pattern":
+                self._do_assign_pattern()
+
+            elif action == "interactive":
+                self._do_interactive_select()
+
+            elif action == "remove_from_cat":
+                self._do_remove_from_cat()
+
+            elif action == "forced":
+                self._do_set_forced_frames()
+
+            elif action == "reset":
+                if self._confirm("Reset ALL video assignments?\nThis cannot be undone!", default=False):
+                    self.m.reset_all_assignments()
+                    self._ok(f"Reset {len(self.m.videos)} videos.")
+
+    def _pick_categories(self, current: Optional[List[str]] = None) -> Optional[List[str]]:
+        cats = sorted(self.m.categories.keys())
+        if not cats:
+            self._warn("No categories configured.")
             return None
+        pre = [i for i, c in enumerate(cats) if current and c in current]
+        sel = self._checkbox("Select categories", cats, pre)
+        if sel is None:
+            return None
+        return [cats[i] for i in sel]
+
+    def _do_assign(self):
+        filter_str = self._input("Filter (leave blank for all):", title="Assign to Category")
+        vids = self.m.list_videos(filter_pattern=filter_str.strip() if filter_str else None)
+        if not vids:
+            self._warn("No videos found.")
+            return
+        sorted_vids = _sorted_videos(vids)
+        selected = select_items(
+            items=[v for _, v in sorted_vids],
+            title=f"Select videos  ({len(sorted_vids)} total)  Space=toggle  Enter=done  Esc=cancel",
+            get_label=lambda v: _short_path(v.get("path", ""), depth=3),
+            get_details=lambda v: format_categories_display(v.get("categories", [])),
+            stdscr=self.stdscr,
+        )
+        if selected is None:
+            return
+        video_indices = [sorted_vids[i][0] for i in selected]
+        cats = self._pick_categories()
+        if cats is None:
+            return
+        has_existing = any(bool(get_video_categories(self.m.videos[i])) for i in video_indices)
+        mode = "replace"
+        if has_existing:
+            m = self._menu("Some videos already have categories",
+                           [("Add to existing categories", "add"),
+                            ("Replace all categories",     "replace")])
+            if m is None:
+                return
+            mode = m
+        count = self.m.assign_videos(video_indices, cats, mode=mode)
+        self._ok(f"{mode.title()} – {count} video(s) → {cats}")
+
+    def _do_assign_pattern(self):
+        pattern = self._input("Pattern (text or regex):", title="Assign by Pattern")
+        if not pattern or not pattern.strip():
+            return
+        pat       = pattern.strip()
+        simple    = "*" in pat or not any(c in pat for c in r"\.[](){}^$+?|")
+        vids      = self.m.list_videos(filter_pattern=pat, use_simple_search=simple)
+        if not vids:
+            self._warn(f"No matches for: {pat}")
+            return
+        rows = [[str(i), v["name"][:40], ", ".join(get_video_categories(v)) or "(unassigned)"]
+                for i, v in _sorted_videos(vids)]
+        self._table(f"Pattern matches ({len(vids)})", ["ID", "Name", "Categories"], rows)
+        if not self._confirm(f"Assign all {len(vids)} matching videos?"):
+            return
+        cats = self._pick_categories()
+        if cats:
+            count = self.m.assign_videos([i for i, _ in vids], cats)
+            self._ok(f"Assigned {count} video(s) → {cats}")
+
+    def _do_interactive_select(self):
+        filter_str = self._input("Filter (leave blank for all):", title="Interactive Select")
+        vids = (self.m.list_videos(filter_pattern=filter_str.strip(), use_simple_search=True)
+                if filter_str and filter_str.strip() else self.m.list_videos())
+        if not vids:
+            self._warn("No videos found.")
+            return
+        sorted_vids = _sorted_videos(vids)
+        selected = select_items(
+            items=[v for _, v in sorted_vids],
+            title=f"Interactive select  Space=toggle  Enter=done  Esc=cancel",
+            get_label=lambda v: _short_path(v.get("path", ""), depth=3),
+            get_details=lambda v: format_categories_display(v.get("categories", [])),
+            stdscr=self.stdscr,
+        )
+        if selected is None:
+            return
+        video_indices = [sorted_vids[i][0] for i in selected]
+        if not video_indices:
+            return
+        cats = self._pick_categories()
+        if cats:
+            count = self.m.assign_videos(video_indices, cats)
+            self._ok(f"Assigned {count} video(s) → {cats}")
+
+    def _do_remove_from_cat(self):
+        cats = sorted(self.m.categories.keys())
+        if not cats:
+            self._warn("No categories configured.")
+            return
+        cat = self._menu("Remove from category",
+                         [(c, c) for c in cats] + [("───", None), ("← Cancel", None)])
+        if not cat:
+            return
+        which = self._menu("Which videos?",
+                           [("All videos in this category", "all"),
+                            ("Enter IDs manually",          "ids"),
+                            ("← Cancel",                   None)])
+        if which == "all":
+            ids = list(range(len(self.m.videos)))
+        elif which == "ids":
+            raw = self._input("Video IDs (comma-separated):", title="Enter IDs")
+            if not raw:
+                return
+            try:
+                ids = [int(x.strip()) for x in raw.split(",") if x.strip()]
+            except ValueError:
+                self._err("Invalid IDs")
+                return
+        else:
+            return
+        count = self.m.remove_from_category(ids, cat)
+        self._ok(f"Removed {count} video(s) from '{cat}'")
+
+    def _do_set_forced_frames(self):
+        raw = self._input("Video ID(s) (comma-separated):", title="Set Forced Frames")
+        if not raw:
+            return
         try:
-            sorted_vids = _sorted_videos(videos)
-            selected = select_items(
-                items=[v for _, v in sorted_vids],
-                title=f"Select Videos – {len(sorted_vids)} available (Space toggle, Enter done, Esc cancel)",
-                get_label=lambda v: _short_path(v.get("path", ""), depth=3),
-                get_details=lambda v: format_categories_display(v.get("categories", [])),
-            )
-            if selected is None:
-                return None
-            return [sorted_vids[i][0] for i in selected]
-        except Exception as e:
-            print_warn(f"Curses UI failed: {e}")
-            return None
-
-    def set_forced_frames(self, video_indices):
-        if isinstance(video_indices, int):
-            video_indices = [video_indices]
-        valid = [i for i in video_indices if 0 <= i < len(self.videos)]
+            ids = [int(x.strip()) for x in raw.split(",") if x.strip()]
+        except ValueError:
+            self._err("Invalid IDs")
+            return
+        valid = [i for i in ids if 0 <= i < len(self.m.videos)]
         if not valid:
-            print_error("No valid video indices.")
+            self._err("No valid video indices.")
             return
         all_cats: List[str] = []
         for idx in valid:
-            for cat in get_video_categories(self.videos[idx]):
+            for cat in get_video_categories(self.m.videos[idx]):
                 if cat not in all_cats:
                     all_cats.append(cat)
         if not all_cats:
-            print_error("Selected videos have no categories assigned.")
+            self._err("Selected videos have no categories assigned.")
             return
-        names = [self.videos[i].get("name", "?") for i in valid]
-        if len(names) == 1:
-            print_rule(f"Forced frames: {names[0]}")
-        else:
-            print_rule(f"Forced frames: {len(names)} videos")
-            for n in names:
-                console.print(f"  [dim]•[/] {n}")
-        print_info(f"Categories: {', '.join(all_cats)}  |  blank=keep  0=auto  N=exact")
-        new_values: Dict[str, Optional[int]] = {}
         for cat in all_cats:
-            cur_values = [self.videos[i].get("forced_frames", {}).get(cat, 0) for i in valid]
+            cur_values = [self.m.videos[i].get("forced_frames", {}).get(cat, 0) for i in valid]
             current_str = f"{cur_values[0]:,}" if len(set(cur_values)) == 1 else "mixed"
-            raw = ask_text(f"{cat} (current: {current_str}):", default="")
-            if not raw or not raw.strip():
-                new_values[cat] = None
-                continue
-            try:
-                value = int(raw.strip())
-            except ValueError:
-                print_warn("Invalid number, keeping current")
-                new_values[cat] = None
-                continue
-            new_values[cat] = None if value < 0 else value
-        for idx in valid:
-            video = self.videos[idx]
-            forced = dict(video.get("forced_frames", {}))
-            for cat, value in new_values.items():
-                if value is None:
-                    continue
-                if value == 0:
-                    forced.pop(cat, None)
-                elif cat in get_video_categories(video):
-                    forced[cat] = value
-            if forced:
-                video["forced_frames"] = forced
-            else:
-                video.pop("forced_frames", None)
-        self.modified = True
-        set_cats = {cat: v for cat, v in new_values.items() if v is not None}
-        if set_cats:
-            parts = "  ".join(f"{c}: {v:,}" if v else f"{c}: auto" for c, v in sorted(set_cats.items()))
-            print_success(f"Applied to {len(valid)} video(s): {parts}")
-        else:
-            print_info("No changes made.")
-
-    def show_statistics(self):
-        print_rule("Statistics")
-        cat_counts: Dict[str, int] = {cat: 0 for cat in self.categories}
-        forced_by_cat: Dict[str, list] = {cat: [] for cat in self.categories}
-        unassigned = 0
-        for video in self.videos:
-            cat_list = get_video_categories(video)
-            if not cat_list:
-                unassigned += 1
-            else:
-                for cat in cat_list:
-                    if cat in cat_counts:
-                        cat_counts[cat] += 1
-            forced = video.get("forced_frames", {})
-            for cat, n in forced.items():
-                if cat in forced_by_cat and n > 0:
-                    forced_by_cat[cat].append(
-                        (video.get("name", "?"), _short_path(video.get("path", ""), depth=3), n)
-                    )
-        t = make_table("Metric", "Value")
-        t.add_row("Total videos",   str(len(self.videos)))
-        t.add_row("Unassigned",     str(unassigned))
-        console.print(t)
-        console.print()
-        for cat in sorted(self.categories.keys()):
-            cfg = self.categories[cat]
-            target = cfg.get("target_total", "?")
-            target_str = f"{target:,}" if isinstance(target, int) else str(target)
-            ft = make_table("Format", "Mode", "Weight", "Share", "Degradation mix")
-            formats = cfg.get("formats", [])
-            total_weight = sum(f.get("weight", 0) for f in formats) or 1
-            for fmt in formats:
-                tmpl  = fmt.get("template", "?")
-                w     = fmt.get("weight", 0)
-                mode  = fmt.get("source_mode", "?")
-                share = f"{round(w / total_weight * 100, 1):.1f}%"
-                deg   = ", ".join(f"{k}:{v}" for k, v in fmt.get("degradation_mix", {}).items())
-                ft.add_row(tmpl, mode, str(w), share, deg)
-            fl = forced_by_cat.get(cat, [])
-            forced_total = sum(n for _, _, n in fl)
-            header_extra = ""
-            if fl and isinstance(target, int):
-                remaining = max(0, target - forced_total)
-                header_extra = (
-                    f"  forced {forced_total:,} / remaining {remaining:,}"
-                )
-            console.print(
-                f"[bold cyan]▸  {cat}[/]  [dim]target: {target_str}  videos: {cat_counts.get(cat, 0)}{header_extra}[/]"
+            val = self._int(
+                f"Forced frames for '{cat}' (current: {current_str})\n"
+                f"  0 = auto/remove override",
+                default=cur_values[0] if len(set(cur_values)) == 1 else 0,
+                min_val=0,
+                title="Forced Frames",
             )
-            console.print(ft)
-            if fl:
-                ft2 = make_table("Video", "Path", "Forced frames")
-                for name, sp, n in sorted(fl, key=lambda x: x[0].lower()):
-                    ft2.add_row(name[:40], sp[:36], f"{n:,}")
-                console.print(ft2)
+            if val is not None:
+                for idx in valid:
+                    self.m.set_forced_frames_for(idx, cat, val if val > 0 else 0)
+        self._ok(f"Forced frames updated for {len(valid)} video(s)")
 
-    def manage_categories(self):
+    # ── CATEGORIES section ─────────────────────────────────────────────────────
+
+    def _section_categories(self):
         while True:
-            action = ask_select(
-                "Categories",
-                [
-                    Choice("List categories",       value="list"),
-                    Choice("Add category",          value="add"),
-                    Choice("Remove category",       value="remove"),
-                    Choice("Edit target total",     value="edit"),
-                    Separator(),
-                    Choice("← Back",                value="back"),
-                ],
-            )
+            self._bg()
+            action = self._menu("Categories & Formats", [
+                ("List categories",            "list"),
+                ("Add category",               "add"),
+                ("Remove category",            "remove"),
+                ("Edit target total",          "edit_target"),
+                ("───", None),
+                ("Manage category formats",    "formats"),
+                ("View category detail",       "detail"),
+                ("───", None),
+                ("← Back",                    "back"),
+            ])
             if action is None or action == "back":
                 break
             elif action == "list":
@@ -363,303 +694,401 @@ class VideoManager:
                 self._add_category()
             elif action == "remove":
                 self._remove_category()
-            elif action == "edit":
+            elif action == "edit_target":
                 self._edit_category_target()
+            elif action == "formats":
+                cat = self._pick_cat("Select category to manage formats")
+                if cat:
+                    self._manage_category_formats(cat)
+            elif action == "detail":
+                cat = self._pick_cat("Select category for detail view")
+                if cat:
+                    lines = compute_category_detail(self.m, cat)
+                    self._show(lines, f"Detail: {cat}")
+
+    def _pick_cat(self, prompt: str) -> Optional[str]:
+        cats = sorted(self.m.categories.keys())
+        if not cats:
+            self._warn("No categories configured.")
+            return None
+        return self._menu(prompt,
+                          [(c, c) for c in cats] + [("───", None), ("← Cancel", None)])
 
     def _list_categories(self):
-        if not self.categories:
-            print_warn("No categories configured.")
+        if not self.m.categories:
+            self._warn("No categories configured.")
             return
-        t = make_table("Category", "Target total", "Formats")
-        for cat in sorted(self.categories.keys()):
-            cfg = self.categories[cat]
-            target = cfg.get("target_total", "?")
-            target_str = f"{target:,}" if isinstance(target, int) else str(target)
-            t.add_row(cat, target_str, str(len(cfg.get("formats", []))))
-        console.print(t)
+        rows = []
+        for cat in sorted(self.m.categories.keys()):
+            cfg     = self.m.categories[cat]
+            target  = cfg.get("target_total", "?")
+            tstr    = f"{target:,}" if isinstance(target, int) else str(target)
+            n_vids  = sum(1 for v in self.m.videos if cat in get_video_categories(v))
+            n_fmts  = len(cfg.get("formats", []))
+            rows.append([cat, tstr, str(n_vids), str(n_fmts)])
+        self._table("Categories", ["Category", "Target", "Videos", "Formats"], rows)
 
     def _add_category(self):
-        name = ask_text("New category name:", validate=lambda v: True if v.strip() else "Name required")
-        if name is None:
+        name = self._input("New category name:", title="Add Category")
+        if not name or not name.strip():
             return
         name = name.strip().lower()
-        if not name:
-            print_error("Name cannot be empty")
+        if name in self.m.categories:
+            self._err(f"Category '{name}' already exists")
             return
-        if name in self.categories:
-            print_error(f"Category '{name}' already exists")
-            return
-        target = ask_int("Target total:", default=50000, min_val=1)
+        target = self._int("Target total:", default=50000, min_val=1, title="Add Category")
         if target is None:
             return
-        self.categories[name] = {"target_total": target, "formats": []}
-        self.config["categories"] = self.categories
-        self.modified = True
-        print_success(f"Added category '{name}' with target {target:,}")
+        self.m.categories[name] = {"target_total": target, "formats": []}
+        self.m.config["categories"] = self.m.categories
+        self.m.modified = True
+        self._ok(f"Added '{name}'  target: {target:,}")
 
     def _remove_category(self):
-        if not self.categories:
-            print_warn("No categories configured.")
+        cat = self._pick_cat("Select category to remove")
+        if not cat:
             return
-        name = ask_select(
-            "Select category to remove:",
-            [Choice(c, value=c) for c in sorted(self.categories.keys())] + [Separator(), Choice("← Cancel", value=None)],
-        )
-        if not name:
+        affected = sum(1 for v in self.m.videos if cat in get_video_categories(v))
+        suffix   = f"\n\nThis will unassign {affected} video(s)." if affected else ""
+        if not self._confirm(f"Remove category '{cat}'?{suffix}", default=False):
             return
-        affected = sum(1 for v in self.videos if name in get_video_categories(v))
-        suffix = f" and unassign {affected} video(s)" if affected else ""
-        ok = ask_confirm(f"Remove '{name}'{suffix}?", default=False)
-        if not ok:
-            print_info("Cancelled.")
-            return
-        for video in self.videos:
+        for video in self.m.videos:
             cats = get_video_categories(video)
-            if name in cats:
-                cats.remove(name)
+            if cat in cats:
+                cats.remove(cat)
                 video["categories"] = cats
-        del self.categories[name]
-        self.config["categories"] = self.categories
-        self.modified = True
-        msg = f"Removed category '{name}'"
+        del self.m.categories[cat]
+        self.m.config["categories"] = self.m.categories
+        self.m.modified = True
+        msg = f"Removed '{cat}'"
         if affected:
             msg += f", unassigned {affected} video(s)"
-        print_success(msg)
+        self._ok(msg)
 
     def _edit_category_target(self):
-        if not self.categories:
-            print_warn("No categories configured.")
+        cat = self._pick_cat("Select category to edit")
+        if not cat:
             return
-        name = ask_select(
-            "Select category to edit:",
-            [Choice(c, value=c) for c in sorted(self.categories.keys())] + [Separator(), Choice("← Cancel", value=None)],
-        )
-        if not name:
-            return
-        current = self.categories[name].get("target_total", 0)
-        new_target = ask_int(f"New target_total (current: {current:,}):", default=current, min_val=1)
+        current    = self.m.categories[cat].get("target_total", 0)
+        new_target = self._int(f"New target_total  (current: {current:,}):",
+                               default=current, min_val=1, title=f"Edit: {cat}")
         if new_target is None:
             return
-        self.categories[name]["target_total"] = new_target
-        self.modified = True
-        print_success(f"'{name}' target: {current:,} → {new_target:,}")
+        self.m.categories[cat]["target_total"] = new_target
+        self.m.modified = True
+        self._ok(f"'{cat}' target: {current:,} → {new_target:,}")
 
-    def manage_category_formats(self, category_name=None):
-        if category_name is None:
-            if not self.categories:
-                print_warn("No categories configured.")
-                return
-            category_name = ask_select(
-                "Select category:",
-                [Choice(c, value=c) for c in sorted(self.categories.keys())] + [Separator(), Choice("← Cancel", value=None)],
-            )
-            if not category_name:
-                return
-        if category_name not in self.categories:
-            print_error(f"Category '{category_name}' not found")
-            return
+    def _manage_category_formats(self, cat_name: str):
         while True:
-            cat_cfg = self.categories[category_name]
+            self._bg()
+            cat_cfg = self.m.categories[cat_name]
             formats = cat_cfg.get("formats", [])
-            # build a summary table before the menu
-            console.print()
-            print_rule(f"Formats for '{category_name}'")
-            if formats:
-                total_w = sum(f.get("weight", 0) for f in formats) or 1
-                t = make_table("#", "Template", "Mode", "Weight", "Share", "Degradation mix")
-                for i, fmt in enumerate(formats):
-                    tmpl  = fmt.get("template", "?")
-                    w     = fmt.get("weight", 0)
-                    mode  = fmt.get("source_mode", "?")
-                    share = f"{round(w / total_w * 100, 1):.1f}%"
-                    deg   = ", ".join(f"{k}={v}" for k, v in fmt.get("degradation_mix", {}).items())
-                    t.add_row(str(i), tmpl, mode, str(w), share, deg)
-                console.print(t)
-            else:
-                print_warn("No format entries yet.")
+            total_w = sum(f.get("weight", 0) for f in formats) or 1
+            fmt_rows = [
+                [str(i),
+                 f.get("template", "?"),
+                 f.get("source_mode", "?"),
+                 str(f.get("weight", 0)),
+                 f"{f.get('weight',0)/total_w*100:.1f}%",
+                 ", ".join(f"{k}={v}" for k, v in f.get("degradation_mix", {}).items())]
+                for i, f in enumerate(formats)
+            ]
 
-            action = ask_select(
-                "Format actions:",
-                [
-                    Choice("Add format entry",          value="add"),
-                    Choice("Remove format entry",       value="remove"),
-                    Choice("Edit weight / source_mode", value="edit"),
-                    Choice("Manage degradation mix",    value="deg"),
-                    Separator(),
-                    Choice("← Back",                    value="back"),
-                ],
-            )
+            action = self._menu(f"Formats for '{cat_name}'", [
+                ("Show format table",             "show"),
+                ("Add format entry",              "add"),
+                ("Remove format entry",           "remove"),
+                ("Edit weight / source_mode",     "edit"),
+                ("Manage degradation mix",        "deg"),
+                ("───", None),
+                ("← Back",                       "back"),
+            ])
             if action is None or action == "back":
                 break
+            elif action == "show":
+                if not formats:
+                    self._warn("No format entries yet.")
+                else:
+                    self._table(f"Formats: {cat_name}",
+                                ["#", "Template", "Mode", "Weight", "Share", "Deg mix"],
+                                fmt_rows)
             elif action == "add":
-                self._add_format_entry(category_name)
+                self._add_format_entry(cat_name)
             elif action == "remove":
-                self._remove_format_entry(category_name)
+                self._remove_format_entry(cat_name)
             elif action == "edit":
-                self._edit_format_entry(category_name)
+                self._edit_format_entry(cat_name)
             elif action == "deg":
-                self._manage_degradation_mix(category_name)
+                self._manage_degradation_mix(cat_name)
 
-    def _add_format_entry(self, category_name):
-        fmt_tmpls = self.templates.get("format_templates", {})
+    def _add_format_entry(self, cat_name: str):
+        fmt_tmpls = self.m.templates.get("format_templates", {})
         if not fmt_tmpls:
-            print_error("No format_templates in templates.json")
+            self._err("No format_templates in templates.json")
             return
-        tmpl = ask_select(
-            "Select format template:",
-            [Choice(n, value=n) for n in sorted(fmt_tmpls.keys())] + [Separator(), Choice("← Cancel", value=None)],
-        )
+        tmpl = self._menu("Select format template",
+                          [(n, n) for n in sorted(fmt_tmpls.keys())] +
+                          [("───", None), ("← Cancel", None)])
         if not tmpl:
             return
-        weight = ask_int("Weight (e.g. 50):", default=50, min_val=1)
+        weight = self._int("Weight (e.g. 50):", default=50, min_val=1,
+                           title="Add Format Entry")
         if weight is None:
             return
-        mode = ask_select(
-            "source_mode:",
-            [Choice(m, value=m) for m in sorted(VALID_SOURCE_MODES)],
-        )
+        mode = self._menu("source_mode",
+                          [(m, m) for m in sorted(VALID_SOURCE_MODES)])
         if mode is None:
             return
-        self.categories[category_name].setdefault("formats", []).append(
+        self.m.categories[cat_name].setdefault("formats", []).append(
             {"template": tmpl, "weight": weight, "source_mode": mode, "degradation_mix": {}}
         )
-        self.modified = True
-        idx = len(self.categories[category_name]["formats"]) - 1
-        print_success(f"Added [{idx}]: {tmpl} / {mode} / weight={weight}  → add degradation mix next")
+        self.m.modified = True
+        idx = len(self.m.categories[cat_name]["formats"]) - 1
+        self._ok(f"Added [{idx}]: {tmpl} / {mode} / weight={weight}")
 
-    def _remove_format_entry(self, category_name):
-        formats = self.categories[category_name].get("formats", [])
+    def _remove_format_entry(self, cat_name: str):
+        formats = self.m.categories[cat_name].get("formats", [])
         if not formats:
-            print_warn("No format entries.")
+            self._warn("No format entries.")
             return
-        choices = [
-            Choice(f"[{i}] {f.get('template','?')} / {f.get('source_mode','?')} / w={f.get('weight',0)}", value=i)
-            for i, f in enumerate(formats)
-        ] + [Separator(), Choice("← Cancel", value=None)]
-        idx = ask_select("Select entry to remove:", choices)
+        items = [(f"[{i}] {f.get('template','?')} / {f.get('source_mode','?')} / w={f.get('weight',0)}", i)
+                 for i, f in enumerate(formats)] + [("───", None), ("← Cancel", None)]
+        idx = self._menu("Select entry to remove", items)
         if idx is None:
             return
-        ok = ask_confirm(f"Remove [{idx}] '{formats[idx].get('template','?')}'?", default=False)
-        if not ok:
-            print_info("Cancelled.")
+        if not self._confirm(f"Remove [{idx}] '{formats[idx].get('template','?')}'?", default=False):
             return
         removed = formats.pop(idx)
-        self.modified = True
-        print_success(f"Removed [{idx}]: {removed.get('template', '?')}")
+        self.m.modified = True
+        self._ok(f"Removed [{idx}]: {removed.get('template', '?')}")
 
-    def _edit_format_entry(self, category_name):
-        formats = self.categories[category_name].get("formats", [])
+    def _edit_format_entry(self, cat_name: str):
+        formats = self.m.categories[cat_name].get("formats", [])
         if not formats:
-            print_warn("No format entries.")
+            self._warn("No format entries.")
             return
-        choices = [
-            Choice(f"[{i}] {f.get('template','?')} / {f.get('source_mode','?')} / w={f.get('weight',0)}", value=i)
-            for i, f in enumerate(formats)
-        ] + [Separator(), Choice("← Cancel", value=None)]
-        idx = ask_select("Select entry to edit:", choices)
+        items = [(f"[{i}] {f.get('template','?')} / {f.get('source_mode','?')} / w={f.get('weight',0)}", i)
+                 for i, f in enumerate(formats)] + [("───", None), ("← Cancel", None)]
+        idx = self._menu("Select entry to edit", items)
         if idx is None:
             return
-        entry = formats[idx]
-        new_w = ask_int(f"New weight (current: {entry.get('weight')}):", default=entry.get("weight", 1), min_val=1)
+        entry  = formats[idx]
+        new_w  = self._int(f"New weight (current: {entry.get('weight')}):",
+                           default=entry.get("weight", 1), min_val=1,
+                           title="Edit Format Entry")
         if new_w is not None:
             entry["weight"] = new_w
-            self.modified = True
-        new_mode = ask_select(
-            f"New source_mode (current: {entry.get('source_mode')}):",
-            [Choice(m, value=m) for m in sorted(VALID_SOURCE_MODES)] + [Separator(), Choice("Keep current", value=None)],
-        )
-        if new_mode is not None:
+            self.m.modified = True
+        new_mode = self._menu(f"New source_mode  (current: {entry.get('source_mode')})",
+                              [(m, m) for m in sorted(VALID_SOURCE_MODES)] +
+                              [("───", None), ("Keep current", None)])
+        if new_mode:
             entry["source_mode"] = new_mode
-            self.modified = True
-        print_success(f"Format entry [{idx}] updated")
+            self.m.modified = True
+        self._ok(f"Format entry [{idx}] updated")
 
-    def _manage_degradation_mix(self, category_name):
-        formats = self.categories[category_name].get("formats", [])
+    def _manage_degradation_mix(self, cat_name: str):
+        formats = self.m.categories[cat_name].get("formats", [])
         if not formats:
-            print_warn("No format entries.")
+            self._warn("No format entries.")
             return
-        choices = [
-            Choice(f"[{i}] {f.get('template','?')} / {f.get('source_mode','?')}", value=i)
-            for i, f in enumerate(formats)
-        ] + [Separator(), Choice("← Cancel", value=None)]
-        idx = ask_select("Select format entry:", choices)
+        items = [(f"[{i}] {f.get('template','?')} / {f.get('source_mode','?')}", i)
+                 for i, f in enumerate(formats)] + [("───", None), ("← Cancel", None)]
+        idx = self._menu("Select format entry to edit degradation mix", items)
         if idx is None:
             return
-        deg_tmpls = self.templates.get("degradation_templates", {})
-        entry = formats[idx]
+        deg_tmpls = self.m.templates.get("degradation_templates", {})
+        entry     = formats[idx]
         tmpl_name = entry.get("template", "?")
-        while True:
-            mix = entry.setdefault("degradation_mix", {})
-            total_w = sum(mix.values()) or 1
-            # show current mix table
-            console.print()
-            print_rule(f"Degradation mix for [{idx}] {tmpl_name}")
-            if mix:
-                t = make_table("Template", "Weight", "Share")
-                for dname, dw in mix.items():
-                    t.add_row(dname, str(dw), f"{round(dw/total_w*100,1):.1f}%")
-                console.print(t)
-            else:
-                print_warn("Mix is empty.")
 
-            action = ask_select(
-                "Degradation mix actions:",
-                [
-                    Choice("Add / update entry",   value="add"),
-                    Choice("Remove entry",          value="remove"),
-                    Separator(),
-                    Choice("← Back",                value="back"),
-                ],
-            )
+        while True:
+            self._bg()
+            mix     = entry.setdefault("degradation_mix", {})
+            total_w = sum(mix.values()) or 1
+
+            action = self._menu(f"Degradation mix: [{idx}] {tmpl_name}", [
+                ("Show current mix",   "show"),
+                ("Add / update entry", "add"),
+                ("Remove entry",       "remove"),
+                ("───", None),
+                ("← Back",            "back"),
+            ])
             if action is None or action == "back":
                 break
+            elif action == "show":
+                if not mix:
+                    self._warn("Mix is empty.")
+                else:
+                    rows = [[dn, str(dw), f"{dw/total_w*100:.1f}%"]
+                            for dn, dw in sorted(mix.items(), key=lambda x: -x[1])]
+                    self._table(f"Deg mix: {tmpl_name}",
+                                ["Template", "Weight", "Share"], rows)
             elif action == "add":
                 if not deg_tmpls:
-                    print_error("No degradation templates defined.")
+                    self._err("No degradation templates defined.")
                     continue
-                dname = ask_select(
-                    "Select degradation template:",
-                    [Choice(n, value=n) for n in sorted(deg_tmpls.keys())] + [Separator(), Choice("← Cancel", value=None)],
-                )
+                dname = self._menu("Select degradation template",
+                                   [(n, n) for n in sorted(deg_tmpls.keys())] +
+                                   [("───", None), ("← Cancel", None)])
                 if not dname:
                     continue
-                dw = ask_int(f"Weight (current: {mix.get(dname, 0)}):", default=mix.get(dname, 50), min_val=1)
+                dw = self._int(f"Weight (current: {mix.get(dname, 0)}):",
+                               default=mix.get(dname, 50), min_val=1,
+                               title="Degradation Weight")
                 if dw is None:
                     continue
                 mix[dname] = dw
-                self.modified = True
-                print_success(f"Set {dname} = {dw}")
+                self.m.modified = True
+                self._ok(f"Set {dname} = {dw}")
             elif action == "remove":
                 if not mix:
-                    print_warn("Mix is already empty.")
+                    self._warn("Mix is already empty.")
                     continue
-                dname = ask_select(
-                    "Remove which entry:",
-                    [Choice(n, value=n) for n in sorted(mix.keys())] + [Separator(), Choice("← Cancel", value=None)],
-                )
+                dname = self._menu("Remove which entry",
+                                   [(n, n) for n in sorted(mix.keys())] +
+                                   [("───", None), ("← Cancel", None)])
                 if dname and dname in mix:
                     del mix[dname]
-                    self.modified = True
-                    print_success(f"Removed {dname}")
+                    self.m.modified = True
+                    self._ok(f"Removed {dname}")
 
-    def manage_templates(self):
+    # ── SOURCES section ────────────────────────────────────────────────────────
+
+    def _section_sources(self):
         while True:
-            fmt_tmpls = self.templates.get("format_templates", {})
-            deg_tmpls = self.templates.get("degradation_templates", {})
-            action = ask_select(
-                "Templates",
-                [
-                    Choice(f"List format templates  [{len(fmt_tmpls)}]",      value="fa"),
-                    Choice("Add format template",                               value="fb"),
-                    Choice("Remove format template",                            value="fc"),
-                    Separator(),
-                    Choice(f"List degradation templates  [{len(deg_tmpls)}]",  value="da"),
-                    Choice("Add / edit degradation template (JSON)",            value="db"),
-                    Choice("Remove degradation template",                       value="dc"),
-                    Separator(),
-                    Choice("← Back",                                            value="back"),
-                ],
-            )
+            self._bg()
+            action = self._menu("Source Directories", [
+                ("List source dirs",  "list"),
+                ("Add source dir",    "add"),
+                ("Edit source dir",   "edit"),
+                ("Remove source dir", "remove"),
+                ("───", None),
+                ("Rescan file list",  "rescan"),
+                ("───", None),
+                ("← Back",           "back"),
+            ])
+            if action is None or action == "back":
+                break
+            elif action == "list":
+                self._list_source_dirs()
+            elif action == "add":
+                self._add_source_dir()
+            elif action == "edit":
+                self._edit_source_dir()
+            elif action == "remove":
+                self._remove_source_dir()
+            elif action == "rescan":
+                self._rescan()
+
+    def _ensure_source_dirs(self):
+        self.m.config.setdefault("source_dirs", [])
+        return self.m.config["source_dirs"]
+
+    def _list_source_dirs(self):
+        sds = self._ensure_source_dirs()
+        if not sds:
+            self._warn("No source directories configured.")
+            return
+        rows = [[str(i), e.get("path", "?"), ", ".join(e.get("extensions", []))]
+                for i, e in enumerate(sds)]
+        self._table("Source Directories", ["#", "Path", "Extensions"], rows)
+
+    def _add_source_dir(self):
+        sds = self._ensure_source_dirs()
+        path = self._input("Directory path:", title="Add Source Directory")
+        if not path or not path.strip():
+            return
+        path = path.strip()
+        if any(d.get("path") == path for d in sds):
+            self._err(f"Already configured: {path}")
+            return
+        exts_raw = self._input("Extensions (comma-separated):",
+                               default=".mkv,.mp4,.avi", title="Extensions")
+        if exts_raw is None:
+            return
+        exts = [e.strip() for e in exts_raw.split(",") if e.strip()]
+        sds.append({"path": path, "extensions": exts})
+        self.m.modified = True
+        self._ok(f"Added: {path}")
+
+    def _edit_source_dir(self):
+        sds = self._ensure_source_dirs()
+        if not sds:
+            self._warn("No source directories configured.")
+            return
+        items = [(f"[{i}] {e.get('path','?')}", i) for i, e in enumerate(sds)] + \
+                [("───", None), ("← Cancel", None)]
+        idx = self._menu("Select source directory to edit", items)
+        if idx is None:
+            return
+        entry    = sds[idx]
+        new_path = self._input("New path:", default=entry["path"], title="Edit Path")
+        if new_path and new_path.strip():
+            entry["path"] = new_path.strip()
+        cur_exts = ", ".join(entry.get("extensions", []))
+        new_exts = self._input("Extensions:", default=cur_exts, title="Edit Extensions")
+        if new_exts and new_exts.strip():
+            entry["extensions"] = [e.strip() for e in new_exts.split(",") if e.strip()]
+        self.m.modified = True
+        self._ok(f"Updated source directory #{idx}")
+
+    def _remove_source_dir(self):
+        sds = self._ensure_source_dirs()
+        if not sds:
+            self._warn("No source directories configured.")
+            return
+        items = [(f"[{i}] {e.get('path','?')}", i) for i, e in enumerate(sds)] + \
+                [("───", None), ("← Cancel", None)]
+        idx = self._menu("Select source directory to remove", items)
+        if idx is None:
+            return
+        path = sds[idx].get("path", "?")
+        if not self._confirm(f"Remove '{path}'?", default=False):
+            return
+        sds.pop(idx)
+        self.m.modified = True
+        self._ok(f"Removed: {path}")
+
+    def _rescan(self):
+        if self.m.modified:
+            if self._confirm("Unsaved config changes. Save before rescanning?"):
+                self.m.save()
+        kept, added, missing = self.m.rescan()
+        lines = [
+            f"Rescan complete.",
+            f"  Videos found : {kept + added}",
+            f"  Kept (known) : {kept}",
+            f"  New          : {added}",
+        ]
+        if missing:
+            lines.append("")
+            lines.append("  Missing directories (skipped):")
+            for d in missing:
+                lines.append(f"    {d}")
+        self._show(lines, "Rescan Results")
+        if added:
+            self._ok(f"Added {added} new video(s). Use 'Assign to category' next.")
+        else:
+            self._ok(f"Rescan done: {kept + added} videos.")
+
+    # ── TEMPLATES section ──────────────────────────────────────────────────────
+
+    def _section_templates(self):
+        while True:
+            self._bg()
+            fmt_tmpls = self.m.templates.get("format_templates", {})
+            deg_tmpls = self.m.templates.get("degradation_templates", {})
+            action = self._menu("Templates", [
+                (f"List format templates  [{len(fmt_tmpls)}]",      "fa"),
+                ("Add format template",                               "fb"),
+                ("Remove format template",                            "fc"),
+                ("───", None),
+                (f"List degradation templates  [{len(deg_tmpls)}]",  "da"),
+                ("Add / edit degradation template",                   "db"),
+                ("Remove degradation template",                       "dc"),
+                ("───", None),
+                ("← Back",                                           "back"),
+            ])
             if action is None or action == "back":
                 break
             elif action == "fa":
@@ -676,674 +1105,290 @@ class VideoManager:
                 self._remove_degradation_template()
 
     def _list_format_templates(self):
-        fmt_tmpls = self.templates.get("format_templates", {})
+        fmt_tmpls = self.m.templates.get("format_templates", {})
         if not fmt_tmpls:
-            print_warn("No format templates defined.")
+            self._warn("No format templates defined.")
             return
-        t = make_table("Name", "base_x", "AR", "Scale", "GT size", "LR size", "Description")
+        rows = []
         for name, spec in sorted(fmt_tmpls.items()):
-            t.add_row(
+            gt = spec.get("gt_size", "?")
+            lr = spec.get("lr_size", "?")
+            gt_str = f"{gt[0]}×{gt[1]}" if isinstance(gt, list) else str(gt)
+            lr_str = f"{lr[0]}×{lr[1]}" if isinstance(lr, list) else str(lr)
+            rows.append([
                 name,
                 str(spec.get("base_x", "–")),
                 spec.get("aspect_ratio", "?"),
                 str(spec.get("scale", "?")),
-                str(spec.get("gt_size", "?")),
-                str(spec.get("lr_size", "?")),
+                gt_str,
+                lr_str,
                 spec.get("description", ""),
-            )
-        console.print(t)
+            ])
+        self._table("Format Templates",
+                    ["Name", "base_x", "AR", "Scale", "GT size", "LR size", "Description"],
+                    rows)
 
     def _add_format_template(self):
-        """Add a new format template using declarative parameters (base_x, aspect_ratio, scale)."""
-        fmt_tmpls = self.templates.setdefault("format_templates", {})
-
-        # --- base_x: preset list + custom option ---
-        preset_choices = [Choice(str(x), value=x) for x in BASE_X_PRESETS]
-        preset_choices += [Separator(), Choice("Custom value…", value="custom")]
-        base_x_sel = ask_select("base_x (GT width):", preset_choices)
+        fmt_tmpls = self.m.templates.setdefault("format_templates", {})
+        preset_items = [(str(x), x) for x in BASE_X_PRESETS] + \
+                       [("───", None), ("Custom value…", "custom")]
+        base_x_sel = self._menu("base_x (GT width)", preset_items)
         if base_x_sel is None:
             return
         if base_x_sel == "custom":
-            base_x = ask_int("Custom base_x:", min_val=1)
+            base_x = self._int("Custom base_x:", min_val=1, title="base_x")
             if base_x is None:
                 return
         else:
             base_x = base_x_sel
-
-        # --- aspect_ratio ---
-        ar = ask_select(
-            "aspect_ratio:",
-            [Choice(r, value=r) for r in sorted(ASPECT_RATIOS.keys())],
-        )
+        ar = self._menu("aspect_ratio",
+                        [(r, r) for r in sorted(ASPECT_RATIOS.keys())])
         if ar is None:
             return
-
-        # --- scale ---
-        scale = ask_int("scale (e.g. 3):", default=3, min_val=1)
+        scale = self._int("scale (e.g. 3):", default=3, min_val=1, title="Scale")
         if scale is None:
             return
-
-        # --- compute and validate sizes ---
         try:
             gt_size, lr_size = compute_format_sizes(base_x, ar, scale)
         except ValueError as exc:
-            print_error(str(exc))
+            self._err(str(exc))
             return
-
-        # --- show preview + name ---
-        ar_slug = ar.replace(":", "")
+        ar_slug   = ar.replace(":", "")
         auto_name = f"{base_x}_{ar_slug}"
-        print_info(f"Preview: gt_size={gt_size}  lr_size={lr_size}")
-        name = ask_text(f"Template name:", default=auto_name,
-                        validate=lambda v: True if v.strip() else "Name required")
+        gt_str    = f"{gt_size[0]}×{gt_size[1]}" if isinstance(gt_size, list) else str(gt_size)
+        lr_str    = f"{lr_size[0]}×{lr_size[1]}" if isinstance(lr_size, list) else str(lr_size)
+        name = self._input(f"Template name (GT: {gt_str}  LR: {lr_str}):",
+                           default=auto_name, title="Add Format Template")
         if name is None:
             return
         name = name.strip()
         if name in fmt_tmpls:
-            ok = ask_confirm(f"'{name}' already exists. Overwrite?", default=False)
-            if not ok:
-                print_info("Cancelled.")
+            if not self._confirm(f"'{name}' already exists. Overwrite?", default=False):
                 return
-
-        desc = ask_text("Description (optional):", default="")
-        if desc is None:
-            desc = ""
-
+        desc = self._input("Description (optional):", title="Add Format Template") or ""
         try:
             fmt_tmpls[name] = build_format_template(base_x, ar, scale, desc)
         except ValueError as exc:
-            print_error(str(exc))
+            self._err(str(exc))
             return
-
-        self.templates_modified = True
-        print_success(f"Added '{name}': gt_size={gt_size}, lr_size={lr_size}")
+        self.m.templates_modified = True
+        self._ok(f"Added '{name}': GT={gt_str}  LR={lr_str}")
 
     def _remove_format_template(self):
-        fmt_tmpls = self.templates.get("format_templates", {})
+        fmt_tmpls = self.m.templates.get("format_templates", {})
         if not fmt_tmpls:
-            print_warn("No format templates.")
+            self._warn("No format templates.")
             return
-        name = ask_select(
-            "Select template to remove:",
-            [Choice(n, value=n) for n in sorted(fmt_tmpls.keys())] + [Separator(), Choice("← Cancel", value=None)],
-        )
+        name = self._menu("Select template to remove",
+                          [(n, n) for n in sorted(fmt_tmpls.keys())] +
+                          [("───", None), ("← Cancel", None)])
         if not name:
             return
-        ok = ask_confirm(f"Remove '{name}'?", default=False)
-        if not ok:
-            print_info("Cancelled.")
+        if not self._confirm(f"Remove '{name}'?", default=False):
             return
         del fmt_tmpls[name]
-        self.templates_modified = True
-        print_success(f"Removed format template '{name}'")
+        self.m.templates_modified = True
+        self._ok(f"Removed format template '{name}'")
 
     def _list_degradation_templates(self):
-        deg_tmpls = self.templates.get("degradation_templates", {})
+        deg_tmpls = self.m.templates.get("degradation_templates", {})
         if not deg_tmpls:
-            print_warn("No degradation templates defined.")
+            self._warn("No degradation templates defined.")
             return
+        lines = []
         for name, spec in sorted(deg_tmpls.items()):
             desc = spec.get("description", "")
-            console.print(f"  [bold cyan]{name}[/]" + (f"  [dim]{desc}[/]" if desc else ""))
+            lines.append(f"  {name}" + (f"  —  {desc}" if desc else ""))
             for key in ("blur", "compression", "noise", "chroma", "color"):
                 if key in spec:
-                    console.print(f"    [dim]{key}:[/] {spec[key]}")
+                    lines.append(f"    {key}: {spec[key]}")
+            lines.append("")
+        self._show(lines, "Degradation Templates")
 
     def _add_edit_degradation_template(self):
-        deg_tmpls = self.templates.setdefault("degradation_templates", {})
-        existing = sorted(deg_tmpls.keys())
-        choices = [Choice(n, value=n) for n in existing] + [Separator(), Choice("+ New template…", value="__new__")]
-        sel = ask_select("Select template to edit (or create new):", choices)
+        deg_tmpls = self.m.templates.setdefault("degradation_templates", {})
+        existing  = sorted(deg_tmpls.keys())
+        choices   = [(n, n) for n in existing] + \
+                    [("───", None), ("+ New template…", "__new__")]
+        sel = self._menu("Select template to edit (or create new)", choices)
         if sel is None:
             return
         if sel == "__new__":
-            name = ask_text("New template name:", validate=lambda v: True if v.strip() else "Name required")
-            if name is None:
+            name = self._input("New template name:", title="Add Degradation Template")
+            if not name or not name.strip():
                 return
             name = name.strip()
         else:
             name = sel
-        print_info("Paste / type JSON definition. End with a blank line:")
-        lines = []
-        while True:
-            try:
-                line = input()
-            except EOFError:
-                break
-            if not line:
-                break
-            lines.append(line)
+        lines = [
+            "Paste / type JSON definition.",
+            "End with a blank line.",
+            "",
+            "Example:",
+            '  {"description": "...", "blur": {"sigma_range": [0.3, 0.9], "prob": 0.75}}',
+        ]
+        self._show(lines, "JSON Input — press any key, then type in the terminal")
+        # Fall back to raw terminal for multi-line JSON input
+        curses.def_prog_mode()
+        curses.endwin()
         try:
-            spec = json.loads("\n".join(lines))
+            json_lines = []
+            print(f"\n[{name}]  Paste JSON  (blank line to finish):\n")
+            while True:
+                try:
+                    line = input()
+                except EOFError:
+                    break
+                if not line:
+                    break
+                json_lines.append(line)
+            spec = json.loads("\n".join(json_lines))
         except json.JSONDecodeError as e:
-            print_error(f"JSON parse error: {e}")
+            curses.reset_prog_mode()
+            self.stdscr.refresh()
+            self._err(f"JSON parse error: {e}")
             return
+        except Exception as e:
+            curses.reset_prog_mode()
+            self.stdscr.refresh()
+            self._err(str(e))
+            return
+        curses.reset_prog_mode()
+        self.stdscr.refresh()
         deg_tmpls[name] = spec
-        self.templates_modified = True
-        print_success(f"Saved degradation template '{name}'")
+        self.m.templates_modified = True
+        self._ok(f"Saved degradation template '{name}'")
 
     def _remove_degradation_template(self):
-        deg_tmpls = self.templates.get("degradation_templates", {})
+        deg_tmpls = self.m.templates.get("degradation_templates", {})
         if not deg_tmpls:
-            print_warn("No degradation templates.")
+            self._warn("No degradation templates.")
             return
-        name = ask_select(
-            "Select template to remove:",
-            [Choice(n, value=n) for n in sorted(deg_tmpls.keys())] + [Separator(), Choice("← Cancel", value=None)],
-        )
+        name = self._menu("Select template to remove",
+                          [(n, n) for n in sorted(deg_tmpls.keys())] +
+                          [("───", None), ("← Cancel", None)])
         if not name:
             return
-        ok = ask_confirm(f"Remove '{name}'?", default=False)
-        if not ok:
-            print_info("Cancelled.")
+        if not self._confirm(f"Remove '{name}'?", default=False):
             return
         del deg_tmpls[name]
-        self.templates_modified = True
-        print_success(f"Removed degradation template '{name}'")
+        self.m.templates_modified = True
+        self._ok(f"Removed '{name}'")
 
-    def _ensure_source_dirs(self):
-        self.config.setdefault("source_dirs", [])
-        return self.config["source_dirs"]
+    # ── CONFIG section ─────────────────────────────────────────────────────────
 
-    def list_source_dirs(self):
-        source_dirs = self._ensure_source_dirs()
-        if not source_dirs:
-            print_warn("No source directories configured.")
-            return
-        t = make_table("#", "Path", "Extensions")
-        for i, entry in enumerate(source_dirs):
-            t.add_row(str(i), entry.get("path", "?"), ", ".join(entry.get("extensions", [])))
-        console.print(t)
+    def _section_config(self):
+        while True:
+            self._bg()
+            action = self._menu("Config & Validation", [
+                ("Show statistics",        "stats"),
+                ("Validation report",      "validate"),
+                ("───", None),
+                ("Create new config file", "new_cfg"),
+                ("───", None),
+                ("← Back",                "back"),
+            ])
+            if action is None or action == "back":
+                break
+            elif action == "stats":
+                self._show_statistics()
+            elif action == "validate":
+                self._show_validation()
+            elif action == "new_cfg":
+                self._create_config()
 
-    def add_source_dir(self):
-        source_dirs = self._ensure_source_dirs()
-        path = ask_text("Directory path:", validate=lambda v: True if v.strip() else "Path required")
-        if path is None:
-            return
-        path = path.strip()
-        if not path:
-            print_error("Path cannot be empty")
-            return
-        if any(d.get("path") == path for d in source_dirs):
-            print_error(f"Already configured: {path}")
-            return
-        exts_str = ask_text("Extensions (comma-separated):", default=".mkv,.mp4,.avi")
-        if exts_str is None:
-            return
-        exts = [e.strip() for e in exts_str.split(",") if e.strip()]
-        source_dirs.append({"path": path, "extensions": exts})
-        self.modified = True
-        print_success(f"Added: {path}")
+    def _show_statistics(self):
+        lines = []
+        n_total    = len(self.m.videos)
+        n_unassign = sum(1 for v in self.m.videos if not v.get("categories"))
+        lines.append(f"  Total videos  : {n_total}")
+        lines.append(f"  Unassigned    : {n_unassign}")
+        lines.append("")
 
-    def edit_source_dir(self):
-        source_dirs = self._ensure_source_dirs()
-        if not source_dirs:
-            print_warn("No source directories configured.")
-            return
-        choices = [
-            Choice(f"[{i}] {e.get('path','?')}", value=i)
-            for i, e in enumerate(source_dirs)
-        ] + [Separator(), Choice("← Cancel", value=None)]
-        idx = ask_select("Select source directory to edit:", choices)
-        if idx is None:
-            return
-        entry = source_dirs[idx]
-        new_path = ask_text("New path:", default=entry["path"])
-        if new_path is not None and new_path.strip():
-            entry["path"] = new_path.strip()
-        cur_exts = ", ".join(entry.get("extensions", []))
-        new_exts = ask_text("Extensions:", default=cur_exts)
-        if new_exts is not None and new_exts.strip():
-            entry["extensions"] = [e.strip() for e in new_exts.split(",") if e.strip()]
-        self.modified = True
-        print_success(f"Updated source directory #{idx}")
+        for cat in sorted(self.m.categories.keys()):
+            cfg     = self.m.categories[cat]
+            target  = cfg.get("target_total", "?")
+            tstr    = f"{target:,}" if isinstance(target, int) else str(target)
+            n_vids  = sum(1 for v in self.m.videos if cat in get_video_categories(v))
+            formats = cfg.get("formats", [])
+            total_w = sum(f.get("weight", 0) for f in formats) or 1
 
-    def remove_source_dir(self):
-        source_dirs = self._ensure_source_dirs()
-        if not source_dirs:
-            print_warn("No source directories configured.")
-            return
-        choices = [
-            Choice(f"[{i}] {e.get('path','?')}", value=i)
-            for i, e in enumerate(source_dirs)
-        ] + [Separator(), Choice("← Cancel", value=None)]
-        idx = ask_select("Select source directory to remove:", choices)
-        if idx is None:
-            return
-        path = source_dirs[idx].get("path", "?")
-        ok = ask_confirm(f"Remove '{path}'?", default=False)
-        if not ok:
-            print_info("Cancelled.")
-            return
-        source_dirs.pop(idx)
-        self.modified = True
-        print_success(f"Removed: {path}")
+            lines.append(f"▸  {cat}  (target: {tstr}  videos: {n_vids})")
+            lines.append("─" * 60)
+            for fmt in formats:
+                tmpl  = fmt.get("template", "?")
+                w     = fmt.get("weight", 0)
+                mode  = fmt.get("source_mode", "?")
+                share = f"{w/total_w*100:.1f}%"
+                deg   = ", ".join(f"{k}:{v}" for k, v in fmt.get("degradation_mix", {}).items())
+                lines.append(f"    {tmpl:<20} {mode:<8} w={w:>4}  share={share}  deg={deg or '(none)'}")
+            lines.append("")
 
-    def rescan_file_list(self):
-        source_dirs = self._ensure_source_dirs()
-        if not source_dirs:
-            print_error("No source directories configured. Add one first.")
-            return
-        if self.modified:
-            ok = ask_confirm("Unsaved changes. Save before rescanning?")
-            if ok:
-                self.save(backup=False)
-        existing_by_path = {v.get("path", ""): v for v in self.config.get("videos", [])}
-        found_paths: List[str] = []
-        seen_paths: set = set()
-        for dir_cfg in source_dirs:
-            video_dir = dir_cfg.get("path", "")
-            extensions = dir_cfg.get("extensions", [".mkv", ".mp4", ".avi"])
-            if not os.path.exists(video_dir):
-                print_warn(f"Not found (skipped): {video_dir}")
-                continue
-            exts_lower = {e.lower() for e in extensions}
-            for p in Path(video_dir).rglob("*"):
-                if p.is_file() and p.suffix.lower() in exts_lower:
-                    path_str = str(p)
-                    if path_str not in seen_paths:
-                        seen_paths.add(path_str)
-                        found_paths.append(path_str)
-        new_videos: List[dict] = []
-        added = kept = 0
-        for path in sorted(found_paths):
-            if path in existing_by_path:
-                new_videos.append(existing_by_path[path])
-                kept += 1
-            else:
-                new_videos.append({"name": Path(path).stem, "path": path, "categories": []})
-                added += 1
-        self.config["videos"] = new_videos
-        self.videos = new_videos
-        self.modified = True
-        print_success(f"Rescan complete: {len(new_videos)} videos ({kept} kept, {added} newly added)")
-        if added:
-            print_info("Use 'Assign to category' to categorise the new videos.")
+        self._show(lines, "Statistics")
 
-    def show_validation_report(self):
-        print_rule("Validation Report")
-        t_errors = validate_templates(self.templates)
-        c_errors = validate_active_config(self.config, self.templates)
-        all_errors = t_errors + c_errors
-        if not all_errors:
-            print_success("No validation errors found.")
+    def _show_validation(self):
+        errors = self.m.validation_report()
+        if not errors:
+            self._show(["✓  No validation errors found."], "Validation Report")
         else:
-            print_error(f"{len(all_errors)} error(s) found:")
-            for e in all_errors:
-                console.print(f"  [red]•[/] {e}")
+            lines = [f"  {len(errors)} error(s) found:", ""]
+            for e in errors:
+                lines.append(f"  • {e}")
+            self._show(lines, "Validation Report — ERRORS")
+
+    def _create_config(self):
+        ts           = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_name = f"generator_config_new_{ts}.active.json"
+        name         = self._input("Output filename:", default=default_name,
+                                   title="Create Config File")
+        if not name:
+            return
+        out_path = str(Path(self.m.config_path).parent / (name.strip() or default_name))
+        if os.path.exists(out_path):
+            if not self._confirm(f"File exists: {name.strip()}\nOverwrite?", default=False):
+                return
+        save_active_config(create_default_active_config(), out_path)
+        self._show([
+            f"✓  Created: {name.strip()}",
+            "",
+            "Next steps:",
+            "  1. Edit the file to set root_path and source_dirs",
+            "  2. Restart the manager and load the new config",
+        ], "Config Created")
 
 
-
-
-def get_categories_interactive(manager, current_categories=None):
-    """Select categories via questionary checkbox, falling back to simple input."""
-    cats = sorted(manager.categories.keys())
-    if not cats:
-        print_error("No categories configured.")
-        return None
-    try:
-        from questionary import Choice as _C, Checkbox as _CB  # noqa: F401
-        choices = [
-            _C(c, checked=(current_categories and c in current_categories))
-            for c in cats
-        ]
-        result = ask_checkbox("Select categories:", choices)
-        return result  # None on cancel, list otherwise
-    except Exception:
-        return _get_categories_simple(manager, current_categories)
-
-
-def _get_categories_simple(manager, current_categories=None):
-    available = sorted(manager.categories.keys())
-    print_info(f"Available: {', '.join(available)}")
-    if current_categories:
-        print_info(f"Current: {', '.join(current_categories)}")
-    while True:
-        raw = ask_text("Categories (comma-separated, or 'none' to clear):")
-        if raw is None:
-            return None
-        if raw.lower() == "none":
-            return []
-        cats = [c.strip() for c in raw.split(",") if c.strip()]
-        invalid = [c for c in cats if c not in manager.categories]
-        if invalid:
-            print_error(f"Unknown: {', '.join(invalid)}")
-            continue
-        return cats
-
-
-# ── Main menu ─────────────────────────────────────────────────────────────────
-
-def _build_main_menu(manager) -> list:
-    m = manager
-    n_vids = len(m.videos)
-    n_unassigned = sum(1 for v in m.videos if not v.get("categories"))
-    n_srcs = len(m.config.get("source_dirs", []))
-    fmt_count = len(m.templates.get("format_templates", {}))
-    deg_count  = len(m.templates.get("degradation_templates", {}))
-    cfg_tag = "  [yellow bold]⚡ unsaved[/]" if m.modified else ""
-    tpl_tag = "  [yellow bold]⚡ unsaved[/]" if m.templates_modified else ""
-
-    return [
-        Choice(f"📹  Videos  ({n_vids} total, {n_unassigned} unassigned)",  value="videos"),
-        Choice(f"🗂️  Categories & Formats  ({len(m.categories)} categories)", value="categories"),
-        Choice(f"📁  Source Directories  ({n_srcs} dirs)",                   value="sources"),
-        Choice(f"🎨  Templates  ({fmt_count} format, {deg_count} degradation)", value="templates"),
-        Choice("⚙️  Config & Validation",                                    value="config"),
-        Separator(),
-        Choice(f"💾  Save config{cfg_tag}",     value="save_config"),
-        Choice(f"📋  Save templates{tpl_tag}",  value="save_templates"),
-        Separator(),
-        Choice("🚪  Quit",                       value="quit"),
-    ]
-
+# ── Entry point ────────────────────────────────────────────────────────────────
 
 def main():
-    from pathlib import Path as _Path
-    script_dir = _Path(__file__).parent
+    script_dir         = Path(__file__).parent
     active_config_path = script_dir / "generator_config_v2.active.json"
-    templates_path = script_dir / "templates.json"
+    templates_path     = script_dir / "templates.json"
 
     if not active_config_path.exists():
-        print_warn("No active config found – creating default…")
         save_active_config(create_default_active_config(), str(active_config_path))
-        print_success(f"Created {active_config_path.name}")
-        print_info("→ Adjust root_path and source_dirs, then restart.")
+        print(f"Created default config: {active_config_path.name}")
+        print("Edit root_path and source_dirs, then restart.")
 
     ensure_templates_file(str(templates_path))
-
-    console.print(f"[dim]config   : {active_config_path.name}[/]")
-    console.print(f"[dim]templates: {templates_path.name}[/]")
 
     manager = VideoManager(str(active_config_path), str(templates_path))
     try:
         manager.load()
     except Exception as e:
-        print_error(f"Error loading config: {e}")
+        print(f"ERROR loading config: {e}", file=sys.stderr)
         traceback.print_exc()
         sys.exit(1)
 
-    while True:
-        console.print()
-        print_banner(
-            videos=len(manager.videos),
-            categories=len(manager.categories),
-            unsaved_cfg=manager.modified,
-            unsaved_tpl=manager.templates_modified,
-        )
-        try:
-            action = ask_select("", _build_main_menu(manager))
-        except KeyboardInterrupt:
-            action = None
-
-        if action is None or action == "quit":
-            if manager.modified or manager.templates_modified:
-                save = ask_confirm("Save changes before quitting?")
-                if save:
-                    if manager.modified:
-                        manager.save()
-                    if manager.templates_modified:
-                        manager.save_templates()
-            console.print("[dim]Goodbye![/]")
-            break
-
-        try:
-            if action == "videos":
-                _menu_videos(manager)
-
-            elif action == "categories":
-                manager.manage_categories()
-
-            elif action == "sources":
-                _menu_sources(manager)
-
-            elif action == "templates":
-                manager.manage_templates()
-
-            elif action == "config":
-                _menu_config(manager)
-
-            elif action == "save_config":
-                if manager.modified:
-                    manager.save()
-                else:
-                    print_info("No config changes to save.")
-
-            elif action == "save_templates":
-                if manager.templates_modified:
-                    manager.save_templates()
-                else:
-                    print_info("No template changes to save.")
-
-        except KeyboardInterrupt:
-            print_warn("Interrupted – back to main menu.")
-        except Exception as e:
-            print_error(f"Error: {e}")
-            traceback.print_exc()
-            console.print("[dim]Continuing…[/]")
-
-
-# ── Section sub-menus ─────────────────────────────────────────────────────────
-
-def _menu_videos(manager):
-    while True:
-        action = ask_select(
-            "Videos",
-            [
-                Choice("List all videos",           value="list_all"),
-                Choice("List by category",           value="list_by_cat"),
-                Choice("List unassigned",            value="list_unassigned"),
-                Choice("Search by name",             value="search"),
-                Separator(),
-                Choice("Assign to category",         value="assign"),
-                Choice("Assign by pattern",          value="assign_pattern"),
-                Choice("Interactive multi-select",   value="interactive"),
-                Choice("Remove from category",       value="remove_from_cat"),
-                Separator(),
-                Choice("Set forced frames",          value="forced"),
-                Choice("Reset all assignments",      value="reset"),
-                Separator(),
-                Choice("← Back",                    value="back"),
-            ],
-        )
-        if action is None or action == "back":
-            break
-
-        elif action == "list_all":
-            show_all = ask_confirm("Show all videos? (No = first 20)", default=False)
-            manager.print_video_list(manager.list_videos(), max_display=None if show_all else 20)
-
-        elif action == "list_by_cat":
-            cat = ask_select(
-                "Select category:",
-                [Choice(c, value=c) for c in sorted(manager.categories.keys())] + [Separator(), Choice("← Cancel", value=None)],
-            )
-            if cat:
-                manager.print_video_list(manager.list_videos(category=cat), max_display=None)
-
-        elif action == "list_unassigned":
-            manager.print_video_list(manager.list_videos(show_unassigned=True), max_display=None)
-
-        elif action == "search":
-            pattern = ask_text("Search pattern (text or regex):")
-            if pattern and pattern.strip():
-                manager.print_video_list(manager.list_videos(filter_pattern=pattern.strip()), max_display=None)
-
-        elif action == "assign":
-            filter_str = ask_text("Optional filter (leave empty for all):", default="")
-            videos = manager.list_videos(filter_pattern=filter_str.strip() or None)
-            if not videos:
-                print_warn("No videos found.")
-                continue
-            sorted_vids = _sorted_videos(videos)
-            try:
-                selected = select_items(
-                    items=[v for _, v in sorted_vids],
-                    title="Select videos  Space=toggle  Enter=confirm  Esc=cancel",
-                    get_label=lambda v: _short_path(v.get("path", ""), depth=3),
-                    get_details=lambda v: format_categories_display(v.get("categories", [])),
-                )
-            except Exception as e:
-                print_warn(f"Curses UI failed: {e}")
-                continue
-            if selected is None:
-                print_info("Cancelled.")
-                continue
-            video_indices = [sorted_vids[i][0] for i in selected]
-            print_success(f"Selected {len(video_indices)} videos")
-            categories = get_categories_interactive(manager)
-            if categories is None:
-                print_info("Cancelled.")
-                continue
-            manager.assign_videos(video_indices, categories)
-
-        elif action == "assign_pattern":
-            pattern = ask_text("Pattern (text or regex):")
-            if not pattern or not pattern.strip():
-                continue
-            pat = pattern.strip()
-            use_simple = "*" in pat or not any(c in pat for c in r"\.[](){}^$+?|")
-            videos = manager.list_videos(filter_pattern=pat, use_simple_search=use_simple)
-            if not videos:
-                print_warn(f"No matches for: {pat}")
-                continue
-            manager.print_video_list(videos)
-            ok = ask_confirm(f"Assign all {len(videos)} matching videos?")
-            if not ok:
-                continue
-            categories = get_categories_interactive(manager)
-            if categories:
-                manager.assign_videos([i for i, _ in videos], categories)
-
-        elif action == "interactive":
-            filter_str = ask_text("Optional filter:", default="")
-            selected_ids = manager.interactive_select_videos(filter_str.strip() or None)
-            if selected_ids:
-                print_success(f"Selected {len(selected_ids)} videos")
-                categories = get_categories_interactive(manager)
-                if categories:
-                    manager.assign_videos(selected_ids, categories)
-            else:
-                print_info("Selection cancelled.")
-
-        elif action == "remove_from_cat":
-            cat = ask_select(
-                "Remove from category:",
-                [Choice(c, value=c) for c in sorted(manager.categories.keys())] + [Separator(), Choice("← Cancel", value=None)],
-            )
-            if not cat:
-                continue
-            ids_sel = ask_select(
-                "Which videos?",
-                [Choice("All videos in this category", value="all"), Choice("Enter IDs manually", value="ids")],
-            )
-            if ids_sel == "all":
-                ids = list(range(len(manager.videos)))
-            elif ids_sel == "ids":
-                raw = ask_text("Video IDs (comma-separated):")
-                if raw is None:
-                    continue
-                try:
-                    ids = [int(x.strip()) for x in raw.split(",") if x.strip()]
-                except ValueError:
-                    print_error("Invalid IDs")
-                    continue
-            else:
-                continue
-            manager.remove_from_category(ids, cat)
-
-        elif action == "forced":
-            raw = ask_text("Video ID(s) (comma-separated):")
-            if raw is None:
-                continue
-            try:
-                ids = [int(x.strip()) for x in raw.split(",") if x.strip()]
-            except ValueError:
-                print_error("Invalid IDs")
-                continue
-            manager.set_forced_frames(ids)
-
-        elif action == "reset":
-            manager.reset_all()
-
-
-def _menu_sources(manager):
-    while True:
-        action = ask_select(
-            "Source Directories",
-            [
-                Choice("List source dirs",   value="list"),
-                Choice("Add source dir",     value="add"),
-                Choice("Edit source dir",    value="edit"),
-                Choice("Remove source dir",  value="remove"),
-                Separator(),
-                Choice("Rescan file list",   value="rescan"),
-                Separator(),
-                Choice("← Back",            value="back"),
-            ],
-        )
-        if action is None or action == "back":
-            break
-        elif action == "list":
-            manager.list_source_dirs()
-        elif action == "add":
-            manager.add_source_dir()
-        elif action == "edit":
-            manager.edit_source_dir()
-        elif action == "remove":
-            manager.remove_source_dir()
-        elif action == "rescan":
-            manager.rescan_file_list()
-
-
-def _menu_config(manager):
-    while True:
-        action = ask_select(
-            "Config & Validation",
-            [
-                Choice("Show statistics",           value="stats"),
-                Choice("Validation report",         value="validate"),
-                Separator(),
-                Choice("Manage category formats",   value="cat_formats"),
-                Separator(),
-                Choice("Create new config file",    value="new_cfg"),
-                Separator(),
-                Choice("← Back",                   value="back"),
-            ],
-        )
-        if action is None or action == "back":
-            break
-        elif action == "stats":
-            manager.show_statistics()
-        elif action == "validate":
-            manager.show_validation_report()
-        elif action == "cat_formats":
-            manager.manage_category_formats()
-        elif action == "new_cfg":
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            default_name = f"generator_config_new_{ts}.active.json"
-            name = ask_text("Output filename:", default=default_name)
-            if name is None:
-                continue
-            from pathlib import Path as _P
-            out_path = str(_P(manager.config_path).parent / (name.strip() or default_name))
-            if os.path.exists(out_path):
-                ok = ask_confirm(f"'{out_path}' exists. Overwrite?", default=False)
-                if not ok:
-                    print_info("Cancelled.")
-                    continue
-            save_active_config(create_default_active_config(), out_path)
-            print_success(f"Created {out_path}")
-            print_info("→ Adjust root_path and source_dirs, then reload.")
+    app = _App(manager)
+    app.run()
 
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        console.print("\n[dim]Interrupted.[/]")
-        sys.exit(0)
+        pass
     except Exception as e:
-        print_error(f"Unexpected error: {e}")
+        print(f"Unexpected error: {e}", file=sys.stderr)
         traceback.print_exc()
         sys.exit(1)
