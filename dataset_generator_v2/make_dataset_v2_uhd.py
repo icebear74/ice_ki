@@ -263,6 +263,7 @@ class DatasetGeneratorV2UHD:
             "eta": {},
             "live_fps": 0.0,
             "live_sps": 0.0,
+            "decode_backend": "–",   # filled in by _run_decode_benchmark
             "categories": list(self.category_targets.keys()),
             "format_sizes": list(next(iter(self.format_config.values()), {}).keys()),
         }
@@ -338,17 +339,27 @@ class DatasetGeneratorV2UHD:
                         best = cache.get("best", {})
                         self.cuda_device = best.get("cuda_device", 0)
                         self.use_cuda    = best.get("use_cuda", self.use_cuda)
+                        _backend_lbl = best.get("label", "?")
+                        _n_w         = cache.get("best_parallel", {})
+                        _n_w_str     = (
+                            f"  |  {_n_w['n_workers']}× parallel: {_n_w['fps']:.0f} fps"
+                            if _n_w and _n_w.get("fps") else ""
+                        )
+                        self.ui_state["decode_backend"] = (
+                            f"{_backend_lbl}  [{best.get('fps', 0):.0f} fps single"
+                            f"{_n_w_str}]"
+                        )
                         print(
                             f"\n  ♻️  Decode benchmark cache ({age_days:.1f}d old) — "
                             f"skipping re-run.\n"
-                            f"  Best pipeline : {best.get('label', '?')}\n"
+                            f"  Best pipeline : {_backend_lbl}\n"
                             f"  Throughput    : {best.get('fps', 0):.1f} fps  "
                             f"(use_cuda={self.use_cuda}, cuda_device={self.cuda_device})\n"
                             f"  Cache file    : {cache_path}\n"
                             f"  Tip           : run with --benchmark to force a fresh measurement.\n"
                         )
                         self.logger.info(
-                            f"Decode backend from cache: {best.get('label','?')} "
+                            f"Decode backend from cache: {_backend_lbl} "
                             f"[cuda_device={self.cuda_device}, use_cuda={self.use_cuda}, "
                             f"fps={best.get('fps',0):.1f}]"
                         )
