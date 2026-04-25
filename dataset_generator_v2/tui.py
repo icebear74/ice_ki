@@ -151,7 +151,7 @@ def draw_background(
     else:
         _safe(stdscr, sh - 1, 0, "  ↑↓/k/j=navigate   Enter=select   Esc/q=cancel".ljust(sw), _a(_P_STATUS))
 
-    stdscr.refresh()
+    stdscr.noutrefresh()
 
 
 # ── menu_box ───────────────────────────────────────────────────────────────────
@@ -225,7 +225,8 @@ def menu_box(
             bar_y = 1 + int(frac * (visible - 1))
             _safe(win, bar_y, width - 1, "█", _a(_P_BORDER))
 
-        win.refresh()
+        win.noutrefresh()
+        curses.doupdate()
         key = win.getch()
 
         def _prev():
@@ -314,7 +315,8 @@ def confirm_box(
         _safe(win, height - 2, yes_x, yes_lbl, ya)
         _safe(win, height - 2, no_x,  no_lbl,  na)
 
-        win.refresh()
+        win.noutrefresh()
+        curses.doupdate()
         key = win.getch()
 
         if key in (curses.KEY_LEFT, curses.KEY_RIGHT, ord('\t')):
@@ -385,7 +387,8 @@ def message_box(
             scrollinfo = ""
         _safe(win, height - 2, 2, scrollinfo + ok_text, _a(_P_DIM, dim=True))
 
-        win.refresh()
+        win.noutrefresh()
+        curses.doupdate()
         key = win.getch()
 
         if key in (curses.KEY_UP, ord('k')):
@@ -448,7 +451,8 @@ def input_box(
             win.move(3, cx)
         except curses.error:
             pass
-        win.refresh()
+        win.noutrefresh()
+        curses.doupdate()
 
         key = win.getch()
 
@@ -575,7 +579,8 @@ def checkbox_box(
         elif cur >= offset + visible:
             offset = cur - visible + 1
 
-        win.refresh()
+        win.noutrefresh()
+        curses.doupdate()
         key = win.getch()
 
         if key in (curses.KEY_UP, ord('k')):
