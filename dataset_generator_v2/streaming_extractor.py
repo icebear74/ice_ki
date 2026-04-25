@@ -305,17 +305,47 @@ def tonemap_cuda_available() -> bool:
 
 
 def libplacebo_available() -> bool:
-    """Return True when the local FFmpeg build includes the ``libplacebo`` filter.
+    """Return True when libplacebo is usable at runtime (Vulkan device opens).
 
-    libplacebo (``--enable-libplacebo``) replaces the 4-step zscale+tonemap
-    CPU chain with a single shader-based HDR→SDR pass.  It is typically
-    2-4× faster than zscale for equivalent quality.
+    Two-stage check:
+    1. Verify that ``libplacebo`` is listed by ``ffmpeg -filters`` (compiled-in
+       with ``--enable-libplacebo``).
+    2. Perform a functional Vulkan probe by running a single libplacebo frame
+       through a 64×64 dummy source.  This step fails with a non-zero exit code
+       when the Vulkan device cannot be initialised (``VK_ERROR_INITIALIZATION_FAILED``
+       or similar) — even if the filter is compiled in.  Without this probe,
+       machines where Vulkan fails at runtime would still select the libplacebo
+       path, causing the entire FFmpeg filter chain to crash and decode 0 frames.
 
     The result is cached after the first call so repeated checks are free.
     """
     global _libplacebo_avail
     if _libplacebo_avail is None:
-        _libplacebo_avail = "libplacebo" in _get_ffmpeg_filters()
+        if "libplacebo" not in _get_ffmpeg_filters():
+            _libplacebo_avail = False
+        else:
+            # Stage 2: functional Vulkan probe — attempt a real libplacebo pass.
+            # FFmpeg exits non-zero when Vulkan device creation fails.
+            try:
+                probe = subprocess.run(
+                    [
+                        "ffmpeg", "-hide_banner", "-loglevel", "error",
+                        "-f", "lavfi", "-i", "color=c=black:size=64x64:duration=0.04",
+                        "-vf", (
+                            "libplacebo=w=64:h=64"
+                            ":colorspace=bt709:color_trc=bt709:color_primaries=bt709"
+                            ":tonemapping=mobius:range=pc:downscaler=bilinear,"
+                            "format=yuv420p"
+                        ),
+                        "-frames:v", "1", "-f", "null", "-",
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=15,
+                )
+                _libplacebo_avail = probe.returncode == 0
+            except Exception:
+                _libplacebo_avail = False
     return _libplacebo_avail
 
 
