@@ -289,8 +289,9 @@ class DatasetGeneratorV2UHD:
 
         Tests every meaningful decode pipeline variant (CPU-only, CUDA NVDEC per
         GPU, CUDA NVDEC + scale_cuda per GPU, full-GPU tonemap_cuda per GPU when
-        HDR source and libnpp are available) plus 2-worker parallel variants that
-        simulate a future parallel video-processing loop.
+        HDR source and libnpp are available), then runs a comprehensive parallel
+        matrix with N = ``self.workers`` concurrent jobs to find the optimal
+        GPU/CPU split for production use.
 
         All FFmpeg child processes are started at idle nice priority (same value
         as the main extraction loop uses) to avoid disturbing other system
@@ -316,9 +317,9 @@ class DatasetGeneratorV2UHD:
         * Multi-category videos are fully handled in a single FFmpeg pass by the
           extractor, so benchmarking one-pass 4 K decode is representative even
           for videos that belong to several categories simultaneously.
-        * Parallel variants test two FFmpeg processes running concurrently to
-          quantify the benefit of distributing future parallel workers across
-          separate GPUs.
+        * Parallel variants measure Family A (K × GPU + (N-K) × CPU sweep) and
+          Family B/C (dual-GPU split) so we can find the NVDEC saturation point
+          and whether CPU fill-up after saturating the GPU still pays off.
         """
         CACHE_MAX_AGE_DAYS = 7
         WARMUP_FRAMES      = 20
@@ -600,115 +601,188 @@ class DatasetGeneratorV2UHD:
                 "hw_args": hw_args, "filter": fchain,
             })
 
-        # ── Parallel 2-worker variants ────────────────────────────────────────
-        # Simulate two simultaneously executing FFmpeg jobs (as would happen with
-        # a parallel video-processing loop) and measure combined decode fps.
-        # This directly answers whether distributing workers across two GPUs
-        # yields more total throughput than doubling up on one GPU.
+        # ── Parallel N-worker variants ────────────────────────────────────────
+        # Build every meaningful (GPU-streams, CPU-streams) combination for
+        # N = self.workers concurrent jobs, so we can answer:
+        #   • Does adding more GPU decode streams help or saturate NVDEC?
+        #   • Is it better to split N workers across two GPUs?
+        #   • Is CPU fill-up after GPU streams worth it?
+        #
+        # Variant families tested (N = self.workers):
+        #   A) K × best-GPU  +  (N-K) × CPU    K = 0 … N  (saturation sweep)
+        #   B) K × GPU0  +  K × GPU1  + (N-2K) × CPU     K = 1 … N//2  (if ≥2 GPUs)
+        #   C) balanced split:  ceil(N/2) × GPU0  +  floor(N/2) × GPU1 (if ≥2 GPUs)
+        #
+        # Each test runs all N threads simultaneously, measures combined fps.
 
-        valid_singles  = [r for r in single_results if r["fps"] is not None]
-        best_single    = max(valid_singles, key=lambda r: r["fps"]) if valid_singles else None
+        valid_singles = [r for r in single_results if r["fps"] is not None]
+        best_single   = max(valid_singles, key=lambda r: r["fps"]) if valid_singles else None
         parallel_results: List[dict] = []
+        N = max(self.workers, 2)   # at least 2 to make parallel testing meaningful
 
-        if best_single:
-            print(f"\n  {'Parallel variants (2 workers)':<{COL}}  {'fps':>8}  {'vs 1×':>8}")
-            print(f"  {'─'*COL}  {'─'*8}  {'─'*8}")
+        # Best single-GPU config (cpu args + filter chain) and CPU config
+        gpu_best_by_idx: Dict[int, dict] = {}   # gpu_device_int → best single result
+        for r in single_results:
+            vid_id = r["variant_id"]
+            if r["fps"] and not vid_id.startswith("cpu"):
+                try:
+                    gidx = int(vid_id.split("_")[0].replace("gpu", ""))
+                except ValueError:
+                    continue
+                if gidx not in gpu_best_by_idx or r["fps"] > gpu_best_by_idx[gidx]["fps"]:
+                    gpu_best_by_idx[gidx] = r
+        sorted_gpu_results = sorted(gpu_best_by_idx.values(),
+                                    key=lambda r: r["fps"], reverse=True)
+        cpu_result = next((r for r in single_results if r["variant_id"] == "cpu"), None)
 
-            def _bench_parallel(
-                hw_a: List[str], fc_a: str,
-                hw_b: List[str], fc_b: str,
-            ) -> Optional[float]:
-                """Run two FFmpeg workers concurrently; return combined fps."""
-                fps_slots: List[Optional[float]] = [None, None]
+        def _bench_n_workers(configs: List[Tuple[List[str], str]]) -> Optional[float]:
+            """Run len(configs) FFmpeg workers simultaneously; return combined fps."""
+            n = len(configs)
+            fps_slots: List[Optional[float]] = [None] * n
 
-                def _worker(slot: int, hw: List[str], fc: str) -> None:
-                    fps_slots[slot] = _bench_one(hw, fc)
+            def _w(slot: int, hw: List[str], fc: str) -> None:
+                fps_slots[slot] = _bench_one(hw, fc)
 
-                threads = [
-                    threading.Thread(target=_worker, args=(0, hw_a, fc_a)),
-                    threading.Thread(target=_worker, args=(1, hw_b, fc_b)),
-                ]
-                for t in threads:
-                    t.start()
-                for t in threads:
-                    t.join()
-                valid = [f for f in fps_slots if f is not None]
-                return sum(valid) if valid else None
+            threads = [
+                threading.Thread(target=_w, args=(i, hw, fc), daemon=True)
+                for i, (hw, fc) in enumerate(configs)
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            valid = [f for f in fps_slots if f is not None]
+            return sum(valid) if valid else None
 
-            p_count = 0
+        p_count = 0
 
-            # P1: 2× best single pipeline on the same config
-            bs_hw  = best_single["hw_args"]
-            bs_fc  = best_single["filter"]
-            p1_lbl = f"2 × {best_single['label']}"
+        def _run_par(vid_id: str, label: str, configs: List[Tuple[List[str], str]],
+                     reference_fps: Optional[float] = None) -> None:
+            nonlocal p_count
             p_count += 1
-            print(f"  [P{p_count}] {p1_lbl:<{COL - 5}} …", end="", flush=True)
-            p1_fps = _bench_parallel(bs_hw, bs_fc, bs_hw, bs_fc)
-            ratio1 = f"×{p1_fps / best_single['fps']:.2f}" if (p1_fps and best_single["fps"]) else "  n/a"
-            if p1_fps:
-                print(f"\r  [P{p_count}] {p1_lbl:<{COL - 5}}   {p1_fps:7.1f}  {ratio1:>8}")
+            n_w = len(configs)
+            line_pfx = f"  [P{p_count:02d}/{n_w}w] {label}"
+            print(f"{line_pfx:<{COL + 8}} …", end="", flush=True)
+            fps = _bench_n_workers(configs)
+            ratio = (
+                f"×{fps / reference_fps:.2f}"
+                if fps and reference_fps else "  n/a"
+            )
+            if fps:
+                print(f"\r{line_pfx:<{COL + 8}}   {fps:7.1f} fps  {ratio:>6}")
             else:
-                print(f"\r  [P{p_count}] {p1_lbl:<{COL - 5}}      n/a    n/a")
+                print(f"\r{line_pfx:<{COL + 8}}      n/a fps     n/a")
             parallel_results.append({
-                "variant_id": "parallel_2x_best", "label": p1_lbl,
-                "fps": p1_fps, "n_workers": 2,
+                "variant_id": vid_id,
+                "label": label,
+                "fps": fps,
+                "n_workers": n_w,
             })
 
-            # P2: best GPU for GPU-0 + best GPU for GPU-1 (round-robin, if ≥2 GPUs)
-            gpu_best: Dict[str, dict] = {}
-            for r in single_results:
-                if r["fps"] and not r["variant_id"].startswith("cpu"):
-                    # variant_id format: "gpu<N>_<tier>" e.g. "gpu0_decode", "gpu1_scale"
-                    gkey = r["variant_id"].split("_")[0]   # → "gpu0", "gpu1", …
-                    if gkey not in gpu_best or (r["fps"] or 0) > (gpu_best[gkey]["fps"] or 0):
-                        gpu_best[gkey] = r
-            sorted_gpu = sorted(gpu_best.values(), key=lambda r: r["fps"] or 0, reverse=True)
+        if best_single:
+            print(f"\n  Parallel variants  (N = {N} workers  —  simulates production load)")
+            print(f"  {'─' * (_W - 2)}")
+            print(f"  {'Label':<{COL + 8}}  {'total fps':>10}  {'vs 1×':>6}")
+            print(f"  {'─' * (_W - 2)}")
 
-            if len(sorted_gpu) >= 2:
-                g0, g1 = sorted_gpu[0], sorted_gpu[1]
-                p2_lbl = (
-                    f"GPU {g0['variant_id'].split('_')[0].replace('gpu','')} best  "
-                    f"+  GPU {g1['variant_id'].split('_')[0].replace('gpu','')} best  "
-                    f"(round-robin)"
-                )
-                p_count += 1
-                print(f"  [P{p_count}] {p2_lbl:<{COL - 5}} …", end="", flush=True)
-                p2_fps = _bench_parallel(
-                    g0["hw_args"], g0["filter"],
-                    g1["hw_args"], g1["filter"],
-                )
-                base2 = max(g0["fps"], g1["fps"])
-                ratio2 = f"×{p2_fps / base2:.2f}" if (p2_fps and base2) else "  n/a"
-                if p2_fps:
-                    print(f"\r  [P{p_count}] {p2_lbl:<{COL - 5}}   {p2_fps:7.1f}  {ratio2:>8}")
-                else:
-                    print(f"\r  [P{p_count}] {p2_lbl:<{COL - 5}}      n/a    n/a")
-                parallel_results.append({
-                    "variant_id": "parallel_gpu_rr", "label": p2_lbl,
-                    "fps": p2_fps, "n_workers": 2,
-                })
+            # ── Family A: K × best-GPU  +  (N-K) × CPU  (K = 0 … N) ──────────
+            if sorted_gpu_results:
+                bg = sorted_gpu_results[0]   # best GPU result overall
+                bg_hw, bg_fc = bg["hw_args"], bg["filter"]
+                bg_name = bg["label"]
 
-            # P3: 2× CPU-only
-            cpu_fps = next((r["fps"] for r in single_results if r["variant_id"] == "cpu"), None)
-            if cpu_fps:
-                p3_lbl = "2 × CPU-only"
-                p_count += 1
-                print(f"  [P{p_count}] {p3_lbl:<{COL - 5}} …", end="", flush=True)
-                p3_fps = _bench_parallel([], _cpu_fchain, [], _cpu_fchain)
-                ratio3 = f"×{p3_fps / cpu_fps:.2f}" if (p3_fps and cpu_fps) else "  n/a"
-                if p3_fps:
-                    print(f"\r  [P{p_count}] {p3_lbl:<{COL - 5}}   {p3_fps:7.1f}  {ratio3:>8}")
+                if cpu_result:
+                    for k in range(0, N + 1):
+                        if k == 0:
+                            lbl = f"{N} × CPU-only  (GPU=0 baseline)"
+                            vid_id = f"par_A_k0"
+                            configs = [([], _cpu_fchain)] * N
+                            ref = cpu_result["fps"]
+                        elif k == N:
+                            lbl = f"{N} × {bg_name}  (GPU only)"
+                            vid_id = f"par_A_kN"
+                            configs = [(bg_hw, bg_fc)] * N
+                            ref = bg["fps"]
+                        else:
+                            lbl = (
+                                f"{k} × {bg_name}  +  {N - k} × CPU"
+                            )
+                            vid_id = f"par_A_k{k}"
+                            configs = (
+                                [(bg_hw, bg_fc)] * k
+                                + [([], _cpu_fchain)] * (N - k)
+                            )
+                            ref = bg["fps"]
+                        _run_par(vid_id, lbl, configs, ref)
                 else:
-                    print(f"\r  [P{p_count}] {p3_lbl:<{COL - 5}}      n/a    n/a")
-                parallel_results.append({
-                    "variant_id": "parallel_2x_cpu", "label": p3_lbl,
-                    "fps": p3_fps, "n_workers": 2,
-                })
+                    # No CPU baseline — just GPU saturation sweep
+                    for k in range(1, N + 1):
+                        lbl = f"{k} × {bg_name}"
+                        vid_id = f"par_A_k{k}"
+                        _run_par(vid_id, lbl, [(bg_hw, bg_fc)] * k, bg["fps"])
+
+            elif cpu_result:
+                # CUDA unavailable — test CPU scaling only
+                for k in range(2, N + 1):
+                    lbl = f"{k} × CPU-only"
+                    _run_par(f"par_cpu_k{k}", lbl,
+                             [([], _cpu_fchain)] * k, cpu_result["fps"])
+
+            # ── Family B: K×GPU0 + K×GPU1 + (N-2K)×CPU  (if ≥2 GPUs) ─────────
+            if len(sorted_gpu_results) >= 2:
+                g0 = sorted_gpu_results[0]
+                g1 = sorted_gpu_results[1]
+                g0_hw, g0_fc = g0["hw_args"], g0["filter"]
+                g1_hw, g1_fc = g1["hw_args"], g1["filter"]
+                g0_name = g0["label"]
+                g1_name = g1["label"]
+
+                def _gpu_idx_str(r: dict) -> str:
+                    """Extract plain GPU ordinal string from a single-result dict."""
+                    return r["variant_id"].split("_")[0].replace("gpu", "")
+
+                g0_idx = _gpu_idx_str(sorted_gpu_results[0])
+                g1_idx = _gpu_idx_str(sorted_gpu_results[1])
+
+                print(f"\n  {'─' * (_W - 2)}")
+                print(f"  Dual-GPU split variants  (GPU {g0_idx} + GPU {g1_idx})")
+                print(f"  {'─' * (_W - 2)}")
+
+                for k in range(1, N // 2 + 1):
+                    rest = N - 2 * k
+                    if rest > 0 and cpu_result:
+                        lbl = (
+                            f"{k} × GPU{g0_idx}  +  {k} × GPU{g1_idx}  +  {rest} × CPU"
+                        )
+                        vid_id = f"par_B_k{k}_cpu{rest}"
+                        configs = (
+                            [(g0_hw, g0_fc)] * k
+                            + [(g1_hw, g1_fc)] * k
+                            + [([], _cpu_fchain)] * rest
+                        )
+                    else:
+                        lbl = (
+                            f"{k} × GPU{g0_idx}  +  {k} × GPU{g1_idx}  (no CPU fill)"
+                        )
+                        vid_id = f"par_B_k{k}_nogpu"
+                        configs = [(g0_hw, g0_fc)] * k + [(g1_hw, g1_fc)] * k
+                    ref = max(g0["fps"], g1["fps"])
+                    _run_par(vid_id, lbl, configs, ref)
+
+                # C) balanced split across both GPUs, no CPU
+                # Use integer arithmetic to avoid floating-point edge cases.
+                c0 = (N + 1) // 2
+                c1 = N - c0
+                lbl_c = (
+                    f"{c0} × GPU{g0_idx}  +  {c1} × GPU{g1_idx}  (balanced, no CPU)"
+                )
+                _run_par("par_C_balanced", lbl_c,
+                         [(g0_hw, g0_fc)] * c0 + [(g1_hw, g1_fc)] * c1,
+                         max(g0["fps"], g1["fps"]))
 
         # ── Summary ───────────────────────────────────────────────────────────
-        all_valid = [r for r in single_results if r["fps"] is not None]
-        winner    = max(all_valid, key=lambda r: r["fps"]) if all_valid else None
-
+        all_valid     = [r for r in single_results if r["fps"] is not None]
+        winner        = max(all_valid, key=lambda r: r["fps"]) if all_valid else None
         all_par_valid = [r for r in parallel_results if r["fps"] is not None]
         par_winner    = (
             max(all_par_valid, key=lambda r: r["fps"]) if all_par_valid else None
@@ -722,7 +796,7 @@ class DatasetGeneratorV2UHD:
         if par_winner:
             print(
                 f"  🏆 Best parallel : {par_winner['label']:<{COL - 5}}  "
-                f"{par_winner['fps']:7.1f} fps  (2 workers combined)"
+                f"{par_winner['fps']:7.1f} fps  ({par_winner['n_workers']} workers combined)"
             )
 
         if not all_valid:
@@ -743,10 +817,20 @@ class DatasetGeneratorV2UHD:
         self.use_cuda    = use_cuda
         self.cuda_device = cuda_device
 
+        # Build the UI backend label: shows active pipeline + parallel fps
+        _par_str = (
+            f"  |  {par_winner['n_workers']}w parallel: {par_winner['fps']:.0f} fps"
+            if par_winner and par_winner["fps"] else ""
+        )
+        self.ui_state["decode_backend"] = (
+            f"{winner['label']}  [{winner['fps']:.0f} fps single{_par_str}]"
+        )
+
         print(
             f"\n  ✅ Generator configured: use_cuda={use_cuda}, "
             f"cuda_device={cuda_device}"
         )
+        print(f"  Active backend : {self.ui_state['decode_backend']}")
 
         # ── Save results to output dir ────────────────────────────────────────
         os.makedirs(self.base_dir, exist_ok=True)
@@ -754,9 +838,10 @@ class DatasetGeneratorV2UHD:
             "_ts":          time.time(),
             "_test_video":  test_video,
             "_is_hdr":      test_is_hdr,
+            "_n_workers":   N,
             "_benchmark":   (
                 f"{BENCH_FRAMES} frames timed + {WARMUP_FRAMES} warmup at "
-                f"{W}×{H}, seek {SEEK_SEC:.0f}s"
+                f"{W}×{H}, seek {SEEK_SEC:.0f}s, {N} workers"
             ),
             "best": {
                 "variant_id":  vid,

@@ -233,6 +233,11 @@ def _draw_statistics_and_eta(state, width):
             f"SPS (scenes/s): {C_CYAN}{sps_str}{C_RESET}"
         )
 
+    # Decode backend (CPU / GPU N + pipeline tier) — always shown
+    backend = state.get("decode_backend", "")
+    if backend and backend != "–":
+        print(f"  Decode-Backend : {C_CYAN}{backend}{C_RESET}")
+
     print()
     
     # ETA – only configured categories + total
