@@ -412,6 +412,7 @@ def _qsv_decoder_for_video(video_path: str) -> Optional[str]:
 
 
 
+def _get_ffmpeg_major_version() -> int:
     """Return the major version of the installed FFmpeg (cached).
 
     Used to select the correct output options:
