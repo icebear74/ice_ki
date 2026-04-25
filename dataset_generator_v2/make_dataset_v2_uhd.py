@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """
-Dataset Generator V2 - UHD Quality with Original Features
-Combines:
-- UHD quality preservation from new implementation
-- GUI, priorities, multi-category support from original
-- Complete video list and configurations
+Dataset Generator V2 – UHD Quality
+
+Loads configuration exclusively from:
+  - dataset_generator_v2/templates.json
+  - dataset_generator_v2/generator_config_v2.active.json
+
+via the shared config utility (utils/config_io.py) introduced in Task 1.
+
+No hard-coded format names, category names, output paths, or distribution
+assumptions.  All fachliche decisions are driven entirely by the active config
+and the templates file.
 """
 
 import os
@@ -21,7 +27,7 @@ import signal
 import threading
 import queue
 import time
-import psutil  # For memory monitoring
+import psutil
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
@@ -30,10 +36,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # Add utils to path
 sys.path.insert(0, os.path.dirname(__file__))
 
-from utils.format_definitions import (
-    FORMATS, CATEGORY_FORMAT_DISTRIBUTION, CATEGORY_PATHS,
-    select_random_format, get_output_dirs_for_format
+from utils.config_io import (
+    load_templates,
+    load_active_config,
+    save_active_config,
+    ensure_templates_file,
+    validate_templates,
+    validate_active_config,
 )
+from utils.format_definitions import get_output_dirs_for_format
 from streaming_extractor import (
     build_assignments_per_category,
     extract_and_save_streaming_distributed,
@@ -48,7 +59,6 @@ from utils.progress_tracker import ProgressTracker
 from generation_plan import GenerationPlan
 from utils.dataset_display import draw_dataset_ui
 from utils.terminal_ui import hide_cursor, show_cursor, clear_screen
-from utils.config_normalizer import normalize_config
 from category_utils import get_video_categories, normalize_categories
 
 try:
@@ -65,187 +75,315 @@ except ImportError:
     print("Warning: 'rich' library not found. Install with: pip install rich")
 
 console = Console() if RICH_AVAILABLE else None
-# Don't configure basic logging here - will be done in _setup_logger based on UI mode
 logger = logging.getLogger(__name__)
+
+# Default config file names (relative to the script directory)
+_TEMPLATES_FILENAME = "templates.json"
+_ACTIVE_CONFIG_FILENAME = "generator_config_v2.active.json"
 
 
 class DatasetGeneratorV2UHD:
     """
-    Enhanced Dataset Generator V2
-    - UHD quality preservation (tonemap only, NO resize)
-    - Multi-category support (master, universal, space, toon)
-    - Priority-based video processing
-    - Rich GUI with progress tracking
-    - Complete video list from original config
+    Dataset Generator V2 – dynamic, template-driven, no hard-coded formats.
+
+    Configuration is loaded exclusively from:
+      * ``templates.json``              – format and degradation templates
+      * ``generator_config_v2.active.json`` – categories, videos, settings
+
+    Both files are validated at startup via ``utils/config_io.py``.  The
+    generator fails early with a clear error message when a required field is
+    missing or a template reference cannot be resolved.
     """
-    
+
     MAX_DISPLAYED_PRIORITIES = 10
-    
-    def __init__(self, config_path: str = "generator_config_v2.json"):
-        """Initialize generator with full config support"""
-        # Load and normalize V2 config
-        with open(config_path, 'r') as f:
-            self.config = json.load(f)
 
-        self.config = normalize_config(self.config)
+    def __init__(self, config_dir: Optional[str] = None):
+        """
+        Initialise the generator.
 
-        self.settings = self.config['base_settings']
-        self.videos = self.config.get('videos', [])
-        self.format_config = self.config.get('format_config', {})
-        self.category_targets = self.config.get('category_targets', {})
-        
-        # Initialize paths (MUST be before logger setup!)
-        self.base_dir = self.settings['output_base_dir']
-        self.temp_dir = self.settings['temp_dir']
-        self.status_file = self.settings['status_file']
-        
-        # Terminal UI setting (MUST be before logger setup!)
-        self.use_terminal_ui = True  # Enable terminal GUI by default
-        
-        # Initialize logger
+        Args:
+            config_dir: Directory that contains ``templates.json`` and
+                        ``generator_config_v2.active.json``.  Defaults to the
+                        directory that contains this script.
+        """
+        if config_dir is None:
+            config_dir = os.path.dirname(os.path.abspath(__file__))
+
+        templates_path = os.path.join(config_dir, _TEMPLATES_FILENAME)
+        active_config_path = os.path.join(config_dir, _ACTIVE_CONFIG_FILENAME)
+
+        # ── Load and validate configs ─────────────────────────────────────────
+        self.templates = ensure_templates_file(templates_path)
+
+        if not os.path.exists(active_config_path):
+            print(
+                f"❌ Active config not found: {active_config_path}\n"
+                "   Please create it via video_manager.py or copy the default."
+            )
+            sys.exit(1)
+
+        self.config = load_active_config(active_config_path)
+
+        tmpl_errors = validate_templates(self.templates)
+        cfg_errors = validate_active_config(self.config, self.templates)
+        if tmpl_errors or cfg_errors:
+            print("❌ Config validation failed:")
+            for e in tmpl_errors:
+                print(f"  [templates] {e}")
+            for e in cfg_errors:
+                print(f"  [active config] {e}")
+            sys.exit(1)
+
+        # ── Extract the fields that the rest of the code relies on ────────────
+        self.categories: Dict[str, dict] = self.config["categories"]
+        self.videos: List[dict] = self.config.get("videos", [])
+        self.category_targets: Dict[str, int] = {
+            name: cat["target_total"] for name, cat in self.categories.items()
+        }
+
+        # Build the format_config dict expected by the streaming extractor.
+        # Resolves template references and attaches source_mode + degradation.
+        self.format_config: Dict[str, Dict[str, dict]] = self._build_format_config()
+
+        # ── Output paths ──────────────────────────────────────────────────────
+        self.base_dir: str = self.config["root_path"]
+        self.temp_dir: str = os.path.join(self.base_dir, "tmp")
+        self.status_file: str = os.path.join(self.base_dir, "generation_status.json")
+
+        # Terminal UI setting (must be set before logger setup)
+        self.use_terminal_ui = True
+
+        # ── Logger ────────────────────────────────────────────────────────────
         self.logger = self._setup_logger()
         sys.logger = self.logger
-        
-        # Use CUDA when the local FFmpeg build supports it; fall back to CPU.
+
+        # ── CUDA ──────────────────────────────────────────────────────────────
         from streaming_extractor import cuda_available
         self.use_cuda = cuda_available()
         if self.use_cuda:
             self.logger.info("🚀 CUDA/GPU mode enabled (hardware-accelerated decoding & scaling)")
         else:
             self.logger.info("🖥️  CPU-only mode enabled (CUDA not available in this FFmpeg build)")
-        
-        # Videos are already sorted in JSON by multi-category priority
-        # Process them in exact JSON order (no additional sorting)
-        # This ensures videos with multiple categories are processed first
-        
-        self.logger.info(f"Loaded {len(self.videos)} videos from config (processing in JSON order)")
-        
-        # Extract format probabilities from format_config
-        self.format_probabilities = self._extract_format_probabilities()
-        
-        # Initialize video metadata cache
-        self.metadata_cache_file = os.path.join(self.base_dir, '.video_metadata_cache.json')
+
+        self.logger.info(f"Loaded {len(self.videos)} videos from active config")
+        self.logger.info(f"Categories: {list(self.category_targets.keys())}")
+        for cat, total in self.category_targets.items():
+            self.logger.info(f"  {cat}: target_total={total:,}")
+
+        # ── Metadata cache ────────────────────────────────────────────────────
+        self.metadata_cache_file = os.path.join(self.base_dir, ".video_metadata_cache.json")
         self.metadata_cache = self._load_metadata_cache()
-        
-        # Initialize progress tracker
+
+        # ── Progress tracking ─────────────────────────────────────────────────
         self.tracker = ProgressTracker(self.status_file)
         self.tracker.update_progress(total_videos=len(self.videos))
         self.tracker.initialize_categories(self.category_targets)
 
-        # Initialize generation plan (path-based resume — more robust than index).
-        # Priority order for the plan file:
-        #   1. Explicit "plan_file" key in base_settings
-        #   2. Default: {root_path}/extraction_plan.json
-        plan_file = self.settings.get(
-            "plan_file",
-            os.path.join(self.base_dir, "extraction_plan.json"),
-        )
+        plan_file = os.path.join(self.base_dir, "extraction_plan.json")
         self.plan = GenerationPlan(plan_file)
-        
-        # Runtime state
-        self.workers = self.config.get('workers', 6)
+
+        # ── Runtime state ─────────────────────────────────────────────────────
+        proc = self.config.get("processing", {})
+        self.workers: int = self.config.get("workers", 6)
         self.running = True
         self.paused = False
         self.last_update_time = time.time()
         self.update_interval = 0.5
         self.logger.info(f"⚡ Using {self.workers} threads for FFmpeg extraction")
-        
+
         # Statistics
         self.start_time = time.time()
         self.extractions_count = 0
         self.success_count = 0
         self.current_video_name = ""
-        
-        # Terminal UI state
+
+        # ── Terminal UI state ─────────────────────────────────────────────────
         self.ui_state = {
-            'current_video_name': "",
-            'current_video_index': 0,
-            'total_videos': len(self.videos),
-            'current_video_progress': {},
-            'overall_progress': {},
-            'patch_distribution': {},
-            'scenes_processed': 0,
-            'patches_created_total': 0,
-            'frames_processed_total': 0,
-            'frames_read_total': 0,
-            'avg_time_per_scene': 0.0,
-            'eta': {},
-            'live_fps': 0.0,   # decoded frames per second (FFmpeg pipeline throughput)
-            'live_sps': 0.0,   # scene-assignments processed per second
-            # Only categories that actually exist in the config
-            'categories': list(self.category_targets.keys()),
-            # Only format-size columns that actually exist in the config
-            'format_sizes': list(next(iter(self.format_config.values()), {}).keys()),
+            "current_video_name": "",
+            "current_video_index": 0,
+            "total_videos": len(self.videos),
+            "current_video_progress": {},
+            "overall_progress": {},
+            "patch_distribution": {},
+            "scenes_processed": 0,
+            "patches_created_total": 0,
+            "frames_processed_total": 0,
+            "frames_read_total": 0,
+            "avg_time_per_scene": 0.0,
+            "eta": {},
+            "live_fps": 0.0,
+            "live_sps": 0.0,
+            "categories": list(self.category_targets.keys()),
+            "format_sizes": list(next(iter(self.format_config.values()), {}).keys()),
         }
-        # Terminal UI already set before logger init (line 89)
         self.ui_update_counter = 0
-        
-        # Display priority distribution
+
         if RICH_AVAILABLE:
             self._show_priority_distribution()
-        
-        # Setup signal handlers
+
+        # Signal handlers
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
-    
+
+    # ── Config helpers ────────────────────────────────────────────────────────
+
+    def _build_format_config(self) -> Dict[str, Dict[str, dict]]:
+        """
+        Build the ``format_config`` dict that the streaming extractor expects.
+
+        Shape::
+
+            {
+              category_name: {
+                template_name: {
+                  "gt_size":               [W, H],
+                  "lr_size":               [W, H],
+                  "source_mode":           "resize" | "crop",
+                  "degradation_mix":       {template_name: weight, …},
+                  "degradation_templates": {template_name: {…spec…}, …},
+                }
+              }
+            }
+
+        All referenced format and degradation templates are resolved from
+        ``self.templates``.  Any missing reference raises ``SystemExit`` because
+        the config was already validated at startup; this is a safety net only.
+        """
+        fmt_tmpls = self.templates["format_templates"]
+        deg_tmpls = self.templates["degradation_templates"]
+        result: Dict[str, Dict[str, dict]] = {}
+
+        for cat_name, cat_cfg in self.categories.items():
+            result[cat_name] = {}
+            for fmt_entry in cat_cfg["formats"]:
+                tmpl_name = fmt_entry["template"]
+                if tmpl_name not in fmt_tmpls:
+                    print(f"❌ format_template '{tmpl_name}' not found (category '{cat_name}')")
+                    sys.exit(1)
+                fmt_spec = fmt_tmpls[tmpl_name]
+
+                # Resolve degradation templates referenced in this format's mix.
+                deg_mix = fmt_entry.get("degradation_mix", {})
+                resolved_deg_tmpls: Dict[str, dict] = {}
+                for dname in deg_mix:
+                    if dname not in deg_tmpls:
+                        print(f"❌ degradation_template '{dname}' not found (category '{cat_name}', format '{tmpl_name}')")
+                        sys.exit(1)
+                    resolved_deg_tmpls[dname] = deg_tmpls[dname]
+
+                result[cat_name][tmpl_name] = {
+                    "gt_size": fmt_spec["gt_size"],
+                    "lr_size": fmt_spec["lr_size"],
+                    "source_mode": fmt_entry["source_mode"],
+                    "degradation_mix": deg_mix,
+                    "degradation_templates": resolved_deg_tmpls,
+                }
+
+        return result
+
+    def _build_format_distribution_for_video(
+        self,
+        video: dict,
+        category_patch_targets: Dict[str, int],
+    ) -> Dict[str, Dict[str, int]]:
+        """
+        Build ``format_distribution = {category: {template_name: count}}``
+        for a single video.
+
+        Within each category the patch budget is split proportionally across
+        the category's format entries using their ``weight`` values.  The last
+        format entry absorbs any rounding remainder.
+
+        Args:
+            video:                  Video config dict.
+            category_patch_targets: ``{category: patch_count}`` for this video.
+
+        Returns:
+            ``{category: {template_name: count}}``
+        """
+        video_cats = get_video_categories(video)
+        distribution: Dict[str, Dict[str, int]] = {}
+
+        for cat_name in video_cats:
+            if cat_name not in category_patch_targets or cat_name not in self.categories:
+                continue
+
+            cat_total = category_patch_targets[cat_name]
+            if cat_total <= 0:
+                continue
+
+            formats = self.categories[cat_name]["formats"]
+            total_weight = sum(f["weight"] for f in formats)
+
+            distribution[cat_name] = {}
+            remaining = cat_total
+
+            for i, fmt_entry in enumerate(formats):
+                tmpl_name = fmt_entry["template"]
+                if i == len(formats) - 1:
+                    count = remaining
+                else:
+                    count = int(cat_total * fmt_entry["weight"] / total_weight)
+                    remaining -= count
+                distribution[cat_name][tmpl_name] = max(0, count)
+
+        return distribution
+
     def _setup_logger(self):
         """Setup file and console logger (console disabled when terminal UI active)"""
         log_dir = os.path.join(self.base_dir, "logs")
         os.makedirs(log_dir, exist_ok=True)
-        
-        logger = logging.getLogger('DatasetGenerator')
+
+        logger = logging.getLogger("DatasetGenerator")
         logger.setLevel(logging.DEBUG)
-        logger.handlers = []  # Clear any existing handlers
-        
-        # File handler (always enabled)
+        logger.handlers = []
+
         log_file = os.path.join(log_dir, f"generator_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
         fh = logging.FileHandler(log_file)
         fh.setLevel(logging.DEBUG)
-        fh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        fh.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
         logger.addHandler(fh)
-        
-        # Console handler (only if terminal UI is disabled)
+
         if not self.use_terminal_ui:
             ch = logging.StreamHandler(sys.stdout)
             ch.setLevel(logging.INFO)
-            ch.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+            ch.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
             logger.addHandler(ch)
             logger.info("Console logging enabled (terminal UI disabled)")
         else:
             logger.info("Console logging disabled (terminal UI active - see GUI)")
-        
+
         return logger
-    
+
     def _show_priority_distribution(self):
         """Display priority distribution in console"""
-        priority_counts = {}
+        priority_counts: Dict[int, int] = {}
         for v in self.videos:
-            p = v.get('priority', 255)
+            p = v.get("priority", 255)
             priority_counts[p] = priority_counts.get(p, 0) + 1
-        
+
         console.print("\n[bold]📋 Video Processing Order:[/bold]")
         sorted_priorities = sorted(priority_counts.keys())
-        
-        # Show first priorities and default (255)
+
         priorities_to_show = []
         if 255 in priority_counts:
-            priorities_to_show = [p for p in sorted_priorities if p != 255][:self.MAX_DISPLAYED_PRIORITIES - 1]
+            priorities_to_show = [
+                p for p in sorted_priorities if p != 255
+            ][: self.MAX_DISPLAYED_PRIORITIES - 1]
             priorities_to_show.append(255)
             priorities_to_show.sort()
         else:
-            priorities_to_show = sorted_priorities[:self.MAX_DISPLAYED_PRIORITIES]
-        
+            priorities_to_show = sorted_priorities[: self.MAX_DISPLAYED_PRIORITIES]
+
         for priority in priorities_to_show:
             count = priority_counts[priority]
             label = "(default)" if priority == 255 else ""
             console.print(f"   Priority {priority} {label}: {count} videos")
-        
+
         remaining = [p for p in sorted_priorities if p not in priorities_to_show]
         if remaining:
             count = sum(priority_counts[p] for p in remaining)
             console.print(f"   ... and {count} more videos in other priority levels")
-    
-    def _load_metadata_cache(self) -> dict:
         """Load video metadata cache from disk"""
         if os.path.exists(self.metadata_cache_file):
             try:
@@ -313,25 +451,33 @@ class DatasetGeneratorV2UHD:
                         'percent': percent,
                     }
 
-            # Patch distribution by category and format
+            # Patch distribution by category and format — derive weights from
+            # the category config instead of old format_probabilities dict.
             patch_dist = {}
-            for category in self.format_config.keys():
+            for category, fmt_map in self.format_config.items():
                 patch_dist[category] = {}
-                if category in self.format_config:
-                    for format_name in self.format_config[category].keys():
-                        if category in category_stats:
-                            total = category_stats[category].get('images_created', 0)
-                            prob = self.format_probabilities.get(category, {}).get(format_name, 0.0)
-                            current = int(total * prob)
-                            target_total = self.category_targets.get(category, 0)
-                            target = int(target_total * prob)
-                            patch_dist[category][format_name] = {
-                                'count': current,
-                                'target': target,
-                            }
-                        else:
-                            patch_dist[category][format_name] = {'count': 0, 'target': 0}
-            self.ui_state['patch_distribution'] = patch_dist
+                total_weight = sum(
+                    fe["weight"]
+                    for fe in self.categories.get(category, {}).get("formats", [])
+                )
+                for format_name in fmt_map:
+                    # Look up the weight for this template name in the category.
+                    weight = 0
+                    for fe in self.categories.get(category, {}).get("formats", []):
+                        if fe["template"] == format_name:
+                            weight = fe["weight"]
+                            break
+                    prob = (weight / total_weight) if total_weight > 0 else 0.0
+                    if category in category_stats:
+                        cat_done = category_stats[category].get("images_created", 0)
+                        cat_target = self.category_targets.get(category, 0)
+                        patch_dist[category][format_name] = {
+                            "count": int(cat_done * prob),
+                            "target": int(cat_target * prob),
+                        }
+                    else:
+                        patch_dist[category][format_name] = {"count": 0, "target": 0}
+            self.ui_state["patch_distribution"] = patch_dist
 
             # ETA calculation: use global rate (total saved / elapsed)
             elapsed = time.time() - self.start_time
@@ -375,32 +521,7 @@ class DatasetGeneratorV2UHD:
                 self.logger.warning("⚠️  WARNING: RAM usage >80%! Monitor carefully!")
         except Exception as e:
             self.logger.debug(f"Could not log system resources: {e}")
-    
-    def _extract_format_probabilities(self) -> Dict[str, Dict[str, float]]:
-        """
-        Extract format probabilities from format_config.
-        
-        Returns:
-            Dictionary mapping category -> {format_name: probability}
-            
-        Example:
-            {
-                'master': {'small_540': 0.5, 'medium_169': 0.35, 'large_720': 0.15},
-                'universal': {'small_540': 0.5, 'medium_169': 0.35, 'large_720': 0.15}
-            }
-        """
-        probabilities = {}
-        
-        for category, formats in self.format_config.items():
-            probabilities[category] = {}
-            for format_name, format_info in formats.items():
-                probabilities[category][format_name] = format_info.get('probability', 0.0)
-        
-        self.logger.debug(f"Extracted format probabilities: {probabilities}")
-        return probabilities
-    
-    # CUDA support removed - using CPU-only mode for better stability
-    
+
     def scan_video_durations(self) -> Dict[str, float]:
         """
         Scan all videos to get their durations.
@@ -728,7 +849,7 @@ class DatasetGeneratorV2UHD:
             # LOG THE FFMPEG COMMAND (for debugging)
             self.logger.debug(f"Single frame extraction command: {' '.join(cmd)}")
             
-            timeout = self.config.get('ffmpeg_timeout', 120)
+            timeout = self.config.get("processing", {}).get("ffmpeg_timeout", 120)
             result = subprocess.run(
                 cmd,
                 stdout=subprocess.DEVNULL,
@@ -879,109 +1000,29 @@ class DatasetGeneratorV2UHD:
         success_count = len(frame_paths_dict)
         self.logger.info(f"✓ Extraction complete: {success_count}/{len(sorted_ts)} timestamps successful, {total_frames}/{len(sorted_ts)*n_frames} frames extracted")
         self.logger.info(f"💾 Memory-efficient: Frames on disk (NOT in RAM)")
-        
+
         return {
-            'frame_paths': frame_paths_dict,
-            'temp_dirs': temp_dirs  # Caller MUST clean up!
+            "frame_paths": frame_paths_dict,
+            "temp_dirs": temp_dirs  # Caller MUST clean up!
         }
-    
-    
-    def calculate_format_distribution_for_video(self, video: dict, target_patches: int) -> Dict[str, Dict[str, int]]:
-        """
-        Calculate exact format distribution for a video.
-        
-        Each video extracts ALL formats according to pre-calculated distribution.
-        
-        Example:
-        - Video needs 4000 patches total
-        - Categories: master 50%, universal 50%
-        - Formats: large 50%, small 25%, medium 25%
-        
-        Result:
-        {
-            'master': {'large_720': 1000, 'small_540': 500, 'medium_169': 500},
-            'universal': {'large_720': 1000, 'small_540': 500, 'medium_169': 500}
-        }
-        
-        Args:
-            video: Video configuration dict
-            target_patches: Total patches for this video
-        
-        Returns:
-            Dictionary of {category: {format_name: count}}
-        
-        Calculate format distribution for this video across ALL its categories.
-        
-        NEW LOGIC (NO WEIGHTS):
-        - Video is 100% in each assigned category
-        - Distribute patches evenly across assigned categories
-        - Each category gets: target_patches / num_categories
-        
-        Args:
-            video: Video dict with categories
-            target_patches: Total patches to extract from this video
-        
-        Returns:
-            Dict[category][format] = patch_count
-        """
-        distribution = {}
-        
-        # Get categories for this video (handle both dict and list formats)
-        video_cats = get_video_categories(video)
-        
-        if not video_cats:
-            return distribution
-        
-        # Calculate patches per category (equal distribution)
-        num_categories = len(video_cats)
-        patches_per_category = target_patches // num_categories
-        remainder = target_patches % num_categories
-        
-        for cat_idx, category in enumerate(video_cats):
-            if category not in self.format_config:
-                continue
-            
-            # This category gets equal share (+ 1 if remainder)
-            category_patches = patches_per_category
-            if cat_idx < remainder:
-                category_patches += 1
-            
-            # Get format probabilities for this category
-            format_probs = self.format_probabilities.get(category, {})
-            
-            # Calculate patches per format
-            distribution[category] = {}
-            remaining_patches = category_patches
-            
-            # Sort by probability (descending) for better rounding
-            sorted_formats = sorted(format_probs.items(), key=lambda x: x[1], reverse=True)
-            
-            for idx, (format_name, prob) in enumerate(sorted_formats):
-                if idx == len(sorted_formats) - 1:
-                    # Last format gets remaining patches
-                    distribution[category][format_name] = remaining_patches
-                else:
-                    count = int(category_patches * prob)
-                    distribution[category][format_name] = count
-                    remaining_patches -= count
-        
-        return distribution
-    
+
     def process_video(self, video_idx: int, category_targets: Dict[str, int] = None) -> Dict[str, int]:
         """
-        Process a single video and extract patches for ALL formats.
-        
-        NEW BEHAVIOR (per-category distribution):
-        - Each category has its own target patch count
-        - Format distribution calculated per category
-        - Ensures category targets are met
-        
+        Process a single video and extract patches for all assigned categories.
+
+        Format distribution within each category is derived from the weighted
+        ``formats`` list in ``categories[cat_name]`` via
+        :meth:`_build_format_distribution_for_video`.
+
         Args:
-            video_idx: Index of video in self.videos
-            category_targets: Dict of {category: patch_count} for this video
-        
+            video_idx:        Index in ``self.videos``.
+            category_targets: ``{category: patch_count}`` for this video.
+                              Must be provided; comes from
+                              :meth:`calculate_proportional_distribution`.
+
         Returns:
-            Statistics dict with patches created per category
+            ``{category: patches_created_count}`` or a sentinel dict with
+            ``"skipped": True`` when the video is skipped.
         """
         if video_idx >= len(self.videos):
             return {}
@@ -1000,149 +1041,58 @@ class DatasetGeneratorV2UHD:
         if not os.path.exists(video_path):
             self.logger.warning(f"Video not found: {video_path}")
             return {}
-        
+
         self.logger.info(f"Processing video {video_idx + 1}/{len(self.videos)}: {video_name}")
-        
-        # Get video metadata
+
         metadata = self._get_video_metadata(video_path)
         if not metadata:
             return {}
-        
-        duration = metadata['duration']
-        
-        # Use category targets if provided, otherwise use old method
-        if category_targets:
-            # NEW: Per-category targets
-            format_distribution = {}
-            
-            for category, patches in category_targets.items():
-                if category not in self.format_config:
-                    continue
-                
-                # Get format probabilities for this category
-                format_probs = self.format_probabilities.get(category, {})
-                
-                # Calculate patches per format
-                format_distribution[category] = {}
-                remaining_patches = patches
-                
-                # Sort by probability (descending) for better rounding
-                sorted_formats = sorted(format_probs.items(), key=lambda x: x[1], reverse=True)
-                
-                for idx, (format_name, prob) in enumerate(sorted_formats):
-                    if idx == len(sorted_formats) - 1:
-                        # Last format gets remaining patches
-                        format_distribution[category][format_name] = remaining_patches
-                    else:
-                        count = int(patches * prob)
-                        format_distribution[category][format_name] = count
-                        remaining_patches -= count
-        else:
-            # OLD: Total target (backward compatibility)
-            target_patches = getattr(self, '_current_video_target', 1000)
-            format_distribution = self.calculate_format_distribution_for_video(video, target_patches)
-        
+
+        duration = metadata["duration"]
+
+        # Build format distribution using the new weight-based method.
+        # category_targets is always the per-category patch budget dict.
+        if not category_targets:
+            self.logger.warning(f"No category targets for video: {video_name}")
+            return {}
+
+        format_distribution = self._build_format_distribution_for_video(
+            video, category_targets
+        )
+
         if not format_distribution:
             self.logger.warning(f"No valid format distribution for video: {video_name}")
             return {}
-        
-        # Calculate total target for logging
-        if category_targets:
-            target_total = sum(category_targets.values())
-        else:
-            target_total = target_patches
-        
-        # Log the distribution plan
-        self.logger.info(f"Format distribution for {video_name} (target: {target_total} total):")
+
+        target_total = sum(category_targets.values())
+        self.logger.info(
+            f"Format distribution for {video_name} (target: {target_total} total):"
+        )
         for category, formats in format_distribution.items():
             total = sum(formats.values())
             self.logger.info(f"  {category} ({total} patches): {formats}")
-        
-        # Determine frame count
-        lr_versions = self.settings.get('lr_versions', ['7frames'])
-        n_frames = 7 if '7frames' in lr_versions else 5
-        
-        # Get video FPS and color metadata for batch extraction
-        # (metadata was already fetched above; re-use it via cache — no extra ffprobe call)
-        metadata = self._get_video_metadata(video_path)
-        fps = metadata.get('fps', 25.0) if metadata else 25.0
-        is_hdr = metadata.get('is_hdr', True) if metadata else True
+
+        # n_frames from processing config (default 7)
+        proc = self.config.get("processing", {})
+        n_frames = int(proc.get("n_frames", 7))
+
+        fps = metadata.get("fps", 25.0) or 25.0
+        is_hdr = metadata.get("is_hdr", True)
 
         self.logger.info(
             f"  Color format: {metadata.get('color_transfer', 'unknown')!r} "
             f"→ {'HDR tonemap' if is_hdr else 'SDR pass-through'}"
         )
 
-        # Extract patches using OPTIMIZED batch mode
         patches_created = self._extract_patches_multi_format_batch(
             video_path, duration, format_distribution, n_frames, video_name, fps, video_idx,
             is_hdr=is_hdr,
         )
         
         return patches_created
-    
-    def _extract_patches_multi_category(self, video_path: str, duration: float,
-                                       category_configs: dict, n_frames: int) -> Dict[str, int]:
-        """
-        Extract patches from video for MULTIPLE categories simultaneously.
-        This avoids opening the video file multiple times.
-        
-        NOTE: This method is legacy and replaced by _extract_patches_multi_format.
-        Kept for backward compatibility.
-        
-        Args:
-            video_path: Path to video file
-            duration: Video duration in seconds
-            category_configs: Dict of {category: {'weight', 'format_name', 'format_config'}}
-            n_frames: Number of frames to extract (5 or 7)
-        
-        Returns:
-            Dict of {category: patches_created_count}
-        """
-        patches_created = {cat: 0 for cat in category_configs.keys()}
-        stride_seconds = 3.0  # Default stride
-        current_time = 0.0
-        
-        self.logger.info(f"Extracting for {len(category_configs)} categories: {list(category_configs.keys())}")
-        
-        while current_time < duration - 1.0:
-            # Extract frames ONCE
-            frames = self.extract_frames_uhd(video_path, current_time, n_frames)
-            
-            if frames is None:
-                current_time += stride_seconds
-                continue
-            
-            # Create and save patches for ALL categories from the same frames
-            for category, config in category_configs.items():
-                format_name = config['format_name']
-                format_config = config['format_config']
-                
-                # Create patch pair for this category/format
-                gt, lr = create_patch_pair(frames, format_name, format_config, logger=self.logger)
-                
-                if gt is None or lr is None:
-                    continue
-                
-                # Save patches for this category
-                saved, gt_path, lr_path = self._save_patch_pair(
-                    gt, lr, video_path, current_time,
-                    category, format_name, n_frames
-                )
-                
-                if saved:
-                    patches_created[category] += 1
-            
-            current_time += stride_seconds
-            
-            # Check if should stop
-            if not self.running:
-                break
-        
-        return patches_created
-    
+
     def _extract_patches_multi_format_batch(self, video_path: str, duration: float,
-                                           format_distribution: Dict[str, Dict[str, int]], 
+                                           format_distribution: Dict[str, Dict[str, int]],
                                            n_frames: int, video_name: str, fps: float = 25.0,
                                            video_idx: int = 0, is_hdr: bool = True) -> Dict[str, int]:
         """
@@ -1268,10 +1218,11 @@ class DatasetGeneratorV2UHD:
             is_black_frame_fn=_streaming_is_black_frame,
             progress_fn=_on_progress,
             use_cuda=self.use_cuda,
-            nice_level=self.settings.get('ffmpeg_nice', 10),
+            nice_level=self.config.get("processing", {}).get("ffmpeg_nice", 10),
             is_hdr=is_hdr,
-            degrade_cfg=self.config.get('quality'),
-            center_snap_seconds=self.config.get('processing', {}).get('center_snap_seconds', 1.0),
+            # degrade_cfg intentionally omitted: per-format degradation templates
+            # are embedded in format_config and sampled per-patch in the extractor.
+            center_snap_seconds=self.config.get("processing", {}).get("center_snap_seconds", 1.0),
             stream_width=STREAM_4K_WIDTH,
             stream_height=STREAM_4K_HEIGHT,
         )
@@ -1301,335 +1252,7 @@ class DatasetGeneratorV2UHD:
             self.logger.info(f"  {category}: {count} patches")
 
         return patches_created
-    
-    def _extract_patches_multi_format_legacy(self, video_path: str, duration: float,
-                                      format_distribution: Dict[str, Dict[str, int]], 
-                                      n_frames: int, video_name: str) -> Dict[str, int]:
-        """
-        LEGACY: Extract patches using individual FFmpeg calls (SLOW).
-        
-        This is the old method that calls FFmpeg once per extraction.
-        Kept as fallback in case batch extraction fails.
-        
-        Args:
-            video_path: Path to video file
-            duration: Video duration in seconds
-            format_distribution: Dict of {category: {format_name: target_count}}
-            n_frames: Number of frames to extract (5 or 7)
-            video_name: Video name for logging
-        
-        Returns:
-            Dict of {category: patches_created_count}
-        """
-        self.logger.warning(f"Using LEGACY extraction mode (slower)")
-        
-        # Initialize counters
-        patches_created = {}
-        patches_targets = {}
-        
-        for category, formats in format_distribution.items():
-            patches_created[category] = 0
-            patches_targets[category] = {}
-            for format_name, target_count in formats.items():
-                patches_targets[category][format_name] = {
-                    'target': target_count,
-                    'created': 0
-                }
-        
-        total_target = sum(sum(formats.values()) for formats in format_distribution.values())
-        
-        # Rest of original implementation
-        stride_seconds = 3.0
-        current_time = 0.0
-        max_retries = 5
-        retry_jump_seconds = 1.0
-        black_frame_threshold_kb = 15
-        black_frame_detection_limit_seconds = 10.0
-        
-        total_created = 0
-        black_frames_detected = 0
-        black_frames_skipped = 0
-        
-        self.logger.info(f"Extracting {total_target} patches for {len(format_distribution)} categories")
-        self.logger.info(f"Black frame detection active for first {black_frame_detection_limit_seconds:.1f} seconds only")
-        
-        # Extract frames and create patches until all targets are met
-        while current_time < duration - 1.0 and total_created < total_target:
-            # For each category-format combination that needs more patches
-            for category, formats in format_distribution.items():
-                for format_name, target_count in formats.items():
-                    # Check if this format still needs patches
-                    if patches_targets[category][format_name]['created'] >= target_count:
-                        continue
-                    
-                    # Get format config
-                    format_config = self.format_config[category][format_name]
-                    
-                    # Try extraction with retry logic for black frames
-                    retry_count = 0
-                    extraction_successful = False
-                    retry_time = current_time
-                    
-                    while retry_count <= max_retries and not extraction_successful:
-                        # Extract frames for this retry attempt
-                        frames = self.extract_frames_uhd(video_path, retry_time, n_frames)
-                        
-                        if frames is None:
-                            retry_count += 1
-                            retry_time += retry_jump_seconds
-                            if retry_time >= duration - 1.0:
-                                break
-                            continue
-                        
-                        # Create patch pair for this category/format
-                        gt, lr = create_patch_pair(frames, format_name, format_config, logger=self.logger)
-                        
-                        if gt is None or lr is None:
-                            retry_count += 1
-                            retry_time += retry_jump_seconds
-                            if retry_time >= duration - 1.0:
-                                break
-                            continue
-                        
-                        # Save patches for this category/format
-                        saved, gt_path, lr_path = self._save_patch_pair(
-                            gt, lr, video_path, retry_time,
-                            category, format_name, n_frames
-                        )
-                        
-                        if saved:
-                            # Check if GT is a black frame (< 15 KB)
-                            # Only check during first 10 seconds of video
-                            if retry_time <= black_frame_detection_limit_seconds and \
-                               self._is_black_frame(gt_path, black_frame_threshold_kb):
-                                black_frames_detected += 1
-                                self.logger.warning(
-                                    f"Black frame detected at {retry_time:.2f}s "
-                                    f"(retry {retry_count}/{max_retries}). Deleting and retrying..."
-                                )
-                                
-                                # Delete the files
-                                try:
-                                    if os.path.exists(gt_path):
-                                        os.remove(gt_path)
-                                    if os.path.exists(lr_path):
-                                        os.remove(lr_path)
-                                except Exception as e:
-                                    self.logger.error(f"Error deleting black frame files: {e}")
-                                
-                                # Jump forward 1 second and retry
-                                retry_count += 1
-                                retry_time += retry_jump_seconds
-                                
-                                if retry_count > max_retries:
-                                    # Max retries reached, count it but don't create patch
-                                    self.logger.warning(
-                                        f"Max retries ({max_retries}) reached for black frame. "
-                                        f"Counting as created but no patch saved."
-                                    )
-                                    patches_targets[category][format_name]['created'] += 1
-                                    patches_created[category] += 1
-                                    total_created += 1
-                                    extraction_successful = True
-                                
-                                if retry_time >= duration - 1.0:
-                                    # Reached end of video, count it but don't create patch
-                                    self.logger.warning(
-                                        f"Reached end of video during black frame retry. "
-                                        f"Counting as created but no patch saved."
-                                    )
-                                    patches_targets[category][format_name]['created'] += 1
-                                    patches_created[category] += 1
-                                    total_created += 1
-                                    extraction_successful = True
-                            else:
-                                # Valid frame (not black), successfully saved
-                                # Or black frame detection skipped (after 10 seconds)
-                                if retry_time > black_frame_detection_limit_seconds:
-                                    black_frames_skipped += 1
-                                    
-                                patches_targets[category][format_name]['created'] += 1
-                                patches_created[category] += 1
-                                total_created += 1
-                                extraction_successful = True
-                        else:
-                            # Save failed, retry
-                            retry_count += 1
-                            retry_time += retry_jump_seconds
-                            if retry_time >= duration - 1.0:
-                                break
-            
-            current_time += stride_seconds
-            
-            # Check if should stop
-            if not self.running:
-                break
-        
-        # Log final statistics
-        self.logger.info(f"Extraction complete for {video_name}: {total_created}/{total_target} patches")
-        if black_frames_detected > 0:
-            self.logger.info(f"  Black frames detected and handled: {black_frames_detected}")
-        if black_frames_skipped > 0:
-            self.logger.info(f"  Frames saved without black frame check (after {black_frame_detection_limit_seconds}s): {black_frames_skipped}")
-        for category, formats in patches_targets.items():
-            for format_name, stats in formats.items():
-                self.logger.info(f"  {category}/{format_name}: {stats['created']}/{stats['target']}")
-        
-        return patches_created
-        # Initialize counters for each category-format combination
-        patches_created = {}
-        patches_targets = {}
-        
-        for category, formats in format_distribution.items():
-            patches_created[category] = 0
-            patches_targets[category] = {}
-            for format_name, target_count in formats.items():
-                patches_targets[category][format_name] = {
-                    'target': target_count,
-                    'created': 0
-                }
-        
-        stride_seconds = 3.0
-        current_time = 0.0
-        max_retries = 5
-        retry_jump_seconds = 1.0
-        black_frame_threshold_kb = 15
-        black_frame_detection_limit_seconds = 10.0  # Only check first 10 seconds
-        
-        total_target = sum(sum(formats.values()) for formats in format_distribution.values())
-        total_created = 0
-        black_frames_detected = 0
-        black_frames_skipped = 0  # Count of frames where detection was skipped
-        
-        self.logger.info(f"Extracting {total_target} patches for {len(format_distribution)} categories")
-        self.logger.info(f"Black frame detection active for first {black_frame_detection_limit_seconds:.1f} seconds only")
-        
-        # Extract frames and create patches until all targets are met
-        while current_time < duration - 1.0 and total_created < total_target:
-            # For each category-format combination that needs more patches
-            for category, formats in format_distribution.items():
-                for format_name, target_count in formats.items():
-                    # Check if this format still needs patches
-                    if patches_targets[category][format_name]['created'] >= target_count:
-                        continue
-                    
-                    # Get format config
-                    format_config = self.format_config[category][format_name]
-                    
-                    # Try extraction with retry logic for black frames
-                    retry_count = 0
-                    extraction_successful = False
-                    retry_time = current_time
-                    
-                    while retry_count <= max_retries and not extraction_successful:
-                        # Extract frames for this retry attempt
-                        frames = self.extract_frames_uhd(video_path, retry_time, n_frames)
-                        
-                        if frames is None:
-                            retry_count += 1
-                            retry_time += retry_jump_seconds
-                            if retry_time >= duration - 1.0:
-                                break
-                            continue
-                        
-                        # Create patch pair for this category/format
-                        gt, lr = create_patch_pair(frames, format_name, format_config, logger=self.logger)
-                        
-                        if gt is None or lr is None:
-                            retry_count += 1
-                            retry_time += retry_jump_seconds
-                            if retry_time >= duration - 1.0:
-                                break
-                            continue
-                        
-                        # Save patches for this category/format
-                        saved, gt_path, lr_path = self._save_patch_pair(
-                            gt, lr, video_path, retry_time,
-                            category, format_name, n_frames
-                        )
-                        
-                        if saved:
-                            # Check if GT is a black frame (< 15 KB)
-                            # Only check during first 10 seconds of video
-                            if retry_time <= black_frame_detection_limit_seconds and \
-                               self._is_black_frame(gt_path, black_frame_threshold_kb):
-                                black_frames_detected += 1
-                                self.logger.warning(
-                                    f"Black frame detected at {retry_time:.2f}s "
-                                    f"(retry {retry_count}/{max_retries}). Deleting and retrying..."
-                                )
-                                
-                                # Delete the files
-                                try:
-                                    if os.path.exists(gt_path):
-                                        os.remove(gt_path)
-                                    if os.path.exists(lr_path):
-                                        os.remove(lr_path)
-                                except Exception as e:
-                                    self.logger.error(f"Error deleting black frame files: {e}")
-                                
-                                # Jump forward 1 second and retry
-                                retry_count += 1
-                                retry_time += retry_jump_seconds
-                                
-                                if retry_count > max_retries:
-                                    # Max retries reached, count it but don't create patch
-                                    self.logger.warning(
-                                        f"Max retries ({max_retries}) reached for black frame. "
-                                        f"Counting as created but no patch saved."
-                                    )
-                                    patches_targets[category][format_name]['created'] += 1
-                                    patches_created[category] += 1
-                                    total_created += 1
-                                    extraction_successful = True
-                                
-                                if retry_time >= duration - 1.0:
-                                    # Reached end of video, count it but don't create patch
-                                    self.logger.warning(
-                                        f"Reached end of video during black frame retry. "
-                                        f"Counting as created but no patch saved."
-                                    )
-                                    patches_targets[category][format_name]['created'] += 1
-                                    patches_created[category] += 1
-                                    total_created += 1
-                                    extraction_successful = True
-                            else:
-                                # Valid frame (not black), successfully saved
-                                # Or black frame detection skipped (after 10 seconds)
-                                if retry_time > black_frame_detection_limit_seconds:
-                                    black_frames_skipped += 1
-                                    
-                                patches_targets[category][format_name]['created'] += 1
-                                patches_created[category] += 1
-                                total_created += 1
-                                extraction_successful = True
-                        else:
-                            # Save failed, retry
-                            retry_count += 1
-                            retry_time += retry_jump_seconds
-                            if retry_time >= duration - 1.0:
-                                break
-            
-            current_time += stride_seconds
-            
-            # Check if should stop
-            if not self.running:
-                break
-        
-        # Log final statistics
-        self.logger.info(f"Extraction complete for {video_name}: {total_created}/{total_target} patches")
-        if black_frames_detected > 0:
-            self.logger.info(f"  Black frames detected and handled: {black_frames_detected}")
-        if black_frames_skipped > 0:
-            self.logger.info(f"  Frames saved without black frame check (after {black_frame_detection_limit_seconds}s): {black_frames_skipped}")
-        for category, formats in patches_targets.items():
-            for format_name, stats in formats.items():
-                created = stats['created']
-                target = stats['target']
-                self.logger.info(f"  {category}/{format_name}: {created}/{target} patches")
-        
-        return patches_created
-    
+
     def _get_video_metadata(self, video_path: str) -> Optional[dict]:
         """
         Get video metadata using ffprobe with caching.
@@ -1678,7 +1301,7 @@ class DatasetGeneratorV2UHD:
                 video_path
             ]
             
-            timeout = self.config.get('ffprobe_timeout', 60)
+            timeout = self.config.get("processing", {}).get("ffprobe_timeout", 60)
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
             
             if result.returncode != 0:
@@ -1818,8 +1441,8 @@ class DatasetGeneratorV2UHD:
             # Calculate Laplacian variance (measure of sharpness/detail)
             laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
             
-            # Get threshold from settings (default 80.0)
-            threshold = self.settings.get('min_detail_threshold', 80.0)
+            # Get threshold from processing settings (default 80.0)
+            threshold = self.config.get("processing", {}).get("min_detail_threshold", 80.0)
             
             # Patch is interesting if it has enough detail
             return laplacian_var >= threshold
@@ -2121,32 +1744,45 @@ class DatasetGeneratorV2UHD:
 
 
 def main():
-    """Main entry point"""
+    """
+    Main entry point.
+
+    Usage:
+        python make_dataset_v2_uhd.py [config_dir]
+
+    *config_dir* (optional) – directory that contains both
+    ``templates.json`` and ``generator_config_v2.active.json``.
+    Defaults to the directory where this script resides.
+
+    The active config and templates are loaded, validated, and then the
+    generator is started.  Run ``video_manager.py`` first to create or edit
+    the config files.
+    """
     script_dir = Path(__file__).parent
     os.chdir(script_dir)
 
+    # Optional: allow passing a config directory as the first argument.
     if len(sys.argv) > 1:
-        config_path = sys.argv[1]
+        config_dir = sys.argv[1]
     else:
-        v2_config = script_dir / 'generator_config_v2.json'
-        if v2_config.exists():
-            config_path = str(v2_config)
-        else:
-            print(
-                "❌ No config file found. "
-                "Please run from dataset_generator_v2 directory "
-                "(expected generator_config_v2.json)."
-            )
-            sys.exit(1)
+        config_dir = str(script_dir)
 
-    print(f"📂 Using config: {Path(config_path).name}")
-
-    if not os.path.exists(config_path):
-        print(f"Error: Config file not found: {config_path}")
+    active_cfg = Path(config_dir) / _ACTIVE_CONFIG_FILENAME
+    if not active_cfg.exists():
+        print(
+            f"❌ Active config not found: {active_cfg}\n"
+            "   Please create it first with video_manager.py:\n"
+            "       python video_manager.py\n"
+            "   Then edit the generated generator_config_v2.active.json."
+        )
         sys.exit(1)
-    
+
+    print(f"📂 Config directory: {config_dir}")
+    print(f"   templates  : {Path(config_dir) / _TEMPLATES_FILENAME}")
+    print(f"   active cfg : {active_cfg.name}")
+
     try:
-        generator = DatasetGeneratorV2UHD(config_path)
+        generator = DatasetGeneratorV2UHD(config_dir=config_dir)
         generator.run()
     except KeyboardInterrupt:
         show_cursor()

@@ -703,6 +703,176 @@ def _degrade_range(value, default: list) -> list:
     return list(value)
 
 
+# ---------------------------------------------------------------------------
+# Template-based degradation (new in Task 2)
+# ---------------------------------------------------------------------------
+
+def sample_degradation_template_params(
+    deg_spec: dict,
+    center_frame: Optional[np.ndarray] = None,
+) -> Optional[dict]:
+    """
+    Sample scene-level degradation parameters from a **degradation template** dict.
+
+    Unlike the legacy :func:`_sample_degrade_params` (which uses a flat
+    ``lr_*`` key schema), this function interprets the new template structure
+    with top-level keys ``blur``, ``compression``, ``noise``, ``chroma``, and
+    ``color``.  Each sub-dict specifies its own probability gate, so stages are
+    independently activated rather than being gated by a single global probability.
+
+    Parameters are sampled **once per scene window** and stored in a frozen
+    dict that :func:`apply_degradation_template_params` applies to every LR
+    frame in the window.  This mirrors real MPEG-2 encoder behaviour where the
+    quantiser settings (and therefore noise level, blur, and JPEG quality) are
+    constant within a GOP.  Additive noise is still drawn per-frame inside
+    :func:`apply_degradation_template_params` at the sampled sigma.
+
+    Args:
+        deg_spec:     Degradation template dict from ``templates["degradation_templates"]``.
+                      Keys: ``blur``, ``compression``, ``noise``, ``chroma``, ``color``.
+        center_frame: Not used (reserved for future dark-scene boost; accepted
+                      for API symmetry with :func:`_sample_degrade_params`).
+
+    Returns:
+        A dict of sampled scalar parameters, or ``None`` when no stage was activated.
+        Keys depend on which stages were sampled; possible keys:
+
+        * ``blur_sigma``         – Gaussian blur σ (float > 0).
+        * ``jpeg_quality``       – JPEG encode quality 1-100 (int).
+        * ``noise_sigma``        – Gaussian noise std-dev (float > 0).
+        * ``color_noise``        – True = colour noise, False = luma noise (bool).
+        * ``saturation``         – HSV saturation multiplier (float).
+        * ``chroma_bleed``       – chroma bleed strength (float, 0 = disabled).
+        * ``contrast``           – linear contrast multiplier (float).
+        * ``brightness``         – additive brightness offset normalised 0-1 (float).
+        * ``gamma``              – gamma exponent; output = input^(1/gamma) (float).
+        * ``black_lift``         – additive black-level lift normalised 0-1 (float).
+    """
+    if not deg_spec:
+        return None
+
+    params: dict = {}
+
+    # ── Blur ─────────────────────────────────────────────────────────────────
+    blur = deg_spec.get("blur", {})
+    if blur and random.random() < float(blur.get("prob", 0.0)):
+        sr = blur.get("sigma_range", [0.5, 1.5])
+        params["blur_sigma"] = random.uniform(float(sr[0]), float(sr[1]))
+
+    # ── Compression (JPEG round-trip) ────────────────────────────────────────
+    compression = deg_spec.get("compression", {})
+    if compression and random.random() < float(compression.get("prob", 0.0)):
+        qr = compression.get("jpeg_quality_range", [70, 90])
+        params["jpeg_quality"] = random.randint(int(qr[0]), int(qr[1]))
+
+    # ── Noise ────────────────────────────────────────────────────────────────
+    noise_cfg = deg_spec.get("noise", {})
+    if noise_cfg and random.random() < float(noise_cfg.get("prob", 0.0)):
+        sr = noise_cfg.get("sigma_range", [1.0, 5.0])
+        params["noise_sigma"] = random.uniform(float(sr[0]), float(sr[1]))
+        params["color_noise"] = random.random() < float(noise_cfg.get("color_noise_prob", 0.2))
+
+    # ── Chroma ───────────────────────────────────────────────────────────────
+    chroma = deg_spec.get("chroma", {})
+    if chroma:
+        sat_range = chroma.get("saturation_range", [1.0, 1.0])
+        params["saturation"] = random.uniform(float(sat_range[0]), float(sat_range[1]))
+        bleed_prob = float(chroma.get("chroma_bleed_prob", 0.0))
+        if bleed_prob > 0.0 and random.random() < bleed_prob:
+            params["chroma_bleed"] = float(chroma.get("chroma_bleed_strength", 0.0))
+
+    # ── Color ────────────────────────────────────────────────────────────────
+    color = deg_spec.get("color", {})
+    if color:
+        cr = color.get("contrast_range", [1.0, 1.0])
+        br = color.get("brightness_range", [0.0, 0.0])
+        gr = color.get("gamma_range", [1.0, 1.0])
+        params["contrast"] = random.uniform(float(cr[0]), float(cr[1]))
+        params["brightness"] = random.uniform(float(br[0]), float(br[1]))
+        params["gamma"] = random.uniform(float(gr[0]), float(gr[1]))
+        params["black_lift"] = float(color.get("black_lift", 0.0))
+
+    return params if params else None
+
+
+def apply_degradation_template_params(
+    frame: np.ndarray,
+    params: dict,
+) -> np.ndarray:
+    """
+    Apply pre-sampled template-based degradation parameters to a single LR frame.
+
+    This function is the template-aware counterpart to :func:`_apply_degrade_params`.
+    It consumes a *params* dict produced by :func:`sample_degradation_template_params`
+    and applies each stage that has been activated.
+
+    The application order is:
+      1. Blur        – applied first so JPEG artifacts are not blurred away.
+      2. Noise       – independent per-frame noise at the sampled sigma.
+      3. JPEG        – blocking / ringing artefacts.
+      4. Saturation  – chroma scaling in HSV space.
+      5. Color       – contrast, brightness, gamma, black-lift in floating point.
+
+    GT frames are never passed through this function; only LR frames are degraded.
+
+    Args:
+        frame:  Single LR BGR frame (uint8 numpy array).
+        params: Dict produced by :func:`sample_degradation_template_params`.
+
+    Returns:
+        Degraded frame as uint8 numpy array.
+    """
+    result: np.ndarray = frame.copy()
+
+    # ── 1. Blur ──────────────────────────────────────────────────────────────
+    if "blur_sigma" in params:
+        sigma = float(params["blur_sigma"])
+        if sigma >= 0.1:
+            ksize = max(3, 2 * int(np.ceil(2.0 * sigma)) + 1)
+            if ksize % 2 == 0:
+                ksize += 1
+            result = cv2.GaussianBlur(result, (ksize, ksize), sigma)
+
+    # ── 2. Noise (per-frame independent, scene-consistent sigma) ─────────────
+    if "noise_sigma" in params:
+        sigma = float(params["noise_sigma"])
+        if sigma > 0.0:
+            if params.get("color_noise", False):
+                noise = np.random.normal(0.0, sigma, result.shape).astype(np.float32)
+            else:
+                # Luma noise: identical value across channels
+                gray_noise = np.random.normal(0.0, sigma, result.shape[:2]).astype(np.float32)
+                noise = np.stack([gray_noise, gray_noise, gray_noise], axis=2)
+            result = np.clip(result.astype(np.float32) + noise, 0, 255).astype(np.uint8)
+
+    # ── 3. JPEG round-trip ───────────────────────────────────────────────────
+    if "jpeg_quality" in params:
+        encode_param = [cv2.IMWRITE_JPEG_QUALITY, int(params["jpeg_quality"])]
+        ok, buf = cv2.imencode(".jpg", result, encode_param)
+        if ok:
+            result = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+
+    # ── 4. Saturation ────────────────────────────────────────────────────────
+    sat = params.get("saturation", 1.0)
+    if sat != 1.0:
+        hsv = cv2.cvtColor(result, cv2.COLOR_BGR2HSV).astype(np.float32)
+        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * sat, 0, 255)
+        result = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+
+    # ── 5. Color: contrast / brightness / gamma / black-lift ─────────────────
+    has_color = any(k in params for k in ("contrast", "brightness", "gamma", "black_lift"))
+    if has_color:
+        result_f = result.astype(np.float32) / 255.0
+        result_f = result_f + float(params.get("black_lift", 0.0))
+        result_f = result_f * float(params.get("contrast", 1.0)) + float(params.get("brightness", 0.0))
+        gamma = float(params.get("gamma", 1.0))
+        if gamma != 1.0 and gamma > 0.0:
+            result_f = np.power(np.clip(result_f, 0.0, 1.0), 1.0 / gamma)
+        result = np.clip(result_f * 255.0, 0, 255).astype(np.uint8)
+
+    return result
+
+
 def _sample_degrade_params(
     degrade_cfg: dict,
     center_frame: Optional[np.ndarray] = None,
@@ -913,55 +1083,79 @@ def create_patch_pair(
     force_center: bool = False,
     logger=None,
     degrade_cfg: Optional[dict] = None,
+    deg_spec: Optional[dict] = None,
 ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
     """
     Create a ``(GT, LR)`` patch pair from a sequence of frames.
 
-    **16:9 formats** (``medium_169`` / ``720_169``):
+    **Resize mode** (``source_mode == "resize"`` in format_cfg, or legacy
+    format names ``medium_169`` / ``720_169``):
       * GT – full-frame resize to ``gt_size`` with ``INTER_LANCZOS4``
-        (best quality, no crop).
+        (best quality, preserves full frame content).
       * LR – full-frame resize to ``lr_size`` with ``INTER_AREA``
         (DVD-realistic quality).
+      * Suitable for any aspect-ratio target (16:9, 4:3, etc.) when the
+        source and target aspect ratios are compatible and no spatial crop is
+        desired.
 
-    **Square formats** (``small_540``, ``large_720``, …):
-      * GT – centre frame.  When the source frame is large enough to support
-        2× oversampling (``frame_h ≥ 2*gt_h`` **and** ``frame_w ≥ 2*gt_w``,
-        e.g. native 4K for the ``720``/``large_720`` formats), a
-        ``2*gt_size`` crop is taken from the source and Lanczos4-downsampled
-        to ``gt_size``.  The 2× Lanczos4 step averages out per-pixel H.265
-        in-loop deblocking softness and produces a clean GT visually
-        comparable to the ``INTER_LANCZOS4`` full-frame resize used by the
-        ``720_169`` family.  For smaller sources (e.g. 1080p for ``540``) the
-        frame is too small to oversample and a direct 1:1 crop is used
-        instead (existing behaviour).
+    **Crop mode** (``source_mode == "crop"`` in format_cfg, all other
+    legacy format names):
+      * GT – centre frame.  When the source frame is large enough for 2×
+        oversampling (``frame_h ≥ 2*gt_h`` **and** ``frame_w ≥ 2*gt_w``,
+        e.g. native 4K for the 720/720_169 formats), a ``2*gt_size`` crop
+        is taken from the source and Lanczos4-downsampled to ``gt_size``.
+        The 2× Lanczos4 step averages H.265 in-loop deblocking softness
+        and produces a clean GT comparable to the full-frame resize path.
+        For smaller sources a direct 1:1 crop is used instead.
       * LR – all frames, same crop region, downscaled to ``lr_size`` with
-        ``INTER_AREA`` (stacked vertically on axis 0).  The LR crop covers
-        the same spatial area as the GT crop at 3× lower resolution
-        (LR/GT = ``scale``), keeping the super-resolution task well-defined.
+        ``INTER_AREA`` (stacked vertically on axis 0).
+      * Works correctly for both 16:9 and 4:3 crop targets – no aspect-
+        ratio name check is performed.
+
+    **Source-mode resolution**:
+    The ``source_mode`` field in *format_cfg* takes precedence.  When it is
+    absent (legacy callers that do not populate it), the function falls back
+    to the old format-name test (``"medium_169"`` / ``"720_169"``).  New code
+    should always populate ``source_mode`` in the format config.
+
+    **Degradation**:
+    Two degradation paths are supported, applied in this priority order:
+
+    1. *New template-based* (``deg_spec`` arg): parameters are sampled via
+       :func:`sample_degradation_template_params` and applied via
+       :func:`apply_degradation_template_params`.  Supports blur,
+       compression, noise, chroma, and colour stages.
+
+    2. *Legacy flat* (``degrade_cfg`` arg): used when ``deg_spec`` is
+       ``None``; forwards to :func:`_sample_degrade_params` /
+       :func:`_apply_degrade_params` for backward compatibility.
+
+    In both cases parameters are **sampled once per scene** so that all LR
+    frames in the window share the same settings — consistent with real
+    MPEG-2 encoder behaviour.  GT is always kept lossless.
 
     In both cases a near-uniform GT (plain black, white, or flat colour) is
     silently discarded (``(None, None)``).  If the source frame is too small
     for the requested resize target a warning is logged.
 
-    When *degrade_cfg* is provided the degradation parameters are **sampled
-    once per scene** via :func:`_sample_degrade_params` (using the center
-    frame for the dark-scene probability boost), then applied to every LR
-    frame with :func:`_apply_degrade_params`.  This means all frames in the
-    window share the same noise sigma, blur sigma, and JPEG quality — matching
-    the behaviour of a real MPEG-2 encoder where the same quantiser settings
-    apply to the whole GOP.  Additive noise samples are still drawn
-    independently per frame (sensor noise is uncorrelated), but at the
-    consistent sigma.  GT is always kept lossless.
-
     Args:
         frames:       BGR numpy arrays, length 5 or 7.
-        format_name:  Format key (e.g. ``"medium_169"``, ``"small_540"``).
-        format_cfg:   Dict with ``'gt_size': [W, H]`` and ``'lr_size': [W, H]``.
-        force_center: Square formats only – use the geometric centre of the
-                      frame instead of a random crop location.
+        format_name:  Format key string (used for logging and legacy
+                      source-mode fallback only — all fachliche decisions are
+                      now driven by *format_cfg*).
+        format_cfg:   Dict with at minimum ``'gt_size': [W, H]`` and
+                      ``'lr_size': [W, H]``.  Optionally:
+                      * ``'source_mode'``: ``"resize"`` or ``"crop"``
+                        (overrides the legacy format-name test).
+        force_center: Crop mode only – use the geometric centre of the frame
+                      instead of a random crop location.
         logger:       Optional logger instance for warning messages.
-        degrade_cfg:  Optional degradation config dict (see :func:`degrade_lr_frame`).
-                      When ``None`` no degradation is applied.
+        degrade_cfg:  Legacy degradation config dict.  Ignored when *deg_spec*
+                      is provided.  When ``None`` no legacy degradation is
+                      applied.
+        deg_spec:     New-style degradation template dict (from
+                      ``templates["degradation_templates"]``).  When
+                      provided, *degrade_cfg* is ignored.
 
     Returns:
         ``(gt, lr_stacked)`` or ``(None, None)`` on failure.
@@ -977,9 +1171,30 @@ def create_patch_pair(
 
     center_idx = n // 2
 
-    if format_name in ("medium_169", "720_169"):
-        # Full-frame resize – the whole source frame is scaled to the target
-        # size.  No crop is applied so the full 16:9 content is preserved.
+    # ── Determine source_mode ─────────────────────────────────────────────────
+    # Prefer explicit source_mode from format_cfg; fall back to legacy name check.
+    source_mode = format_cfg.get("source_mode")
+    if source_mode not in ("resize", "crop"):
+        # Legacy fallback: the old hardcoded whitelist
+        source_mode = "resize" if format_name in ("medium_169", "720_169") else "crop"
+
+    # ── Degradation: resolve which sampler to use ─────────────────────────────
+    # deg_spec (new template) takes priority over degrade_cfg (legacy flat cfg).
+    center_raw = frames[center_idx]
+    if deg_spec is not None:
+        # New template-based degradation – sample once per scene.
+        _scene_params = sample_degradation_template_params(deg_spec, center_frame=center_raw)
+        _apply_fn = apply_degradation_template_params
+    elif degrade_cfg is not None:
+        # Legacy degradation – keep old behaviour.
+        _scene_params = _sample_degrade_params(degrade_cfg, center_frame=center_raw)
+        _apply_fn = _apply_degrade_params
+    else:
+        _scene_params = None
+        _apply_fn = None
+
+    if source_mode == "resize":
+        # ── Resize path: full-frame rescale ──────────────────────────────────
         if frame_h < gt_h or frame_w < gt_w:
             if logger:
                 logger.warning(
@@ -997,30 +1212,23 @@ def create_patch_pair(
             return None, None
 
         # LR: INTER_AREA = DVD-realistic quality, then optional degradation.
-        # Parameters are sampled once for the whole scene so that every frame
-        # in the window receives identical blur/quality/noise-level settings.
-        center_raw = frames[center_idx]
-        _scene_params = _sample_degrade_params(degrade_cfg, center_frame=center_raw) if degrade_cfg else None
         lr_frames = []
         for frame in frames:
             lr = cv2.resize(frame, (lr_w, lr_h), interpolation=cv2.INTER_AREA)
             if _scene_params is not None:
-                lr = _apply_degrade_params(lr, _scene_params)
+                lr = _apply_fn(lr, _scene_params)
             lr_frames.append(lr)
+
     else:
-        # -----------------------------------------------------------------------
-        # Square crop formats
-        # -----------------------------------------------------------------------
-        # When the source is large enough for 2× oversampling (e.g. native 4K
-        # for the 720/large_720 formats, where 3840≥1440 and 2160≥1440), take
-        # a 2×gt_size crop and Lanczos4-downsample it to gt_size for the GT.
-        # The 2× Lanczos4 step averages H.265 in-loop deblocking softness and
-        # produces a clean GT comparable to the full-frame INTER_LANCZOS4 resize
-        # used by 720_169/medium_169.
+        # ── Crop path: spatial crop + optional oversampled Lanczos4 ──────────
         #
-        # For smaller sources (1080p → 540/small_540, and any format in the
-        # 1080p fallback path) a 2×gt_size crop would exceed the frame height
-        # so we fall back to the existing 1:1 native-resolution crop.
+        # When the source is large enough for 2× oversampling (e.g. native 4K
+        # for 720/1152 GT sizes), take a 2×gt_size crop and Lanczos4-
+        # downsample it.  Produces a clean GT comparable to full-frame resize.
+        # For smaller sources fall back to a 1:1 native-resolution crop.
+        #
+        # This path is dimension-driven, not name-driven, so it works correctly
+        # for any aspect ratio (16:9 crop, 4:3 crop, etc.).
         oversample: int = 2 if (frame_h >= 2 * gt_h and frame_w >= 2 * gt_w) else 1
         sample_h: int = gt_h * oversample
         sample_w: int = gt_w * oversample
@@ -1052,19 +1260,13 @@ def create_patch_pair(
         if float(gray.std()) < 7.0:
             return None, None
 
-        center_raw = frames[center_idx]
-        # Sample degradation parameters once for the whole scene window so
-        # that all 7 LR frames share the same noise sigma, blur sigma, and
-        # JPEG quality — consistent with how a real MPEG-2 encoder works.
-        _scene_params = _sample_degrade_params(degrade_cfg, center_frame=center_raw) if degrade_cfg else None
+        # LR: same oversampled area → exact scale ratio (e.g. 240/720 = 1/3).
         lr_frames = []
         for frame in frames:
-            # LR is derived from the same oversampled area so the LR/GT ratio
-            # is always exactly `scale` (e.g. 240/720 = 1/3 for scale=3).
             raw_crop = frame[crop_y : crop_y + sample_h, crop_x : crop_x + sample_w]
             lr = cv2.resize(raw_crop, (lr_w, lr_h), interpolation=cv2.INTER_AREA)
             if _scene_params is not None:
-                lr = _apply_degrade_params(lr, _scene_params)
+                lr = _apply_fn(lr, _scene_params)
             lr_frames.append(lr)
 
     lr_stacked = np.concatenate(lr_frames, axis=0)
@@ -1704,17 +1906,40 @@ def extract_and_save_streaming_distributed(
                             if not cfg:
                                 continue
 
-                            # Resize formats (medium_169/720_169) always use the full
-                            # frame – retrying never changes the result.
-                            is_resize_fmt = fmt_name in ("medium_169", "720_169")
-                            max_attempts = 1 if is_resize_fmt else 6
+                            # Determine source_mode from cfg; fall back to legacy name
+                            # check so existing callers that don't populate source_mode
+                            # still work correctly.
+                            _source_mode = cfg.get("source_mode")
+                            if _source_mode not in ("resize", "crop"):
+                                _source_mode = (
+                                    "resize"
+                                    if fmt_name in ("medium_169", "720_169")
+                                    else "crop"
+                                )
+                            # Resize mode produces the same output on every attempt —
+                            # no benefit in retrying a random crop.
+                            max_attempts = 1 if _source_mode == "resize" else 6
+
+                            # Per-format degradation: sample a template from the
+                            # format's degradation_mix if available; fall back to the
+                            # global degrade_cfg for legacy callers.
+                            _deg_spec: Optional[dict] = None
+                            _deg_mix = cfg.get("degradation_mix")
+                            _deg_tmpls = cfg.get("degradation_templates")
+                            if _deg_mix and _deg_tmpls:
+                                _names = list(_deg_mix.keys())
+                                _weights = [float(_deg_mix[k]) for k in _names]
+                                _chosen = random.choices(_names, weights=_weights, k=1)[0]
+                                _deg_spec = _deg_tmpls.get(_chosen)
+
                             gt, lr = None, None
                             for attempt in range(max_attempts):
                                 force = attempt >= 5
                                 gt, lr = create_patch_pair(
                                     window, fmt_name, cfg,
                                     force_center=force, logger=logger,
-                                    degrade_cfg=degrade_cfg,
+                                    degrade_cfg=degrade_cfg if _deg_spec is None else None,
+                                    deg_spec=_deg_spec,
                                 )
                                 if gt is None:
                                     continue

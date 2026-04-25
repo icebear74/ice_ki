@@ -1,7 +1,7 @@
 # Task 2 Handover Notes
 
-This document is for whoever implements **Task 2** (generator rework).
-Task 1 has completely replaced the config model and management UI.
+> **Status: COMPLETED** – Task 2 has been implemented.
+> This document is retained as reference for the design decisions made.
 
 ---
 
