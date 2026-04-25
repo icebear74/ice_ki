@@ -213,6 +213,10 @@ class DatasetGeneratorV2UHD:
             [idx for idx, _ in _detected] if _detected
             else ([0] if self.use_cuda else [])
         )
+        # Optimal per-worker decode configs for within-film parallel extraction.
+        # Populated from the decode_benchmark.json cache (best_parallel entry).
+        # None = parallel mode disabled (single-worker extraction per film).
+        self._parallel_worker_configs: Optional[List[dict]] = None
         if self.use_cuda:
             self.logger.info("🚀 CUDA/GPU mode enabled (hardware-accelerated decoding & scaling)")
         else:
@@ -358,6 +362,10 @@ class DatasetGeneratorV2UHD:
                         self.use_cuda    = best.get("use_cuda", self.use_cuda)
                         _backend_lbl = best.get("label", "?")
                         _n_w         = cache.get("best_parallel", {})
+                        # Load optimal per-worker decode configs for parallel
+                        # within-film extraction (stored since this PR).
+                        if _n_w and _n_w.get("worker_configs"):
+                            self._parallel_worker_configs = _n_w["worker_configs"]
                         _n_w_str     = (
                             f"  |  {_n_w['n_workers']}× parallel: {_n_w['fps']:.0f} fps"
                             if _n_w and _n_w.get("fps") else ""
@@ -679,6 +687,22 @@ class DatasetGeneratorV2UHD:
 
         p_count = 0
 
+        def _hw_to_worker_cfg(hw: List[str]) -> dict:
+            """Convert hw_args list to a compact (use_cuda, cuda_device) dict."""
+            if not hw:
+                return {"use_cuda": False, "cuda_device": 0}
+            # "-init_hw_device cuda=hw:N" encodes the device ordinal.
+            for i, tok in enumerate(hw):
+                if tok == "-init_hw_device" and i + 1 < len(hw):
+                    val = hw[i + 1]
+                    if val.startswith("cuda=hw:"):
+                        try:
+                            device = int(val.split(":")[1])
+                            return {"use_cuda": True, "cuda_device": device}
+                        except (ValueError, IndexError):
+                            pass
+            return {"use_cuda": True, "cuda_device": 0}
+
         def _run_par(vid_id: str, label: str, configs: List[Tuple[List[str], str]],
                      reference_fps: Optional[float] = None) -> None:
             nonlocal p_count
@@ -700,6 +724,9 @@ class DatasetGeneratorV2UHD:
                 "label": label,
                 "fps": fps,
                 "n_workers": n_w,
+                # Store per-worker decode config so _extract_film_parallel can
+                # reproduce the optimal worker mix without re-running the benchmark.
+                "worker_configs": [_hw_to_worker_cfg(hw) for hw, _ in configs],
             })
 
         if best_single:
@@ -839,6 +866,9 @@ class DatasetGeneratorV2UHD:
 
         self.use_cuda    = use_cuda
         self.cuda_device = cuda_device
+        # Store per-worker decode configs for within-film parallel extraction.
+        if par_winner and par_winner.get("worker_configs"):
+            self._parallel_worker_configs = par_winner["worker_configs"]
 
         # Build the UI backend label: shows active pipeline + parallel fps
         _par_str = (
@@ -875,10 +905,11 @@ class DatasetGeneratorV2UHD:
             },
             "best_parallel": (
                 {
-                    "variant_id": par_winner["variant_id"],
-                    "label":      par_winner["label"],
-                    "fps":        par_winner["fps"],
-                    "n_workers":  par_winner["n_workers"],
+                    "variant_id":    par_winner["variant_id"],
+                    "label":         par_winner["label"],
+                    "fps":           par_winner["fps"],
+                    "n_workers":     par_winner["n_workers"],
+                    "worker_configs": par_winner.get("worker_configs"),
                 }
                 if par_winner else None
             ),
@@ -1855,6 +1886,118 @@ class DatasetGeneratorV2UHD:
         
         return patches_created
 
+    def _extract_film_parallel(
+        self,
+        video_path: str,
+        assignments: List[Tuple[int, str, str]],
+        n_frames: int,
+        fps: float,
+        is_hdr: bool,
+        prior_total: int,
+    ) -> Dict[str, int]:
+        """Run N parallel streaming extractors on temporal segments of the same film.
+
+        Splits *assignments* into N temporally-ordered groups and launches one
+        ``extract_and_save_streaming_distributed`` worker per group.  Each worker
+        opens its own FFmpeg process and decodes only the frames in its slice,
+        reducing per-worker decode cost from ``|film_frames|`` to
+        ``|film_frames| / N``.
+
+        The optimal N and per-worker decode configs (GPU vs CPU) come from
+        ``self._parallel_worker_configs``, which is populated from the stored
+        ``decode_benchmark.json`` when the benchmark is run.
+
+        Args:
+            video_path:   Path to the source video file.
+            assignments:  All (center_frame, category, format_name) assignments
+                          for this film — will be split across workers.
+            n_frames:     Rolling-buffer window size (same for all workers).
+            fps:          Video frame rate.
+            is_hdr:       Whether the source uses an HDR transfer function.
+            prior_total:  Cumulative patch count before this film (for UI).
+
+        Returns:
+            Dict mapping category name → number of patches created.
+        """
+        worker_configs = self._parallel_worker_configs  # guaranteed not None
+        n = len(worker_configs)
+
+        # Split assignments into N temporally-ordered chunks.
+        # Temporal ordering ensures each worker's FFmpeg process seeks to a
+        # compact range and decodes a contiguous slice of the film, avoiding
+        # large decode ranges caused by interleaved assignments.
+        sorted_asgn = sorted(assignments, key=lambda a: a[0])
+        chunk = max(1, (len(sorted_asgn) + n - 1) // n)
+        groups: List[List[Tuple[int, str, str]]] = [
+            sorted_asgn[i * chunk : (i + 1) * chunk]
+            for i in range(n)
+        ]
+        groups = [g for g in groups if g]  # drop empty trailing groups
+
+        nice_level = self.config.get("processing", {}).get("ffmpeg_nice", 10)
+        center_snap = self.config.get("processing", {}).get("center_snap_seconds", 1.0)
+
+        patches_lock = threading.Lock()
+        patches_total: Dict[str, int] = {}
+        # Track per-category totals for UI (not accurate until workers finish,
+        # but used for the final progress bar update).
+        _tracker_updated: Dict[str, int] = {}
+
+        def _run_worker(group: List[Tuple[int, str, str]], wcfg: dict) -> None:
+            result = extract_and_save_streaming_distributed(
+                video_path=video_path,
+                assignments=group,
+                n_frames=n_frames,
+                format_config=self.format_config,
+                base_dir=self.base_dir,
+                fps=fps,
+                logger=self.logger,
+                is_interesting_fn=self.is_interesting_patch,
+                is_black_frame_fn=_streaming_is_black_frame,
+                # No per-frame progress callback in parallel mode — workers
+                # share the UI state and would conflict; UI is refreshed after
+                # each worker finishes instead.
+                progress_fn=None,
+                use_cuda=wcfg.get("use_cuda", False),
+                cuda_device=wcfg.get("cuda_device", 0),
+                nice_level=nice_level,
+                is_hdr=is_hdr,
+                center_snap_seconds=center_snap,
+                stream_width=STREAM_OPT_WIDTH,
+                stream_height=STREAM_OPT_HEIGHT,
+            )
+            with patches_lock:
+                for cat, count in result.items():
+                    patches_total[cat] = patches_total.get(cat, 0) + count
+                    # Update tracker once per worker completion (not per-frame).
+                    delta = count - _tracker_updated.get(cat, 0)
+                    if delta > 0:
+                        self.tracker.increment_category_images(cat, delta)
+                        _tracker_updated[cat] = count
+                # Refresh UI so the progress bars advance as workers finish.
+                self.ui_state['patches_created_total'] = (
+                    prior_total + sum(patches_total.values())
+                )
+                self.last_update_time = 0.0   # force immediate redraw
+                self._update_terminal_ui()
+
+        threads = [
+            threading.Thread(target=_run_worker, args=(g, w), daemon=True)
+            for g, w in zip(groups, worker_configs)
+        ]
+        n_actual = len(threads)
+        self.logger.info(
+            f"⚡ Parallel film extraction: {n_actual} workers × "
+            f"~{len(sorted_asgn) // max(n_actual, 1)} assignments each "
+            f"(total {len(sorted_asgn)} assignments)"
+        )
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        return patches_total
+
     def _extract_patches_multi_format_batch(self, video_path: str, duration: float,
                                            format_distribution: Dict[str, Dict[str, int]],
                                            n_frames: int, video_name: str, fps: float = 25.0,
@@ -1976,30 +2119,51 @@ class DatasetGeneratorV2UHD:
             # Throttled redraw (respects self.update_interval)
             self._update_terminal_ui()
 
-        streaming_result = extract_and_save_streaming_distributed(
-            video_path=video_path,
-            assignments=assignments,
-            n_frames=n_frames,
-            format_config=self.format_config,
-            base_dir=self.base_dir,
-            fps=fps,
-            logger=self.logger,
-            is_interesting_fn=self.is_interesting_patch,
-            is_black_frame_fn=_streaming_is_black_frame,
-            progress_fn=_on_progress,
-            use_cuda=self.use_cuda,
-            nice_level=self.config.get("processing", {}).get("ffmpeg_nice", 10),
-            is_hdr=is_hdr,
-            # degrade_cfg intentionally omitted: per-format degradation templates
-            # are embedded in format_config and sampled per-patch in the extractor.
-            center_snap_seconds=self.config.get("processing", {}).get("center_snap_seconds", 1.0),
-            stream_width=STREAM_OPT_WIDTH,
-            stream_height=STREAM_OPT_HEIGHT,
-            cuda_device=self.cuda_device,
-        )
+        streaming_result: Dict[str, int]
+        if (
+            self._parallel_worker_configs is not None
+            and len(assignments) >= len(self._parallel_worker_configs)
+        ):
+            # ── Parallel within-film extraction ─────────────────────────────
+            # Split the assignment list into N temporal segments and run N
+            # FFmpeg workers simultaneously.  Each worker decodes only its
+            # slice of the film (not the whole thing), which reduces the total
+            # frames decoded from |film| to |film|/N per worker.
+            streaming_result = self._extract_film_parallel(
+                video_path=video_path,
+                assignments=assignments,
+                n_frames=n_frames,
+                fps=fps,
+                is_hdr=is_hdr,
+                prior_total=prior_total,
+            )
+        else:
+            # ── Single-worker extraction (original path) ─────────────────────
+            streaming_result = extract_and_save_streaming_distributed(
+                video_path=video_path,
+                assignments=assignments,
+                n_frames=n_frames,
+                format_config=self.format_config,
+                base_dir=self.base_dir,
+                fps=fps,
+                logger=self.logger,
+                is_interesting_fn=self.is_interesting_patch,
+                is_black_frame_fn=_streaming_is_black_frame,
+                progress_fn=_on_progress,
+                use_cuda=self.use_cuda,
+                nice_level=self.config.get("processing", {}).get("ffmpeg_nice", 10),
+                is_hdr=is_hdr,
+                # degrade_cfg intentionally omitted: per-format degradation templates
+                # are embedded in format_config and sampled per-patch in the extractor.
+                center_snap_seconds=self.config.get("processing", {}).get("center_snap_seconds", 1.0),
+                stream_width=STREAM_OPT_WIDTH,
+                stream_height=STREAM_OPT_HEIGHT,
+                cuda_device=self.cuda_device,
+            )
 
         # Merge final result into patches_created.
-        # Tracker already updated incrementally in _on_progress – do NOT call
+        # Tracker already updated: incrementally via _on_progress (single-worker)
+        # or once per worker completion (parallel) — do NOT call
         # tracker.increment_category_images again here to avoid double-counting.
         for category, count in streaming_result.items():
             patches_created[category] = patches_created.get(category, 0) + count

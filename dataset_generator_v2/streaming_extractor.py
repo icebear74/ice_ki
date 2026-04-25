@@ -1890,16 +1890,26 @@ def extract_and_save_streaming_distributed(
     # Build FFmpeg command.
     #
     # Pipeline tier is chosen by build_vf_filter() based on is_hdr and
-    # available CUDA capabilities:
+    # available CUDA/QSV capabilities:
     #
     #  HDR source  + full-GPU   → tonemap_cuda + scale_cuda + hwdownload
     #  HDR source  + scale-GPU  → scale_cuda + hwdownload (p010) + zscale+tonemap
+    #  HDR source  + QSV decode → Intel QSV H.265/H.264 decode + CPU libplacebo/zscale
     #  HDR source  + CPU-only   → zscale + tonemap(reinhard) + scale (bilinear)
     #  SDR source  + scale-GPU  → scale_cuda + hwdownload (plain scale)
     #  SDR source  + CPU-only   → scale bilinear (software, no linearisation)
     _use_cuda = use_cuda and cuda_available()
     _full_gpu  = _use_cuda and is_hdr and tonemap_cuda_available()
     _scale_gpu = _use_cuda and (not _full_gpu) and scale_cuda_available()
+
+    # QSV decode: try Intel hardware H.265/H.264 decode when no CUDA is active.
+    # QSV only accelerates the decode step; the filter chain (libplacebo,
+    # zscale, scale) still runs on the CPU — so build_vf_filter is unchanged.
+    _qsv_codec: Optional[str] = (
+        _qsv_decoder_for_video(video_path)
+        if use_qsv and not _use_cuda
+        else None
+    )
 
     vf_filter = build_vf_filter(
         is_hdr=is_hdr, use_cuda=use_cuda,
@@ -1972,6 +1982,12 @@ def extract_and_save_streaming_distributed(
         hw_args        = [*_CUDA_HW_INIT, "-hwaccel", "cuda"]
         _cpu_algo = ("libplacebo" if _placebo else "tonemap/reinhard") if is_hdr else "scale/bilinear"
         pipeline_label = f"decode-GPU + CPU {_cpu_algo} [{hdr_label}] yuv420p {stream_width}×{stream_height}"
+    elif _qsv_codec:
+        # Intel QSV hardware decode: frame data lands in CPU memory after decode,
+        # so the existing CPU filter chain (libplacebo / zscale) is unchanged.
+        hw_args        = ["-hwaccel", "qsv", "-c:v", _qsv_codec]
+        _cpu_algo = ("libplacebo" if _placebo else "zscale/tonemap") if is_hdr else "scale/bilinear"
+        pipeline_label = f"QSV decode ({_qsv_codec}) + CPU {_cpu_algo} [{hdr_label}] yuv420p {stream_width}×{stream_height}"
     else:
         hw_args        = []
         _cpu_algo = ("libplacebo" if _placebo else "zscale/tonemap") if is_hdr else "scale/bilinear"
