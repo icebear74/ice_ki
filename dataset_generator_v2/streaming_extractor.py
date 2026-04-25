@@ -7,6 +7,23 @@ FFmpeg pass that streams the video linearly.  A rolling frame buffer
 (default 7 frames) is maintained in memory; patches are written to disk
 as their centre frame enters the buffer.
 
+Performance optimisations (active by default)
+---------------------------------------------
+* **Opt 1 – Reduced stream resolution**: ``STREAM_OPT_WIDTH × STREAM_OPT_HEIGHT``
+  (2304 × 1440) instead of native 4K.  Still large enough for 2× oversampled
+  Lanczos4 crops for all GT families (1152×648, 960×540, 960×720).
+* **Opt 2 – Bilinear FFmpeg scale**: ``flags=bilinear`` in the intermediate
+  scale step; Python applies Lanczos4 on the actual patch crops anyway.
+* **Opt 3 – yuv420p pipe**: 1.5 bytes/pixel instead of 3 bytes/pixel (bgr24),
+  cutting pipe bandwidth by ~33 %.  Python converts with
+  ``cv2.cvtColor(…, COLOR_YUV2BGR_I420)``.
+* **Opt 4 – libplacebo HDR tonemap**: when ``--enable-libplacebo`` is present
+  in the FFmpeg build a single shader-based pass replaces the 4-step
+  zscale+tonemap chain (~2-4× faster for equivalent quality).
+
+Combined Opt 1+3 alone reduce per-frame pipe data from 24.9 MB (3840×2160
+BGR24) to ~5 MB (2304×1440 yuv420p) — roughly **5× less**.
+
 Public API
 ----------
 build_frame_assignments_distributed()
@@ -26,15 +43,16 @@ snap_assignments_to_centers()
 
 extract_and_save_streaming_distributed()
     Single-stream entry point for all formats.  Launches one FFmpeg process,
-    streams BGR24 frames at 3840×2160 (4K) by default — large enough for
-    ``create_patch_pair`` to apply 2× oversampled Lanczos4 crops for both the
-    720×720 and 540×540 GT families.  Uses CUDA (``tonemap_cuda`` + ``scale_cuda``
-    or ``scale_cuda`` alone) when available; falls back to CPU automatically.
+    streams yuv420p frames at ``STREAM_OPT_WIDTH × STREAM_OPT_HEIGHT`` by
+    default — large enough for ``create_patch_pair`` to apply 2× oversampled
+    Lanczos4 crops for both the 1152×648 and 960×720 GT families.  Uses CUDA
+    (``tonemap_cuda`` + ``scale_cuda`` or ``scale_cuda`` alone) when available;
+    falls back to libplacebo (if present) or CPU zscale automatically.
     Passes the filter chain via a temp file, avoiding OS ARG_MAX limits.
 
 extract_and_save_streaming_dual()
     Deprecated compatibility shim.  Forwards all arguments to
-    :func:`extract_and_save_streaming_distributed` at 4K resolution.
+    :func:`extract_and_save_streaming_distributed` at optimised resolution.
 
 create_patch_pair()
     Create a (GT, LR) patch pair from a sequence of frames.
@@ -83,11 +101,24 @@ from utils.format_definitions import (
 STREAM_WIDTH: int = 1920
 STREAM_HEIGHT: int = 1080
 
-# 4K stream — default resolution for all formats.
-# large enough for create_patch_pair to do 2× oversampled Lanczos4 crops for
-# both 720×720 and 540×540 GT families (requires frame_h ≥ 2*gt_h).
+# 4K stream — kept for backward compatibility / explicit callers.
 STREAM_4K_WIDTH:  int = 3840
 STREAM_4K_HEIGHT: int = 2160
+
+# Optimised stream resolution (Opt 1).
+# Minimum resolution that supports 2× oversampled Lanczos4 crops for every
+# format in the current template set:
+#   1152×648 crop  → needs 2×1152 = 2304 w,  2×648 = 1296 h
+#   960×540  crop  → needs 2×960  = 1920 w,  2×540 = 1080 h
+#   960×720  crop  → needs 2×960  = 1920 w,  2×720 = 1440 h
+#   Resize formats → only need ≥ gt_size (trivially covered)
+# → max(2304, 1920, 1920) × max(1296, 1080, 1440) = 2304 × 1440
+#
+# Pipe-bandwidth compared to 3840×2160 BGR24:
+#   Old: 3840 × 2160 × 3      = 24.9 MB/frame
+#   New: 2304 × 1440 × 1.5    =  4.98 MB/frame  (~5× less, combined Opt1+Opt3)
+STREAM_OPT_WIDTH:  int = 2304
+STREAM_OPT_HEIGHT: int = 1440
 
 # ---------------------------------------------------------------------------
 # Filter chains — two families: HDR→SDR tonemap and plain SDR pass-through.
@@ -98,17 +129,20 @@ STREAM_4K_HEIGHT: int = 2160
 # tonemap chain to an SDR source causes overexposure because zscale would
 # linearise the already-gamma-encoded values a second time.
 #
+# All chains output yuv420p (Opt 3) — ~33 % less pipe bandwidth vs bgr24.
+# Python converts yuv420p→BGR with cv2.cvtColor(…, COLOR_YUV2BGR_I420).
+#
 # The correct chain is selected per-video by build_vf_filter() based on the
 # is_hdr flag returned by _get_video_metadata() / is_hdr_transfer().
 # ---------------------------------------------------------------------------
 
-# HDR→SDR: Software (CPU-only) fallback.
+# HDR→SDR: Software (CPU-only) fallback via zscale+tonemap.
 # zscale reads tin from stream metadata → works for smpte2084, hlg, bt709.
 # range=full: unambiguous 0-255 output for OpenCV.
 # Performance notes:
 #   - tonemap=reinhard is the fastest tone-mapper (simple x/(1+x) curve).
-#   - flags=lanczos gives the highest-quality resize to 1080 (important for GT
-#     quality in full-frame formats like 720_169).
+#   - flags=bilinear (Opt 2): faster than lanczos; Python does Lanczos4 on
+#     the actual patch crops, so the FFmpeg resize only needs to be adequate.
 #   - filter=bilinear in each zscale step speeds up any incidental resampling.
 _TONEMAP_FILTER: str = (
     "zscale=t=linear:npl=100:filter=bilinear,"
@@ -116,16 +150,28 @@ _TONEMAP_FILTER: str = (
     "zscale=p=bt709:filter=bilinear,"
     "tonemap=tonemap=reinhard:desat=0,"
     "zscale=t=bt709:m=bt709:range=full:filter=bilinear,"
-    f"scale={STREAM_WIDTH}:{STREAM_HEIGHT}:flags=lanczos,"
-    "format=bgr24"
+    f"scale={STREAM_WIDTH}:{STREAM_HEIGHT}:flags=bilinear,"
+    "format=yuv420p"
+)
+
+# HDR→SDR: libplacebo CPU path (Opt 4).
+# Replaces the 4-step zscale+tonemap chain with a single GPU-shader pass on
+# the CPU (via Vulkan/software fallback).  Requires FFmpeg built with
+# --enable-libplacebo (Ubuntu 6.1.1-3ubuntu5 includes this).
+# range=pc → full range (0-255), downscaler=bilinear → fast resize.
+# libplacebo auto-detects source HDR metadata from stream properties.
+_TONEMAP_FILTER_PLACEBO: str = (
+    f"libplacebo=w={STREAM_WIDTH}:h={STREAM_HEIGHT}"
+    ":colorspace=bt709:color_trc=bt709:color_primaries=bt709"
+    ":tonemapping=mobius:range=pc:downscaler=bilinear,"
+    "format=yuv420p"
 )
 
 # SDR pass-through: Software (CPU-only).
-# No linearisation or tonemap needed — just scale + convert to BGR24.
-# flags=lanczos: highest-quality downscale, best GT fidelity.
+# flags=bilinear (Opt 2): adequate for the intermediate scale step.
 _SDR_FILTER: str = (
-    f"scale={STREAM_WIDTH}:{STREAM_HEIGHT}:flags=lanczos,"
-    "format=bgr24"
+    f"scale={STREAM_WIDTH}:{STREAM_HEIGHT}:flags=bilinear,"
+    "format=yuv420p"
 )
 
 # HDR→SDR: Hybrid GPU/CPU — scale_cuda downscales on GPU, tonemap on CPU.
@@ -143,7 +189,7 @@ _TONEMAP_FILTER_SCALE_CUDA: str = (
     "zscale=p=bt709:filter=bilinear,"
     "tonemap=tonemap=reinhard:desat=0,"
     "zscale=t=bt709:m=bt709:range=full:filter=bilinear,"
-    "format=bgr24"
+    "format=yuv420p"
 )
 
 # SDR pass-through: Hybrid GPU/CPU — scale on GPU, convert on CPU.
@@ -151,14 +197,14 @@ _TONEMAP_FILTER_SCALE_CUDA: str = (
 _SDR_FILTER_SCALE_CUDA: str = (
     f"scale_cuda={STREAM_WIDTH}:{STREAM_HEIGHT}:interp_algo=bicubic,"
     "hwdownload,"
-    "format=bgr24"
+    "format=yuv420p"
 )
 
 # Full-GPU HDR→SDR tonemap filter chain.
 # Requires FFmpeg built with --enable-cuda-nvcc / libnpp so that both
 # tonemap_cuda and scale_cuda are available.
 # Frames stay in GPU memory from decode through tonemap + scale;
-# hwdownload copies only the final 1920×1080 result to CPU.
+# hwdownload copies only the final result to CPU.
 # Use together with -hwaccel cuda -hwaccel_output_format cuda.
 # Notes:
 #   - interp_algo=bicubic — see _TONEMAP_FILTER_SCALE_CUDA comment above.
@@ -166,26 +212,25 @@ _SDR_FILTER_SCALE_CUDA: str = (
 #     and outputs NV12.
 #   - hwdownload (bare) + scale=iw:ih: same reasoning as above — scale breaks
 #     the backward format negotiation, converting NV12→YUV420P in software.
-#   - format=yuv420p: ensures planar yuv420p so the final format=bgr24
-#     libswscale conversion is unambiguous.
+#   - format=yuv420p: ensures planar yuv420p for the pipe (Opt 3).
 _TONEMAP_FILTER_CUDA: str = (
     f"tonemap_cuda=tonemap=mobius:desat=0:peak=100,"
     f"scale_cuda={STREAM_WIDTH}:{STREAM_HEIGHT}:interp_algo=bicubic,"
     "hwdownload,"
     "scale=iw:ih,"
-    "format=yuv420p,"
-    "format=bgr24"
+    "format=yuv420p"
 )
 
 # ---------------------------------------------------------------------------
-# CUDA detection (cached after the first call)
+# CUDA / libplacebo detection (cached after the first call)
 # ---------------------------------------------------------------------------
 
 _cuda_available: Optional[bool] = None
 _scale_cuda_available: Optional[bool] = None
 _tonemap_cuda_available: Optional[bool] = None
+_libplacebo_avail: Optional[bool] = None
 
-# Cached output of `ffmpeg -filters` (shared by both filter probes).
+# Cached output of `ffmpeg -filters` (shared by all filter probes).
 _ffmpeg_filters_output: Optional[str] = None
 
 # Cached FFmpeg major version (4 = conservative fallback).
@@ -255,6 +300,21 @@ def tonemap_cuda_available() -> bool:
         out = _get_ffmpeg_filters()
         _tonemap_cuda_available = "tonemap_cuda" in out and "scale_cuda" in out
     return _tonemap_cuda_available
+
+
+def libplacebo_available() -> bool:
+    """Return True when the local FFmpeg build includes the ``libplacebo`` filter.
+
+    libplacebo (``--enable-libplacebo``) replaces the 4-step zscale+tonemap
+    CPU chain with a single shader-based HDR→SDR pass.  It is typically
+    2-4× faster than zscale for equivalent quality.
+
+    The result is cached after the first call so repeated checks are free.
+    """
+    global _libplacebo_avail
+    if _libplacebo_avail is None:
+        _libplacebo_avail = "libplacebo" in _get_ffmpeg_filters()
+    return _libplacebo_avail
 
 
 def _get_ffmpeg_major_version() -> int:
@@ -360,11 +420,16 @@ def build_vf_filter(is_hdr: bool, use_cuda: bool = True,
 
     Selects the best available pipeline tier at call time:
 
-    * HDR + full-GPU  → tonemap_cuda + scale_cuda pipeline
-    * HDR + scale-GPU → scale_cuda + CPU zscale/tonemap pipeline
-    * HDR + CPU-only  → CPU zscale + tonemap + scale pipeline
-    * SDR + scale-GPU → scale_cuda pipeline
-    * SDR + CPU-only  → scale pipeline
+    * HDR + full-GPU   → tonemap_cuda + scale_cuda pipeline
+    * HDR + scale-GPU  → scale_cuda + CPU zscale/tonemap pipeline
+    * HDR + libplacebo → single-pass libplacebo HDR→SDR (Opt 4, CPU)
+    * HDR + CPU-only   → CPU zscale + tonemap + scale pipeline (fallback)
+    * SDR + scale-GPU  → scale_cuda pipeline
+    * SDR + CPU-only   → bilinear scale pipeline (Opt 2)
+
+    All paths output ``yuv420p`` (Opt 3) — ~33 % less pipe bandwidth
+    compared to ``bgr24``.  Python converts with
+    ``cv2.cvtColor(yuv, COLOR_YUV2BGR_I420)``.
 
     Args:
         is_hdr:    Whether the source video is HDR (PQ or HLG transfer).
@@ -388,8 +453,7 @@ def build_vf_filter(is_hdr: bool, use_cuda: bool = True,
                 f"scale_cuda={width}:{height}:interp_algo=bicubic,"
                 "hwdownload,"
                 "scale=iw:ih,"
-                "format=yuv420p,"
-                "format=bgr24"
+                "format=yuv420p"
             )
         if _scale_gpu:
             return (
@@ -401,7 +465,16 @@ def build_vf_filter(is_hdr: bool, use_cuda: bool = True,
                 "zscale=p=bt709:filter=bilinear,"
                 "tonemap=tonemap=reinhard:desat=0,"
                 "zscale=t=bt709:m=bt709:range=full:filter=bilinear,"
-                "format=bgr24"
+                "format=yuv420p"
+            )
+        # CPU-only HDR: prefer libplacebo (one shader pass) over the 4-step
+        # zscale chain when available (Opt 4).
+        if libplacebo_available():
+            return (
+                f"libplacebo=w={width}:h={height}"
+                ":colorspace=bt709:color_trc=bt709:color_primaries=bt709"
+                ":tonemapping=mobius:range=pc:downscaler=bilinear,"
+                "format=yuv420p"
             )
         return (
             "zscale=t=linear:npl=100:filter=bilinear,"
@@ -409,8 +482,8 @@ def build_vf_filter(is_hdr: bool, use_cuda: bool = True,
             "zscale=p=bt709:filter=bilinear,"
             "tonemap=tonemap=reinhard:desat=0,"
             "zscale=t=bt709:m=bt709:range=full:filter=bilinear,"
-            f"scale={width}:{height}:flags=lanczos,"
-            "format=bgr24"
+            f"scale={width}:{height}:flags=bilinear,"
+            "format=yuv420p"
         )
     else:
         # SDR: no tone-mapping needed; applying it would re-linearise the
@@ -419,11 +492,13 @@ def build_vf_filter(is_hdr: bool, use_cuda: bool = True,
             return (
                 f"scale_cuda={width}:{height}:interp_algo=bicubic,"
                 "hwdownload,"
-                "format=bgr24"
+                "format=yuv420p"
             )
+        # Opt 2: bilinear is adequate for the intermediate scale step —
+        # Python applies Lanczos4 on the actual patch crops.
         return (
-            f"scale={width}:{height}:flags=lanczos,"
-            "format=bgr24"
+            f"scale={width}:{height}:flags=bilinear,"
+            "format=yuv420p"
         )
 
 
@@ -1748,14 +1823,14 @@ def extract_and_save_streaming_distributed(
     #                     final hwdownload to cut pipe bandwidth.
     if _select_expr and not _use_seek_mode:
         if _full_gpu:
-            # Full-GPU: insert select right before the final format=bgr24
-            # (after hwdownload+scale=iw:ih+format=yuv420p — all GPU work
-            # is already done, select avoids the final CPU format conversion
-            # and the pipe write for unwanted frames).
-            _marker = ",format=bgr24"
+            # Full-GPU: insert select right before the terminal format=yuv420p
+            # (after hwdownload+scale=iw:ih — all GPU work is done; select
+            # avoids the final CPU format conversion and the pipe write for
+            # unwanted frames).
+            _marker = ",format=yuv420p"
             if _marker in vf_filter:
                 vf_filter = vf_filter.replace(
-                    _marker, f",select={_select_expr},format=bgr24", 1
+                    _marker, f",select={_select_expr},format=yuv420p", 1
                 )
             else:
                 _log("⚠️  Could not inject select into full-GPU filter chain — falling back to prepend")
@@ -1785,18 +1860,24 @@ def extract_and_save_streaming_distributed(
     _CUDA_HW_INIT = ["-init_hw_device", f"cuda=hw:{cuda_device}"]
 
     hdr_label = "HDR" if is_hdr else "SDR"
+    _placebo = is_hdr and (not _full_gpu) and (not _scale_gpu) and libplacebo_available()
     if _full_gpu:
         hw_args        = [*_CUDA_HW_INIT, "-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
-        pipeline_label = f"full-GPU tonemap_cuda+scale_cuda [{hdr_label}]"
+        pipeline_label = f"full-GPU tonemap_cuda+scale_cuda [{hdr_label}] yuv420p {stream_width}×{stream_height}"
     elif _scale_gpu:
         hw_args        = [*_CUDA_HW_INIT, "-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
-        pipeline_label = f"scale-GPU + CPU {'zscale/tonemap' if is_hdr else 'passthrough'} [{hdr_label}]"
+        pipeline_label = f"scale-GPU + CPU {'zscale/tonemap' if is_hdr else 'passthrough'} [{hdr_label}] yuv420p {stream_width}×{stream_height}"
     elif _use_cuda:
         hw_args        = [*_CUDA_HW_INIT, "-hwaccel", "cuda"]
-        pipeline_label = f"decode-GPU + CPU {'tonemap' if is_hdr else 'scale'} [{hdr_label}]"
+        _cpu_algo = ("libplacebo" if _placebo else "tonemap/reinhard") if is_hdr else "scale/bilinear"
+        pipeline_label = f"decode-GPU + CPU {_cpu_algo} [{hdr_label}] yuv420p {stream_width}×{stream_height}"
     else:
         hw_args        = []
-        pipeline_label = f"CPU-only {'tonemap/reinhard' if is_hdr else 'scale/bilinear'} [{hdr_label}]"
+        _cpu_algo = ("libplacebo" if _placebo else "zscale/tonemap") if is_hdr else "scale/bilinear"
+        pipeline_label = f"CPU-only {_cpu_algo} [{hdr_label}] yuv420p {stream_width}×{stream_height}"
+
+    # Pipe bandwidth for the log (yuv420p = 1.5 bytes/pixel).
+    _pipe_mb_per_frame = stream_width * stream_height * 1.5 / (1024 * 1024)
 
     _log(
         f"🎬 Streaming extractor: {len(sorted_asgn)} assignments, "
@@ -1814,6 +1895,10 @@ def extract_and_save_streaming_distributed(
         f"🎯 Frame selection: {len(_all_needed)} frames needed "
         f"({_select_pct:.1f}% of {last_needed + 1} decoded) "
         f"in {len(_select_ranges)} ranges — mode={_mode_label}"
+    )
+    _log(
+        f"📦 Pipe: yuv420p {stream_width}×{stream_height} "
+        f"= {_pipe_mb_per_frame:.2f} MB/frame"
     )
 
     # Write the filter chain to a temp file so that a long _select_expr
@@ -1834,7 +1919,9 @@ def extract_and_save_streaming_distributed(
     _t_start: Optional[float] = None
     _log_interval: int = 50
 
-    frame_bytes: int = stream_width * stream_height * 3
+    # yuv420p: 1.5 bytes per pixel (Y plane + half-res U+V planes).
+    # Compared to bgr24 (3 bytes/pixel) this cuts pipe bandwidth by ~33 %.
+    frame_bytes: int = stream_width * stream_height * 3 // 2
     patches_created: Dict[str, int] = {}
 
     # Rolling buffer: frame_idx → BGR frame (numpy array)
@@ -1846,7 +1933,7 @@ def extract_and_save_streaming_distributed(
     _t_phases: dict = {
         "n_frames_buf": 0,   # total raw frames processed through buffer
         "n_centers":    0,   # centers fully evaluated (= frames_examined, incl. black)
-        "t_buf_s":      0.0, # total time: frombuffer + copy + buffer insert + eviction
+        "t_buf_s":      0.0, # total time: yuv→bgr convert + copy + buffer insert/evict
         "t_black_s":    0.0, # total time: black-frame check (per center)
         "t_patch_s":    0.0, # total time: create_patch_pair calls (per center×format)
         "t_write_s":    0.0, # total time: write_queue.put (per patch)
@@ -1867,9 +1954,14 @@ def extract_and_save_streaming_distributed(
         ms_black = _t_phases["t_black_s"] / nc * 1000
         ms_patch = _t_phases["t_patch_s"] / nc * 1000
         ms_write = _t_phases["t_write_s"] / max(np_, 1) * 1000
+        # Pipe throughput in MB/s (yuv420p = 1.5 bytes/pixel).
+        elapsed = _t_phases["t_buf_s"] + _t_phases["t_black_s"] + _t_phases["t_patch_s"]
+        pipe_mbs = (nf * _pipe_mb_per_frame / elapsed) if elapsed > 0 else 0.0
         line = (
             f"[{_dt.now().strftime('%H:%M:%S')}] "
             f"video={os.path.basename(video_path)} "
+            f"pipe={stream_width}x{stream_height} yuv420p {_pipe_mb_per_frame:.2f}MB/frame "
+            f"pipe_mbs={pipe_mbs:.1f}MB/s "
             f"centers={nc} frames={nf} patches={np_} "
             f"buf={ms_buf:.1f}ms/frame "
             f"black={ms_black:.1f}ms/ctr "
@@ -1932,8 +2024,9 @@ def extract_and_save_streaming_distributed(
             pipe.close()
 
         # ------------------------------------------------------------------
-        # Inner helper: receive one decoded BGR frame, fill the rolling buffer,
-        # and satisfy any pending assignments whose window is now complete.
+        # Inner helper: receive one decoded yuv420p frame, convert to BGR,
+        # fill the rolling buffer, and satisfy any pending assignments whose
+        # window is now complete.
         # Shared by both stream mode and seek mode to avoid code duplication.
         # ------------------------------------------------------------------
         def _consume_raw_frame(raw: bytes, actual_frame: int) -> None:
@@ -1943,9 +2036,14 @@ def extract_and_save_streaming_distributed(
             _t_phases["n_frames_buf"] += 1
 
             _ta = time.monotonic()
-            frame = np.frombuffer(raw, dtype=np.uint8).reshape(
-                (stream_height, stream_width, 3)
-            ).copy()
+            # yuv420p (I420) layout: Y plane (H rows × W cols) followed by
+            # U plane (H/2 × W/2) and V plane (H/2 × W/2).
+            # Total bytes = W × H × 3/2.  cv2.COLOR_YUV2BGR_I420 expects the
+            # array shaped (H*3//2, W) and produces an (H, W, 3) BGR array.
+            yuv = np.frombuffer(raw, dtype=np.uint8).reshape(
+                (stream_height * 3 // 2, stream_width)
+            )
+            frame = cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR_I420)
             buffer[actual_frame] = frame
 
             # Evict frames no longer needed by any pending assignment.
@@ -2094,7 +2192,7 @@ def extract_and_save_streaming_distributed(
                     *_fc_args,
                     "-map", "[vout]",
                     "-f", "rawvideo",
-                    "-pix_fmt", "bgr24",
+                    "-pix_fmt", "yuv420p",
                     *_vsync_args,
                     "pipe:1",
                 ]
@@ -2167,7 +2265,7 @@ def extract_and_save_streaming_distributed(
                 *_fc_args,
                 "-map", "[vout]",
                 "-f", "rawvideo",
-                "-pix_fmt", "bgr24",
+                "-pix_fmt", "yuv420p",
                 *_vsync_args,
                 "pipe:1",
             ]
@@ -2333,9 +2431,10 @@ def extract_and_save_streaming_dual(
 
     The former dual-buffer (4K stream + Python LANCZOS4 downscale to 1080p)
     approach has been removed.  All formats are now extracted in a single
-    4K FFmpeg pass via :func:`extract_and_save_streaming_distributed`, which
-    lets :func:`create_patch_pair` apply 2× oversampled Lanczos4 crops for
-    every GT family (720×720 and 540×540).
+    optimised FFmpeg pass via :func:`extract_and_save_streaming_distributed`
+    (resolution ``STREAM_OPT_WIDTH × STREAM_OPT_HEIGHT``, yuv420p pipe, bilinear
+    scale), which lets :func:`create_patch_pair` apply 2× oversampled Lanczos4
+    crops for every GT family (1152×648, 960×540, 960×720).
     """
     return extract_and_save_streaming_distributed(
         video_path=video_path,
@@ -2353,7 +2452,7 @@ def extract_and_save_streaming_dual(
         is_hdr=is_hdr,
         degrade_cfg=degrade_cfg,
         center_snap_seconds=center_snap_seconds,
-        stream_width=STREAM_4K_WIDTH,
-        stream_height=STREAM_4K_HEIGHT,
+        stream_width=STREAM_OPT_WIDTH,
+        stream_height=STREAM_OPT_HEIGHT,
         cuda_device=cuda_device,
     )

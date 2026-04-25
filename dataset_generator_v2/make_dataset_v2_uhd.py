@@ -57,6 +57,8 @@ from streaming_extractor import (
     extract_and_save_streaming_distributed,
     STREAM_4K_WIDTH,
     STREAM_4K_HEIGHT,
+    STREAM_OPT_WIDTH,
+    STREAM_OPT_HEIGHT,
     create_patch_pair,
     is_black_frame as _streaming_is_black_frame,
     is_hdr_transfer,
@@ -64,6 +66,7 @@ from streaming_extractor import (
     cuda_available,
     scale_cuda_available,
     tonemap_cuda_available,
+    libplacebo_available,
     _get_ffmpeg_major_version,
 )
 from utils.progress_tracker import ProgressTracker
@@ -338,8 +341,8 @@ class DatasetGeneratorV2UHD:
         WARMUP_FRAMES      = 20
         BENCH_FRAMES       = 80
         SEEK_SEC           = 60.0   # skip opening credits / black frames
-        W, H               = STREAM_4K_WIDTH, STREAM_4K_HEIGHT
-        FRAME_BYTES        = W * H * 3   # BGR24
+        W, H               = STREAM_OPT_WIDTH, STREAM_OPT_HEIGHT
+        FRAME_BYTES        = W * H * 3 // 2   # yuv420p = 1.5 bytes/pixel
 
         cache_path = os.path.join(self.base_dir, "decode_benchmark.json")
 
@@ -413,7 +416,7 @@ class DatasetGeneratorV2UHD:
         _SEP  = "═" * _W
         _SEP2 = "─" * _W
         print(f"\n{_SEP}")
-        print(f"  FFmpeg Decode Benchmark  –  {W}×{H} BGR24 (4 K)")
+        print(f"  FFmpeg Decode Benchmark  –  {W}×{H} yuv420p (optimised)")
         print(_SEP2)
         print(f"  Test video    : {os.path.basename(test_video)}")
         print(f"  Content type  : {'HDR (PQ/HLG)' if test_is_hdr else 'SDR (BT.709)'}")
@@ -434,16 +437,23 @@ class DatasetGeneratorV2UHD:
 
         def _cpu_filter(hdr: bool) -> str:
             if hdr:
+                if libplacebo_available():
+                    return (
+                        f"libplacebo=w={W}:h={H}"
+                        ":colorspace=bt709:color_trc=bt709:color_primaries=bt709"
+                        ":tonemapping=mobius:range=pc:downscaler=bilinear,"
+                        "format=yuv420p"
+                    )
                 return (
                     "zscale=t=linear:npl=100:filter=bilinear,"
                     "format=gbrpf32le,"
                     "zscale=p=bt709:filter=bilinear,"
                     "tonemap=tonemap=reinhard:desat=0,"
                     "zscale=t=bt709:m=bt709:range=full:filter=bilinear,"
-                    f"scale={W}:{H}:flags=lanczos,"
-                    "format=bgr24"
+                    f"scale={W}:{H}:flags=bilinear,"
+                    "format=yuv420p"
                 )
-            return f"scale={W}:{H}:flags=lanczos,format=bgr24"
+            return f"scale={W}:{H}:flags=bilinear,format=yuv420p"
 
         def _scale_gpu_filter(hdr: bool) -> str:
             if hdr:
@@ -456,12 +466,12 @@ class DatasetGeneratorV2UHD:
                     "zscale=p=bt709:filter=bilinear,"
                     "tonemap=tonemap=reinhard:desat=0,"
                     "zscale=t=bt709:m=bt709:range=full:filter=bilinear,"
-                    "format=bgr24"
+                    "format=yuv420p"
                 )
             return (
                 f"scale_cuda={W}:{H}:interp_algo=bicubic,"
                 "hwdownload,"
-                "format=bgr24"
+                "format=yuv420p"
             )
 
         def _full_gpu_filter() -> str:
@@ -470,15 +480,15 @@ class DatasetGeneratorV2UHD:
                 f"scale_cuda={W}:{H}:interp_algo=bicubic,"
                 "hwdownload,"
                 "scale=iw:ih,"
-                "format=yuv420p,"
-                "format=bgr24"
+                "format=yuv420p"
             )
 
         # ── Build variant list ────────────────────────────────────────────────
         # Each entry: (variant_id, label, hw_args, filter_chain)
+        _placebo_suffix = "+libplacebo" if (test_is_hdr and libplacebo_available()) else ""
         _cpu_fchain = _cpu_filter(test_is_hdr)
         variants: List[Tuple[str, str, List[str], str]] = [
-            ("cpu", "CPU-only", [], _cpu_fchain),
+            ("cpu", f"CPU-only{_placebo_suffix}", [], _cpu_fchain),
         ]
         if self.use_cuda:
             for gpu_idx, gpu_name in available_gpus:
@@ -544,7 +554,7 @@ class DatasetGeneratorV2UHD:
                     "-frames:v", str(total),
                     *fc_args,
                     "-map", "[vout]",
-                    "-f", "rawvideo", "-pix_fmt", "bgr24",
+                    "-f", "rawvideo", "-pix_fmt", "yuv420p",
                     *vsync,
                     "pipe:1",   # direct raw-frame output to stdout for Python to read
                 ]
@@ -1582,11 +1592,9 @@ class DatasetGeneratorV2UHD:
             # Build the correct filter chain for this video's color format.
             # extract_frames_uhd uses CPU-only (no CUDA) for stability and
             # because it processes only a few frames at a time.
-            # Replace bgr24 with yuv420p so ffmpeg can write PNG files.
-            # (Both _TONEMAP_FILTER and _SDR_FILTER already contain the scale
-            # step, so only the final pixel-format needs to change.)
+            # build_vf_filter already outputs yuv420p (Opt 3) which ffmpeg
+            # can write directly to PNG files.
             vf_filter = build_vf_filter(is_hdr=is_hdr, use_cuda=False)
-            vf_filter = vf_filter.replace("format=bgr24", "format=yuv420p")
             
             # CPU-only mode (no CUDA) - more stable and reliable
             # FIXED: Added nice priority for lower system impact
@@ -1985,8 +1993,8 @@ class DatasetGeneratorV2UHD:
             # degrade_cfg intentionally omitted: per-format degradation templates
             # are embedded in format_config and sampled per-patch in the extractor.
             center_snap_seconds=self.config.get("processing", {}).get("center_snap_seconds", 1.0),
-            stream_width=STREAM_4K_WIDTH,
-            stream_height=STREAM_4K_HEIGHT,
+            stream_width=STREAM_OPT_WIDTH,
+            stream_height=STREAM_OPT_HEIGHT,
             cuda_device=self.cuda_device,
         )
 
