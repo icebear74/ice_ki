@@ -248,6 +248,17 @@ class DatasetGeneratorV2UHD:
         self.current_video_name = ""
 
         # ── Terminal UI state ─────────────────────────────────────────────────
+        # Build a display-label dict: template_name → "WxH" from gt_size.
+        # Used in the patch-distribution table so every column header shows
+        # the real pixel size (e.g. "1152×648") instead of the truncated
+        # template name suffix (which causes duplicates like "169" / "169").
+        _format_labels: Dict[str, str] = {}
+        for _cat_fc in self.format_config.values():
+            for _tmpl, _cfg in _cat_fc.items():
+                if _tmpl not in _format_labels:
+                    _gt = _cfg.get("gt_size", [0, 0])
+                    _format_labels[_tmpl] = f"{_gt[0]}×{_gt[1]}"
+
         self.ui_state = {
             "current_video_name": "",
             "current_video_index": 0,
@@ -266,6 +277,8 @@ class DatasetGeneratorV2UHD:
             "decode_backend": "–",   # filled in by _run_decode_benchmark
             "categories": list(self.category_targets.keys()),
             "format_sizes": list(next(iter(self.format_config.values()), {}).keys()),
+            "format_labels": _format_labels,  # template_name → "WxH" string
+            "timing_phases": {},              # phase timings from streaming extractor
         }
         self.ui_update_counter = 0
 
@@ -947,6 +960,80 @@ class DatasetGeneratorV2UHD:
                 }
 
         return result
+
+    def _write_architecture_file(self) -> None:
+        """Write ``<base_dir>/dataset_architecture.json``.
+
+        The file contains the complete configuration block that describes how
+        the dataset was built: categories, format templates (with gt_size /
+        lr_size / scale), source_mode, degradation mixes, and per-category
+        targets.  The trainer can load this file to determine patch dimensions,
+        scale factors, category distribution, and whether patches are crops or
+        resizes without needing access to the original generator config.
+        """
+        from datetime import datetime as _dt
+
+        # Collect all format templates and degradation templates actually used.
+        used_fmt_tmpls: Dict[str, dict] = {}
+        used_deg_tmpls: Dict[str, dict] = {}
+        for cat_name, fmt_map in self.format_config.items():
+            for tmpl_name, cfg in fmt_map.items():
+                if tmpl_name not in used_fmt_tmpls:
+                    raw_tmpl = self.templates.get("format_templates", {}).get(tmpl_name, {})
+                    used_fmt_tmpls[tmpl_name] = raw_tmpl
+                for dname, dspec in cfg.get("degradation_templates", {}).items():
+                    if dname not in used_deg_tmpls:
+                        used_deg_tmpls[dname] = dspec
+
+        # Build per-category section with human-readable format entries.
+        categories_out: Dict[str, dict] = {}
+        for cat_name, cat_cfg in self.categories.items():
+            formats_out = []
+            for fmt_entry in cat_cfg.get("formats", []):
+                tmpl_name = fmt_entry["template"]
+                fc = self.format_config.get(cat_name, {}).get(tmpl_name, {})
+                formats_out.append({
+                    "template":        tmpl_name,
+                    "weight":          fmt_entry.get("weight", 1),
+                    "source_mode":     fmt_entry.get("source_mode", "resize"),
+                    "gt_size":         fc.get("gt_size", []),
+                    "lr_size":         fc.get("lr_size", []),
+                    "scale":           (
+                        used_fmt_tmpls.get(tmpl_name, {}).get("scale", 3)
+                    ),
+                    "aspect_ratio":    (
+                        used_fmt_tmpls.get(tmpl_name, {}).get("aspect_ratio", "")
+                    ),
+                    "description":     (
+                        used_fmt_tmpls.get(tmpl_name, {}).get("description", "")
+                    ),
+                    "degradation_mix": fmt_entry.get("degradation_mix", {}),
+                })
+            categories_out[cat_name] = {
+                "target_total": self.category_targets.get(cat_name, 0),
+                "formats":      formats_out,
+            }
+
+        proc = self.config.get("processing", {})
+        arch = {
+            "generated_at":      _dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "generator_version": "dataset_generator_v2",
+            "root_path":         self.base_dir,
+            "n_frames":          int(proc.get("n_frames", 7)),
+            "category_targets":  dict(self.category_targets),
+            "categories":        categories_out,
+            "format_templates":  used_fmt_tmpls,
+            "degradation_templates": used_deg_tmpls,
+        }
+
+        out_path = os.path.join(self.base_dir, "dataset_architecture.json")
+        try:
+            os.makedirs(self.base_dir, exist_ok=True)
+            with open(out_path, "w", encoding="utf-8") as fh:
+                json.dump(arch, fh, indent=2, ensure_ascii=False)
+            self.logger.info(f"📄 Architecture file written: {out_path}")
+        except Exception as exc:
+            self.logger.warning(f"Could not write architecture file: {exc}")
 
     def _build_format_distribution_for_video(
         self,
@@ -1845,10 +1932,13 @@ class DatasetGeneratorV2UHD:
         # Wall-clock start for per-video FPS / SPS measurement
         video_t0: float = time.monotonic()
 
-        def _on_progress(frames_examined: int, patches_so_far: Dict[str, int], raw_frames_read: int) -> None:
+        def _on_progress(frames_examined: int, patches_so_far: Dict[str, int],
+                         raw_frames_piped: int, timing: dict = None) -> None:
             # Live UI counters
             self.ui_state['frames_processed_total'] = frames_examined
-            self.ui_state['frames_read_total'] = self._prior_raw_frames + raw_frames_read
+            # raw_frames_piped = selected_idx from the extractor: the count of
+            # BGR frames actually piped from FFmpeg to Python (not a frame index).
+            self.ui_state['frames_read_total'] = self._prior_raw_frames + raw_frames_piped
             # Cumulative patch total across all videos
             self.ui_state['patches_created_total'] = (
                 prior_total + sum(patches_so_far.values())
@@ -1856,8 +1946,11 @@ class DatasetGeneratorV2UHD:
             # Live throughput metrics
             elapsed_time = time.monotonic() - video_t0
             if elapsed_time > 0:
-                self.ui_state['live_fps'] = raw_frames_read / elapsed_time
+                self.ui_state['live_fps'] = raw_frames_piped / elapsed_time
                 self.ui_state['live_sps'] = frames_examined / elapsed_time
+            # Phase timing snapshot from extractor
+            if timing:
+                self.ui_state['timing_phases'] = timing
             # Update per-video progress bars with live per-category patch counts
             current_progress = self.ui_state.get('current_video_progress', {})
             for cat, new_total in patches_so_far.items():
@@ -2174,6 +2267,10 @@ class DatasetGeneratorV2UHD:
                     "UHD Preservation • Multi-Category • Priorities • Proportional Distribution",
                     border_style="cyan"
                 ))
+
+            # Write architecture file once at the start of each run so the
+            # trainer always has an up-to-date description of the dataset layout.
+            self._write_architecture_file()
             
             # Phase 1: Scan all videos to get durations
             self.logger.info("Starting Phase 1: Scanning video durations...")

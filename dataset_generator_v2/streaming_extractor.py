@@ -1842,6 +1842,49 @@ def extract_and_save_streaming_distributed(
     pending_idx: int = 0  # index into pending_centers
     frames_examined: int = 0  # assignments processed (saved + skipped)
 
+    # --- Per-video timing accumulators (mutated inside _consume_raw_frame) ---
+    _t_phases: dict = {
+        "n_frames_buf": 0,   # total raw frames processed through buffer
+        "n_centers":    0,   # centers fully evaluated (= frames_examined, incl. black)
+        "t_buf_s":      0.0, # total time: frombuffer + copy + buffer insert + eviction
+        "t_black_s":    0.0, # total time: black-frame check (per center)
+        "t_patch_s":    0.0, # total time: create_patch_pair calls (per center×format)
+        "t_write_s":    0.0, # total time: write_queue.put (per patch)
+        "n_patches":    0,   # patches enqueued for writing
+        "q_size_last":  0,   # last observed write-queue depth
+    }
+    _next_timing_log: List[int] = [50]  # mutable box: write debug log at this n_centers
+
+    def _write_timing_log_entry() -> None:
+        """Append a one-line timing summary to <base_dir>/timing_debug.log."""
+        nc = _t_phases["n_centers"]
+        nf = _t_phases["n_frames_buf"]
+        np_ = _t_phases["n_patches"]
+        if nc == 0:
+            return
+        from datetime import datetime as _dt
+        ms_buf   = _t_phases["t_buf_s"]   / max(nf, 1) * 1000
+        ms_black = _t_phases["t_black_s"] / nc * 1000
+        ms_patch = _t_phases["t_patch_s"] / nc * 1000
+        ms_write = _t_phases["t_write_s"] / max(np_, 1) * 1000
+        line = (
+            f"[{_dt.now().strftime('%H:%M:%S')}] "
+            f"video={os.path.basename(video_path)} "
+            f"centers={nc} frames={nf} patches={np_} "
+            f"buf={ms_buf:.1f}ms/frame "
+            f"black={ms_black:.1f}ms/ctr "
+            f"patch={ms_patch:.1f}ms/ctr "
+            f"write={ms_write:.1f}ms/patch "
+            f"qsize={_t_phases['q_size_last']}"
+        )
+        try:
+            log_path = os.path.join(base_dir, "timing_debug.log")
+            os.makedirs(base_dir, exist_ok=True)
+            with open(log_path, "a", encoding="utf-8") as _fh:
+                _fh.write(line + "\n")
+        except Exception:
+            pass
+
     # Reduce FFmpeg CPU priority so interactive processes stay responsive.
     # psutil is used instead of preexec_fn because preexec_fn is unsafe in
     # multi-threaded programs (Python docs recommend avoiding it).
@@ -1897,7 +1940,9 @@ def extract_and_save_streaming_distributed(
             nonlocal pending_idx, frames_examined, selected_idx
 
             selected_idx += 1
+            _t_phases["n_frames_buf"] += 1
 
+            _ta = time.monotonic()
             frame = np.frombuffer(raw, dtype=np.uint8).reshape(
                 (stream_height, stream_width, 3)
             ).copy()
@@ -1907,6 +1952,7 @@ def extract_and_save_streaming_distributed(
             min_keep = max(0, pending_centers[pending_idx] - half)
             for old_idx in [k for k in buffer if k < min_keep]:
                 del buffer[old_idx]
+            _t_phases["t_buf_s"] += time.monotonic() - _ta
 
             # Satisfy pending assignments whose full window is now in the buffer.
             while pending_idx < len(pending_centers):
@@ -1928,8 +1974,13 @@ def extract_and_save_streaming_distributed(
                     # position – before iterating over (category, format) pairs.
                     center_raw = window[n_frames // 2]
                     frames_examined += 1
+                    _t_phases["n_centers"] += 1
 
-                    if _black_fn(center_raw):
+                    _tb = time.monotonic()
+                    _is_black = _black_fn(center_raw)
+                    _t_phases["t_black_s"] += time.monotonic() - _tb
+
+                    if _is_black:
                         _log(f"  ⏭ frame {center} skipped (black frame)")
                     else:
                         for category, fmt_name in center_map[center]:
@@ -1964,6 +2015,7 @@ def extract_and_save_streaming_distributed(
                                 _deg_spec = _deg_tmpls.get(_chosen)
 
                             gt, lr = None, None
+                            _tp = time.monotonic()
                             for attempt in range(max_attempts):
                                 force = attempt >= 5
                                 gt, lr = create_patch_pair(
@@ -1980,23 +2032,35 @@ def extract_and_save_streaming_distributed(
                                     or force
                                 ):
                                     break
+                            _t_phases["t_patch_s"] += time.monotonic() - _tp
 
                             if gt is not None and lr is not None:
                                 dirs = _output_dirs_cache[(category, fmt_name)]
                                 patch_name = f"{_video_stem}_{int(ts * 1000):08d}.png"
+                                _tw = time.monotonic()
                                 _write_queue.put((
                                     gt, lr,
                                     os.path.join(dirs["gt"], patch_name),
                                     os.path.join(dirs["lr"], patch_name),
                                 ))
+                                _t_phases["t_write_s"] += time.monotonic() - _tw
+                                _t_phases["n_patches"] += 1
+                                _t_phases["q_size_last"] = _write_queue.qsize()
                                 patches_created[category] = (
                                     patches_created.get(category, 0) + 1
                                 )
 
+                    # Periodic timing debug log (every 50 centres evaluated)
+                    if _t_phases["n_centers"] >= _next_timing_log[0]:
+                        _write_timing_log_entry()
+                        _next_timing_log[0] += 50
+
                     if progress_fn is not None:
-                        # 3rd arg = actual video frame index (monotonically
-                        # increasing video frame number).
-                        progress_fn(frames_examined, dict(patches_created), actual_frame)
+                        # 3rd arg = selected_idx: count of frames actually piped
+                        # from FFmpeg to Python (used for real "piped fps" metric).
+                        # 4th arg = snapshot of phase timings for GUI display.
+                        progress_fn(frames_examined, dict(patches_created),
+                                    selected_idx, dict(_t_phases))
 
                 pending_idx += 1
 
