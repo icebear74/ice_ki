@@ -1449,6 +1449,7 @@ def extract_and_save_streaming_distributed(
     center_snap_seconds: float = 0.0,
     stream_width: int = STREAM_WIDTH,
     stream_height: int = STREAM_HEIGHT,
+    cuda_device: int = 0,
 ) -> Dict[str, int]:
     """
     Stream the video once and save patches as frames pass through the buffer.
