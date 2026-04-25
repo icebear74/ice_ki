@@ -12,6 +12,84 @@ from typing import Dict, List, Optional
 
 VALID_SOURCE_MODES = {"resize", "crop"}
 
+# Supported aspect ratios: name → (numerator, denominator)
+ASPECT_RATIOS = {
+    "16:9": (16, 9),
+    "4:3":  (4,  3),
+    "1:1":  (1,  1),
+}
+
+# Common base_x preset values for the format-template wizard.
+# These are all multiples of 96 and divisible by both 3 and 4, which ensures
+# clean integer gt_size and lr_size for 16:9, 4:3, and 1:1 aspect ratios at
+# scale factors 2, 3, and 4. Custom values are still accepted.
+BASE_X_PRESETS = [768, 864, 960, 1024, 1152, 1280]
+
+
+# ── Format-size helpers ───────────────────────────────────────────────────────
+
+def compute_format_sizes(base_x: int, aspect_ratio: str, scale: int):
+    """
+    Compute gt_size and lr_size from base_x, aspect_ratio, and scale.
+
+    Returns (gt_size, lr_size) where each is a [width, height] list of ints.
+    Raises ValueError for any inconsistency:
+      - unsupported aspect_ratio
+      - height would not be an integer
+      - gt_size dimensions not divisible by scale
+    """
+    if aspect_ratio not in ASPECT_RATIOS:
+        raise ValueError(
+            f"Unsupported aspect_ratio '{aspect_ratio}'. "
+            f"Supported: {', '.join(sorted(ASPECT_RATIOS))}"
+        )
+    num, den = ASPECT_RATIOS[aspect_ratio]
+    if (base_x * den) % num != 0:
+        raise ValueError(
+            f"base_x={base_x} does not produce an integer height for {aspect_ratio}. "
+            f"({base_x}*{den}/{num} = {base_x * den / num:.4f} – not integer)"
+        )
+    gt_w = base_x
+    gt_h = (base_x * den) // num
+    if gt_w % scale != 0:
+        raise ValueError(
+            f"gt_size width {gt_w} is not divisible by scale {scale}"
+        )
+    if gt_h % scale != 0:
+        raise ValueError(
+            f"gt_size height {gt_h} is not divisible by scale {scale}"
+        )
+    lr_w = gt_w // scale
+    lr_h = gt_h // scale
+    return [gt_w, gt_h], [lr_w, lr_h]
+
+
+def build_format_template(
+    base_x: int,
+    aspect_ratio: str,
+    scale: int,
+    description: str = "",
+) -> dict:
+    """
+    Build a complete format-template dict from declarative parameters.
+
+    Stores both the source parameters (base_x, aspect_ratio, scale) and the
+    derived sizes (gt_size, lr_size) so that:
+      - the template is self-documenting and easy to edit
+      - the generator can read gt_size / lr_size directly without recalculation
+
+    Raises ValueError if the combination is invalid.
+    """
+    gt_size, lr_size = compute_format_sizes(base_x, aspect_ratio, scale)
+    return {
+        "base_x":       base_x,
+        "aspect_ratio": aspect_ratio,
+        "scale":        scale,
+        "gt_size":      gt_size,
+        "lr_size":      lr_size,
+        "description":  description,
+    }
+
 
 # ── Load / Save ───────────────────────────────────────────────────────────────
 
@@ -53,30 +131,24 @@ def create_default_templates() -> dict:
         "_format": "templates_v1",
         "_description": "Reusable format and degradation templates for dataset generation",
         "format_templates": {
-            "960x540_169": {
-                "gt_size": [960, 540],
-                "scale": 3,
-                "aspect_ratio": "16:9",
-                "description": "960x540 16:9 Landscape – standard resize target"
-            },
-            "1152x648_169": {
-                "gt_size": [1152, 648],
-                "scale": 3,
-                "aspect_ratio": "16:9",
-                "description": "1152x648 16:9 Landscape – higher detail resize/crop target"
-            },
-            "720x540_43": {
-                "gt_size": [720, 540],
-                "scale": 3,
-                "aspect_ratio": "4:3",
-                "description": "720x540 4:3 – classic TV ratio"
-            },
-            "720x720_11": {
-                "gt_size": [720, 720],
-                "scale": 3,
-                "aspect_ratio": "1:1",
-                "description": "720x720 Square – detail crop"
-            }
+            # 1152_169 – main 16:9 format for clean UHD resize
+            # base_x=1152, 16:9 → gt 1152x648, lr 384x216
+            "1152_169": build_format_template(
+                1152, "16:9", 3,
+                "1152x648 16:9 – main resize target (UHD→HD quality step)"
+            ),
+            # 960_169 – secondary 16:9 for crop use or lighter resize
+            # base_x=960, 16:9 → gt 960x540, lr 320x180
+            "960_169": build_format_template(
+                960, "16:9", 3,
+                "960x540 16:9 – secondary resize / crop target"
+            ),
+            # 960_43 – 4:3 format for classic TV / sitcom / older sci-fi content
+            # base_x=960, 4:3 → gt 960x720, lr 320x240
+            "960_43": build_format_template(
+                960, "4:3", 3,
+                "960x720 4:3 – classic TV / sitcom / older sci-fi (crop from 16:9 source)"
+            ),
         },
         "degradation_templates": {
             "classic_sitcom_sd": {
@@ -129,9 +201,18 @@ def create_default_active_config() -> dict:
                 "target_total": 100000,
                 "formats": [
                     {
-                        "template": "960x540_169",
+                        "template": "1152_169",
                         "weight": 60,
                         "source_mode": "resize",
+                        "degradation_mix": {
+                            "dvd_film_balanced": 50,
+                            "classic_sitcom_sd": 50
+                        }
+                    },
+                    {
+                        "template": "960_169",
+                        "weight": 40,
+                        "source_mode": "crop",
                         "degradation_mix": {
                             "dvd_film_balanced": 50,
                             "classic_sitcom_sd": 50
@@ -175,6 +256,13 @@ def validate_templates(templates: dict) -> List[str]:
     """
     Validate templates dict structure.
 
+    Checks:
+    - format_templates entries have valid gt_size, scale
+    - gt_size dimensions are divisible by scale (lr_size must be integer)
+    - if lr_size is stored, it matches gt_size // scale
+    - if base_x / aspect_ratio are stored, derived gt_size matches stored gt_size
+    - degradation_templates is a dict
+
     Returns a list of error strings (empty = OK).
     """
     errors: List[str] = []
@@ -191,12 +279,63 @@ def validate_templates(templates: dict) -> List[str]:
             if not isinstance(spec, dict):
                 errors.append(f"format_templates.{name}: must be a JSON object")
                 continue
+
             gt = spec.get("gt_size")
-            if not (isinstance(gt, (list, tuple)) and len(gt) == 2 and all(isinstance(x, int) and x > 0 for x in gt)):
-                errors.append(f"format_templates.{name}.gt_size: must be [width, height] positive ints")
             scale = spec.get("scale")
-            if not (isinstance(scale, int) and scale > 0):
-                errors.append(f"format_templates.{name}.scale: must be a positive int")
+
+            gt_ok = (
+                isinstance(gt, (list, tuple))
+                and len(gt) == 2
+                and all(isinstance(x, int) and x > 0 for x in gt)
+            )
+            if not gt_ok:
+                errors.append(
+                    f"format_templates.{name}.gt_size: must be [width, height] positive ints"
+                )
+
+            scale_ok = isinstance(scale, int) and scale > 0
+            if not scale_ok:
+                errors.append(
+                    f"format_templates.{name}.scale: must be a positive int"
+                )
+
+            if gt_ok and scale_ok:
+                gt_w, gt_h = gt[0], gt[1]
+                if gt_w % scale != 0:
+                    errors.append(
+                        f"format_templates.{name}: gt_size width {gt_w} "
+                        f"is not divisible by scale {scale}"
+                    )
+                if gt_h % scale != 0:
+                    errors.append(
+                        f"format_templates.{name}: gt_size height {gt_h} "
+                        f"is not divisible by scale {scale}"
+                    )
+
+                # Validate stored lr_size if present
+                stored_lr = spec.get("lr_size")
+                if stored_lr is not None:
+                    expected_lr = [gt_w // scale, gt_h // scale]
+                    if stored_lr != expected_lr:
+                        errors.append(
+                            f"format_templates.{name}.lr_size: stored {stored_lr} "
+                            f"does not match gt_size // scale = {expected_lr}"
+                        )
+
+            # Validate that stored base_x / aspect_ratio are consistent with gt_size
+            base_x = spec.get("base_x")
+            ar = spec.get("aspect_ratio")
+            if base_x is not None and ar is not None and gt_ok and scale_ok:
+                try:
+                    derived_gt, _ = compute_format_sizes(base_x, ar, scale)
+                    if derived_gt != list(gt):
+                        errors.append(
+                            f"format_templates.{name}: base_x={base_x} + "
+                            f"aspect_ratio={ar} + scale={scale} would yield "
+                            f"gt_size={derived_gt}, but stored gt_size is {list(gt)}"
+                        )
+                except ValueError as exc:
+                    errors.append(f"format_templates.{name}: {exc}")
 
     deg_tmpls = templates.get("degradation_templates")
     if not isinstance(deg_tmpls, dict):

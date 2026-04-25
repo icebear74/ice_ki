@@ -30,6 +30,10 @@ from utils.config_io import (
     validate_templates,
     validate_active_config,
     VALID_SOURCE_MODES,
+    ASPECT_RATIOS,
+    BASE_X_PRESETS,
+    build_format_template,
+    compute_format_sizes,
 )
 
 
@@ -626,33 +630,81 @@ class VideoManager:
         if not fmt_tmpls:
             print("No format templates defined.")
             return
-        print(f"\n{'Name':<24} {'gt_size':<16} {'scale':<7} {'aspect_ratio':<12} Description")
-        print("-" * 90)
+        print(f"\n{'Name':<16} {'base_x':<8} {'AR':<6} {'scale':<7} {'gt_size':<14} {'lr_size':<14} Description")
+        print("-" * 105)
         for name, spec in sorted(fmt_tmpls.items()):
-            gt = spec.get("gt_size", "?")
-            scale = spec.get("scale", "?")
-            ar = spec.get("aspect_ratio", "?")
-            desc = spec.get("description", "")
-            print(f"  {name:<22} {str(gt):<16} {str(scale):<7} {ar:<12} {desc}")
+            base_x = spec.get("base_x", "–")
+            ar     = spec.get("aspect_ratio", "?")
+            scale  = spec.get("scale", "?")
+            gt     = spec.get("gt_size", "?")
+            lr     = spec.get("lr_size", "?")
+            desc   = spec.get("description", "")
+            print(f"  {name:<14} {str(base_x):<8} {ar:<6} {str(scale):<7} {str(gt):<14} {str(lr):<14} {desc}")
 
     def _add_format_template(self):
+        """Add a new format template using declarative parameters (base_x, aspect_ratio, scale)."""
         fmt_tmpls = self.templates.setdefault("format_templates", {})
-        name = input("Template name (e.g. 1280x720_169): ").strip()
-        if not name:
-            print("❌ Name cannot be empty")
-            return
+
+        # --- base_x ---
+        presets_str = ", ".join(str(x) for x in BASE_X_PRESETS)
+        print(f"  Common base_x values: {presets_str}  (or enter any custom value)")
         try:
-            w = int(input("  Width (GT): ").strip())
-            h = int(input("  Height (GT): ").strip())
-            scale = int(input("  Scale (e.g. 3): ").strip())
+            base_x = int(input("  base_x (GT width): ").strip())
         except ValueError:
             print("❌ Invalid number")
             return
-        ar = input("  Aspect ratio (e.g. 16:9): ").strip() or "16:9"
-        desc = input("  Description: ").strip()
-        fmt_tmpls[name] = {"gt_size": [w, h], "scale": scale, "aspect_ratio": ar, "description": desc}
+        if base_x <= 0:
+            print("❌ base_x must be positive")
+            return
+
+        # --- aspect_ratio ---
+        ar_options = ", ".join(sorted(ASPECT_RATIOS))
+        ar = input(f"  aspect_ratio ({ar_options}): ").strip()
+        if ar not in ASPECT_RATIOS:
+            print(f"❌ '{ar}' is not supported. Choose from: {ar_options}")
+            return
+
+        # --- scale ---
+        try:
+            scale = int(input("  scale (e.g. 3): ").strip())
+        except ValueError:
+            print("❌ Invalid number")
+            return
+        if scale <= 0:
+            print("❌ scale must be positive")
+            return
+
+        # --- compute and validate sizes ---
+        try:
+            gt_size, lr_size = compute_format_sizes(base_x, ar, scale)
+        except ValueError as exc:
+            print(f"❌ {exc}")
+            return
+
+        # --- show preview ---
+        ar_slug = ar.replace(":", "")
+        auto_name = f"{base_x}_{ar_slug}"
+        print(f"\n  Preview: gt_size={gt_size}  lr_size={lr_size}")
+        name_input = input(f"  Template name [{auto_name}]: ").strip()
+        name = name_input or auto_name
+        if not name:
+            print("❌ Name cannot be empty")
+            return
+        if name in fmt_tmpls:
+            if input(f"  ⚠️  '{name}' already exists. Overwrite? (yes/no): ").strip().lower() != "yes":
+                print("Cancelled.")
+                return
+
+        desc = input("  Description (optional): ").strip()
+
+        try:
+            fmt_tmpls[name] = build_format_template(base_x, ar, scale, desc)
+        except ValueError as exc:
+            print(f"❌ {exc}")
+            return
+
         self.templates_modified = True
-        print(f"✓ Added format template '{name}'")
+        print(f"✓ Added format template '{name}': gt_size={gt_size}, lr_size={lr_size}")
 
     def _remove_format_template(self):
         fmt_tmpls = self.templates.get("format_templates", {})
@@ -1112,7 +1164,7 @@ def main():
                 manager.show_validation_report()
 
             elif choice == "20":
-                ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
                 default_name = f"generator_config_new_{ts}.active.json"
                 val = input(f"Output filename [{default_name}]: ").strip()
                 out_path = str(script_dir / (val or default_name))

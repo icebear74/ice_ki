@@ -6,11 +6,19 @@
   "source_dirs": [
     {
       "path": "/mnt/data/video/SerieUHD",
-      "extensions": [".mkv", ".mp4", ".avi"]
+      "extensions": [
+        ".mkv",
+        ".mp4",
+        ".avi"
+      ]
     },
     {
       "path": "/mnt/data/video/filme/UHD",
-      "extensions": [".mkv", ".mp4", ".avi"]
+      "extensions": [
+        ".mkv",
+        ".mp4",
+        ".avi"
+      ]
     }
   ],
   "videos": [],
@@ -19,7 +27,7 @@
       "target_total": 350000,
       "formats": [
         {
-          "template": "960x540_169",
+          "template": "960_169",
           "weight": 60,
           "source_mode": "resize",
           "degradation_mix": {
@@ -30,7 +38,7 @@
           }
         },
         {
-          "template": "1152x648_169",
+          "template": "1152_169",
           "weight": 40,
           "source_mode": "crop",
           "degradation_mix": {
@@ -46,7 +54,7 @@
       "target_total": 100000,
       "formats": [
         {
-          "template": "960x540_169",
+          "template": "960_169",
           "weight": 70,
           "source_mode": "resize",
           "degradation_mix": {
@@ -55,7 +63,7 @@
           }
         },
         {
-          "template": "1152x648_169",
+          "template": "1152_169",
           "weight": 30,
           "source_mode": "crop",
           "degradation_mix": {
@@ -69,7 +77,7 @@
       "target_total": 80000,
       "formats": [
         {
-          "template": "720x720_11",
+          "template": "960_43",
           "weight": 60,
           "source_mode": "crop",
           "degradation_mix": {
@@ -78,7 +86,7 @@
           }
         },
         {
-          "template": "960x540_169",
+          "template": "960_169",
           "weight": 40,
           "source_mode": "resize",
           "degradation_mix": {
