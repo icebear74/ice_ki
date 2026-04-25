@@ -257,9 +257,12 @@ def _get_ffmpeg_major_version() -> int:
     """Return the major version of the installed FFmpeg (cached).
 
     Used to select the correct output options:
-      * FFmpeg ≥ 5: ``-fps_mode passthrough`` (replaces deprecated ``-vsync``)
-                    and ``-/filter_complex file`` (replaces ``-filter_complex_script``)
-      * FFmpeg 4:   ``-vsync 0``  and  ``-filter_complex_script file``
+      * FFmpeg ≥ 7: ``-/filter_complex file`` (file-based option syntax, added in 7.0;
+                     ``-filter_complex_script`` was removed in 7.0)
+                    ``-fps_mode passthrough``
+      * FFmpeg 5–6: ``-filter_complex_script file`` (deprecated but present)
+                    ``-fps_mode passthrough``
+      * FFmpeg 4:   ``-filter_complex_script file``  and  ``-vsync 0``
 
     Standard release builds report the version as a numeric string, e.g.
     ``"ffmpeg version 6.1.1 …"``.  Git snapshot builds use a non-numeric
@@ -1834,15 +1837,19 @@ def extract_and_save_streaming_distributed(
             _fc_fh.write(f"[0:v]{vf_filter}[vout]")
 
         # Select the right filter-file and vsync options depending on the
-        # installed FFmpeg version.  FFmpeg 5+ deprecated -filter_complex_script
-        # (replaced by -/filter_complex) and -vsync (replaced by -fps_mode).
+        # installed FFmpeg version.
+        #   FFmpeg 7+: -/filter_complex <file>  (file-based option syntax, added in 7.0)
+        #              -filter_complex_script was removed in 7.0
+        #   FFmpeg 5-6: -filter_complex_script <file>  (deprecated but still present)
+        #   FFmpeg 4:   -filter_complex_script <file>
+        #   FFmpeg 5+:  -fps_mode passthrough  (replaces deprecated -vsync)
         # -vsync 0 / -fps_mode passthrough is CRITICAL: without it, FFmpeg fills
         # PTS gaps left by the select filter with duplicated frames, so Python
         # would read only frames from the very start of the video.
         _ffmpeg_ver = _get_ffmpeg_major_version()
         _fc_args = (
             ["-/filter_complex", _fc_script_path]
-            if _ffmpeg_ver >= 5
+            if _ffmpeg_ver >= 7
             else ["-filter_complex_script", _fc_script_path]
         )
         _vsync_args = (
