@@ -335,11 +335,29 @@ def libplacebo_available() -> bool:
         else:
             # Stage 2: functional Vulkan probe — attempt a real libplacebo pass
             # using a 10-bit source so the same Vulkan code path as real HDR
-            # video is exercised.  FFmpeg exits non-zero when Vulkan init fails.
+            # video is exercised.
+            #
+            # IMPORTANT: we must capture stderr and scan it for Vulkan failure
+            # strings, not just check the exit code.  When Vulkan device
+            # creation fails, libplacebo falls back to a software path for the
+            # simple lavfi source used here, so FFmpeg may still exit 0 even
+            # though Vulkan is broken.  With a real UHD/HDR video, however, the
+            # filter reinitialises for the actual pixel format and fails with
+            # "Query format failed" — producing 0 frames.  Scanning stderr lets
+            # us detect the silent Vulkan failure before committing to the
+            # libplacebo pipeline.
+            _VULKAN_FAIL_STRINGS = (
+                "VK_ERROR_",
+                "Failed creating Vulkan device",
+                "Failed initializing vulkan device",
+                "Failed creating logical device",
+                "Query format failed",
+                "Error reinitializing filters",
+            )
             try:
                 probe = subprocess.run(
                     [
-                        "ffmpeg", "-hide_banner", "-loglevel", "error",
+                        "ffmpeg", "-hide_banner", "-loglevel", "verbose",
                         "-f", "lavfi", "-i", "color=c=black:size=64x64:duration=0.04",
                         "-vf", (
                             # Convert to 10-bit first so libplacebo takes the
@@ -355,10 +373,14 @@ def libplacebo_available() -> bool:
                         "-frames:v", "1", "-f", "null", "-",
                     ],
                     stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
                     timeout=15,
                 )
-                _libplacebo_avail = probe.returncode == 0
+                stderr_txt = probe.stderr.decode(errors="replace")
+                vulkan_ok = probe.returncode == 0 and not any(
+                    kw in stderr_txt for kw in _VULKAN_FAIL_STRINGS
+                )
+                _libplacebo_avail = vulkan_ok
             except Exception:
                 _libplacebo_avail = False
     return _libplacebo_avail

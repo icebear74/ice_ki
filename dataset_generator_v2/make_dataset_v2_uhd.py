@@ -350,7 +350,7 @@ class DatasetGeneratorV2UHD:
         # Increment this version whenever the benchmark probe logic changes so
         # that stale cached results are automatically invalidated without
         # requiring the user to pass --benchmark manually.
-        _CACHE_VERSION     = 2      # v2: libplacebo probe uses 10-bit source
+        _CACHE_VERSION     = 3      # v3: libplacebo probe checks stderr for Vulkan errors
 
         cache_path = os.path.join(self.base_dir, "decode_benchmark.json")
 
