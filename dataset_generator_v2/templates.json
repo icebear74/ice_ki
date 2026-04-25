@@ -1,0 +1,246 @@
+{
+  "_format": "templates_v1",
+  "_description": "Reusable format and degradation templates for dataset generation",
+  "format_templates": {
+    "1152_169": {
+      "base_x": 1152,
+      "aspect_ratio": "16:9",
+      "scale": 3,
+      "gt_size": [
+        1152,
+        648
+      ],
+      "lr_size": [
+        384,
+        216
+      ],
+      "description": "1152x648 16:9 – main resize target (UHD→HD quality step)"
+    },
+    "960_169": {
+      "base_x": 960,
+      "aspect_ratio": "16:9",
+      "scale": 3,
+      "gt_size": [
+        960,
+        540
+      ],
+      "lr_size": [
+        320,
+        180
+      ],
+      "description": "960x540 16:9 – secondary resize / crop target"
+    },
+    "960_43": {
+      "base_x": 960,
+      "aspect_ratio": "4:3",
+      "scale": 3,
+      "gt_size": [
+        960,
+        720
+      ],
+      "lr_size": [
+        320,
+        240
+      ],
+      "description": "960x720 4:3 – classic TV / sitcom / older sci-fi (crop from 16:9 source)"
+    }
+  },
+  "degradation_templates": {
+    "classic_sitcom_sd": {
+      "description": "Classic SD sitcom / series look: VHS-era sharpness loss, analog noise, warm color cast",
+      "blur": {
+        "sigma_range": [
+          0.4,
+          1.2
+        ],
+        "prob": 0.85
+      },
+      "compression": {
+        "jpeg_quality_range": [
+          55,
+          78
+        ],
+        "prob": 0.9,
+        "ringing_strength": 0.3
+      },
+      "noise": {
+        "sigma_range": [
+          2.0,
+          8.0
+        ],
+        "prob": 0.8,
+        "color_noise_prob": 0.4
+      },
+      "chroma": {
+        "saturation_range": [
+          0.85,
+          1.1
+        ],
+        "chroma_bleed_prob": 0.35,
+        "chroma_bleed_strength": 0.2
+      },
+      "color": {
+        "contrast_range": [
+          0.9,
+          1.05
+        ],
+        "brightness_range": [
+          -0.02,
+          0.04
+        ],
+        "black_lift": 0.03,
+        "gamma_range": [
+          0.95,
+          1.1
+        ]
+      }
+    },
+    "classic_scifi_sd": {
+      "description": "Classic sci-fi SD: slightly over-sharpened, film grain, cool desaturated look",
+      "blur": {
+        "sigma_range": [
+          0.2,
+          0.8
+        ],
+        "prob": 0.7
+      },
+      "compression": {
+        "jpeg_quality_range": [
+          62,
+          82
+        ],
+        "prob": 0.8,
+        "ringing_strength": 0.4
+      },
+      "noise": {
+        "sigma_range": [
+          1.5,
+          6.0
+        ],
+        "prob": 0.75,
+        "color_noise_prob": 0.25
+      },
+      "chroma": {
+        "saturation_range": [
+          0.75,
+          0.95
+        ],
+        "chroma_bleed_prob": 0.2,
+        "chroma_bleed_strength": 0.1
+      },
+      "color": {
+        "contrast_range": [
+          0.95,
+          1.1
+        ],
+        "brightness_range": [
+          -0.03,
+          0.02
+        ],
+        "black_lift": 0.01,
+        "gamma_range": [
+          0.9,
+          1.05
+        ]
+      }
+    },
+    "dvd_film_balanced": {
+      "description": "Balanced DVD/film look: moderate compression, slight softening, neutral color",
+      "blur": {
+        "sigma_range": [
+          0.3,
+          0.9
+        ],
+        "prob": 0.75
+      },
+      "compression": {
+        "jpeg_quality_range": [
+          65,
+          85
+        ],
+        "prob": 0.85,
+        "ringing_strength": 0.2
+      },
+      "noise": {
+        "sigma_range": [
+          1.0,
+          4.5
+        ],
+        "prob": 0.65,
+        "color_noise_prob": 0.2
+      },
+      "chroma": {
+        "saturation_range": [
+          0.9,
+          1.05
+        ],
+        "chroma_bleed_prob": 0.15,
+        "chroma_bleed_strength": 0.08
+      },
+      "color": {
+        "contrast_range": [
+          0.95,
+          1.05
+        ],
+        "brightness_range": [
+          -0.02,
+          0.03
+        ],
+        "black_lift": 0.01,
+        "gamma_range": [
+          0.97,
+          1.03
+        ]
+      }
+    },
+    "toon_sd": {
+      "description": "Animated / cartoon SD: flat color loss, strong compression artifacts, cel-like sharpness",
+      "blur": {
+        "sigma_range": [
+          0.1,
+          0.6
+        ],
+        "prob": 0.6
+      },
+      "compression": {
+        "jpeg_quality_range": [
+          50,
+          72
+        ],
+        "prob": 0.95,
+        "ringing_strength": 0.5
+      },
+      "noise": {
+        "sigma_range": [
+          0.5,
+          3.0
+        ],
+        "prob": 0.5,
+        "color_noise_prob": 0.15
+      },
+      "chroma": {
+        "saturation_range": [
+          0.8,
+          1.15
+        ],
+        "chroma_bleed_prob": 0.4,
+        "chroma_bleed_strength": 0.25
+      },
+      "color": {
+        "contrast_range": [
+          0.92,
+          1.08
+        ],
+        "brightness_range": [
+          -0.01,
+          0.05
+        ],
+        "black_lift": 0.02,
+        "gamma_range": [
+          0.95,
+          1.08
+        ]
+      }
+    }
+  }
+}
