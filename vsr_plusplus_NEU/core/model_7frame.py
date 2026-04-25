@@ -150,26 +150,28 @@ class TemporalAlignBlock(nn.Module):
             torch.linspace(-1, 1, W, device=ref_feat.device),
             indexing='ij'
         )
-        base_grid = torch.stack([grid_x, grid_y], dim=-1)   # [H, W, 2]
+        base_grid = torch.stack([grid_x, grid_y], dim=-1)   # [H, W, 2], float32
         base_grid = base_grid.unsqueeze(0).expand(B, -1, -1, -1)  # [B, H, W, 2]
 
         # offset is [B, 2, H, W] → rearrange to [B, H, W, 2]
         offset_grid = offset.permute(0, 2, 3, 1)
 
-        # Final sampling grid
-        sample_grid = base_grid + offset_grid  # [B, H, W, 2]
-        sample_grid = sample_grid.clamp(-1, 1)
+        # Warp in float32 for FP16 compatibility:
+        # • torch.linspace always returns float32, so base_grid is float32.
+        # • F.grid_sample requires input and grid to have the same dtype.
+        # • Do the warp in float32 regardless of the model's working dtype
+        #   and cast the result back to the original dtype afterwards.
+        sample_grid = (base_grid + offset_grid.float()).clamp(-1, 1)  # float32
 
-        # Warp src_feat using the predicted grid
         aligned_src = F.grid_sample(
-            src_feat,
+            src_feat.float(),   # upcast to float32 if fp16
             sample_grid,
             mode='bilinear',
             padding_mode='border',
             align_corners=True
         )
 
-        return aligned_src
+        return aligned_src.to(ref_feat.dtype)  # restore original dtype (fp16 or fp32)
 
 
 class GatedFusionBlock(nn.Module):
