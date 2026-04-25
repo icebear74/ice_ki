@@ -391,6 +391,8 @@ class DatasetGeneratorV2UHD:
         if remaining:
             count = sum(priority_counts[p] for p in remaining)
             console.print(f"   ... and {count} more videos in other priority levels")
+
+    def _load_metadata_cache(self):
         """Load video metadata cache from disk"""
         if os.path.exists(self.metadata_cache_file):
             try:
