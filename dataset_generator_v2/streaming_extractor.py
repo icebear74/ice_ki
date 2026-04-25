@@ -1641,6 +1641,7 @@ def _append_ffmpeg_log(
     video_path: str,
     stderr_lines: List[str],
     pipeline_label: str = "",
+    ffmpeg_cmd: Optional[List[str]] = None,
 ) -> None:
     """Append FFmpeg stderr output to ``<base_dir>/ffmpeg_errors.log``.
 
@@ -1658,10 +1659,14 @@ def _append_ffmpeg_log(
         stderr_lines:   Lines collected from FFmpeg's stderr pipe.
         pipeline_label: Optional human-readable pipeline description included
                         in the header (e.g. ``"CPU-only [HDR]"``).
+        ffmpeg_cmd:     The complete FFmpeg argument list that was executed.
+                        When provided it is logged before the stderr output so
+                        the exact invocation can be reproduced from the log.
     """
     if not stderr_lines:
         return
     try:
+        import shlex
         from datetime import datetime as _dt
         log_path = os.path.join(base_dir, "ffmpeg_errors.log")
         os.makedirs(base_dir, exist_ok=True)
@@ -1673,6 +1678,8 @@ def _append_ffmpeg_log(
         )
         if pipeline_label:
             header += f"Pipeline: {pipeline_label}\n"
+        if ffmpeg_cmd:
+            header += f"FFmpeg command: {shlex.join(ffmpeg_cmd)}\n"
         header += f"FFmpeg stderr ({len(stderr_lines)} lines):\n"
         body = "\n".join(f"  {ln}" for ln in stderr_lines)
         with open(log_path, "a", encoding="utf-8") as fh:
@@ -2105,6 +2112,7 @@ def extract_and_save_streaming_distributed(
     selected_idx: int = 0
     _t_start: Optional[float] = None
     _log_interval: int = 50
+    _ffmpeg_cmd: List[str] = []  # last FFmpeg command; logged on error
 
     # yuv420p: 1.5 bytes per pixel (Y plane + half-res U+V planes).
     # Compared to bgr24 (3 bytes/pixel) this cuts pipe bandwidth by ~33 %.
@@ -2383,6 +2391,7 @@ def extract_and_save_streaming_distributed(
                     *_vsync_args,
                     "pipe:1",
                 ]
+                _ffmpeg_cmd = _cl_cmd  # capture for error logging
 
                 _cl_proc = subprocess.Popen(
                     _cl_cmd,
@@ -2456,6 +2465,7 @@ def extract_and_save_streaming_distributed(
                 *_vsync_args,
                 "pipe:1",
             ]
+            _ffmpeg_cmd = cmd  # capture for error logging
 
             process = subprocess.Popen(
                 cmd,
@@ -2521,7 +2531,7 @@ def extract_and_save_streaming_distributed(
         # Always persist FFmpeg stderr to the log file so that filter-chain
         # errors, codec warnings and hw-accel failures are visible after the
         # run even when they didn't prevent frame output.
-        _append_ffmpeg_log(base_dir, video_path, stderr_lines, pipeline_label)
+        _append_ffmpeg_log(base_dir, video_path, stderr_lines, pipeline_label, _ffmpeg_cmd or None)
         # Also echo to the logger when no frames were produced (most useful
         # for diagnosing filter-chain errors interactively).
         if selected_idx == 0 and stderr_lines:

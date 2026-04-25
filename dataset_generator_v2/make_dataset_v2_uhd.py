@@ -347,6 +347,10 @@ class DatasetGeneratorV2UHD:
         SEEK_SEC           = 60.0   # skip opening credits / black frames
         W, H               = STREAM_OPT_WIDTH, STREAM_OPT_HEIGHT
         FRAME_BYTES        = W * H * 3 // 2   # yuv420p = 1.5 bytes/pixel
+        # Increment this version whenever the benchmark probe logic changes so
+        # that stale cached results are automatically invalidated without
+        # requiring the user to pass --benchmark manually.
+        _CACHE_VERSION     = 2      # v2: libplacebo probe uses 10-bit source
 
         cache_path = os.path.join(self.base_dir, "decode_benchmark.json")
 
@@ -356,7 +360,8 @@ class DatasetGeneratorV2UHD:
                 if os.path.exists(cache_path):
                     cache = json.loads(Path(cache_path).read_text())
                     age_days = (time.time() - cache.get("_ts", 0)) / 86400.0
-                    if age_days < CACHE_MAX_AGE_DAYS:
+                    cache_ver = cache.get("_probe_version", 1)
+                    if age_days < CACHE_MAX_AGE_DAYS and cache_ver >= _CACHE_VERSION:
                         best = cache.get("best", {})
                         self.cuda_device = best.get("cuda_device", 0)
                         self.use_cuda    = best.get("use_cuda", self.use_cuda)
@@ -888,11 +893,12 @@ class DatasetGeneratorV2UHD:
         # ── Save results to output dir ────────────────────────────────────────
         os.makedirs(self.base_dir, exist_ok=True)
         cache: dict = {
-            "_ts":          time.time(),
-            "_test_video":  test_video,
-            "_is_hdr":      test_is_hdr,
-            "_n_workers":   N,
-            "_benchmark":   (
+            "_ts":            time.time(),
+            "_probe_version": _CACHE_VERSION,
+            "_test_video":    test_video,
+            "_is_hdr":        test_is_hdr,
+            "_n_workers":     N,
+            "_benchmark":     (
                 f"{BENCH_FRAMES} frames timed + {WARMUP_FRAMES} warmup at "
                 f"{W}×{H}, seek {SEEK_SEC:.0f}s, {N} workers"
             ),
