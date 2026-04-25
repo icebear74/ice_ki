@@ -723,7 +723,7 @@ def sample_degradation_template_params(
     Parameters are sampled **once per scene window** and stored in a frozen
     dict that :func:`apply_degradation_template_params` applies to every LR
     frame in the window.  This mirrors real MPEG-2 encoder behaviour where the
-    quantiser settings (and therefore noise level, blur, and JPEG quality) are
+    quantizer settings (and therefore noise level, blur, and JPEG quality) are
     constant within a GOP.  Additive noise is still drawn per-frame inside
     :func:`apply_degradation_template_params` at the sampled sigma.
 
@@ -1141,7 +1141,7 @@ def create_patch_pair(
     Args:
         frames:       BGR numpy arrays, length 5 or 7.
         format_name:  Format key string (used for logging and legacy
-                      source-mode fallback only — all fachliche decisions are
+                      source-mode fallback only — all functional decisions are
                       now driven by *format_cfg*).
         format_cfg:   Dict with at minimum ``'gt_size': [W, H]`` and
                       ``'lr_size': [W, H]``.  Optionally:

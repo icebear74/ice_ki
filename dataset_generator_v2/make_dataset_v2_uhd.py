@@ -9,7 +9,7 @@ Loads configuration exclusively from:
 via the shared config utility (utils/config_io.py) introduced in Task 1.
 
 No hard-coded format names, category names, output paths, or distribution
-assumptions.  All fachliche decisions are driven entirely by the active config
+assumptions.  All functional decisions are driven entirely by the active config
 and the templates file.
 """
 
