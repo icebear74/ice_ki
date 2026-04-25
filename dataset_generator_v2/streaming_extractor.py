@@ -311,11 +311,20 @@ def libplacebo_available() -> bool:
     1. Verify that ``libplacebo`` is listed by ``ffmpeg -filters`` (compiled-in
        with ``--enable-libplacebo``).
     2. Perform a functional Vulkan probe by running a single libplacebo frame
-       through a 64×64 dummy source.  This step fails with a non-zero exit code
-       when the Vulkan device cannot be initialised (``VK_ERROR_INITIALIZATION_FAILED``
-       or similar) — even if the filter is compiled in.  Without this probe,
-       machines where Vulkan fails at runtime would still select the libplacebo
-       path, causing the entire FFmpeg filter chain to crash and decode 0 frames.
+       through a 64×64 dummy source rendered as 10-bit (``yuv420p10le``).
+
+    The 10-bit pixel format is critical: libplacebo only initialises a Vulkan
+    device when the input is ≥10-bit (i.e. HDR-like).  An 8-bit ``lavfi color``
+    source takes a lightweight software path that never touches Vulkan, so the
+    probe would always succeed even when Vulkan is broken.  Using
+    ``format=yuv420p10le`` before the filter mirrors exactly what a real UHD/HDR
+    video file delivers, triggering the same Vulkan init code path.
+
+    This step fails with a non-zero exit code when the Vulkan device cannot be
+    initialised (``VK_ERROR_INITIALIZATION_FAILED`` or similar) — even if the
+    filter is compiled in.  Without this probe, machines where Vulkan fails at
+    runtime would still select the libplacebo path, causing the entire FFmpeg
+    filter chain to crash and decode 0 frames.
 
     The result is cached after the first call so repeated checks are free.
     """
@@ -324,14 +333,20 @@ def libplacebo_available() -> bool:
         if "libplacebo" not in _get_ffmpeg_filters():
             _libplacebo_avail = False
         else:
-            # Stage 2: functional Vulkan probe — attempt a real libplacebo pass.
-            # FFmpeg exits non-zero when Vulkan device creation fails.
+            # Stage 2: functional Vulkan probe — attempt a real libplacebo pass
+            # using a 10-bit source so the same Vulkan code path as real HDR
+            # video is exercised.  FFmpeg exits non-zero when Vulkan init fails.
             try:
                 probe = subprocess.run(
                     [
                         "ffmpeg", "-hide_banner", "-loglevel", "error",
                         "-f", "lavfi", "-i", "color=c=black:size=64x64:duration=0.04",
                         "-vf", (
+                            # Convert to 10-bit first so libplacebo takes the
+                            # same Vulkan-accelerated HDR code path as a real
+                            # UHD source (8-bit input uses a SW-only path that
+                            # never tests Vulkan device creation).
+                            "format=yuv420p10le,"
                             "libplacebo=w=64:h=64"
                             ":colorspace=bt709:color_trc=bt709:color_primaries=bt709"
                             ":tonemapping=mobius:range=pc:downscaler=bilinear,"
