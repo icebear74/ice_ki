@@ -77,7 +77,7 @@ import threading
 import time
 from collections import deque
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 import cv2
 import numpy as np
@@ -222,13 +222,15 @@ _TONEMAP_FILTER_CUDA: str = (
 )
 
 # ---------------------------------------------------------------------------
-# CUDA / libplacebo detection (cached after the first call)
+# CUDA / QSV / libplacebo detection (cached after the first call)
 # ---------------------------------------------------------------------------
 
 _cuda_available: Optional[bool] = None
 _scale_cuda_available: Optional[bool] = None
 _tonemap_cuda_available: Optional[bool] = None
 _libplacebo_avail: Optional[bool] = None
+_qsv_avail: Optional[bool] = None
+_qsv_decoders: Optional[Set[str]] = None
 
 # Cached output of `ffmpeg -filters` (shared by all filter probes).
 _ffmpeg_filters_output: Optional[str] = None
@@ -317,7 +319,99 @@ def libplacebo_available() -> bool:
     return _libplacebo_avail
 
 
-def _get_ffmpeg_major_version() -> int:
+def qsv_available() -> bool:
+    """Return True when Intel QSV hw-accel is listed by the local FFmpeg build.
+
+    Requires ``--enable-libvpl`` (Intel oneVPL, successor to libmfx) or
+    ``--enable-libmfx`` in the FFmpeg configure flags, plus an Intel CPU with
+    a hardware video engine and the matching user-space driver installed at
+    runtime.
+
+    The result is cached after the first call so repeated checks are free.
+    """
+    global _qsv_avail
+    if _qsv_avail is None:
+        try:
+            out = subprocess.check_output(
+                ["ffmpeg", "-hide_banner", "-hwaccels"],
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            ).decode(errors="replace")
+            _qsv_avail = "qsv" in out.lower()
+        except Exception:
+            _qsv_avail = False
+    return _qsv_avail
+
+
+def qsv_decoders_available() -> Set[str]:
+    """Return the set of QSV decoder names compiled into this FFmpeg build.
+
+    Queries ``ffmpeg -decoders`` once and caches the result.  The returned
+    set contains names such as ``"hevc_qsv"``, ``"h264_qsv"``, etc.  An
+    empty set is returned when QSV decoders are unavailable or the probe
+    fails.
+    """
+    global _qsv_decoders
+    if _qsv_decoders is None:
+        try:
+            out = subprocess.check_output(
+                ["ffmpeg", "-hide_banner", "-decoders"],
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            ).decode(errors="replace")
+            _qsv_decoders = {
+                name
+                for name in (
+                    "hevc_qsv", "h264_qsv", "mpeg2_qsv", "vp9_qsv", "av1_qsv",
+                )
+                if name in out
+            }
+        except Exception:
+            _qsv_decoders = set()
+    return _qsv_decoders
+
+
+# Mapping from ffprobe codec_name → QSV decoder name.
+_QSV_CODEC_MAP: Dict[str, str] = {
+    "hevc":        "hevc_qsv",
+    "h264":        "h264_qsv",
+    "mpeg2video":  "mpeg2_qsv",
+    "vp9":         "vp9_qsv",
+    "av1":         "av1_qsv",
+}
+
+
+def _qsv_decoder_for_video(video_path: str) -> Optional[str]:
+    """Return the QSV decoder name for the first video stream, or *None*.
+
+    Probes the video codec with ``ffprobe`` and looks up the matching
+    ``*_qsv`` decoder.  Returns ``None`` when the codec has no QSV decoder,
+    QSV is unavailable, or the probe fails.
+    """
+    if not qsv_available():
+        return None
+    avail = qsv_decoders_available()
+    if not avail:
+        return None
+    try:
+        codec_name = subprocess.check_output(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=codec_name",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                video_path,
+            ],
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        ).decode(errors="replace").strip().lower()
+    except Exception:
+        return None
+    candidate = _QSV_CODEC_MAP.get(codec_name)
+    return candidate if candidate in avail else None
+
+
+
     """Return the major version of the installed FFmpeg (cached).
 
     Used to select the correct output options:
@@ -1331,9 +1425,11 @@ def create_patch_pair(
             crop_y : crop_y + sample_h, crop_x : crop_x + sample_w
         ]
 
-        # GT: Lanczos4 downsample from oversampled crop; direct slice otherwise.
+        # GT: INTER_AREA for exact-integer downsampling (box filter; identical
+        # quality to Lanczos4 at 2× but significantly faster).  INTER_LANCZOS4
+        # is only superior for non-integer scale factors.
         if oversample > 1:
-            gt = cv2.resize(center_crop, (gt_w, gt_h), interpolation=cv2.INTER_LANCZOS4)
+            gt = cv2.resize(center_crop, (gt_w, gt_h), interpolation=cv2.INTER_AREA)
         else:
             gt = center_crop
 
@@ -1419,15 +1515,16 @@ def is_black_frame(gt: np.ndarray, unique_ratio_threshold: float = 0.07) -> bool
     near-uniform frame regardless of its average brightness — unlike the
     previous mean-brightness check which only caught dark frames.
 
-    Performance note: ``np.bincount`` on the uint8 grayscale ravel is O(n) and
-    avoids the O(n log n) sort inside ``np.unique``, keeping the hot-path cheap.
-    The grayscale approximation uses a simple channel mean rather than the
-    luminosity formula (0.299R + 0.587G + 0.114B) because the uniqueness count
-    is insensitive to the exact weighting — any near-uniform frame will show
-    very few distinct values regardless of the conversion method used.
+    Performance note: the function stride-samples the frame by a factor of 8 in
+    each spatial dimension (producing a ~288×180 view from a 2304×1440 source)
+    before the grayscale conversion.  Near-uniform frames are uniformly-valued at
+    any sampling density, so the detection is lossless while processing ~64×
+    fewer pixels.  ``np.bincount`` on the uint8 ravel is O(n); ``np.mean`` with
+    a simple channel average is used (not the 0.299/0.587/0.114 luminosity
+    formula) because the uniqueness count is insensitive to the exact weighting.
 
     Args:
-        gt:                     Center-frame BGR numpy array.
+        gt:                     Center-frame BGR numpy array (H × W × 3, uint8).
         unique_ratio_threshold: Fraction of 256 grey levels that must be present
                                 for the frame to be kept (default 0.07 → at least
                                 ~18 distinct grey levels required).
@@ -1435,7 +1532,10 @@ def is_black_frame(gt: np.ndarray, unique_ratio_threshold: float = 0.07) -> bool
     Returns:
         ``True`` when the frame has too few unique intensity levels to be useful.
     """
-    gray = np.mean(gt, axis=2).astype(np.uint8)
+    # Stride-sample to 1/8 in each dimension — creates a view (no copy).
+    # 2304×1440 → 288×180 = 51 840 pixels instead of 3 317 760: ~64× cheaper.
+    sample = gt[::8, ::8, :]
+    gray = np.mean(sample, axis=2).astype(np.uint8)
     unique_count = np.count_nonzero(np.bincount(gray.ravel(), minlength=256))
     return unique_count < unique_ratio_threshold * 256
 
@@ -1530,6 +1630,7 @@ def extract_and_save_streaming_distributed(
     stream_width: int = STREAM_WIDTH,
     stream_height: int = STREAM_HEIGHT,
     cuda_device: int = 0,
+    use_qsv: bool = True,
 ) -> Dict[str, int]:
     """
     Stream the video once and save patches as frames pass through the buffer.
