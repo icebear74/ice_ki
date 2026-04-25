@@ -1,6 +1,28 @@
 """
 VSRDataset - Video Super-Resolution Dataset Loader
 
+# =============================================================================
+# TODO – BUCKET-SUBDIR MIGRATION REQUIRED
+# =============================================================================
+# The dataset generator now writes patches into 4-digit bucket subdirectories:
+#
+#   master/patches/720/GT/0000/   (up to 10 000 PNG files per bucket)
+#   master/patches/720/GT/0001/
+#   master/patches/720/LR_7frames/0000/
+#   …
+#
+# This loader still uses os.listdir(gt_dir) which sees only the bucket dirs,
+# NOT the PNG files.  It MUST be updated before training works on the new data.
+#
+# Full migration instructions: vsr_plusplus_NEU/LOADER_UPDATE_REQUIRED.md
+# Key changes needed in THIS file:
+#   • Replace os.listdir(self.gt_dir) (5 spots) with os.walk / bucket scan
+#   • Add _collect_png_files() helper (see hint file for implementation)
+#   • Update lr_paths dict keys to relative "bucket/filename.png" paths
+#   • Fix __getitem__ path assembly (os.path.basename for LR)
+#   • Update cache invalidation to compare file count, not only mtime
+# =============================================================================
+
 Loads VSR training data with new dataset structure:
 - Dataset structure: root/dataset_name/patches/{size_key}/GT/ and LR/
 - Validation structure: root/dataset_name/val/{size_key}/GT/ (GT) + patches/{size_key}/LR/ (LR)

@@ -69,7 +69,11 @@ import numpy as np
 # ---------------------------------------------------------------------------
 import sys as _sys
 _sys.path.insert(0, os.path.dirname(__file__))
-from utils.format_definitions import get_output_dirs_for_format
+from utils.format_definitions import (
+    get_output_dirs_for_format,
+    get_synced_bucket_dirs,
+    BUCKET_SIZE,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -1307,8 +1311,9 @@ def save_patch_pair(
     """
     try:
         output_dirs = get_output_dirs_for_format(base_dir, category, format_name, n_frames)
-        gt_dir = output_dirs["gt"]
-        lr_dir = output_dirs["lr"]
+        # Resolve the current bucket once before writing so this patch pair
+        # goes into a consistent location (GT and LR share the same bucket).
+        gt_dir, lr_dir = get_synced_bucket_dirs(output_dirs["gt"], output_dirs["lr"])
 
         os.makedirs(gt_dir, exist_ok=True)
         os.makedirs(lr_dir, exist_ok=True)
@@ -1659,9 +1664,18 @@ def extract_and_save_streaming_distributed(
     for _, _cat, _fmt in sorted_asgn:
         _key = (_cat, _fmt)
         if _key not in _output_dirs_cache:
-            _dirs = get_output_dirs_for_format(base_dir, _cat, _fmt, n_frames)
-            for _d in _dirs.values():
-                os.makedirs(_d, exist_ok=True)
+            _base_dirs = get_output_dirs_for_format(base_dir, _cat, _fmt, n_frames)
+            # Determine the write bucket ONCE per (category, format) before this
+            # video's first patch is written.  All patches from this video land in
+            # the same bucket — never split across a bucket boundary mid-video.
+            _gt_bucket, _lr_bucket = get_synced_bucket_dirs(
+                _base_dirs["gt"], _base_dirs["lr"]
+            )
+            _dirs = dict(_base_dirs)  # keep val_gt / val_lr unchanged
+            _dirs["gt"] = _gt_bucket
+            _dirs["lr"] = _lr_bucket
+            os.makedirs(_gt_bucket, exist_ok=True)
+            os.makedirs(_lr_bucket, exist_ok=True)
             _output_dirs_cache[_key] = _dirs
 
     # --- Async PNG write queue --------------------------------------------
