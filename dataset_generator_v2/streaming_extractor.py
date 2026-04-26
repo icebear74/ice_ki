@@ -2362,14 +2362,14 @@ def extract_and_save_streaming_distributed(
 
             except Exception as _exc:
                 if logger:
-                    logger.warning(f"[processing_worker] Error at center={item[0] if item else '?'}: {_exc!r}")
+                    logger.warning(f"[processing_worker] Error: {_exc!r}")
             finally:
                 _process_queue.task_done()
 
-    # 4 processing workers: image work (crop, degradation, PNG encode) is
-    # CPU-bound; 4 threads saturate a multi-core CPU without contending on
-    # the GIL excessively for pure-NumPy paths.
-    _n_processing_workers = 4
+    # Processing workers: image work (crop, degradation, PNG encode) is
+    # CPU-bound.  Scale with available CPU cores, capped at 8 to avoid
+    # excessive memory pressure from concurrent 7-frame window copies.
+    _n_processing_workers = min(8, os.cpu_count() or 4)
     _processing_threads = [
         threading.Thread(target=_processing_worker, daemon=True)
         for _ in range(_n_processing_workers)
@@ -2665,7 +2665,7 @@ def extract_and_save_streaming_distributed(
                     # holds references that keep the arrays alive until it
                     # finishes.  The buffer eviction above only removes dict
                     # entries, not the underlying numpy arrays.
-                    _process_queue.put((center, list(window), center_map[center]))
+                    _process_queue.put((center, window, center_map[center]))
                     frames_examined += 1
                     _t_phases["n_centers"] += 1
 
