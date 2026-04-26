@@ -2197,76 +2197,6 @@ def extract_and_save_streaming_distributed(
     pending_centers: List[int] = sorted(center_map.keys())
     last_needed: int = pending_centers[-1] + half if pending_centers else 0
 
-    # --- Build the exact set of frames that will ever be needed -----------
-    # Each assignment requires a contiguous window [center-half … center+half].
-    # We collect every frame index in any such window, sort them, and merge
-    # adjacent indices into contiguous ranges.  These ranges are then passed
-    # to FFmpeg as a `select` filter expression so that the expensive tonemap
-    # and scale stages run *only* on the frames Python will actually use.
-    #
-    # For a typical 10-minute 24fps video with 100 scene assignments and
-    # n_frames=7, this reduces filter-chain CPU work from ~14 400 frames
-    # to ~700 frames (≈5%).
-    _all_needed: List[int] = sorted({
-        fi
-        for c in pending_centers
-        for fi in range(max(0, c - half), c + half + 1)
-    })
-    # Merge into contiguous ranges for a compact select expression.
-    _select_ranges: List[Tuple[int, int]] = []
-    if _all_needed:
-        _rs, _re = _all_needed[0], _all_needed[0]
-        for _f in _all_needed[1:]:
-            if _f == _re + 1:
-                _re = _f
-            else:
-                _select_ranges.append((_rs, _re))
-                _rs = _re = _f
-        _select_ranges.append((_rs, _re))
-
-    # FFmpeg's filtergraph parser treats commas as filter separators, so the
-    # commas inside between(n,a,b) must be escaped with a backslash so they
-    # are not misread as filter boundaries.
-    _select_expr: str = "+".join(
-        f"between(n\\,{s}\\,{e})" for s, e in _select_ranges
-    )
-
-    _select_pct = (
-        100.0 * len(_all_needed) / (last_needed + 1) if last_needed >= 0 else 100.0
-    )
-
-    # --- Seek-mode decision -----------------------------------------------
-    # Streaming decodes every frame up to the last needed one even though the
-    # select filter skips the expensive scale/tonemap stages for most frames.
-    # For sparse assignment sets the raw decode cost dominates.  Seeking to
-    # each cluster of nearby ranges is cheaper when:
-    #
-    #   N_ranges × assumed_GOP_size  <  last_needed_frame
-    #
-    # i.e. the total frames decoded by seeking to each cluster is less than
-    # the total frames decoded by a single streaming pass.
-    # GOP estimate of 150 frames (≈6 s at 24 fps) is conservative for modern
-    # H.265 HDR encodes; the actual value only affects the crossover threshold.
-    _SEEK_GOP_ESTIMATE: int = 150
-    _use_seek_mode: bool = (
-        bool(_select_ranges)
-        and len(_select_ranges) * _SEEK_GOP_ESTIMATE < last_needed + 1
-    )
-    if _use_seek_mode:
-        # Group consecutive ranges into seek clusters so one -ss call covers
-        # several nearby assignments without extra keyframe-seek overhead.
-        _seek_clusters: List[List[Tuple[int, int]]] = []
-        _cur_cl: List[Tuple[int, int]] = [_select_ranges[0]]
-        for _sr in _select_ranges[1:]:
-            if _sr[0] - _cur_cl[-1][1] <= _SEEK_GOP_ESTIMATE:
-                _cur_cl.append(_sr)
-            else:
-                _seek_clusters.append(_cur_cl)
-                _cur_cl = [_sr]
-        _seek_clusters.append(_cur_cl)
-    else:
-        _seek_clusters = []
-
     # --- Pre-compute per-video constants ----------------------------------
     # video_stem and output dir paths are the same for every patch in this
     # video — compute them once to avoid Path() and os.makedirs overhead in
@@ -2328,6 +2258,125 @@ def extract_and_save_streaming_distributed(
     for _t in _write_threads:
         _t.start()
 
+    # --- Async processing queue -------------------------------------------
+    # 7-frame windows captured by the main reader are handed to processing
+    # workers which run: black-frame check → crop/resize → degradation →
+    # GT/LR assembly → enqueue result to the write queue.
+    # This keeps the FFmpeg pipe reader as light as possible (read → convert
+    # → buffer → snapshot → enqueue → continue) without blocking it on heavy
+    # Python/OpenCV image work.
+    # maxsize=32: at 2304×1440 BGR (~10 MB/frame) a 7-frame window is ~70 MB;
+    # 32 slots ≈ 2 GB — provides back-pressure without unbounded memory use.
+    _process_queue: "queue.Queue[Optional[tuple]]" = queue.Queue(maxsize=32)
+
+    def _processing_worker() -> None:
+        """Pop captured 7-frame windows and produce GT/LR pairs asynchronously."""
+        while True:
+            item = _process_queue.get()
+            if item is None:
+                _process_queue.task_done()
+                break
+            try:
+                center, window_frames, cat_fmt_list = item
+                ts = center / fps
+                center_raw = window_frames[n_frames // 2]
+
+                # --- Black-frame check (once per extraction point) --------
+                if _black_fn(center_raw):
+                    with _patches_lock:
+                        _n_black_ctr[0] += 1
+                    if logger:
+                        logger.info(f"  ⏭ frame {center} skipped (black frame)")
+                    _process_queue.task_done()
+                    continue
+
+                _any_patch_saved = False
+                for category, fmt_name in cat_fmt_list:
+                    cfg = format_config.get(category, {}).get(fmt_name, {})
+                    if not cfg:
+                        continue
+
+                    _source_mode = cfg.get("source_mode", "crop")
+                    if _source_mode not in ("resize", "crop"):
+                        _source_mode = "crop"
+                    # Resize mode always produces the same result — no benefit
+                    # in retrying a random crop.
+                    max_attempts = 1 if _source_mode == "resize" else 6
+
+                    # --- Per-format degradation template selection ---------
+                    _deg_spec: Optional[dict] = None
+                    _chosen: Optional[str] = None
+                    _deg_mix = cfg.get("degradation_mix")
+                    _deg_tmpls = cfg.get("degradation_templates")
+                    if _deg_mix and _deg_tmpls:
+                        _names = list(_deg_mix.keys())
+                        _weights = [float(_deg_mix[k]) for k in _names]
+                        _chosen = random.choices(_names, weights=_weights, k=1)[0]
+                        _deg_spec = _deg_tmpls.get(_chosen)
+
+                    # --- Crop / resize → degradation → GT/LR assembly -----
+                    gt, lr = None, None
+                    for attempt in range(max_attempts):
+                        force = attempt >= 5
+                        gt, lr = create_patch_pair(
+                            window_frames, fmt_name, cfg,
+                            force_center=force, logger=logger,
+                            degrade_cfg=degrade_cfg if _deg_spec is None else None,
+                            deg_spec=_deg_spec,
+                        )
+                        if gt is None:
+                            continue
+                        if (
+                            is_interesting_fn is None
+                            or is_interesting_fn(gt)
+                            or force
+                        ):
+                            break
+
+                    # --- Enqueue result for async disk writing -------------
+                    if gt is not None and lr is not None:
+                        _any_patch_saved = True
+                        dirs = _output_dirs_cache[(category, fmt_name)]
+                        _ext = output_format.value
+                        patch_name = f"{_video_stem}_{int(ts * 1000):08d}.{_ext}"
+                        _write_queue.put((
+                            gt, lr,
+                            os.path.join(dirs["gt"], patch_name),
+                            os.path.join(dirs["lr"], patch_name),
+                        ))
+                        with _patches_lock:
+                            patches_created[category] = (
+                                patches_created.get(category, 0) + 1
+                            )
+                            _t_phases["n_patches"] += 1
+                            if _chosen is not None:
+                                _dc = _t_phases["degrade_counts"]
+                                _dc.setdefault(category, {})
+                                _dc[category][_chosen] = (
+                                    _dc[category].get(_chosen, 0) + 1
+                                )
+
+                if not _any_patch_saved:
+                    with _patches_lock:
+                        _n_quality_fail_ctr[0] += 1
+
+            except Exception as _exc:
+                if logger:
+                    logger.warning(f"[processing_worker] Error at center={item[0] if item else '?'}: {_exc!r}")
+            finally:
+                _process_queue.task_done()
+
+    # 4 processing workers: image work (crop, degradation, PNG encode) is
+    # CPU-bound; 4 threads saturate a multi-core CPU without contending on
+    # the GIL excessively for pure-NumPy paths.
+    _n_processing_workers = 4
+    _processing_threads = [
+        threading.Thread(target=_processing_worker, daemon=True)
+        for _ in range(_n_processing_workers)
+    ]
+    for _pt in _processing_threads:
+        _pt.start()
+
     # Build FFmpeg command.
     #
     # Pipeline tier is chosen by build_vf_filter() based on is_hdr and
@@ -2367,52 +2416,6 @@ def extract_and_save_streaming_distributed(
         color_trc=color_trc,
         vulkan_device=vulkan_device,
     )
-
-    # --- Inject select filter to skip unused frames in the filter chain ---
-    # The `select` filter passes only the frames in `_select_expr` to
-    # downstream filter stages.  Non-selected frames are still decoded
-    # (unavoidable for H.264/H.265 inter-frame prediction) but bypass the
-    # expensive scale/tonemap/zscale stages entirely.
-    #
-    # In seek mode this injection is skipped: each cluster subprocess already
-    # starts at the right position, so every decoded frame is a needed one.
-    #
-    # Placement depends on the pipeline tier:
-    #   CPU path        → select goes at the very start of the filter chain.
-    #   Hybrid GPU/CPU  → GPU scale runs first (cheap, already on GPU);
-    #                     select is inserted right after hwdownload so the
-    #                     expensive CPU tonemap only runs on needed frames.
-    #   Full-GPU        → all stages are on GPU; select is placed after the
-    #                     final hwdownload to cut pipe bandwidth.
-    if _select_expr and not _use_seek_mode:
-        if _full_gpu:
-            # Full-GPU: insert select right before the terminal format=yuv420p
-            # (after hwdownload+scale=iw:ih — all GPU work is done; select
-            # avoids the final CPU format conversion and the pipe write for
-            # unwanted frames).
-            _marker = ",format=yuv420p"
-            if _marker in vf_filter:
-                vf_filter = vf_filter.replace(
-                    _marker, f",select={_select_expr},format=yuv420p", 1
-                )
-            else:
-                _log("⚠️  Could not inject select into full-GPU filter chain — falling back to prepend")
-                vf_filter = f"select={_select_expr},{vf_filter}"
-        elif _scale_gpu:
-            # Hybrid scale-GPU + CPU tonemap: insert select after hwdownload
-            # so the CPU-side zscale/tonemap only processes needed frames.
-            _marker = "hwdownload,"
-            if _marker in vf_filter:
-                vf_filter = vf_filter.replace(
-                    _marker, f"hwdownload,select={_select_expr},", 1
-                )
-            else:
-                _log("⚠️  Could not inject select into hybrid GPU filter chain — falling back to prepend")
-                vf_filter = f"select={_select_expr},{vf_filter}"
-        else:
-            # CPU-only (or decode-only CUDA): prepend select so tonemap/scale
-            # runs on needed frames only.
-            vf_filter = f"select={_select_expr},{vf_filter}"
 
     # -init_hw_device cuda=hw explicitly initialises the CUDA device context
     # before demuxing begins.  Without this flag some FFmpeg builds silently
@@ -2459,33 +2462,27 @@ def extract_and_save_streaming_distributed(
     _pipe_mb_per_frame = stream_width * stream_height * 1.5 / (1024 * 1024)
 
     _log(
-        f"🎬 Streaming extractor: {len(sorted_asgn)} assignments, "
+        f"🎬 Continuous-stream extractor: {len(sorted_asgn)} assignments, "
         f"{len(pending_centers)} unique centers, "
         f"last frame needed: {last_needed}, "
         f"stream={stream_width}×{stream_height}, "
         f"pipeline={pipeline_label}, nice={nice_level}"
     )
-    _mode_label = (
-        f"seek ({len(_seek_clusters)} clusters)"
-        if _use_seek_mode
-        else "stream (select filter)"
-    )
     _log(
-        f"🎯 Frame selection: {len(_all_needed)} frames needed "
-        f"({_select_pct:.1f}% of {last_needed + 1} decoded) "
-        f"in {len(_select_ranges)} ranges — mode={_mode_label}"
+        f"🎯 Mode: continuous linear FFmpeg stream — "
+        f"Python reads frames 0..{last_needed} ({last_needed + 1} total), "
+        f"snapshots {len(pending_centers)} 7-frame windows asynchronously"
     )
     _log(
         f"📦 Pipe: yuv420p {stream_width}×{stream_height} "
         f"= {_pipe_mb_per_frame:.2f} MB/frame"
     )
 
-    # Write the filter chain to a temp file so that a long _select_expr
-    # (thousands of between() terms for a dense assignment list) never
-    # exceeds the OS ARG_MAX limit (~2 MB on Linux) and causes execve() to
-    # fail with E2BIG.  -filter_complex_script reads from a file and has no
-    # length restriction.  We wrap the vf-style filter in a minimal
-    # filter_complex graph: [0:v]<filter>[vout], then map [vout] to output.
+    # Write the filter chain to a temp file to avoid exceeding the OS
+    # ARG_MAX limit (~2 MB on Linux) for very long filter expressions.
+    # -filter_complex_script reads from a file and has no length restriction.
+    # We wrap the vf-style filter in a minimal filter_complex graph:
+    # [0:v]<filter>[vout], then map [vout] to output.
     #
     # Initialise all variables that the finally block references to safe
     # defaults so that a failure in mkstemp or Popen cannot produce a
@@ -2509,9 +2506,15 @@ def extract_and_save_streaming_distributed(
     pending_idx: int = 0  # index into pending_centers
     frames_examined: int = 0  # assignments processed (saved + skipped)
 
-    # Rejection counters: incremented inside _consume_raw_frame for diagnostics.
-    _n_black: int = 0         # centers skipped by black-frame check
-    _n_quality_fail: int = 0  # centers where create_patch_pair returned None for all formats
+    # Rejection counters: mutable containers so processing workers can update
+    # them without needing to hold the GIL or change the nonlocal declaration.
+    _n_black_ctr: List[int] = [0]         # centers skipped by black-frame check
+    _n_quality_fail_ctr: List[int] = [0]  # centers where create_patch_pair returned None
+
+    # Lock protecting patches_created, _n_black_ctr, _n_quality_fail_ctr,
+    # and _t_phases["degrade_counts"] / _t_phases["n_patches"] which are
+    # written by processing worker threads and read by the main thread.
+    _patches_lock = threading.Lock()
 
     # --- Per-video timing accumulators (mutated inside _consume_raw_frame) ---
     _t_phases: dict = {
@@ -2605,7 +2608,7 @@ def extract_and_save_streaming_distributed(
             else ["-vsync", "0"]
         )
 
-        # Drain stderr helper: shared by stream mode and each seek-mode cluster.
+        # Drain stderr helper.
         def drain_stderr(pipe: "subprocess.IO[bytes]") -> None:
             for line in pipe:
                 stderr_lines.append(line.decode(errors="replace").rstrip())
@@ -2613,12 +2616,12 @@ def extract_and_save_streaming_distributed(
 
         # ------------------------------------------------------------------
         # Inner helper: receive one decoded yuv420p frame, convert to BGR,
-        # fill the rolling buffer, and satisfy any pending assignments whose
-        # window is now complete.
-        # Shared by both stream mode and seek mode to avoid code duplication.
+        # fill the rolling buffer, and enqueue any completed 7-frame windows
+        # for background processing.  This is the lightweight FFmpeg pipe
+        # reader — it does NOT call create_patch_pair directly.
         # ------------------------------------------------------------------
         def _consume_raw_frame(raw: bytes, actual_frame: int) -> None:
-            nonlocal pending_idx, frames_examined, selected_idx, _n_black, _n_quality_fail
+            nonlocal pending_idx, frames_examined, selected_idx
 
             selected_idx += 1
             _t_phases["n_frames_buf"] += 1
@@ -2635,16 +2638,19 @@ def extract_and_save_streaming_distributed(
             buffer[actual_frame] = frame
 
             # Evict frames no longer needed by any pending assignment.
-            min_keep = max(0, pending_centers[pending_idx] - half)
-            for old_idx in [k for k in buffer if k < min_keep]:
-                del buffer[old_idx]
+            if pending_idx < len(pending_centers):
+                min_keep = max(0, pending_centers[pending_idx] - half)
+                for old_idx in [k for k in buffer if k < min_keep]:
+                    del buffer[old_idx]
             _t_phases["t_buf_s"] += time.monotonic() - _ta
 
-            # Satisfy pending assignments whose full window is now in the buffer.
+            # Detect completed 7-frame windows and enqueue for async processing.
+            # The main reader is NOT blocked by heavy image work — processing
+            # happens entirely in the background worker threads.
             while pending_idx < len(pending_centers):
                 center = pending_centers[pending_idx]
                 if actual_frame < center + half:
-                    break  # Need more frames
+                    break  # need more frames
 
                 window: List[np.ndarray] = []
                 for fi in range(center - half, center + half + 1):
@@ -2654,275 +2660,103 @@ def extract_and_save_streaming_distributed(
                     window.append(frm)
 
                 if len(window) == n_frames:
-                    ts = center / fps
-
-                    # Black-frame check on the raw center frame once per video
-                    # position – before iterating over (category, format) pairs.
-                    center_raw = window[n_frames // 2]
+                    # Hand off the window (list of frame references) to a
+                    # background worker.  Frames are not copied — the worker
+                    # holds references that keep the arrays alive until it
+                    # finishes.  The buffer eviction above only removes dict
+                    # entries, not the underlying numpy arrays.
+                    _process_queue.put((center, list(window), center_map[center]))
                     frames_examined += 1
                     _t_phases["n_centers"] += 1
 
-                    _tb = time.monotonic()
-                    _is_black = _black_fn(center_raw)
-                    _t_phases["t_black_s"] += time.monotonic() - _tb
-
-                    if _is_black:
-                        _n_black += 1
-                        _log(f"  ⏭ frame {center} skipped (black frame)")
-                    else:
-                        _any_patch_saved = False
-                        for category, fmt_name in center_map[center]:
-                            cfg = format_config.get(category, {}).get(fmt_name, {})
-                            if not cfg:
-                                continue
-
-                            # source_mode is ALWAYS set by the template config
-                            # (validated at startup by config_io.validate_active_config).
-                            # No hardcoded fallback on old format names — the config
-                            # is the single source of truth.
-                            _source_mode = cfg.get("source_mode", "crop")
-                            if _source_mode not in ("resize", "crop"):
-                                _source_mode = "crop"
-                            # Resize mode produces the same output on every attempt —
-                            # no benefit in retrying a random crop.
-                            max_attempts = 1 if _source_mode == "resize" else 6
-
-                            # Per-format degradation: sample a template from the
-                            # format's degradation_mix if available; fall back to the
-                            # global degrade_cfg for legacy callers.
-                            _deg_spec: Optional[dict] = None
-                            _chosen: Optional[str] = None
-                            _deg_mix = cfg.get("degradation_mix")
-                            _deg_tmpls = cfg.get("degradation_templates")
-                            if _deg_mix and _deg_tmpls:
-                                _names = list(_deg_mix.keys())
-                                _weights = [float(_deg_mix[k]) for k in _names]
-                                _chosen = random.choices(_names, weights=_weights, k=1)[0]
-                                _deg_spec = _deg_tmpls.get(_chosen)
-
-                            gt, lr = None, None
-                            _tp = time.monotonic()
-                            for attempt in range(max_attempts):
-                                force = attempt >= 5
-                                gt, lr = create_patch_pair(
-                                    window, fmt_name, cfg,
-                                    force_center=force, logger=logger,
-                                    degrade_cfg=degrade_cfg if _deg_spec is None else None,
-                                    deg_spec=_deg_spec,
-                                )
-                                if gt is None:
-                                    continue
-                                if (
-                                    is_interesting_fn is None
-                                    or is_interesting_fn(gt)
-                                    or force
-                                ):
-                                    break
-                            _t_phases["t_patch_s"] += time.monotonic() - _tp
-
-                            if gt is not None and lr is not None:
-                                _any_patch_saved = True
-                                dirs = _output_dirs_cache[(category, fmt_name)]
-                                _ext = output_format.value
-                                patch_name = f"{_video_stem}_{int(ts * 1000):08d}.{_ext}"
-                                _tw = time.monotonic()
-                                _write_queue.put((
-                                    gt, lr,
-                                    os.path.join(dirs["gt"], patch_name),
-                                    os.path.join(dirs["lr"], patch_name),
-                                ))
-                                _t_phases["t_write_s"] += time.monotonic() - _tw
-                                _t_phases["n_patches"] += 1
-                                _t_phases["q_size_last"] = _write_queue.qsize()
-                                patches_created[category] = (
-                                    patches_created.get(category, 0) + 1
-                                )
-                                # Track which degradation template was used so the
-                                # GUI can display live per-template statistics.
-                                if _chosen is not None:
-                                    _dc = _t_phases["degrade_counts"]
-                                    _dc.setdefault(category, {})
-                                    _dc[category][_chosen] = (
-                                        _dc[category].get(_chosen, 0) + 1
-                                    )
-
-                        if not _any_patch_saved:
-                            _n_quality_fail += 1
-
-                    # Periodic timing debug log (every 50 centres evaluated)
+                    # Periodic timing debug log (every 50 centres enqueued).
                     if _t_phases["n_centers"] >= _next_timing_log[0]:
                         _write_timing_log_entry()
                         _next_timing_log[0] += 50
 
                     if progress_fn is not None:
-                        # 3rd arg = selected_idx: count of frames actually piped
-                        # from FFmpeg to Python (used for real "piped fps" metric).
-                        # 4th arg = snapshot of phase timings for GUI display.
+                        # 3rd arg = selected_idx: raw frames read so far
+                        # (used for "piped fps" metric in the GUI).
+                        # 4th arg = snapshot of phase timings.
                         progress_fn(frames_examined, dict(patches_created),
                                     selected_idx, dict(_t_phases))
 
                 pending_idx += 1
 
         # ------------------------------------------------------------------
-        if _use_seek_mode:
-            # --- SEEK MODE ------------------------------------------------
-            # One short FFmpeg subprocess per cluster of nearby ranges.
-            # Each subprocess seeks (accurately, -ss after -i) to the cluster
-            # start and reads exactly the frames in that cluster window.
-            # Avoids decoding the entire video for sparse assignment sets.
-            for _cl_idx, _cluster in enumerate(_seek_clusters):
-                if pending_idx >= len(pending_centers):
-                    break
+        # --- CONTINUOUS STREAM MODE (single FFmpeg pass) ------------------
+        # FFmpeg behaves as a pure continuous producer: it decodes, tone-maps
+        # (libplacebo/Vulkan), and resizes every frame linearly, writing
+        # yuv420p frames into the pipe without any seek, jump, or select-
+        # filter frame-pruning.  Python reads the stream, tracks the frame
+        # counter, and enqueues 7-frame windows when extraction points are
+        # reached.  All heavy image work runs in the background worker pool.
+        # ------------------------------------------------------------------
+        cmd = [
+            "ffmpeg",
+            "-threads", "0",
+            "-filter_threads", "0",
+            "-loglevel", "warning",
+            *hw_args,
+            "-probesize", "100M",
+            "-analyzeduration", "100M",
+            "-i", video_path,
+            *_fc_args,
+            "-map", "[vout]",
+            "-f", "rawvideo",
+            "-pix_fmt", "yuv420p",
+            *_vsync_args,
+            "pipe:1",
+        ]
+        _ffmpeg_cmd = cmd  # capture for error logging
 
-                _cl_seek_frame = _cluster[0][0]
-                _cl_end_frame  = _cluster[-1][1]
-                _cl_n_read     = _cl_end_frame - _cl_seek_frame + 1
-                _cl_seek_sec   = _cl_seek_frame / fps
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        _set_nice(process.pid)
 
-                _cl_cmd = [
-                    "ffmpeg",
-                    "-threads", "0",
-                    "-filter_threads", "0",
-                    "-loglevel", "warning",
-                    *hw_args,
-                    "-probesize", "100M",
-                    "-analyzeduration", "100M",
-                    "-i", video_path,
-                    "-ss", f"{_cl_seek_sec:.6f}",   # accurate seek (after -i)
-                    "-frames:v", str(_cl_n_read),
-                    *_fc_args,
-                    "-map", "[vout]",
-                    "-f", "rawvideo",
-                    "-pix_fmt", "yuv420p",
-                    *_vsync_args,
-                    "pipe:1",
-                ]
-                _ffmpeg_cmd = _cl_cmd  # capture for error logging
+        stderr_thread = threading.Thread(
+            target=drain_stderr, args=(process.stderr,), daemon=True
+        )
+        stderr_thread.start()
 
-                _cl_proc = subprocess.Popen(
-                    _cl_cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                )
-                process = _cl_proc   # expose for finally-block kill on exception
-                _set_nice(_cl_proc.pid)
+        # Read frames continuously until the last needed frame has been
+        # consumed.  `actual_frame` is the 0-based video frame index;
+        # `selected_idx` (incremented inside _consume_raw_frame) is the
+        # count of frames read so far — both track the same position.
+        _actual_frame: int = 0
+        while _actual_frame <= last_needed:
+            if pending_idx >= len(pending_centers):
+                break  # all extraction-point windows enqueued; stop reading
 
-                _cl_stderr_t = threading.Thread(
-                    target=drain_stderr, args=(_cl_proc.stderr,), daemon=True
-                )
-                _cl_stderr_t.start()
+            raw = process.stdout.read(frame_bytes)
+            if len(raw) < frame_bytes:
+                _log("⚠️  Video stream ended before all frames were received")
+                break
 
-                for _cl_i in range(_cl_n_read):
-                    if pending_idx >= len(pending_centers):
-                        break
+            # Start the clock on the very first frame so FFmpeg startup time
+            # (device init, demux, codec open) is excluded from the FPS figure.
+            if _t_start is None:
+                _t_start = time.monotonic()
 
-                    raw = _cl_proc.stdout.read(frame_bytes)
-                    if len(raw) < frame_bytes:
-                        break  # cluster extends past video end — stop gracefully
+            _consume_raw_frame(raw, _actual_frame)
+            _actual_frame += 1
 
-                    if _t_start is None:
-                        _t_start = time.monotonic()
-
-                    _consume_raw_frame(raw, _cl_seek_frame + _cl_i)
-
-                    # Periodic throughput log (every _log_interval frames).
-                    if _t_start is not None and selected_idx % _log_interval == 0:
-                        _elapsed = time.monotonic() - _t_start
-                        if _elapsed > 0:
-                            _sel_fps = selected_idx / _elapsed
-                            _sps_actual = frames_examined / _elapsed
-                            _log(
-                                f"  📊 cluster {_cl_idx + 1}/{len(_seek_clusters)}  "
-                                f"sel {selected_idx:>5}/{len(_all_needed)}  "
-                                f"sel/s {_sel_fps:>6.1f}  SPS {_sps_actual:>6.2f}  "
-                                f"(scenes: {frames_examined})"
-                            )
-
-                # Clean up this cluster's process before starting the next.
-                # Keep process pointing to _cl_proc until after successful reap
-                # so the finally block can kill it if an exception interrupts us.
-                try:
-                    _cl_proc.stdout.close()
-                except Exception:
-                    pass
-                try:
-                    _cl_proc.kill()
-                    _cl_proc.wait()
-                except Exception:
-                    pass
-                _cl_stderr_t.join(timeout=2)
-                process = None  # disarm finally block only after successful reap
-
-        else:
-            # --- STREAM MODE (single FFmpeg pass with select filter) ------
-            cmd = [
-                "ffmpeg",
-                "-threads", "0",
-                "-filter_threads", "0",
-                "-loglevel", "warning",
-                *hw_args,
-                "-probesize", "100M",
-                "-analyzeduration", "100M",
-                "-i", video_path,
-                *_fc_args,
-                "-map", "[vout]",
-                "-f", "rawvideo",
-                "-pix_fmt", "yuv420p",
-                *_vsync_args,
-                "pipe:1",
-            ]
-            _ffmpeg_cmd = cmd  # capture for error logging
-
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            _set_nice(process.pid)
-
-            stderr_thread = threading.Thread(
-                target=drain_stderr, args=(process.stderr,), daemon=True
-            )
-            stderr_thread.start()
-            # `selected_idx` tracks our position in `_all_needed`.  FFmpeg (via the
-            # `select` filter) only outputs the frames in that list, in sorted order,
-            # so each pipe read maps directly to `_all_needed[selected_idx]`.
-
-            while pending_idx < len(pending_centers):
-                raw = process.stdout.read(frame_bytes)
-                if len(raw) < frame_bytes:
-                    _log("⚠️  Video stream ended before all selected frames were received")
-                    break
-
-                # Start the clock on the very first frame so FFmpeg startup time
-                # (device init, demux, codec open) is excluded from the FPS figure.
-                if _t_start is None:
-                    _t_start = time.monotonic()
-
-                # Guard against FFmpeg producing more frames than the select
-                # expression requested (shouldn't happen, but avoids IndexError).
-                if selected_idx >= len(_all_needed):
-                    _log("⚠️  FFmpeg produced more frames than selected — stopping")
-                    break
-
-                # Map this pipe read to its actual video frame index.
-                actual_frame: int = _all_needed[selected_idx]
-
-                _consume_raw_frame(raw, actual_frame)
-
-                # Periodic throughput log.
-                # SPS = scene-sets completed per second (assignments processed / s).
-                # sel/s = selected frames per second (frames FFmpeg actually piped).
-                if _t_start is not None and selected_idx % _log_interval == 0:
-                    _elapsed = time.monotonic() - _t_start
-                    if _elapsed > 0:
-                        _sel_fps = selected_idx / _elapsed
-                        _sps_actual = frames_examined / _elapsed
-                        _log(
-                            f"  📊 sel {selected_idx:>5}/{len(_all_needed)}  "
-                            f"sel/s {_sel_fps:>6.1f}  SPS {_sps_actual:>6.2f}  "
-                            f"(scenes: {frames_examined})"
-                        )
+            # Periodic throughput log.
+            # fps  = raw frames piped per second.
+            # SPS  = scene windows enqueued per second.
+            if _t_start is not None and _actual_frame % _log_interval == 0:
+                _elapsed = time.monotonic() - _t_start
+                if _elapsed > 0:
+                    _fps = _actual_frame / _elapsed
+                    _sps_actual = frames_examined / _elapsed
+                    _log(
+                        f"  📊 raw {_actual_frame:>5}/{last_needed + 1}  "
+                        f"fps {_fps:>6.1f}  SPS {_sps_actual:>6.2f}  "
+                        f"(scenes: {frames_examined}  pq:{_process_queue.qsize()})"
+                    )
 
     finally:
         if process is not None:
@@ -2945,7 +2779,14 @@ def extract_and_save_streaming_distributed(
             for _line in stderr_lines[-20:]:
                 _log(f"  [ffmpeg] {_line}")
 
-        # Drain the async write queue — wait for all pending PNG writes to
+        # Drain the async processing queue — wait for all enqueued windows to
+        # be fully processed before draining the write queue.
+        for _ in _processing_threads:
+            _process_queue.put(None)  # poison pill per worker
+        for _pt in _processing_threads:
+            _pt.join()
+
+        # Drain the async write queue — wait for all pending PNG/BMP writes to
         # finish before returning so that patches_created is accurate.
         for _ in _write_threads:
             _write_queue.put(None)  # poison pill per worker
@@ -3004,6 +2845,8 @@ def extract_and_save_streaming_distributed(
     _elapsed_total = (
         (time.monotonic() - _t_start) if _t_start is not None else 0.0
     )
+    _n_black = _n_black_ctr[0]
+    _n_quality_fail = _n_quality_fail_ctr[0]
     _rejection_info = (
         f", {_n_black} black"
         + (f", {_n_quality_fail} quality-rejected" if _n_quality_fail else "")
@@ -3012,17 +2855,17 @@ def extract_and_save_streaming_distributed(
     )
     if _elapsed_total > 0:
         _sps_final = frames_examined / _elapsed_total
-        _sel_fps_final = selected_idx / _elapsed_total
+        _fps_final = selected_idx / _elapsed_total
         _log(
-            f"✓ Streaming extraction done: {total} patches saved, "
-            f"{frames_examined} assignments examined{_rejection_info}, "
-            f"{selected_idx}/{len(_all_needed)} selected frames received — "
-            f"sel/s {_sel_fps_final:.1f}  SPS {_sps_final:.2f}"
+            f"✓ Continuous-stream extraction done: {total} patches saved, "
+            f"{frames_examined} windows enqueued{_rejection_info}, "
+            f"{selected_idx}/{last_needed + 1} raw frames read — "
+            f"fps {_fps_final:.1f}  SPS {_sps_final:.2f}"
         )
     else:
         _log(
-            f"✓ Streaming extraction done: {total} patches saved, "
-            f"{frames_examined} assignments examined{_rejection_info}"
+            f"✓ Continuous-stream extraction done: {total} patches saved, "
+            f"{frames_examined} windows enqueued{_rejection_info}"
         )
     return patches_created
 
