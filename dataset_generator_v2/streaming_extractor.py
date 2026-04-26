@@ -599,7 +599,8 @@ def is_hdr_transfer(color_transfer: Optional[str]) -> bool:
 
 
 def build_vf_filter(is_hdr: bool, use_cuda: bool = True,
-                    width: int = STREAM_WIDTH, height: int = STREAM_HEIGHT) -> str:
+                    width: int = STREAM_WIDTH, height: int = STREAM_HEIGHT,
+                    color_trc: str = "smpte2084") -> str:
     """Return the FFmpeg ``-vf`` filter string for the given video type.
 
     Selects the best available pipeline tier at call time:
@@ -621,6 +622,12 @@ def build_vf_filter(is_hdr: bool, use_cuda: bool = True,
                    to CPU-only when the local FFmpeg has no CUDA support.
         width:     Output width in pixels (default ``STREAM_WIDTH`` = 1920).
         height:    Output height in pixels (default ``STREAM_HEIGHT`` = 1080).
+        color_trc: Transfer function string from ffprobe (e.g. ``"smpte2084"``
+                   for HDR10/PQ, ``"arib-std-b67"`` for HLG).  Used to
+                   annotate the explicit ``tin=`` parameter of ``zscale`` in
+                   the scale-GPU path so that the correct HDR→linear
+                   conversion is applied even when CUDA pipeline stages do not
+                   reliably propagate frame colour metadata through to CPU.
 
     Returns:
         FFmpeg filter string ready for ``-vf`` (or for wrapping in
@@ -629,6 +636,12 @@ def build_vf_filter(is_hdr: bool, use_cuda: bool = True,
     _use_cuda = use_cuda and cuda_available()
     _full_gpu  = _use_cuda and tonemap_cuda_available()
     _scale_gpu = _use_cuda and (not _full_gpu) and scale_cuda_available()
+
+    # Normalise color_trc to the vocabulary understood by zscale/zimg.
+    # "hlg" is an alias used by some encoders; zscale expects "arib-std-b67".
+    _zscale_trc = (color_trc or "smpte2084").strip().lower()
+    if _zscale_trc == "hlg":
+        _zscale_trc = "arib-std-b67"
 
     if is_hdr:
         if _full_gpu:
@@ -640,11 +653,15 @@ def build_vf_filter(is_hdr: bool, use_cuda: bool = True,
                 "format=yuv420p"
             )
         if _scale_gpu:
+            # After hwdownload the CUDA pipeline may not reliably propagate
+            # HDR frame metadata (color_trc, colorspace) to the CPU frame.
+            # Specifying tin= and primariesin= explicitly in zscale ensures the
+            # correct PQ/HLG→linear conversion regardless of frame metadata.
             return (
                 f"scale_cuda={width}:{height}:interp_algo=bicubic,"
                 "hwdownload,"
                 "format=p010,"
-                "zscale=t=linear:npl=100:filter=bilinear,"
+                f"zscale=tin={_zscale_trc}:primariesin=bt2020:t=linear:npl=100:filter=bilinear,"
                 "format=gbrpf32le,"
                 "zscale=p=bt709:filter=bilinear,"
                 "tonemap=tonemap=reinhard:desat=0,"
@@ -1728,6 +1745,7 @@ def extract_and_save_streaming_distributed(
     stream_height: int = STREAM_HEIGHT,
     cuda_device: int = 0,
     use_qsv: bool = True,
+    color_trc: str = "smpte2084",
 ) -> Dict[str, int]:
     """
     Stream the video once and save patches as frames pass through the buffer.
@@ -1812,6 +1830,15 @@ def extract_and_save_streaming_distributed(
                              available in the local FFmpeg build.  Use the index
                              reported by ``nvidia-smi`` to target a specific GPU
                              when multiple are present.
+        color_trc:           Transfer-function string from ffprobe for the source
+                             video (e.g. ``"smpte2084"`` for HDR10/PQ,
+                             ``"arib-std-b67"`` for HLG).  Forwarded to
+                             :func:`build_vf_filter` so the scale-GPU HDR path
+                             can use explicit ``tin=`` / ``primariesin=`` zscale
+                             parameters, which prevents misidentification of the
+                             source transfer function when HDR frame metadata is
+                             not reliably propagated through the CUDA pipeline.
+                             Defaults to ``"smpte2084"`` (HDR10/PQ).
 
     Returns:
         ``{category: patches_saved_count}``
@@ -2008,9 +2035,20 @@ def extract_and_save_streaming_distributed(
         else None
     )
 
+    # Pre-warm the libplacebo runtime probe so that build_vf_filter() can
+    # correctly select libplacebo vs. zscale for the CPU tier.  Without this
+    # call the cache is empty and libplacebo_available() (called without a
+    # video_path inside build_vf_filter) returns False conservatively, causing
+    # the CPU-only filter to fall back to the zscale chain even when libplacebo
+    # is actually available.  The probe result is cached after this first call,
+    # so all subsequent calls within this process are free.
+    if is_hdr:
+        libplacebo_available(video_path)
+
     vf_filter = build_vf_filter(
         is_hdr=is_hdr, use_cuda=use_cuda,
         width=stream_width, height=stream_height,
+        color_trc=color_trc,
     )
 
     # --- Inject select filter to skip unused frames in the filter chain ---
@@ -2144,6 +2182,10 @@ def extract_and_save_streaming_distributed(
     pending_idx: int = 0  # index into pending_centers
     frames_examined: int = 0  # assignments processed (saved + skipped)
 
+    # Rejection counters: incremented inside _consume_raw_frame for diagnostics.
+    _n_black: int = 0         # centers skipped by black-frame check
+    _n_quality_fail: int = 0  # centers where create_patch_pair returned None for all formats
+
     # --- Per-video timing accumulators (mutated inside _consume_raw_frame) ---
     _t_phases: dict = {
         "n_frames_buf": 0,   # total raw frames processed through buffer
@@ -2245,7 +2287,7 @@ def extract_and_save_streaming_distributed(
         # Shared by both stream mode and seek mode to avoid code duplication.
         # ------------------------------------------------------------------
         def _consume_raw_frame(raw: bytes, actual_frame: int) -> None:
-            nonlocal pending_idx, frames_examined, selected_idx
+            nonlocal pending_idx, frames_examined, selected_idx, _n_black, _n_quality_fail
 
             selected_idx += 1
             _t_phases["n_frames_buf"] += 1
@@ -2294,8 +2336,10 @@ def extract_and_save_streaming_distributed(
                     _t_phases["t_black_s"] += time.monotonic() - _tb
 
                     if _is_black:
+                        _n_black += 1
                         _log(f"  ⏭ frame {center} skipped (black frame)")
                     else:
+                        _any_patch_saved = False
                         for category, fmt_name in center_map[center]:
                             cfg = format_config.get(category, {}).get(fmt_name, {})
                             if not cfg:
@@ -2348,6 +2392,7 @@ def extract_and_save_streaming_distributed(
                             _t_phases["t_patch_s"] += time.monotonic() - _tp
 
                             if gt is not None and lr is not None:
+                                _any_patch_saved = True
                                 dirs = _output_dirs_cache[(category, fmt_name)]
                                 patch_name = f"{_video_stem}_{int(ts * 1000):08d}.png"
                                 _tw = time.monotonic()
@@ -2362,6 +2407,9 @@ def extract_and_save_streaming_distributed(
                                 patches_created[category] = (
                                     patches_created.get(category, 0) + 1
                                 )
+
+                        if not _any_patch_saved:
+                            _n_quality_fail += 1
 
                     # Periodic timing debug log (every 50 centres evaluated)
                     if _t_phases["n_centers"] >= _next_timing_log[0]:
@@ -2608,25 +2656,32 @@ def extract_and_save_streaming_distributed(
             stream_width=stream_width,
             stream_height=stream_height,
             cuda_device=cuda_device,
+            color_trc=color_trc,
         )
 
     total = sum(patches_created.values())
     _elapsed_total = (
         (time.monotonic() - _t_start) if _t_start is not None else 0.0
     )
+    _rejection_info = (
+        f", {_n_black} black"
+        + (f", {_n_quality_fail} quality-rejected" if _n_quality_fail else "")
+        if (_n_black or _n_quality_fail)
+        else ""
+    )
     if _elapsed_total > 0:
         _sps_final = frames_examined / _elapsed_total
         _sel_fps_final = selected_idx / _elapsed_total
         _log(
             f"✓ Streaming extraction done: {total} patches saved, "
-            f"{frames_examined} assignments examined, "
+            f"{frames_examined} assignments examined{_rejection_info}, "
             f"{selected_idx}/{len(_all_needed)} selected frames received — "
             f"sel/s {_sel_fps_final:.1f}  SPS {_sps_final:.2f}"
         )
     else:
         _log(
             f"✓ Streaming extraction done: {total} patches saved, "
-            f"{frames_examined} assignments examined"
+            f"{frames_examined} assignments examined{_rejection_info}"
         )
     return patches_created
 
@@ -2650,6 +2705,7 @@ def extract_and_save_streaming_dual(
     degrade_cfg: Optional[dict] = None,
     center_snap_seconds: float = 0.0,
     cuda_device: int = 0,
+    color_trc: str = "smpte2084",
 ) -> Dict[str, int]:
     """Deprecated compatibility shim — forwards to extract_and_save_streaming_distributed.
 
@@ -2679,4 +2735,5 @@ def extract_and_save_streaming_dual(
         stream_width=STREAM_OPT_WIDTH,
         stream_height=STREAM_OPT_HEIGHT,
         cuda_device=cuda_device,
+        color_trc=color_trc,
     )

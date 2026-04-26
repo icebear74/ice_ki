@@ -470,11 +470,13 @@ class DatasetGeneratorV2UHD:
 
         def _scale_gpu_filter(hdr: bool) -> str:
             if hdr:
+                # Use explicit tin= and primariesin= to guarantee correct HDR→SDR
+                # conversion regardless of CUDA frame metadata propagation.
                 return (
                     f"scale_cuda={W}:{H}:interp_algo=bicubic,"
                     "hwdownload,"
                     "format=p010,"
-                    "zscale=t=linear:npl=100:filter=bilinear,"
+                    "zscale=tin=smpte2084:primariesin=bt2020:t=linear:npl=100:filter=bilinear,"
                     "format=gbrpf32le,"
                     "zscale=p=bt709:filter=bilinear,"
                     "tonemap=tonemap=reinhard:desat=0,"
@@ -1879,6 +1881,7 @@ class DatasetGeneratorV2UHD:
 
         fps = metadata.get("fps", 25.0) or 25.0
         is_hdr = metadata.get("is_hdr", True)
+        color_trc: str = metadata.get("color_transfer") or "smpte2084"
 
         self.logger.info(
             f"  Color format: {metadata.get('color_transfer', 'unknown')!r} "
@@ -1888,6 +1891,7 @@ class DatasetGeneratorV2UHD:
         patches_created = self._extract_patches_multi_format_batch(
             video_path, duration, format_distribution, n_frames, video_name, fps, video_idx,
             is_hdr=is_hdr,
+            color_trc=color_trc,
         )
         
         return patches_created
@@ -1900,6 +1904,7 @@ class DatasetGeneratorV2UHD:
         fps: float,
         is_hdr: bool,
         prior_total: int,
+        color_trc: str = "smpte2084",
     ) -> Dict[str, int]:
         """Run N parallel streaming extractors on temporal segments of the same film.
 
@@ -1921,6 +1926,7 @@ class DatasetGeneratorV2UHD:
             fps:          Video frame rate.
             is_hdr:       Whether the source uses an HDR transfer function.
             prior_total:  Cumulative patch count before this film (for UI).
+            color_trc:    Transfer-function string from ffprobe (e.g. "smpte2084").
 
         Returns:
             Dict mapping category name → number of patches created.
@@ -1971,6 +1977,7 @@ class DatasetGeneratorV2UHD:
                 center_snap_seconds=center_snap,
                 stream_width=STREAM_OPT_WIDTH,
                 stream_height=STREAM_OPT_HEIGHT,
+                color_trc=color_trc,
             )
             with patches_lock:
                 for cat, count in result.items():
@@ -2007,7 +2014,8 @@ class DatasetGeneratorV2UHD:
     def _extract_patches_multi_format_batch(self, video_path: str, duration: float,
                                            format_distribution: Dict[str, Dict[str, int]],
                                            n_frames: int, video_name: str, fps: float = 25.0,
-                                           video_idx: int = 0, is_hdr: bool = True) -> Dict[str, int]:
+                                           video_idx: int = 0, is_hdr: bool = True,
+                                           color_trc: str = "smpte2084") -> Dict[str, int]:
         """
         OPTIMIZED: Extract patches using BATCH frame extraction (10-50x faster).
         
@@ -2142,6 +2150,7 @@ class DatasetGeneratorV2UHD:
                 fps=fps,
                 is_hdr=is_hdr,
                 prior_total=prior_total,
+                color_trc=color_trc,
             )
         else:
             # ── Single-worker extraction (original path) ─────────────────────
@@ -2165,6 +2174,7 @@ class DatasetGeneratorV2UHD:
                 stream_width=STREAM_OPT_WIDTH,
                 stream_height=STREAM_OPT_HEIGHT,
                 cuda_device=self.cuda_device,
+                color_trc=color_trc,
             )
 
         # Merge final result into patches_created.
