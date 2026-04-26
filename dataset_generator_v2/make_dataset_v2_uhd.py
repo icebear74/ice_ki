@@ -212,9 +212,8 @@ class DatasetGeneratorV2UHD:
         self._available_gpu_names: Dict[int, str] = {
             idx: name for idx, name in _detected_gpus
         }
-        # Optimal per-worker decode configs for within-film parallel extraction.
-        # Populated from the decode_benchmark.json cache (best_parallel entry).
-        # None = parallel mode disabled (single-worker extraction per film).
+        # Placeholder — overwritten in the "Parallel worker configs" block
+        # below, once self.workers has been set.  Do not use before that point.
         self._parallel_worker_configs: Optional[List[dict]] = None
         if self.use_cuda:
             self.logger.info("🚀 CUDA/GPU mode enabled (hardware-accelerated decoding & scaling)")
@@ -246,6 +245,26 @@ class DatasetGeneratorV2UHD:
         self.last_update_time = time.time()
         self.update_interval = 0.5
         self.logger.info(f"⚡ Using {self.workers} threads for FFmpeg extraction")
+
+        # ── Parallel worker configs ───────────────────────────────────────────
+        # Initialise here (after self.workers is known) so that the parallel
+        # dispatch path in _extract_patches_multi_format_batch is always active.
+        # Worker count: max(config workers, one worker per GPU) — at least 1.
+        # Each entry uses use_cuda=False; the libplacebo/Vulkan pipeline does
+        # not need CUDA hardware decode.  Actual Vulkan device (GPU) assignment
+        # is handled round-robin in _extract_film_parallel.
+        _n_workers = max(
+            self.workers,
+            len(self._available_gpu_indices) if self._available_gpu_indices else 1,
+        )
+        self._parallel_worker_configs = [
+            {"use_cuda": False, "cuda_device": 0}
+            for _ in range(_n_workers)
+        ]
+        self.logger.info(
+            f"🔀 Parallel extraction: {_n_workers} workers, "
+            f"{len(self._available_gpu_indices)} GPU(s) available for round-robin Vulkan assignment"
+        )
 
         # ── UI heartbeat ──────────────────────────────────────────────────────
         # A background thread refreshes the terminal UI every second so the
