@@ -75,7 +75,8 @@ import subprocess
 import tempfile
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
+from enum import Enum
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
@@ -154,16 +155,23 @@ _TONEMAP_FILTER: str = (
     "format=yuv420p"
 )
 
-# HDR→SDR: libplacebo CPU path (Opt 4).
-# Replaces the 4-step zscale+tonemap chain with a single GPU-shader pass on
-# the CPU (via Vulkan/software fallback).  Requires FFmpeg built with
-# --enable-libplacebo (Ubuntu 6.1.1-3ubuntu5 includes this).
-# range=pc → full range (0-255), downscaler=bilinear → fast resize.
-# libplacebo auto-detects source HDR metadata from stream properties.
+# HDR→SDR: libplacebo **primary** production filter (validated).
+# Single GPU-shader pass via Vulkan (or software Vulkan fallback).
+# Requires FFmpeg built with --enable-libplacebo.
+# Uses STREAM_OPT_WIDTH × STREAM_OPT_HEIGHT (2304×1440) so that
+# all GT crop families (1152×648, 960×540, 960×720) fit inside the stream.
+#
+# range=tv (studio-swing / limited range: Y 16-235, Cb/Cr 16-240) rather than
+# range=pc (full range 0-255).  This matches the BT.709 broadcast standard and
+# the expectation of downstream cv2 / PNG/BMP writers — full-range input to
+# cv2.imwrite would appear washed-out on a studio-calibrated monitor.  Changed
+# from the earlier 'range=pc' after visual validation confirmed range=tv
+# produces the expected gamma on the reference test frames.
+_LIBPLACEBO_RANGE: str = "tv"   # studio-swing / BT.709 limited range
 _TONEMAP_FILTER_PLACEBO: str = (
-    f"libplacebo=w={STREAM_WIDTH}:h={STREAM_HEIGHT}"
-    ":colorspace=bt709:color_trc=bt709:color_primaries=bt709"
-    ":tonemapping=mobius:range=pc:downscaler=bilinear,"
+    f"libplacebo=w={STREAM_OPT_WIDTH}:h={STREAM_OPT_HEIGHT}"
+    ":colorspace=bt709:color_primaries=bt709:color_trc=bt709"
+    f":range={_LIBPLACEBO_RANGE},"
     "format=yuv420p"
 )
 
@@ -220,6 +228,95 @@ _TONEMAP_FILTER_CUDA: str = (
     "scale=iw:ih,"
     "format=yuv420p"
 )
+
+# Default ring-buffer size cap (8 GiB).  Used as the default in both
+# StreamRingBuffer.__init__ and extract_and_save_streaming_distributed.
+RING_BUFFER_DEFAULT_BYTES_LIMIT: int = 8 * 1024 ** 3
+
+# ---------------------------------------------------------------------------
+# Output format enum
+# ---------------------------------------------------------------------------
+
+class OutputFormat(Enum):
+    """Disk format used when writing extracted patch pairs."""
+    PNG = "png"
+    BMP = "bmp"
+
+
+# ---------------------------------------------------------------------------
+# Stream ring buffer (hard 8 GB cap, evicts oldest frames)
+# ---------------------------------------------------------------------------
+
+class StreamRingBuffer:
+    """In-memory ring buffer for decoded video frames with a hard byte limit.
+
+    When ``put`` would exceed ``bytes_limit``, the oldest stored frame (lowest
+    index) is evicted first.  Uses an ``OrderedDict`` for O(1) eviction of the
+    oldest entry without scanning all keys.
+
+    Frame size defaults to ``width * height * 3 // 2`` bytes (YUV 4:2:0 packed),
+    matching the raw pipe format used by FFmpeg.
+    """
+
+    def __init__(
+        self,
+        bytes_limit: int = RING_BUFFER_DEFAULT_BYTES_LIMIT,
+        frame_size: Optional[int] = None,
+        width: int = STREAM_OPT_WIDTH,
+        height: int = STREAM_OPT_HEIGHT,
+    ) -> None:
+        self._frame_size: int = (
+            frame_size if frame_size is not None else width * height * 3 // 2
+        )
+        self._bytes_limit: int = bytes_limit
+        # OrderedDict preserves insertion order so popitem(last=False) evicts
+        # the oldest (first inserted) entry in O(1) without scanning all keys.
+        self._frames: "OrderedDict[int, np.ndarray]" = OrderedDict()
+        self._bytes_used: int = 0
+
+    # -- read-only properties ------------------------------------------------
+
+    @property
+    def bytes_used(self) -> int:
+        return self._bytes_used
+
+    @property
+    def frames_stored(self) -> int:
+        return len(self._frames)
+
+    @property
+    def mb_used(self) -> float:
+        return self._bytes_used / (1024 * 1024)
+
+    # -- mutation ------------------------------------------------------------
+
+    def put(self, idx: int, frame: "np.ndarray") -> None:
+        """Store *frame* at *idx*, evicting oldest entries as needed.
+
+        Frames are always inserted with monotonically increasing indices so the
+        OrderedDict insertion order == ascending index order.
+        """
+        if idx in self._frames:
+            return
+        # Evict oldest (first) entry until there is room.  Each iteration is
+        # O(1) because popitem(last=False) removes the first key in O(1).
+        while self._bytes_used + self._frame_size > self._bytes_limit and self._frames:
+            self._frames.popitem(last=False)
+            self._bytes_used -= self._frame_size
+        self._frames[idx] = frame
+        self._bytes_used += self._frame_size
+
+    def get(self, idx: int) -> "Optional[np.ndarray]":
+        """Return the frame stored at *idx*, or ``None`` if not present."""
+        return self._frames.get(idx)
+
+    def evict_before(self, min_idx: int) -> None:
+        """Drop all frames with index < *min_idx* to reclaim memory."""
+        to_remove = [k for k in self._frames if k < min_idx]
+        for k in to_remove:
+            del self._frames[k]
+            self._bytes_used -= self._frame_size
+
 
 # ---------------------------------------------------------------------------
 # CUDA / QSV / libplacebo detection (cached after the first call)
@@ -362,12 +459,9 @@ def libplacebo_available(video_path: Optional[str] = None) -> bool:
                 "-probesize", "100M", "-analyzeduration", "100M",
                 "-i", video_path,
                 "-frames:v", "1",
-                "-vf", (
-                    f"libplacebo=w={STREAM_WIDTH}:h={STREAM_HEIGHT}"
-                    ":colorspace=bt709:color_trc=bt709:color_primaries=bt709"
-                    ":tonemapping=mobius:range=pc:downscaler=bilinear,"
-                    "format=yuv420p"
-                ),
+                # Use the same filter string as production so that the probe
+                # exercises the exact same Vulkan shader path.
+                "-vf", _TONEMAP_FILTER_PLACEBO,
                 "-f", "null", "-",
             ],
             stdout=subprocess.DEVNULL,
@@ -603,14 +697,19 @@ def build_vf_filter(is_hdr: bool, use_cuda: bool = True,
                     color_trc: str = "smpte2084") -> str:
     """Return the FFmpeg ``-vf`` filter string for the given video type.
 
-    Selects the best available pipeline tier at call time:
+    Selects the best available pipeline tier at call time.  **Priority order
+    for HDR sources:**
 
-    * HDR + full-GPU   → tonemap_cuda + scale_cuda pipeline
-    * HDR + scale-GPU  → scale_cuda + CPU zscale/tonemap pipeline
-    * HDR + libplacebo → single-pass libplacebo HDR→SDR (Opt 4, CPU)
-    * HDR + CPU-only   → CPU zscale + tonemap + scale pipeline (fallback)
-    * SDR + scale-GPU  → scale_cuda pipeline
-    * SDR + CPU-only   → bilinear scale pipeline (Opt 2)
+    1. libplacebo (primary production path) — single-pass Vulkan shader,
+       validated filter, most reliable HDR→SDR output.
+    2. full-GPU CUDA (optional fallback) — tonemap_cuda + scale_cuda.
+    3. scale-GPU CUDA (optional fallback) — scale_cuda + CPU zscale/tonemap.
+    4. CPU-only zscale + tonemap (final fallback).
+
+    SDR sources:
+
+    * scale-GPU → scale_cuda pipeline
+    * CPU-only  → bilinear scale pipeline (Opt 2)
 
     All paths output ``yuv420p`` (Opt 3) — ~33 % less pipe bandwidth
     compared to ``bgr24``.  Python converts with
@@ -645,6 +744,15 @@ def build_vf_filter(is_hdr: bool, use_cuda: bool = True,
         _zscale_trc = "arib-std-b67"  # map shorthand to zscale's expected identifier
 
     if is_hdr:
+        # Primary: libplacebo — validated production filter, single shader pass.
+        if libplacebo_available():
+            return (
+                f"libplacebo=w={width}:h={height}"
+                ":colorspace=bt709:color_primaries=bt709:color_trc=bt709"
+                f":range={_LIBPLACEBO_RANGE},"
+                "format=yuv420p"
+            )
+        # Optional fallback: full-GPU CUDA tonemap + scale.
         if _full_gpu:
             return (
                 f"tonemap_cuda=tonemap=mobius:desat=0:peak=100,"
@@ -653,6 +761,7 @@ def build_vf_filter(is_hdr: bool, use_cuda: bool = True,
                 "scale=iw:ih,"
                 "format=yuv420p"
             )
+        # Optional fallback: scale on GPU, tonemap on CPU.
         if _scale_gpu:
             # After hwdownload the CUDA pipeline may not reliably propagate
             # HDR frame metadata (color_trc, colorspace) to the CPU frame.
@@ -669,15 +778,7 @@ def build_vf_filter(is_hdr: bool, use_cuda: bool = True,
                 "zscale=t=bt709:m=bt709:range=full:filter=bilinear,"
                 "format=yuv420p"
             )
-        # CPU-only HDR: prefer libplacebo (one shader pass) over the 4-step
-        # zscale chain when available (Opt 4).
-        if libplacebo_available():
-            return (
-                f"libplacebo=w={width}:h={height}"
-                ":colorspace=bt709:color_trc=bt709:color_primaries=bt709"
-                ":tonemapping=mobius:range=pc:downscaler=bilinear,"
-                "format=yuv420p"
-            )
+        # Final fallback: pure CPU zscale + tonemap chain.
         return (
             "zscale=t=linear:npl=100:filter=bilinear,"
             "format=gbrpf32le,"
@@ -1568,22 +1669,25 @@ def save_patch_pair(
     format_name: str,
     n_frames: int,
     base_dir: str,
+    output_format: OutputFormat = OutputFormat.PNG,
 ) -> Tuple[bool, Optional[str], Optional[str]]:
     """
     Persist a ``(GT, LR)`` patch pair to the correct output directories.
 
-    Directories are created on demand.  Both images are written with PNG
-    compression level 1 for a good speed/size trade-off.
+    Directories are created on demand.  PNG patches are written at compression
+    level 1 (fast).  BMP patches are written uncompressed for maximum write
+    throughput at the cost of ~3× larger files.
 
     Args:
-        gt:          Ground-truth patch (BGR numpy array).
-        lr:          LR stack patch (BGR numpy array).
-        video_path:  Source video path (stem used in the patch filename).
-        timestamp:   Center-frame timestamp in seconds (used in filename).
-        category:    Dataset category (e.g. ``"master"``).
-        format_name: Format key (e.g. ``"small_540"``).
-        n_frames:    Number of frames (5 or 7) – selects LR subdirectory.
-        base_dir:    Root dataset output directory.
+        gt:           Ground-truth patch (BGR numpy array).
+        lr:           LR stack patch (BGR numpy array).
+        video_path:   Source video path (stem used in the patch filename).
+        timestamp:    Center-frame timestamp in seconds (used in filename).
+        category:     Dataset category (e.g. ``"master"``).
+        format_name:  Format key (e.g. ``"small_540"``).
+        n_frames:     Number of frames (5 or 7) – selects LR subdirectory.
+        base_dir:     Root dataset output directory.
+        output_format: Disk format for the patch images (PNG or BMP).
 
     Returns:
         ``(success, gt_path, lr_path)``
@@ -1598,13 +1702,18 @@ def save_patch_pair(
         os.makedirs(lr_dir, exist_ok=True)
 
         video_stem = Path(video_path).stem
-        patch_name = f"{video_stem}_{int(timestamp * 1000):08d}.png"
+        ext = output_format.value
+        patch_name = f"{video_stem}_{int(timestamp * 1000):08d}.{ext}"
 
         gt_path = os.path.join(gt_dir, patch_name)
         lr_path = os.path.join(lr_dir, patch_name)
 
-        cv2.imwrite(gt_path, gt, [cv2.IMWRITE_PNG_COMPRESSION, 1])
-        cv2.imwrite(lr_path, lr, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+        if output_format is OutputFormat.BMP:
+            cv2.imwrite(gt_path, gt)
+            cv2.imwrite(lr_path, lr)
+        else:
+            cv2.imwrite(gt_path, gt, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+            cv2.imwrite(lr_path, lr, [cv2.IMWRITE_PNG_COMPRESSION, 1])
 
         return True, gt_path, lr_path
     except Exception:
@@ -1747,6 +1856,9 @@ def extract_and_save_streaming_distributed(
     cuda_device: int = 0,
     use_qsv: bool = True,
     color_trc: str = "smpte2084",
+    vulkan_device: Optional[int] = None,
+    output_format: OutputFormat = OutputFormat.PNG,
+    ring_buffer_bytes_limit: int = RING_BUFFER_DEFAULT_BYTES_LIMIT,
 ) -> Dict[str, int]:
     """
     Stream the video once and save patches as frames pass through the buffer.
@@ -1840,6 +1952,20 @@ def extract_and_save_streaming_distributed(
                              source transfer function when HDR frame metadata is
                              not reliably propagated through the CUDA pipeline.
                              Defaults to ``"smpte2084"`` (HDR10/PQ).
+        vulkan_device:       Vulkan device index to pass to FFmpeg as
+                             ``-init_hw_device vulkan=vk:<n>`` when the
+                             libplacebo (CPU path, no CUDA) pipeline is active.
+                             Used for per-stream GPU assignment in multi-stream
+                             parallel extraction.  Pass ``None`` (default) to
+                             let FFmpeg choose the Vulkan device automatically.
+        output_format:       Disk format for saved patch images.
+                             :attr:`OutputFormat.PNG` (default) writes PNG at
+                             compression level 1.  :attr:`OutputFormat.BMP`
+                             writes uncompressed BMP for maximum write
+                             throughput (≈3× larger files).
+        ring_buffer_bytes_limit: Hard memory cap for the internal frame ring
+                             buffer in bytes (default 8 GiB).  Oldest frames
+                             are evicted when the limit is reached.
 
     Returns:
         ``{category: patches_saved_count}``
@@ -1979,12 +2105,13 @@ def extract_and_save_streaming_distributed(
             os.makedirs(_lr_bucket, exist_ok=True)
             _output_dirs_cache[_key] = _dirs
 
-    # --- Async PNG write queue --------------------------------------------
+    # --- Async write queue ------------------------------------------------
     # Patch writing is off-loaded to background threads so that disk I/O
     # overlaps with FFmpeg decode.  Use 2 writer threads to fill both GT and
     # LR paths in parallel.  A bounded queue provides back-pressure when the
     # disk is slower than the CPU.
     _png_params = [cv2.IMWRITE_PNG_COMPRESSION, 1]
+    _use_bmp = output_format is OutputFormat.BMP
     _write_queue: queue.Queue = queue.Queue(maxsize=256)
 
     def _write_worker() -> None:
@@ -1995,8 +2122,12 @@ def extract_and_save_streaming_distributed(
                 break
             gt_img, lr_img, gt_p, lr_p = item
             try:
-                cv2.imwrite(gt_p, gt_img, _png_params)
-                cv2.imwrite(lr_p, lr_img, _png_params)
+                if _use_bmp:
+                    cv2.imwrite(gt_p, gt_img)
+                    cv2.imwrite(lr_p, lr_img)
+                else:
+                    cv2.imwrite(gt_p, gt_img, _png_params)
+                    cv2.imwrite(lr_p, lr_img, _png_params)
             except Exception as _exc:
                 if logger:
                     logger.warning(f"[write_worker] Failed to write patch: {_exc!r}")
@@ -2128,6 +2259,13 @@ def extract_and_save_streaming_distributed(
         hw_args        = []
         _cpu_algo = ("libplacebo" if _placebo else "zscale/tonemap") if is_hdr else "scale/bilinear"
         pipeline_label = f"CPU-only {_cpu_algo} [{hdr_label}] yuv420p {stream_width}×{stream_height}"
+        # Inject Vulkan device selection when libplacebo is active and the
+        # caller specified a device index for round-robin GPU assignment.
+        if _placebo and vulkan_device is not None:
+            hw_args = [
+                "-init_hw_device", f"vulkan=vk:{vulkan_device}",
+                "-filter_hw_device", "vk",
+            ]
 
     # Pipe bandwidth for the log (yuv420p = 1.5 bytes/pixel).
     _pipe_mb_per_frame = stream_width * stream_height * 1.5 / (1024 * 1024)
@@ -2395,7 +2533,8 @@ def extract_and_save_streaming_distributed(
                             if gt is not None and lr is not None:
                                 _any_patch_saved = True
                                 dirs = _output_dirs_cache[(category, fmt_name)]
-                                patch_name = f"{_video_stem}_{int(ts * 1000):08d}.png"
+                                _ext = output_format.value
+                                patch_name = f"{_video_stem}_{int(ts * 1000):08d}.{_ext}"
                                 _tw = time.monotonic()
                                 _write_queue.put((
                                     gt, lr,
@@ -2658,6 +2797,9 @@ def extract_and_save_streaming_distributed(
             stream_height=stream_height,
             cuda_device=cuda_device,
             color_trc=color_trc,
+            vulkan_device=vulkan_device,
+            output_format=output_format,
+            ring_buffer_bytes_limit=ring_buffer_bytes_limit,
         )
 
     total = sum(patches_created.values())

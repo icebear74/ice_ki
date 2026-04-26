@@ -23,6 +23,33 @@ VSRDataset - Video Super-Resolution Dataset Loader
 #   • Update cache invalidation to compare file count, not only mtime
 # =============================================================================
 
+# =============================================================================
+# TODO – DATASET FILE FORMAT MAY CHANGE (intentional reminder for trainer rework)
+# =============================================================================
+# The dataset generator currently writes .png patches (PNG compression level 1).
+# A future update may switch the output format, for example:
+#   • BMP  – uncompressed, fastest write/read, directly viewable on Windows
+#   • PNG  – low-compression (level 0–1), still Windows-viewable
+#
+# The target format is configurable via generator_config.json:
+#   "output_format": "bmp"   →  .bmp files (preferred fast default candidate)
+#   "output_format": "png"   →  .png files (current default, compatibility mode)
+#
+# IMPORTANT for future loader migration:
+#   • Do NOT hard-code the extension ".png" in any new loader code.
+#   • Use glob patterns like "**/*.png" OR "**/*.bmp", or make the extension
+#     configurable so the loader can handle whichever format the generator used.
+#   • The file stem / naming convention (video_stem + timestamp) will remain
+#     stable even if the extension changes — only the suffix differs.
+#   • Update the index cache key to include the file extension so that a dataset
+#     re-generated with a different format invalidates the old cache correctly.
+#   • Any _collect_png_files() helper (see LOADER_UPDATE_REQUIRED.md) must be
+#     extended to also match "*.bmp" before BMP datasets can be used for training.
+#
+# This TODO is an intentional reminder for the later trainer rework.
+# See also: LOADER_UPDATE_REQUIRED.md and the pending bucket-subdir migration above.
+# =============================================================================
+
 Loads VSR training data with new dataset structure:
 - Dataset structure: root/dataset_name/patches/{size_key}/GT/ and LR/
 - Validation structure: root/dataset_name/val/{size_key}/GT/ (GT) + patches/{size_key}/LR/ (LR)
