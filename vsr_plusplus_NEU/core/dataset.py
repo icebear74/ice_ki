@@ -23,6 +23,22 @@ VSRDataset - Video Super-Resolution Dataset Loader
 #   • Update cache invalidation to compare file count, not only mtime
 # =============================================================================
 
+# =============================================================================
+# TODO – BMP OUTPUT FORMAT SUPPORT
+# =============================================================================
+# The dataset generator now supports BMP as an alternative output format
+# (OutputFormat.BMP in streaming_extractor.py).  When enabled via
+# generator_config.json ("output_format": "bmp"), patches are written as
+# uncompressed .bmp files instead of .png for maximum write throughput.
+#
+# This loader currently hard-codes ".png" in several filename patterns and
+# glob expressions.  Before using BMP-format datasets for training, update:
+#   • _collect_png_files() (once added) to also match "*.bmp"
+#   • Any hard-coded ".png" extension checks in __getitem__ / path assembly
+#   • The index cache key to include the file extension so that a dataset
+#     re-generated with a different format invalidates the old cache
+# =============================================================================
+
 Loads VSR training data with new dataset structure:
 - Dataset structure: root/dataset_name/patches/{size_key}/GT/ and LR/
 - Validation structure: root/dataset_name/val/{size_key}/GT/ (GT) + patches/{size_key}/LR/ (LR)

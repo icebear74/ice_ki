@@ -68,6 +68,7 @@ from streaming_extractor import (
     tonemap_cuda_available,
     libplacebo_available,
     _get_ffmpeg_major_version,
+    OutputFormat,
 )
 from utils.progress_tracker import ProgressTracker
 from generation_plan import GenerationPlan
@@ -136,18 +137,14 @@ class DatasetGeneratorV2UHD:
 
     MAX_DISPLAYED_PRIORITIES = 10
 
-    def __init__(self, config_dir: Optional[str] = None, force_benchmark: bool = False):
+    def __init__(self, config_dir: Optional[str] = None):
         """
         Initialise the generator.
 
         Args:
-            config_dir:       Directory that contains ``templates.json`` and
-                              ``generator_config.json``.  Defaults to the
-                              directory that contains this script.
-            force_benchmark:  When ``True``, always re-run the decode pipeline
-                              benchmark even if a recent cached result exists in
-                              ``<base_dir>/decode_benchmark.json``.  Pass
-                              ``--benchmark`` on the command line to set this.
+            config_dir: Directory that contains ``templates.json`` and
+                        ``generator_config.json``.  Defaults to the directory
+                        that contains this script.
         """
         if config_dir is None:
             config_dir = os.path.dirname(os.path.abspath(__file__))
@@ -202,17 +199,19 @@ class DatasetGeneratorV2UHD:
 
         # ── CUDA ──────────────────────────────────────────────────────────────
         self.use_cuda: bool = cuda_available()
-        # cuda_device is the CUDA device ordinal used for hardware-accelerated
-        # decoding.  0 = first GPU (default).  Updated by _run_decode_benchmark.
-        self.cuda_device: int = 0
-        # List of all available GPU ordinals for round-robin assignment across
-        # parallel workers.  Falls back to [0] when CUDA is enabled but
-        # nvidia-smi returns nothing, or to [] for CPU-only mode.
-        _detected = _detect_nvidia_gpus()
+        # GPU index lists for round-robin assignment across parallel workers.
+        # Falls back to [0] only when CUDA is available but detection fails,
+        # so that at least one GPU slot is attempted.  If CUDA is unavailable,
+        # the list stays empty and vulkan_device will be left as None downstream.
+        _detected_gpus = _detect_nvidia_gpus()
         self._available_gpu_indices: List[int] = (
-            [idx for idx, _ in _detected] if _detected
+            [idx for idx, _ in _detected_gpus]
+            if _detected_gpus
             else ([0] if self.use_cuda else [])
         )
+        self._available_gpu_names: Dict[int, str] = {
+            idx: name for idx, name in _detected_gpus
+        }
         # Optimal per-worker decode configs for within-film parallel extraction.
         # Populated from the decode_benchmark.json cache (best_parallel entry).
         # None = parallel mode disabled (single-worker extraction per film).
@@ -289,12 +288,14 @@ class DatasetGeneratorV2UHD:
             "eta": {},
             "live_fps": 0.0,
             "live_sps": 0.0,
-            "decode_backend": "–",   # filled in by _run_decode_benchmark
+            "decode_backend": "libplacebo [Vulkan HDR→SDR] — GPU assignment: round-robin",
             "categories": list(self.category_targets.keys()),
             "format_sizes": list(next(iter(self.format_config.values()), {}).keys()),
             "format_labels": _format_labels,  # template_name → "WxH" string
             "timing_phases": {},              # phase timings from streaming extractor
             "parallel_status": "",            # e.g. "⚡ 16 workers active"
+            "active_streams": [],             # per-worker stream state dicts
+            "n_active_streams": 0,            # len(active_streams) for quick reads
         }
         self.ui_update_counter = 0
 
@@ -305,16 +306,15 @@ class DatasetGeneratorV2UHD:
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
 
-        # ── Decode pipeline benchmark ─────────────────────────────────────────
-        # Runs at startup to pick the fastest GPU/CPU decode pipeline.
-        # Results are cached in <base_dir>/decode_benchmark.json and reused on
-        # subsequent runs unless force_benchmark=True (--benchmark CLI flag).
-        self._run_decode_benchmark(force=force_benchmark)
-
     # ── Decode pipeline benchmark ─────────────────────────────────────────────
 
-    def _run_decode_benchmark(self, force: bool = False) -> None:
+    def run_benchmark_tool(self, force: bool = False) -> None:
         """Run a short FFmpeg decode-throughput benchmark and select the fastest pipeline.
+
+        This method is a standalone diagnostic tool.  It is **not** called
+        automatically at startup; invoke it explicitly when you want to
+        measure or re-measure decode throughput (e.g. after installing a new
+        GPU driver or replacing hardware).
 
         Tests every meaningful decode pipeline variant (CPU-only, CUDA NVDEC per
         GPU, CUDA NVDEC + scale_cuda per GPU, full-GPU tonemap_cuda per GPU when
@@ -462,8 +462,8 @@ class DatasetGeneratorV2UHD:
                 if libplacebo_available():
                     return (
                         f"libplacebo=w={W}:h={H}"
-                        ":colorspace=bt709:color_trc=bt709:color_primaries=bt709"
-                        ":tonemapping=mobius:range=pc:downscaler=bilinear,"
+                        ":colorspace=bt709:color_primaries=bt709:color_trc=bt709"
+                        ":range=tv,"
                         "format=yuv420p"
                     )
                 return (
@@ -1983,6 +1983,12 @@ class DatasetGeneratorV2UHD:
         worker_configs = self._parallel_worker_configs  # guaranteed not None
         n = len(worker_configs)
 
+        # Resolve output format from config (default: PNG).
+        _fmt_str = self.config.get("output_format", "png").lower()
+        output_format = OutputFormat.BMP if _fmt_str == "bmp" else OutputFormat.PNG
+
+        _n_gpus = len(self._available_gpu_indices)
+
         # Split assignments into N temporally-ordered chunks.
         # Temporal ordering ensures each worker's FFmpeg process seeks to a
         # compact range and decodes a contiguous slice of the film, avoiding
@@ -2009,6 +2015,26 @@ class DatasetGeneratorV2UHD:
         # read by _update_terminal_ui (called from the heartbeat thread).
         _worker_live: Dict[int, Dict[str, int]] = {}
 
+        # Initialise per-worker stream-state entries for the terminal UI.
+        # Truncate to the last 40 chars so the name fits in one terminal line.
+        _video_stem = Path(video_path).stem[-40:]
+        _stream_states: List[dict] = []
+        for _wi in range(len(groups)):
+            _gpu_idx = self._available_gpu_indices[_wi % _n_gpus]
+            _stream_states.append({
+                "stream_id": _wi,
+                "video_name": _video_stem,
+                "gpu_index": _gpu_idx,
+                "gpu_name": self._available_gpu_names.get(_gpu_idx, f"GPU {_gpu_idx}"),
+                "state": "queued",
+                "frames_processed": 0,
+                "patches_created": 0,
+                "write_queue_depth": 0,
+            })
+        with patches_lock:
+            self.ui_state["active_streams"] = _stream_states
+            self.ui_state["n_active_streams"] = len(_stream_states)
+
         def _make_progress_fn(worker_idx: int):
             """Return a thread-safe progress callback for one parallel worker."""
             def _on_progress(frames_examined: int, patches_so_far: Dict[str, int],
@@ -2029,9 +2055,27 @@ class DatasetGeneratorV2UHD:
                             pct = (new_total / target * 100) if target > 0 else 0.0
                             current_progress[cat]['created'] = new_total
                             current_progress[cat]['percent'] = pct
+                    # Update active stream entry for this worker.
+                    if worker_idx < len(self.ui_state["active_streams"]):
+                        _s = self.ui_state["active_streams"][worker_idx]
+                        _s["state"] = "running"
+                        _s["frames_processed"] = raw_frames_piped
+                        _s["patches_created"] = sum(patches_so_far.values())
+                        if timing:
+                            _s["write_queue_depth"] = timing.get("q_size_last", 0)
+                        self.ui_state["n_active_streams"] = sum(
+                            1 for s in self.ui_state["active_streams"]
+                            if s["state"] == "running"
+                        )
             return _on_progress
 
         def _run_worker(worker_idx: int, group: List[Tuple[int, str, str]], wcfg: dict) -> None:
+            # Round-robin GPU assignment for vulkan_device (libplacebo CPU path).
+            _gpu_idx = self._available_gpu_indices[worker_idx % _n_gpus]
+            # Mark this stream as running.
+            with patches_lock:
+                if worker_idx < len(self.ui_state["active_streams"]):
+                    self.ui_state["active_streams"][worker_idx]["state"] = "running"
             result = extract_and_save_streaming_distributed(
                 video_path=video_path,
                 assignments=group,
@@ -2053,8 +2097,13 @@ class DatasetGeneratorV2UHD:
                 stream_width=STREAM_OPT_WIDTH,
                 stream_height=STREAM_OPT_HEIGHT,
                 color_trc=color_trc,
+                vulkan_device=_gpu_idx,
+                output_format=output_format,
             )
             with patches_lock:
+                # Mark stream done.
+                if worker_idx < len(self.ui_state["active_streams"]):
+                    self.ui_state["active_streams"][worker_idx]["state"] = "done"
                 for cat, count in result.items():
                     patches_total[cat] = patches_total.get(cat, 0) + count
                     # Update tracker once per worker completion (not per-frame).
@@ -2065,6 +2114,10 @@ class DatasetGeneratorV2UHD:
                 # Refresh UI so the progress bars advance as workers finish.
                 self.ui_state['patches_created_total'] = (
                     prior_total + sum(patches_total.values())
+                )
+                self.ui_state["n_active_streams"] = sum(
+                    1 for s in self.ui_state["active_streams"]
+                    if s["state"] == "running"
                 )
                 self.last_update_time = 0.0   # force immediate redraw
                 self._update_terminal_ui()
@@ -2097,8 +2150,11 @@ class DatasetGeneratorV2UHD:
         for t in threads:
             t.join()
 
-        # Clear the parallel-status indicator now that all workers are done
+        # Clear the parallel-status indicator and active stream states
+        # now that all workers are done.
         self.ui_state['parallel_status'] = ""
+        self.ui_state["active_streams"] = []
+        self.ui_state["n_active_streams"] = 0
 
         return patches_total
 
@@ -2245,6 +2301,8 @@ class DatasetGeneratorV2UHD:
             )
         else:
             # ── Single-worker extraction (original path) ─────────────────────
+            _fmt_str = self.config.get("output_format", "png").lower()
+            output_format = OutputFormat.BMP if _fmt_str == "bmp" else OutputFormat.PNG
             streaming_result = extract_and_save_streaming_distributed(
                 video_path=video_path,
                 assignments=assignments,
@@ -2264,8 +2322,10 @@ class DatasetGeneratorV2UHD:
                 center_snap_seconds=self.config.get("processing", {}).get("center_snap_seconds", 1.0),
                 stream_width=STREAM_OPT_WIDTH,
                 stream_height=STREAM_OPT_HEIGHT,
-                cuda_device=self.cuda_device,
+                cuda_device=self._available_gpu_indices[0],
                 color_trc=color_trc,
+                vulkan_device=self._available_gpu_indices[0],
+                output_format=output_format,
             )
 
         # Merge final result into patches_created.
@@ -2797,7 +2857,7 @@ def main():
 
     Usage::
 
-        python make_dataset_v2_uhd.py [config_dir] [--benchmark]
+        python make_dataset_v2_uhd.py [config_dir]
 
     Arguments
     ---------
@@ -2805,14 +2865,15 @@ def main():
                  and ``generator_config.json``.  Defaults to the directory
                  where this script resides.
 
-    --benchmark  Force a fresh decode-pipeline benchmark at startup even when a
-                 cached result already exists in ``<output_dir>/decode_benchmark.json``.
-                 Use this after installing a new GPU driver, replacing a GPU, or
-                 whenever you want to re-measure decode throughput.
-
     The active config and templates are loaded, validated, and then the
     generator is started.  Run ``video_manager.py`` first to create or edit
     the config files.
+
+    To run the decode pipeline benchmark manually::
+
+        from make_dataset_v2_uhd import DatasetGeneratorV2UHD
+        g = DatasetGeneratorV2UHD(config_dir='.')
+        g.run_benchmark_tool(force=True)
     """
     import argparse
 
@@ -2838,15 +2899,24 @@ def main():
         action="store_true",
         default=False,
         help=(
-            "Force re-run of the FFmpeg decode pipeline benchmark at startup. "
-            "Results are normally cached in <output_dir>/decode_benchmark.json "
-            "and reused for 7 days."
+            "[DEPRECATED] The decode pipeline benchmark no longer runs automatically "
+            "at startup.  Use generator.run_benchmark_tool() from Python instead."
         ),
     )
     args = parser.parse_args()
 
-    config_dir     = args.config_dir
-    force_benchmark = args.benchmark
+    if args.benchmark:
+        print(
+            "\n⚠️  --benchmark is deprecated.\n"
+            "   The benchmark no longer runs at startup.  To re-measure decode\n"
+            "   throughput, call generator.run_benchmark_tool() from Python:\n\n"
+            "       from make_dataset_v2_uhd import DatasetGeneratorV2UHD\n"
+            "       g = DatasetGeneratorV2UHD(config_dir='.')\n"
+            "       g.run_benchmark_tool(force=True)\n"
+        )
+        sys.exit(0)
+
+    config_dir = args.config_dir
 
     active_cfg = Path(config_dir) / _ACTIVE_CONFIG_FILENAME
     if not active_cfg.exists():
@@ -2861,14 +2931,9 @@ def main():
     print(f"📂 Config directory : {config_dir}")
     print(f"   templates        : {Path(config_dir) / _TEMPLATES_FILENAME}")
     print(f"   active cfg       : {active_cfg.name}")
-    if force_benchmark:
-        print(f"   --benchmark      : decode pipeline benchmark will be re-run")
 
     try:
-        generator = DatasetGeneratorV2UHD(
-            config_dir=config_dir,
-            force_benchmark=force_benchmark,
-        )
+        generator = DatasetGeneratorV2UHD(config_dir=config_dir)
         generator.run()
     except KeyboardInterrupt:
         show_cursor()
