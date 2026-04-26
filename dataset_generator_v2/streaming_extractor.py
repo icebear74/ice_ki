@@ -317,86 +317,70 @@ def tonemap_cuda_available() -> bool:
     return _tonemap_cuda_available
 
 
-def libplacebo_available() -> bool:
+def libplacebo_available(video_path: Optional[str] = None) -> bool:
     """Return True when libplacebo is usable at runtime (Vulkan device opens).
 
     Two-stage check:
     1. Verify that ``libplacebo`` is listed by ``ffmpeg -filters`` (compiled-in
        with ``--enable-libplacebo``).
-    2. Perform a functional Vulkan probe by running a single libplacebo frame
-       through a 64×64 dummy source that carries HDR10 stream metadata.
+    2. When *video_path* is provided and no cached result exists yet, decode one
+       frame from that real HDR video through the libplacebo filter.  Using an
+       actual file exercises exactly the same Vulkan device-init code path that
+       the extractor will use, so any hardware or driver incompatibility
+       (``VK_ERROR_INITIALIZATION_FAILED``, etc.) surfaces here rather than
+       mid-extraction.  The probe is therefore reliable on every system without
+       requiring synthetic HDR metadata tricks.
 
-    Injecting ``smpte2084`` / BT.2020 metadata via ``setparams`` is critical:
-    without real HDR metadata libplacebo detects a plain SDR signal and silently
-    takes a lightweight software path that never initialises Vulkan, so the
-    probe would exit 0 with no error strings even on a machine where Vulkan
-    device creation fails.  Setting ``color_trc=smpte2084`` forces libplacebo
-    into the same HDR→SDR Vulkan tonemapping code path used for real UHD/HDR
-    video files, ensuring any Vulkan initialisation failure surfaces in stderr
-    as ``VK_ERROR_*`` strings.
+    When called without *video_path* (e.g. from ``build_vf_filter``) and the
+    result is already cached from a prior real-file probe, the cached value is
+    returned instantly.  If no probe has run yet, False is returned
+    conservatively so that callers without video context do not accidentally
+    pick libplacebo before it has been verified.
 
-    The result is cached after the first call so repeated checks are free.
+    The result is cached after the first successful probe so repeated checks
+    are free and libplacebo is never re-evaluated within the same process.
     """
     global _libplacebo_avail
-    if _libplacebo_avail is None:
-        if "libplacebo" not in _get_ffmpeg_filters():
-            _libplacebo_avail = False
-        else:
-            # Stage 2: functional Vulkan probe — run libplacebo on a synthetic
-            # HDR10 source so the same Vulkan init code path as a real UHD file
-            # is exercised.
-            #
-            # IMPORTANT: we must (a) set HDR metadata via setparams so libplacebo
-            # enters its Vulkan-based tonemapping path, and (b) scan stderr for
-            # Vulkan failure strings.  Without HDR metadata libplacebo may silently
-            # fall back to software (exit 0, no errors) — a false positive that
-            # causes the real video run to crash with "Query format failed".
-            try:
-                probe = subprocess.run(
-                    [
-                        "ffmpeg", "-hide_banner", "-loglevel", "verbose",
-                        "-f", "lavfi",
-                        "-i", (
-                            f"color=c=black"
-                            f":size={STREAM_WIDTH}x{STREAM_HEIGHT}"
-                            f":duration=0.04"
-                        ),
-                        "-vf", (
-                            # Step 1: convert to 10-bit to mimic a UHD source.
-                            "format=yuv420p10le,"
-                            # Step 2: inject HDR10 stream metadata (PQ transfer,
-                            # BT.2020 primaries).  Without this, libplacebo sees
-                            # a plain 10-bit SDR signal and silently takes a
-                            # software path that *never* initialises Vulkan —
-                            # the probe would exit 0 with no error strings even
-                            # on a machine where Vulkan device creation fails.
-                            # Setting smpte2084 forces libplacebo to enter the
-                            # same HDR→SDR Vulkan tonemapping code path it uses
-                            # for real UHD/HDR video files.
-                            # Using STREAM_WIDTH x STREAM_HEIGHT (instead of
-                            # 64x64) ensures the same memory allocation and
-                            # Vulkan device-init code path as real HDR content.
-                            "setparams=color_trc=smpte2084"
-                            ":color_primaries=bt2020"
-                            ":colorspace=bt2020nc,"
-                            f"libplacebo=w={STREAM_WIDTH}:h={STREAM_HEIGHT}"
-                            ":colorspace=bt709:color_trc=bt709:color_primaries=bt709"
-                            ":tonemapping=mobius:range=pc:downscaler=bilinear,"
-                            "format=yuv420p"
-                        ),
-                        "-frames:v", "1", "-f", "null", "-",
-                    ],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                    timeout=20,
-                )
-                stderr_txt = probe.stderr.decode(errors="replace")
-                vulkan_ok = probe.returncode == 0 and not any(
-                    kw in stderr_txt for kw in _VULKAN_FAIL_STRINGS
-                )
-                _libplacebo_avail = vulkan_ok
-            except Exception:
-                _libplacebo_avail = False
+    if _libplacebo_avail is not None:
+        return _libplacebo_avail
+
+    # Stage 1: compiled-in check.
+    if "libplacebo" not in _get_ffmpeg_filters():
+        _libplacebo_avail = False
+        return False
+
+    # Stage 2: real-file probe.  Without a concrete video we cannot confirm
+    # that Vulkan works, so report False conservatively.  The extraction
+    # function always passes a video_path, so the probe runs on first use.
+    if video_path is None:
+        return False
+
+    try:
+        probe = subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "verbose",
+                "-probesize", "100M", "-analyzeduration", "100M",
+                "-i", video_path,
+                "-frames:v", "1",
+                "-vf", (
+                    f"libplacebo=w={STREAM_WIDTH}:h={STREAM_HEIGHT}"
+                    ":colorspace=bt709:color_trc=bt709:color_primaries=bt709"
+                    ":tonemapping=mobius:range=pc:downscaler=bilinear,"
+                    "format=yuv420p"
+                ),
+                "-f", "null", "-",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=30,
+        )
+        stderr_txt = probe.stderr.decode(errors="replace")
+        vulkan_ok = probe.returncode == 0 and not any(
+            kw in stderr_txt for kw in _VULKAN_FAIL_STRINGS
+        )
+        _libplacebo_avail = vulkan_ok
+    except Exception:
+        _libplacebo_avail = False
     return _libplacebo_avail
 
 
@@ -2084,7 +2068,7 @@ def extract_and_save_streaming_distributed(
     _CUDA_HW_INIT = ["-init_hw_device", f"cuda=hw:{cuda_device}"]
 
     hdr_label = "HDR" if is_hdr else "SDR"
-    _placebo = is_hdr and (not _full_gpu) and (not _scale_gpu) and libplacebo_available()
+    _placebo = is_hdr and (not _full_gpu) and (not _scale_gpu) and libplacebo_available(video_path)
     if _full_gpu:
         hw_args        = [*_CUDA_HW_INIT, "-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
         pipeline_label = f"full-GPU tonemap_cuda+scale_cuda [{hdr_label}] yuv420p {stream_width}×{stream_height}"
@@ -2589,32 +2573,22 @@ def extract_and_save_streaming_distributed(
             except Exception:
                 pass
 
-    # Detect Vulkan / libplacebo failure in the stderr collected during the run.
-    # If any failure keyword is present while we were using the libplacebo
-    # pipeline, invalidate the in-process cache so that subsequent videos in
-    # the same run automatically fall back to CPU zscale without repeating
-    # the painful probe/fail cycle.
+    # Safety net: if libplacebo still failed at runtime despite passing the
+    # startup probe (should not happen with a real-file probe), disable it for
+    # all subsequent videos in this process so the failure is not repeated.
     global _libplacebo_avail
     _stderr_text = "\n".join(stderr_lines)
-    _placebo_failed = _placebo and any(
-        kw in _stderr_text for kw in _VULKAN_FAIL_STRINGS
-    )
-    if _placebo_failed:
+    if _placebo and any(kw in _stderr_text for kw in _VULKAN_FAIL_STRINGS):
         _libplacebo_avail = False
         _log(
-            "⚠️  libplacebo Vulkan failure detected in FFmpeg stderr — "
+            "⚠️  libplacebo Vulkan failure detected — "
             "disabling libplacebo for the remainder of this run"
         )
 
-    # GPU pipeline (or libplacebo) produced zero frames — most likely a runtime
-    # hw-accel failure (e.g. CUDA driver mismatch, scale_cuda format-negotiation
-    # bug, FFmpeg silently falling back to software while GPU filters are still
-    # in the chain, or Vulkan device creation failure for libplacebo).
-    # Retry transparently with the CPU-only (zscale) pipeline so extraction
-    # still completes, rather than silently returning 0 patches.
-    if selected_idx == 0 and (_full_gpu or _scale_gpu or _placebo_failed):
+    # GPU pipeline produced zero frames — retry with CPU-only (zscale) pipeline.
+    if selected_idx == 0 and (_full_gpu or _scale_gpu):
         _log(
-            "⚠️  GPU/libplacebo pipeline produced no frames — retrying with CPU-only pipeline"
+            "⚠️  GPU pipeline produced no frames — retrying with CPU-only pipeline"
         )
         return extract_and_save_streaming_distributed(
             video_path=video_path,
