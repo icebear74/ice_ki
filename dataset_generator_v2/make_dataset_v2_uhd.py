@@ -67,6 +67,8 @@ from streaming_extractor import (
     scale_cuda_available,
     tonemap_cuda_available,
     libplacebo_available,
+    _discover_vulkan_devices,
+    map_cuda_to_vulkan_device,
     _get_ffmpeg_major_version,
     OutputFormat,
 )
@@ -197,14 +199,12 @@ class DatasetGeneratorV2UHD:
         self.logger = self._setup_logger()
         sys.logger = self.logger
 
-        # ── CUDA ──────────────────────────────────────────────────────────────
+        # ── GPU / Vulkan device discovery ────────────────────────────────────
         self.use_cuda: bool = cuda_available()
-        # GPU index lists for round-robin assignment across parallel workers.
-        # Falls back to [0] only when CUDA is available but detection fails,
-        # so that at least one GPU slot is attempted.  If CUDA is unavailable,
-        # the list stays empty and vulkan_device will be left as None downstream.
+
+        # Discover CUDA GPUs via nvidia-smi (for display names).
         _detected_gpus = _detect_nvidia_gpus()
-        self._available_gpu_indices: List[int] = (
+        _cuda_indices: List[int] = (
             [idx for idx, _ in _detected_gpus]
             if _detected_gpus
             else ([0] if self.use_cuda else [])
@@ -212,13 +212,63 @@ class DatasetGeneratorV2UHD:
         self._available_gpu_names: Dict[int, str] = {
             idx: name for idx, name in _detected_gpus
         }
-        # Placeholder — overwritten in the "Parallel worker configs" block
-        # below, once self.workers has been set.  Do not use before that point.
-        self._parallel_worker_configs: Optional[List[dict]] = None
+
+        # Discover Vulkan devices from FFmpeg — these are the indices used by
+        # the libplacebo pipeline.  CUDA indices from nvidia-smi are NOT
+        # guaranteed to match Vulkan indices; we map them explicitly.
+        _vulkan_devs = _discover_vulkan_devices()  # [(vk_idx, desc), …]
+        if _vulkan_devs:
+            self.logger.info(
+                f"🖥️  Vulkan devices reported by FFmpeg: "
+                + ", ".join(f"{i}: {d}" for i, d in _vulkan_devs)
+            )
+        else:
+            self.logger.info("🖥️  No Vulkan devices found via FFmpeg (CPU/software fallback)")
+
+        # Build the list of Vulkan device indices to use for round-robin
+        # assignment.  Each CUDA GPU is mapped to its Vulkan counterpart.
+        # When map_cuda_to_vulkan_device() returns None the entry is still
+        # included as None so that FFmpeg picks any available Vulkan device
+        # for that worker slot (better than skipping the GPU entirely).
+        if _cuda_indices:
+            _mapped: List[Optional[int]] = [
+                map_cuda_to_vulkan_device(c) for c in _cuda_indices
+            ]
+            for c_idx, v_idx in zip(_cuda_indices, _mapped):
+                if v_idx is not None:
+                    self.logger.info(
+                        f"  CUDA {c_idx} ({self._available_gpu_names.get(c_idx, '?')}) "
+                        f"→ Vulkan {v_idx}"
+                    )
+                else:
+                    self.logger.warning(
+                        f"  CUDA {c_idx} ({self._available_gpu_names.get(c_idx, '?')}) "
+                        f"→ Vulkan mapping not found; FFmpeg will choose device automatically"
+                    )
+            self._available_gpu_indices: List[int] = [
+                v for v in _mapped if v is not None
+            ]
+            # Keep None-mapped slots in the full worker list so we still attempt
+            # round-robin across all detected GPUs even if the Vulkan index is
+            # unknown.  _run_multi_stream / _extract_film_parallel both handle
+            # vulkan_device=None safely (FFmpeg picks any available device).
+            self._vulkan_device_pool: List[Optional[int]] = _mapped
+        elif _vulkan_devs:
+            # No CUDA but Vulkan devices exist — use them directly.
+            self._available_gpu_indices = [i for i, _ in _vulkan_devs]
+            self._vulkan_device_pool = self._available_gpu_indices[:]
+        else:
+            self._available_gpu_indices = []
+            self._vulkan_device_pool = [None]  # CPU/software Vulkan
+
         if self.use_cuda:
             self.logger.info("🚀 CUDA/GPU mode enabled (hardware-accelerated decoding & scaling)")
         else:
             self.logger.info("🖥️  CPU-only mode enabled (CUDA not available in this FFmpeg build)")
+
+        # Placeholder — overwritten in the "Parallel worker configs" block
+        # below, once self.workers is known.  Do not use before that point.
+        self._parallel_worker_configs: Optional[List[dict]] = None
 
         self.logger.info(f"Loaded {len(self.videos)} videos from active config")
         self.logger.info(f"Categories: {list(self.category_targets.keys())}")
@@ -247,15 +297,13 @@ class DatasetGeneratorV2UHD:
         self.logger.info(f"⚡ Using {self.workers} threads for FFmpeg extraction")
 
         # ── Parallel worker configs ───────────────────────────────────────────
-        # Initialise here (after self.workers is known) so that the parallel
-        # dispatch path in _extract_patches_multi_format_batch is always active.
-        # Worker count: max(config workers, one worker per GPU) — at least 1.
+        # Worker count: max(config workers, number of GPU slots) — at least 1.
         # Each entry uses use_cuda=False; the libplacebo/Vulkan pipeline does
-        # not need CUDA hardware decode.  Actual Vulkan device (GPU) assignment
-        # is handled round-robin in _extract_film_parallel.
+        # not need CUDA hardware decode.  Vulkan device assignment is handled
+        # round-robin in _extract_film_parallel using _vulkan_device_pool.
         _n_workers = max(
             self.workers,
-            len(self._available_gpu_indices) if self._available_gpu_indices else 1,
+            len(self._vulkan_device_pool) if self._vulkan_device_pool else 1,
         )
         self._parallel_worker_configs = [
             {"use_cuda": False, "cuda_device": 0}
@@ -263,7 +311,7 @@ class DatasetGeneratorV2UHD:
         ]
         self.logger.info(
             f"🔀 Parallel extraction: {_n_workers} workers, "
-            f"{len(self._available_gpu_indices)} GPU(s) available for round-robin Vulkan assignment"
+            f"{len(self._vulkan_device_pool)} Vulkan device slot(s) for round-robin assignment"
         )
 
         # ── UI heartbeat ──────────────────────────────────────────────────────
@@ -307,13 +355,13 @@ class DatasetGeneratorV2UHD:
             "eta": {},
             "live_fps": 0.0,
             "live_sps": 0.0,
-            # Decode-backend label: reflect whether GPUs are available for Vulkan.
-            # libplacebo is the primary HDR path regardless of CUDA availability;
-            # GPU assignment uses round-robin across detected Vulkan devices.
+            # Decode-backend label: reflects Vulkan device availability.
+            # libplacebo is the primary HDR path; device assignment uses
+            # round-robin across the mapped Vulkan device pool.
             "decode_backend": (
                 f"libplacebo [Vulkan HDR→SDR] — "
-                f"{len(self._available_gpu_indices)} GPU(s) round-robin"
-                if self._available_gpu_indices
+                f"{len(self._vulkan_device_pool)} Vulkan device slot(s) round-robin"
+                if self._vulkan_device_pool and self._vulkan_device_pool[0] is not None
                 else "libplacebo [Vulkan HDR→SDR — CPU/software fallback]"
             ),
             "categories": list(self.category_targets.keys()),
@@ -323,7 +371,7 @@ class DatasetGeneratorV2UHD:
             "parallel_status": "",            # e.g. "⚡ 16 workers active"
             "active_streams": [],             # per-stream state dicts for GUI panels
             "n_active_streams": 0,            # active stream count for quick reads
-            "n_gpus_available": len(self._available_gpu_indices),
+            "n_gpus_available": len(self._vulkan_device_pool),
             # Output format (BMP by default, configurable).
             # Updated at runtime in _run_multi_stream().
             "output_format": self.config.get("output_format", "bmp").upper(),
@@ -1680,52 +1728,48 @@ class DatasetGeneratorV2UHD:
     def extract_frames_uhd(self, video_path: str, start_time: float, n_frames: int = 7,
                            is_hdr: Optional[bool] = None) -> Optional[Dict]:
         """
-        Extract frames to DISK (memory-efficient).
+        LEGACY helper — not part of the production extraction path.
 
-        Applies the HDR→SDR tonemap chain when the source is HDR, or a
-        lightweight scale-only chain when it is SDR.  When *is_hdr* is
-        ``None`` (default) the color format is determined automatically by
-        calling ``_get_video_metadata``.
+        The production path is:
+            run() → _run_multi_stream() → _extract_film_parallel()
+                  → extract_and_save_streaming_distributed()
 
-        MEMORY OPTIMIZATION: Returns PATHS to frames (NOT loaded into memory).
-        Caller must load frames when needed and clean up temp_dir when done.
-        
+        This method is retained only because ``extract_frames_single_mode``
+        calls it for diagnostic / fallback purposes.  It should **not** be
+        called from any hot path.
+
+        Output format is BMP (lossless, no compression) written to a temp
+        directory.  Callers must clean up the returned ``temp_dir``.
+
         Args:
             video_path: Path to video
             start_time: Start timestamp
             n_frames: Number of frames (7 or 5)
-            is_hdr: Override for HDR detection.  Pass ``True``/``False`` to
-                    skip the metadata look-up (useful when the caller already
-                    has the value from ``_get_video_metadata``).
-        
+            is_hdr: Override HDR detection; ``None`` → auto-detect.
+
         Returns:
-            Dict with 'frame_paths' (list of paths) and 'temp_dir' (must be cleaned up)
-            or None on failure
+            Dict with ``'frame_paths'`` (list) and ``'temp_dir'`` (must be
+            cleaned up by caller), or ``None`` on failure.
         """
         temp_dir = None
+        # Use BMP as temp format — lossless, no compression overhead, no
+        # external dependency.  PNG would impose unnecessary CPU cost here.
+        _ext = "bmp"
         try:
-            # Determine HDR/SDR if not supplied by caller
             if is_hdr is None:
                 meta = self._get_video_metadata(video_path)
                 is_hdr = meta.get('is_hdr', True) if meta else True
 
-            # Use configured temp directory
             temp_dir = self._create_temp_dir("extract_single")
-            output_pattern = os.path.join(temp_dir, "frame_%04d.png")
+            output_pattern = os.path.join(temp_dir, f"frame_%04d.{_ext}")
 
-            # Build the correct filter chain for this video's color format.
-            # extract_frames_uhd uses CPU-only (no CUDA) for stability and
-            # because it processes only a few frames at a time.
-            # build_vf_filter already outputs yuv420p (Opt 3) which ffmpeg
-            # can write directly to PNG files.
+            # CPU-only; this path is used only for diagnostics / small jobs.
             vf_filter = build_vf_filter(is_hdr=is_hdr, use_cuda=False)
-            
-            # CPU-only mode (no CUDA) - more stable and reliable
-            # FIXED: Added nice priority for lower system impact
+
             cmd = [
-                'nice', '-n', '19',  # Lowest priority
+                'nice', '-n', '19',
                 'ffmpeg',
-                '-threads', str(self.workers),  # 6 threads for faster extraction
+                '-threads', str(self.workers),
                 '-ss', str(start_time),
                 '-i', video_path,
                 '-vf', vf_filter,
@@ -1733,10 +1777,9 @@ class DatasetGeneratorV2UHD:
                 '-y',
                 output_pattern
             ]
-            
-            # LOG THE FFMPEG COMMAND (for debugging)
-            self.logger.debug(f"Single frame extraction command: {' '.join(cmd)}")
-            
+
+            self.logger.debug(f"[LEGACY extract_frames_uhd] command: {' '.join(cmd)}")
+
             timeout = self.config.get("processing", {}).get("ffmpeg_timeout", 120)
             result = subprocess.run(
                 cmd,
@@ -1744,33 +1787,28 @@ class DatasetGeneratorV2UHD:
                 stderr=subprocess.DEVNULL,
                 timeout=timeout
             )
-            
+
             if result.returncode != 0:
-                # Clean up on failure
                 if temp_dir and os.path.exists(temp_dir):
                     shutil.rmtree(temp_dir, ignore_errors=True)
                 return None
-            
-            # Build list of frame paths (do NOT load into memory!)
+
             frame_paths = []
             for i in range(1, n_frames + 1):
-                frame_path = os.path.join(temp_dir, f"frame_{i:04d}.png")
+                frame_path = os.path.join(temp_dir, f"frame_{i:04d}.{_ext}")
                 if not os.path.exists(frame_path):
-                    # Clean up on failure
                     if temp_dir and os.path.exists(temp_dir):
                         shutil.rmtree(temp_dir, ignore_errors=True)
                     return None
                 frame_paths.append(frame_path)
-            
-            # Return paths (NOT frames!) - memory efficient!
+
             return {
                 'frame_paths': frame_paths,
-                'temp_dir': temp_dir  # Caller MUST clean up!
+                'temp_dir': temp_dir,
             }
-        
+
         except Exception as e:
-            self.logger.error(f"Error extracting frames: {e}")
-            # Clean up on exception
+            self.logger.error(f"[LEGACY extract_frames_uhd] Error: {e}")
             if temp_dir and os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir, ignore_errors=True)
             return None
@@ -2023,11 +2061,12 @@ class DatasetGeneratorV2UHD:
         _fmt_str = self.config.get("output_format", "bmp").lower()
         output_format = OutputFormat.BMP if _fmt_str == "bmp" else OutputFormat.PNG
 
-        # GPU pool for round-robin Vulkan device assignment (libplacebo path).
-        # When no GPUs are detected (CPU-only mode) the pool is empty and
-        # vulkan_device will be None, letting FFmpeg pick any Vulkan device.
-        _gpu_pool = self._available_gpu_indices  # may be empty for CPU-only
-        _n_gpus = len(_gpu_pool)  # 0 → CPU-only, no explicit Vulkan device
+        # Vulkan device pool for round-robin assignment (libplacebo path).
+        # Uses _vulkan_device_pool (FFmpeg Vulkan indices, not CUDA indices).
+        # Entries may be None when a CUDA GPU could not be mapped to a Vulkan
+        # device; FFmpeg will then pick any available Vulkan device for that slot.
+        _vk_pool = self._vulkan_device_pool  # [(vk_idx | None), …]
+        _n_vk = len(_vk_pool)  # 0 is handled below as CPU-only
 
         # Split assignments into N temporally-ordered chunks.
         # Temporal ordering ensures each worker's FFmpeg process seeks to a
@@ -2060,15 +2099,19 @@ class DatasetGeneratorV2UHD:
         _video_stem = Path(video_path).stem[-40:]
         _stream_states: List[dict] = []
         for _wi in range(len(groups)):
-            _gpu_idx = _gpu_pool[_wi % _n_gpus] if _n_gpus > 0 else None
+            _vk_idx = _vk_pool[_wi % _n_vk] if _n_vk > 0 else None
+            # For display: find a human-readable GPU name.  We look up by Vulkan
+            # index in _available_gpu_names (which is keyed by Vulkan index after
+            # the mapping in __init__).  Fall back to generic label when unknown.
+            _gpu_display_name = (
+                self._available_gpu_names.get(_vk_idx, f"Vulkan {_vk_idx}")
+                if _vk_idx is not None else "CPU (software Vulkan)"
+            )
             _stream_states.append({
                 "stream_id": _wi,
                 "video_name": _video_stem,
-                "gpu_index": _gpu_idx if _gpu_idx is not None else -1,
-                "gpu_name": (
-                    self._available_gpu_names.get(_gpu_idx, f"GPU {_gpu_idx}")
-                    if _gpu_idx is not None else "CPU (no GPU)"
-                ),
+                "gpu_index": _vk_idx if _vk_idx is not None else -1,
+                "gpu_name": _gpu_display_name,
                 "state": "queued",
                 "frames_processed": 0,
                 "patches_created": 0,
@@ -2113,9 +2156,10 @@ class DatasetGeneratorV2UHD:
             return _on_progress
 
         def _run_worker(worker_idx: int, group: List[Tuple[int, str, str]], wcfg: dict) -> None:
-            # Round-robin GPU assignment for vulkan_device (libplacebo path).
-            # None when running in CPU-only mode (no GPUs detected).
-            _gpu_idx = _gpu_pool[worker_idx % _n_gpus] if _n_gpus > 0 else None
+            # Round-robin Vulkan device assignment (libplacebo path).
+            # Uses _vulkan_device_pool (FFmpeg Vulkan indices, already mapped
+            # from CUDA indices in __init__).  None means "FFmpeg picks any".
+            _vk_idx = _vk_pool[worker_idx % _n_vk] if _n_vk > 0 else None
             # Mark this stream as running.
             with patches_lock:
                 if worker_idx < len(self.ui_state["active_streams"]):
@@ -2141,7 +2185,7 @@ class DatasetGeneratorV2UHD:
                 stream_width=STREAM_OPT_WIDTH,
                 stream_height=STREAM_OPT_HEIGHT,
                 color_trc=color_trc,
-                vulkan_device=_gpu_idx,
+                vulkan_device=_vk_idx,
                 output_format=output_format,
             )
             with patches_lock:
@@ -2366,16 +2410,15 @@ class DatasetGeneratorV2UHD:
                 center_snap_seconds=self.config.get("processing", {}).get("center_snap_seconds", 1.0),
                 stream_width=STREAM_OPT_WIDTH,
                 stream_height=STREAM_OPT_HEIGHT,
-                # Only pass cuda_device when CUDA is actually in use; passing 0
-                # in CPU-only mode would not cause harm but is misleading.
+                # Only pass cuda_device when CUDA is actually in use.
                 cuda_device=(
                     self._available_gpu_indices[0] if self.use_cuda and self._available_gpu_indices else 0
                 ),
                 color_trc=color_trc,
-                # vulkan_device drives the explicit Vulkan device selection for
-                # libplacebo.  None = FFmpeg picks any available Vulkan device.
+                # vulkan_device: use the first mapped Vulkan index from the pool.
+                # None means FFmpeg picks any available Vulkan device.
                 vulkan_device=(
-                    self._available_gpu_indices[0] if self._available_gpu_indices else None
+                    self._vulkan_device_pool[0] if self._vulkan_device_pool else None
                 ),
                 output_format=output_format,
             )
@@ -2671,9 +2714,10 @@ class DatasetGeneratorV2UHD:
         current film, live FPS, write-queue depth, and degradation counts.
         """
         proc = self.config.get("processing", {})
-        n_gpus = len(self._available_gpu_indices) if self._available_gpu_indices else 1
+        # Use _vulkan_device_pool length to determine GPU slot count.
+        n_vk_slots = len(self._vulkan_device_pool) if self._vulkan_device_pool else 1
         streams_per_gpu = int(proc.get("streams_per_gpu", 1))
-        n_streams = max(1, n_gpus * streams_per_gpu)
+        n_streams = max(1, n_vk_slots * streams_per_gpu)
         n_frames = int(proc.get("n_frames", 7))
         nice_level = int(proc.get("ffmpeg_nice", 10))
         center_snap = float(proc.get("center_snap_seconds", 1.0))
@@ -2709,18 +2753,19 @@ class DatasetGeneratorV2UHD:
         # ── Initialise per-stream state for the GUI ──────────────────────────
         stream_states: list = []
         for sid in range(n_streams):
-            gpu_idx = (
-                self._available_gpu_indices[sid % n_gpus]
-                if self._available_gpu_indices else None
+            # Assign each stream a Vulkan device index from the mapped pool.
+            _vk_idx = (
+                self._vulkan_device_pool[sid % n_vk_slots]
+                if self._vulkan_device_pool else None
             )
             gpu_name = (
-                self._available_gpu_names.get(gpu_idx, f"GPU {gpu_idx}")
-                if gpu_idx is not None else "CPU / Vulkan-SW"
+                self._available_gpu_names.get(_vk_idx, f"Vulkan {_vk_idx}")
+                if _vk_idx is not None else "CPU / software Vulkan"
             )
             stream_states.append({
                 "stream_id":        sid,
                 "video_name":       "—",
-                "gpu_index":        gpu_idx if gpu_idx is not None else -1,
+                "gpu_index":        _vk_idx if _vk_idx is not None else -1,
                 "gpu_name":         gpu_name,
                 "state":            "idle",
                 "frames_processed": 0,
@@ -2728,7 +2773,8 @@ class DatasetGeneratorV2UHD:
                 "write_queue_depth": 0,
                 "live_fps":         0.0,
                 "pipeline":         (
-                    "libplacebo" if self._available_gpu_indices else "CPU/Vulkan-SW"
+                    "libplacebo" if self._vulkan_device_pool and self._vulkan_device_pool[0] is not None
+                    else "CPU/Vulkan-SW"
                 ),
                 "degrade_counts":   {},   # {cat: {template_name: count}}
                 "current_video_idx": -1,
@@ -2738,12 +2784,13 @@ class DatasetGeneratorV2UHD:
         streams_lock = threading.Lock()
         self.ui_state["active_streams"] = stream_states
         self.ui_state["n_active_streams"] = 0
-        self.ui_state["n_gpus_available"] = n_gpus
+        self.ui_state["n_gpus_available"] = n_vk_slots
 
         # ── Stream worker ────────────────────────────────────────────────────
         def stream_worker(stream_id: int) -> None:
-            gpu_idx = stream_states[stream_id]["gpu_index"]
-            vulkan_device = gpu_idx if gpu_idx >= 0 else None
+            # vulkan_device comes from the pre-mapped Vulkan pool (not CUDA indices).
+            _vk = stream_states[stream_id]["gpu_index"]
+            vulkan_device = _vk if _vk >= 0 else None
 
             while self.running:
                 try:
@@ -3042,15 +3089,15 @@ class DatasetGeneratorV2UHD:
                 self.logger.info(f"Resuming from video {start_idx + 1}/{len(self.videos)}")
 
             # --- Multi-stream parallel extraction ---
-            # N concurrent stream workers, each assigned to a specific GPU.
+            # N concurrent stream workers, each assigned to a specific Vulkan device.
             # Multiple FFmpeg processes run simultaneously across different videos.
             self.logger.info("=" * 80)
-            n_gpus = len(self._available_gpu_indices) if self._available_gpu_indices else 1
+            n_vk_slots = len(self._vulkan_device_pool) if self._vulkan_device_pool else 1
             streams_per_gpu = self.config.get("processing", {}).get("streams_per_gpu", 1)
-            n_streams = max(1, n_gpus * streams_per_gpu)
+            n_streams = max(1, n_vk_slots * streams_per_gpu)
             self.logger.info(
                 f"🚀 MULTI-STREAM MODE: {n_streams} concurrent stream(s) "
-                f"across {n_gpus} GPU(s)"
+                f"across {n_vk_slots} Vulkan device slot(s)"
             )
             self.logger.info("=" * 80)
 
