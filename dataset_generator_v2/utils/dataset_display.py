@@ -5,35 +5,47 @@ Layout (top → bottom)
 ─────────────────────
   Title bar
   GPU stream panels  (side-by-side when both fit in terminal, else stacked)
-  Write-queue status (one line)
+  Current film panel (plan item detail for each running stream)
+  Write-queue & writer diagnostics
   Plan summary       (item counts + global bar + per-category bars)
-  Production progress (per-category → per-format → per-degradation, vertical hierarchy)
-  Performance & ETA
+  Production progress (category → format → degradation, vertical hierarchy)
+  Performance & ETA  (FPS + SPS + remaining)
 
 Width-safety rules
 ──────────────────
 * Every panel is capped at ``term_width``.
-* ``_box_row`` always truncates content to ``inner_w`` so no line can ever
+* ``_box_row`` always truncates content to ``inner_w`` – no line can ever
   escape the box border.
-* Side-by-side GPU panels are only used when each panel has at least 38 usable
-  columns AND the combined pair fits inside ``term_width``.
+* Side-by-side GPU panels are only used when each panel has at least
+  _MIN_SIDE_INNER usable columns AND the combined pair fits inside term_width.
 * All content strings are explicitly truncated with ``_trunc`` before being
   passed to ``_box_row``.
 
+Flicker-free rendering
+──────────────────────
+* draw_dataset_ui() uses cursor home (ANSI_HOME) instead of full clear.
+* Each line is padded to term_width visible chars so it fully overwrites the
+  previous content at that position.
+* After all rendered lines, \033[J erases any stale lines from a previous
+  taller render without causing a visible full-screen flash.
+
 Plan-driven fields (from ``ui_state``)
 ───────────────────────────────────────
-  plan_summary       – GenerationPlan.get_global_stats()
-  current_plan_items – per-stream {plan_item_id, queue_position, …}
-  patch_distribution – {cat: {fmt: {count, target, deg_planned, deg_completed}}}
+  plan_summary        – GenerationPlan.get_global_stats()
+  current_plan_items  – per-stream {plan_item_id, queue_position, …}
+  patch_distribution  – {cat: {fmt: {count, target, deg_planned, deg_completed}}}
+  live_sps            – global patches/second
+  wq_capacity         – write-queue max capacity (int)
+  total_streams       – total configured stream count
 """
 
 import sys
 import shutil
 
 from .terminal_ui import (
-    ANSI_ESCAPE, C_RESET, C_BOLD, C_CYAN, C_GRAY, C_GREEN, C_RED,
+    ANSI_ESCAPE, C_RESET, C_BOLD, C_CYAN, C_GRAY, C_SILVER, C_GREEN, C_RED,
     C_YELLOW, C_MAGENTA, C_BLUE, C_WHITE,
-    ANSI_HOME, ANSI_CLEAR, ANSI_HIDE_CURSOR,
+    ANSI_HOME,
     get_visible_len, make_bar, format_time, format_number,
 )
 
@@ -49,11 +61,13 @@ _KNOWN_COLORS = {
 _DEG_COLORS = [C_YELLOW, C_GREEN, C_CYAN, C_MAGENTA, C_WHITE, C_RED]
 _FMT_COLORS = [C_CYAN, C_GREEN, C_YELLOW, C_MAGENTA, C_WHITE, C_BLUE]
 
-# Minimum usable inner width for a panel column in side-by-side mode.
+# Minimum usable inner width for one column in side-by-side mode.
 _MIN_SIDE_INNER = 34
-# Minimum terminal width required for side-by-side GPU panels (2 panels × min
-# inner + 2×4 border/padding + 2 gap).
+# Minimum terminal width for side-by-side GPU panels.
 _MIN_SIDE_BY_SIDE = 2 * (_MIN_SIDE_INNER + 4) + 2
+
+# Track how many lines the previous render used so we can erase stale lines.
+_prev_line_count: int = 0
 
 
 def _category_color(cat_key, index=0):
@@ -70,12 +84,11 @@ _BC = C_CYAN   # box border colour
 
 
 def _box_top(width, title="", color=_BC):
-    """Top border ╔══ title ═══╗ (width = total visual chars including borders)."""
+    """Top border ╔══ title ═══╗"""
     inner = width - 2
     if title:
         t_plain = " " + title.strip() + " "
-        tl = get_visible_len(t_plain)
-        tl = min(tl, inner)          # never wider than the inner area
+        tl = min(get_visible_len(t_plain), inner)
         left  = max(0, (inner - tl) // 2)
         right = max(0, inner - tl - left)
         return (
@@ -91,18 +104,19 @@ def _box_bot(width, color=_BC):
     return f"{color}╚{'═' * (width - 2)}╝{C_RESET}"
 
 
+def _box_div(width, color=_BC):
+    """Inner divider ╠══════╣"""
+    return f"{color}╠{'═' * (width - 2)}╣{C_RESET}"
+
+
 def _box_row(content, width, color=_BC, pad=1):
     """
     Content row ║ content … ║.
-
-    The content is **always truncated** to fit exactly inside the box so that
-    no rendered line can exceed *width* visible characters.
+    Always truncates to inner width so no line can overflow the box.
     """
-    inner = width - 2 - 2 * pad
-    inner = max(0, inner)
+    inner = max(0, width - 2 - 2 * pad)
     vl = get_visible_len(content)
     if vl > inner:
-        # Strip ANSI, truncate plain text, add ellipsis
         plain = ANSI_ESCAPE.sub('', content)
         content = plain[:max(0, inner - 1)] + '…'
         vl = get_visible_len(content)
@@ -121,7 +135,7 @@ def _trunc(s, maxlen):
 
 
 def _abbrev_num(n: int) -> str:
-    """Abbreviated number for compact displays: 1_234_567 → '1.2M'."""
+    """Compact number: 1_234_567 → '1.2M'."""
     n = int(n)
     if n >= 1_000_000:
         return f"{n / 1_000_000:.1f}M"
@@ -132,82 +146,59 @@ def _abbrev_num(n: int) -> str:
 
 def _bar_row(label, pct, done, target, inner_w, color, label_w=10):
     """
-    Build a progress-bar row that always fits within *inner_w* visible chars.
+    Progress-bar row that always fits within *inner_w* visible chars.
 
-    Algorithm
-    ---------
-    1. Try the full count field  "  1,234,567 /  9,999,999  ( 55.5%)"
-    2. If the bar would be too narrow (< 4 chars), fall back to
-       abbreviated counts "1.2M/10M (55%)"
-    3. As a last resort strip the bar entirely and show label + pct only.
-    4. Hard-clip the final string to inner_w so the result *always* fits.
+    Falls back from full count format → abbreviated → label+pct only.
+    Hard-clips the final string as a safety net.
     """
     inner_w = max(8, inner_w)
 
     def _try(done_s, target_s, pct_fmt):
         cnt = f"  {done_s}/{target_s} ({pct_fmt})"
-        cnt_w = len(cnt)
-        bw = inner_w - label_w - 1 - cnt_w   # 1 for the space before bar
-        return cnt, cnt_w, bw
+        bw = inner_w - label_w - 1 - len(cnt)
+        return cnt, bw
 
-    # Full format
-    done_f   = format_number(done)
-    target_f = format_number(target)
-    pct_f    = f"{pct:5.1f}%"
-    cnt, cnt_w, bar_w = _try(done_f, target_f, pct_f)
+    done_f, target_f, pct_f = format_number(done), format_number(target), f"{pct:5.1f}%"
+    cnt, bar_w = _try(done_f, target_f, pct_f)
 
     if bar_w < 4:
-        # Abbreviated format
-        done_a, target_a, pct_a = _abbrev_num(done), _abbrev_num(target), f"{pct:.0f}%"
-        cnt, cnt_w, bar_w = _try(done_a, target_a, pct_a)
+        done_a, target_a = _abbrev_num(done), _abbrev_num(target)
+        cnt, bar_w = _try(done_a, target_a, f"{pct:.0f}%")
 
     lbl = _trunc(label, label_w)
-    lbl_padded = f"{color}{lbl:<{label_w}}{C_RESET}"
-    cnt_colored = f"{C_GRAY}{cnt}{C_RESET}"
+    lbl_p = f"{color}{lbl:<{label_w}}{C_RESET}"
+    cnt_c = f"{C_SILVER}{cnt}{C_RESET}"
 
     if bar_w >= 4:
-        row = f"{lbl_padded} {make_bar(pct, bar_w, color)}{cnt_colored}"
+        row = f"{lbl_p} {make_bar(pct, bar_w, color)}{cnt_c}"
     else:
-        # No room for bar – just label + pct
-        pct_short = f" ({pct:.0f}%)"
-        row = f"{lbl_padded}{C_GRAY}{pct_short}{C_RESET}"
+        row = f"{lbl_p}{C_SILVER} ({pct:.0f}%){C_RESET}"
 
-    # Hard-clip (safety net)
     vl = get_visible_len(row)
     if vl > inner_w:
         plain = ANSI_ESCAPE.sub('', row)
         row = plain[:max(1, inner_w - 1)] + '…'
-
     return row
-
 
 
 # ── GPU stream panel ──────────────────────────────────────────────────────────
 
 def _gpu_panel_lines(stream, inner_w):
     """
-    Build the content lines for one GPU/stream panel.
-
-    Every line is truncated to *inner_w* before being returned so that callers
-    can pass these strings directly to ``_box_row`` without any further width
-    checks.
-
-    Args:
-        stream:  stream state dict from ``ui_state["active_streams"]``.
-        inner_w: available visible characters inside the box (width - 4).
+    Content lines for one GPU/stream panel – every line truncated to inner_w.
     """
     gpu_idx  = stream.get("gpu_index", -1)
     gpu_name = stream.get("gpu_name", "GPU")
     state    = stream.get("state", "idle")
     video    = stream.get("video_name", "—")
     fps      = stream.get("live_fps", 0.0)
+    sps      = stream.get("live_sps", 0.0)
     patches  = stream.get("patches_created", 0)
     wq       = stream.get("write_queue_depth", 0)
     pipeline = stream.get("pipeline", "libplacebo")
     n_done   = stream.get("n_videos_done", 0)
-
-    plan_id       = stream.get("plan_item_id", "")
-    queue_pos     = stream.get("queue_position", 0)
+    plan_id  = stream.get("plan_item_id", "")
+    queue_pos = stream.get("queue_position", 0)
     planned_total = stream.get("planned_total", 0)
 
     if state == "running":
@@ -215,158 +206,247 @@ def _gpu_panel_lines(stream, inner_w):
     elif state == "error":
         sc, sl = C_RED, "✖ error"
     else:
-        sc, sl = C_GRAY, "· idle"
+        sc, sl = C_SILVER, "· idle"
 
     gpu_label = f"GPU {gpu_idx}" if gpu_idx >= 0 else "CPU"
 
     def _t(s):
         return _trunc(s, inner_w)
 
-    header = _t(
-        f"{C_BOLD}{C_CYAN}{gpu_label}{C_RESET}  "
-        f"{C_GRAY}{gpu_name}{C_RESET}  {sc}{sl}{C_RESET}"
-    )
-    film_line = _t(
-        f"{C_GRAY}Film :{C_RESET} {C_WHITE}{_trunc(video, inner_w - 8)}{C_RESET}"
-    )
+    rows = [
+        _t(f"{C_BOLD}{C_CYAN}{gpu_label}{C_RESET}  {C_SILVER}{gpu_name}{C_RESET}  {sc}{sl}{C_RESET}"),
+        _t(f"{C_SILVER}Film :{C_RESET} {C_WHITE}{_trunc(video, inner_w - 8)}{C_RESET}"),
+    ]
 
-    rows = [header, film_line]
-
-    # Plan item line (only when there is active plan data)
     if plan_id:
-        # Show ID in short form: first 8 chars
         short_id = plan_id[:8]
-        plan_line = _t(
-            f"{C_GRAY}Plan :{C_RESET} "
-            f"{C_CYAN}#{short_id}{C_RESET}"
-            f"{C_GRAY} pos:{C_RESET}{queue_pos}"
-            f"  {C_GRAY}plan:{C_RESET}{format_number(planned_total)}"
-            f"  {C_GRAY}done:{C_RESET}{format_number(patches)}"
-        )
-        rows.append(plan_line)
+        remaining = max(0, planned_total - patches)
+        rows.append(_t(
+            f"{C_SILVER}Plan :{C_RESET} {C_CYAN}#{short_id}{C_RESET}"
+            f"{C_SILVER} pos:{C_RESET}{queue_pos}"
+            f"  {C_SILVER}plan:{C_RESET}{_abbrev_num(planned_total)}"
+            f"  {C_SILVER}done:{C_RESET}{_abbrev_num(patches)}"
+            f"  {C_SILVER}rem:{C_RESET}{_abbrev_num(remaining)}"
+        ))
 
-    fps_str = f"{fps:6.1f} fps" if state == "running" else "     — fps"
+    fps_str = f"{fps:6.1f}" if state == "running" else "     —"
+    sps_str = f"{sps:6.1f}" if sps > 0 else "     —"
     rows.append(_t(
-        f"{C_GRAY}Speed:{C_RESET} {C_GREEN if fps > 0 else C_GRAY}{fps_str}{C_RESET}"
-        f"  {C_GRAY}{pipeline}{C_RESET}"
+        f"{C_SILVER}FPS  :{C_RESET} {C_GREEN if fps > 0 else C_SILVER}{fps_str}{C_RESET}"
+        f"  {C_SILVER}SPS:{C_RESET} {C_GREEN if sps > 0 else C_SILVER}{sps_str}{C_RESET}"
+        f"  {C_SILVER}{pipeline}{C_RESET}"
     ))
     rows.append(_t(
-        f"{C_GRAY}Patch:{C_RESET} {C_BOLD}{format_number(patches):>7}{C_RESET} this film"
-        f"  {C_GRAY}WQ:{C_RESET}{wq}"
+        f"{C_SILVER}Patch:{C_RESET} {C_BOLD}{_abbrev_num(patches):>7}{C_RESET} this film"
+        f"  {C_SILVER}WQ:{C_RESET}{wq}"
     ))
-    rows.append(_t(
-        f"{C_GRAY}Done :{C_RESET} {n_done} film(s) this session"
-    ))
+    rows.append(_t(f"{C_SILVER}Done :{C_RESET} {n_done} film(s) this session"))
     return rows
 
 
 def _render_gpu_panels(streams, term_width):
-    """
-    Render GPU/stream panels.
-
-    Layout decision:
-    - Two panels side-by-side when ``term_width >= _MIN_SIDE_BY_SIDE`` **and**
-      there are at least two streams.
-    - Otherwise panels are stacked vertically.
-
-    This is determined once per call so there is never a layout that exceeds
-    the terminal width.
-    """
     lines_out = []
 
     if not streams:
         pw = min(term_width, 80)
-        lines_out.append(_box_top(pw, "STREAMS – awaiting start"))
-        lines_out.append(_box_row(f"{C_GRAY}No streams active yet.{C_RESET}", pw))
-        lines_out.append(_box_bot(pw))
+        lines_out += [
+            _box_top(pw, "STREAMS – awaiting start"),
+            _box_row(f"{C_SILVER}No streams active yet.{C_RESET}", pw),
+            _box_bot(pw),
+        ]
         return lines_out
 
     use_side_by_side = (term_width >= _MIN_SIDE_BY_SIDE) and (len(streams) >= 2)
 
     if use_side_by_side:
-        # Each panel gets exactly half the terminal minus 1 for the gap character.
-        # (gap = 1 space between two panels)
         pw = (term_width - 1) // 2
         for pair_start in range(0, len(streams), 2):
             left  = streams[pair_start]
             right = streams[pair_start + 1] if pair_start + 1 < len(streams) else None
 
-            left_title  = f"GPU {left.get('gpu_index', '?')} · {_trunc(left.get('gpu_name', ''), 20)}"
-            right_title = (
-                f"GPU {right.get('gpu_index', '?')} · {_trunc(right.get('gpu_name', ''), 20)}"
+            lt = f"GPU {left.get('gpu_index','?')} · {_trunc(left.get('gpu_name',''), 20)}"
+            rt = (
+                f"GPU {right.get('gpu_index','?')} · {_trunc(right.get('gpu_name',''), 20)}"
                 if right else ""
             )
+            lines_out.append(_box_top(pw, lt) + " " + (_box_top(pw, rt) if right else ""))
 
-            lines_out.append(
-                _box_top(pw, left_title) + " "
-                + (_box_top(pw, right_title) if right else "")
-            )
-
-            inner_w = pw - 4  # 2 borders + 2×1 padding
-            left_rows  = _gpu_panel_lines(left, inner_w)
-            right_rows = _gpu_panel_lines(right, inner_w) if right else []
-            n_rows = max(len(left_rows), len(right_rows))
-
-            for r in range(n_rows):
-                lr = left_rows[r]  if r < len(left_rows)  else ""
-                rr = right_rows[r] if r < len(right_rows) else ""
+            inner_w = pw - 4
+            lr = _gpu_panel_lines(left, inner_w)
+            rr = _gpu_panel_lines(right, inner_w) if right else []
+            for r in range(max(len(lr), len(rr))):
+                l_row = lr[r] if r < len(lr) else ""
+                r_row = rr[r] if r < len(rr) else ""
                 lines_out.append(
-                    _box_row(lr, pw) + " " + (_box_row(rr, pw) if right else "")
+                    _box_row(l_row, pw) + " " + (_box_row(r_row, pw) if right else "")
                 )
-
-            lines_out.append(
-                _box_bot(pw) + " " + (_box_bot(pw) if right else "")
-            )
+            lines_out.append(_box_bot(pw) + " " + (_box_bot(pw) if right else ""))
     else:
-        # Stacked – single column, full width (capped at 100 for readability)
         pw = min(term_width, 100)
         for stream in streams:
             idx   = stream.get("gpu_index", -1)
-            title = f"GPU {idx} · {_trunc(stream.get('gpu_name', ''), 30)}"
+            title = f"GPU {idx} · {_trunc(stream.get('gpu_name',''), 30)}"
             lines_out.append(_box_top(pw, title))
-            inner_w = pw - 4
-            for row in _gpu_panel_lines(stream, inner_w):
+            for row in _gpu_panel_lines(stream, pw - 4):
                 lines_out.append(_box_row(row, pw))
             lines_out.append(_box_bot(pw))
 
     return lines_out
 
 
-# ── Write-queue panel ─────────────────────────────────────────────────────────
+# ── Current-film detail panel ─────────────────────────────────────────────────
+
+def _render_current_film_panel(state, term_width):
+    """
+    Dedicated sub-panel for the currently running film(s).
+
+    Shows per-stream: plan item ID, position in plan, planned / completed /
+    remaining patches, and a breakdown by category / format / degradation.
+    """
+    pw = min(term_width, 100)
+    inner_w = pw - 4
+
+    streams = [s for s in state.get("active_streams", []) if s.get("state") == "running"]
+    if not streams:
+        return []
+
+    lines = [_box_top(pw, "CURRENT FILM STATUS")]
+
+    for si, ss in enumerate(streams):
+        if si > 0:
+            lines.append(_box_div(pw))
+
+        plan_id   = ss.get("plan_item_id", "")
+        video     = _trunc(ss.get("video_name", "—"), inner_w - 10)
+        pos       = ss.get("queue_position", 0)
+        planned   = ss.get("planned_total", 0)
+        done      = ss.get("patches_created", 0)
+        remaining = max(0, planned - done)
+        pct       = min(100.0, 100.0 * done / planned) if planned > 0 else 0.0
+
+        lines.append(_box_row(
+            f"{C_BOLD}{C_WHITE}{video}{C_RESET}"
+            + (f"  {C_SILVER}#{plan_id[:12]}{C_RESET}" if plan_id else ""),
+            pw,
+        ))
+        lines.append(_box_row(
+            f"{C_SILVER}Pos:{C_RESET} {pos}"
+            f"   {C_SILVER}Planned:{C_RESET} {C_BOLD}{_abbrev_num(planned)}{C_RESET}"
+            f"   {C_GREEN}Done:{C_RESET} {C_BOLD}{_abbrev_num(done)}{C_RESET}"
+            f"   {C_YELLOW}Remaining:{C_RESET} {C_BOLD}{_abbrev_num(remaining)}{C_RESET}",
+            pw,
+        ))
+        # Overall bar for this film
+        lines.append(_box_row(
+            _bar_row("  Film", pct, done, planned, inner_w, C_GREEN, 7),
+            pw,
+        ))
+
+        # Per-category breakdown (in-flight from live stream state)
+        per_cat = ss.get("patches_per_category", {})
+        planned_per_cat = ss.get("planned_per_category", {})
+        if per_cat or planned_per_cat:
+            all_cats = sorted(set(list(per_cat.keys()) + list(planned_per_cat.keys())))
+            for ci, cat in enumerate(all_cats):
+                cat_done    = per_cat.get(cat, 0)
+                cat_planned = planned_per_cat.get(cat, planned)  # fallback to film total
+                cat_pct     = min(100.0, 100.0 * cat_done / cat_planned) if cat_planned > 0 else 0.0
+                col = _category_color(cat, ci)
+                lines.append(_box_row(
+                    _bar_row(f"    {cat}", cat_pct, cat_done, cat_planned,
+                             inner_w, col, max(8, min(14, len(cat) + 4))),
+                    pw,
+                ))
+
+        # Per-format planned (static from plan; live counts only available after film)
+        planned_per_fmt = ss.get("planned_per_format", {})
+        if planned_per_fmt and inner_w > 40:
+            for fi, (fmt_name, fmt_planned) in enumerate(
+                sorted(planned_per_fmt.items(), key=lambda kv: -kv[1])[:4]
+            ):
+                fc = _FMT_COLORS[fi % len(_FMT_COLORS)]
+                fmt_lbl = _trunc(f"      ╰ {fmt_name}", 22)
+                lines.append(_box_row(
+                    f"{C_SILVER}{fmt_lbl}{C_RESET}"
+                    f"  {C_SILVER}plan:{C_RESET} {fc}{_abbrev_num(fmt_planned)}{C_RESET}",
+                    pw,
+                ))
+
+    lines.append(_box_bot(pw))
+    return lines
+
+
+# ── Write-queue / writer diagnostics panel ────────────────────────────────────
 
 def _render_write_queue_panel(state, term_width):
+    """
+    Write-queue and writer-status panel.
+
+    Shows:
+    - Queue depth with a visual fill bar
+    - Queue capacity and percentage fill
+    - Active vs idle writers
+    - Backpressure state
+    - Global SPS (patches per second)
+    """
     pw = min(term_width, 100)
-    streams  = state.get("active_streams", [])
-    wq_total = sum(s.get("write_queue_depth", 0) for s in streams)
-    fmt      = state.get("output_format", "BMP")
-    n_active = state.get("n_active_streams", 0)
+    inner_w = pw - 4
+    streams   = state.get("active_streams", [])
+    wq_total  = sum(s.get("write_queue_depth", 0) for s in streams)
+    wq_cap    = max(1, state.get("wq_capacity", 500))
+    wq_pct    = min(100.0, 100.0 * wq_total / wq_cap)
+    fmt       = state.get("output_format", "BMP")
+    n_active  = state.get("n_active_streams", 0)
+    n_total   = max(n_active, state.get("total_streams", len(streams)))
+    n_idle    = max(0, n_total - n_active)
+    live_sps  = state.get("live_sps", 0.0)
     fc = C_GREEN if fmt == "BMP" else C_YELLOW
 
-    bp_str = (
-        f"{C_RED}HIGH{C_RESET}"   if wq_total > 200 else
-        f"{C_YELLOW}mod{C_RESET}" if wq_total >  80 else
-        f"{C_GREEN}ok{C_RESET}"
-    )
-    content = (
-        f"{C_GRAY}Writers:{C_RESET} {C_BOLD}{n_active}{C_RESET} active"
-        f"   {C_GRAY}Queue:{C_RESET} {C_BOLD}{wq_total}{C_RESET}"
-        f"   {C_GRAY}Format:{C_RESET} {fc}{C_BOLD}{fmt}{C_RESET}"
-        f"   {C_GRAY}Backpressure:{C_RESET} {bp_str}"
-    )
-    return [
-        _box_top(pw, "WRITE QUEUE"),
-        _box_row(content, pw),
-        _box_bot(pw),
-    ]
+    # Backpressure colour and label
+    if wq_pct >= 80:
+        bp_color, bp_label = C_RED,    "HIGH"
+    elif wq_pct >= 40:
+        bp_color, bp_label = C_YELLOW, "moderate"
+    else:
+        bp_color, bp_label = C_GREEN,  "ok"
+
+    lines = [_box_top(pw, "WRITE QUEUE & WRITERS")]
+
+    # Row 1: queue bar
+    bar_label = f"Queue {wq_total}/{wq_cap}"
+    queue_bar_w = max(8, inner_w - len(bar_label) - 14)
+    lines.append(_box_row(
+        f"{C_SILVER}{bar_label}{C_RESET}"
+        f"  {make_bar(wq_pct, queue_bar_w, bp_color)}"
+        f"  {bp_color}{C_BOLD}{wq_pct:4.0f}%{C_RESET}"
+        f"  {C_SILVER}pressure:{C_RESET} {bp_color}{bp_label}{C_RESET}",
+        pw,
+    ))
+
+    # Row 2: writer status + SPS
+    sps_str = f"{live_sps:6.1f}" if live_sps > 0 else "     —"
+    lines.append(_box_row(
+        f"{C_SILVER}Writers:{C_RESET}"
+        f"  {C_GREEN}▶ {n_active} active{C_RESET}"
+        f"  {C_SILVER}· {n_idle} idle{C_RESET}"
+        f"  {C_SILVER}Format:{C_RESET} {fc}{C_BOLD}{fmt}{C_RESET}"
+        f"  {C_SILVER}SPS:{C_RESET} {C_BOLD}{sps_str}{C_RESET}",
+        pw,
+    ))
+
+    lines.append(_box_bot(pw))
+    return lines
 
 
 # ── Plan summary panel ────────────────────────────────────────────────────────
 
 def _render_plan_summary_panel(state, term_width):
     """
-    Plan summary: item counts + global progress bar + per-category bars.
+    Plan summary with live in-flight patches shown separately.
 
-    All rows are computed to fit within *term_width*.
+    In-flight patches are patches being created by currently running streams
+    that have not yet been persisted to the plan (plan.completed_total only
+    updates after a film finishes).  Showing them here makes progress feel live.
     """
     pw = min(term_width, 100)
     inner_w = pw - 4
@@ -374,7 +454,7 @@ def _render_plan_summary_panel(state, term_width):
 
     ps = state.get("plan_summary", {})
     if not ps:
-        lines.append(_box_row(f"{C_GRAY}Plan not yet created (Phase 3 pending…){C_RESET}", pw))
+        lines.append(_box_row(f"{C_SILVER}Plan not yet created (Phase 3 pending…){C_RESET}", pw))
         lines.append(_box_bot(pw))
         return lines
 
@@ -386,34 +466,62 @@ def _render_plan_summary_panel(state, term_width):
 
     planned_total   = ps.get("planned_total",   0)
     completed_total = ps.get("completed_total", 0)
-    pct_overall = (completed_total / planned_total * 100) if planned_total > 0 else 0.0
 
-    # ── Item count row ────────────────────────────────────────────────────
-    item_row = (
-        f"{C_GRAY}Items:{C_RESET} {C_BOLD}{n_total}{C_RESET}"
-        f"  {C_GREEN}✔{n_done}{C_RESET}"
-        f"  {C_CYAN}▶{n_running}{C_RESET}"
-        f"  {C_GRAY}·{n_pending}{C_RESET}"
-        + (f"  {C_RED}✖{n_failed}{C_RESET}" if n_failed else "")
+    # In-flight: patches being made right now (not yet in plan)
+    in_flight = sum(
+        s.get("patches_created", 0)
+        for s in state.get("active_streams", [])
+        if s.get("state") == "running"
     )
-    lines.append(_box_row(item_row, pw))
+    effective_done = completed_total + in_flight
+    pct_overall = (effective_done / planned_total * 100) if planned_total > 0 else 0.0
 
-    # ── Global bar ────────────────────────────────────────────────────────
-    label_w = 10
+    # Item counts
     lines.append(_box_row(
-        _bar_row("TOTAL", pct_overall, completed_total, planned_total, inner_w, C_GREEN, label_w),
+        f"{C_SILVER}Items:{C_RESET} {C_BOLD}{n_total}{C_RESET}"
+        f"  {C_GREEN}✔ done:{n_done}{C_RESET}"
+        f"  {C_CYAN}▶ running:{n_running}{C_RESET}"
+        f"  {C_SILVER}· pending:{n_pending}{C_RESET}"
+        + (f"  {C_RED}✖ failed:{n_failed}{C_RESET}" if n_failed else ""),
         pw,
     ))
 
-    # ── Per-category bars ─────────────────────────────────────────────────
-    for i, cat in enumerate(sorted(ps.get("planned_per_category", {}))):
-        pl = ps["planned_per_category"].get(cat, 0)
-        co = ps.get("completed_per_category", {}).get(cat, 0)
-        pct = (co / pl * 100) if pl > 0 else 0.0
-        lines.append(_box_row(
-            _bar_row(cat, pct, co, pl, inner_w, _category_color(cat, i), label_w),
-            pw,
-        ))
+    # Patches: completed (plan) + in-flight + remaining
+    remaining = max(0, planned_total - effective_done)
+    lines.append(_box_row(
+        f"{C_SILVER}Patches:{C_RESET}"
+        f"  {C_GREEN}done:{_abbrev_num(completed_total)}{C_RESET}"
+        + (f"  {C_CYAN}+live:{_abbrev_num(in_flight)}{C_RESET}" if in_flight > 0 else "")
+        + f"  {C_YELLOW}rem:{_abbrev_num(remaining)}{C_RESET}"
+        + f"  {C_SILVER}total:{_abbrev_num(planned_total)}{C_RESET}",
+        pw,
+    ))
+
+    # Global bar (effective done = plan_done + in-flight)
+    label_w = 10
+    lines.append(_box_row(
+        _bar_row("TOTAL", pct_overall, effective_done, planned_total, inner_w, C_GREEN, label_w),
+        pw,
+    ))
+
+    # Per-category bars
+    planned_per_cat   = ps.get("planned_per_category", {})
+    completed_per_cat = ps.get("completed_per_category", {})
+    for i, cat in enumerate(sorted(planned_per_cat)):
+        pl = planned_per_cat.get(cat, 0)
+        co = completed_per_cat.get(cat, 0)
+        # Add in-flight for this category
+        in_flight_cat = sum(
+            s.get("patches_per_category", {}).get(cat, 0)
+            for s in state.get("active_streams", [])
+            if s.get("state") == "running"
+        )
+        effective_co = co + in_flight_cat
+        pct = (effective_co / pl * 100) if pl > 0 else 0.0
+        row = _bar_row(cat, pct, effective_co, pl, inner_w, _category_color(cat, i), label_w)
+        if in_flight_cat > 0:
+            row = _trunc(row, inner_w - 9) + f" {C_CYAN}+{_abbrev_num(in_flight_cat)}{C_RESET}"
+        lines.append(_box_row(row, pw))
 
     lines.append(_box_bot(pw))
     return lines
@@ -423,18 +531,10 @@ def _render_plan_summary_panel(state, term_width):
 
 def _render_production_panel(state, term_width):
     """
-    Production progress panel with a readable three-level hierarchy:
+    Three-level hierarchy: category → format → degradation template.
 
-        category                    ████████░  12,345 / 80,000  (15.4%)
-          ╰ format_template_A       ████░░     5,000 / 40,000  (12.5%)
-              ╰ degrade_template_X  3,000 / 25,000  (40%)
-              ╰ degrade_template_Y  2,000 / 15,000  (60%)
-          ╰ format_template_B       ████░░     7,345 / 40,000  (18.4%)
-              ╰ degrade_template_X  …
-
-    Every line is constrained to ``term_width`` through ``_box_row``.
-    Degradation entries are shown one per line (vertical) instead of one
-    long horizontal string to avoid overflow.
+    Shows effective progress (plan_done + in-flight from active streams).
+    Every line is constrained to term_width via _box_row.
     """
     pw = min(term_width, 100)
     inner_w = pw - 4
@@ -445,7 +545,7 @@ def _render_production_panel(state, term_width):
     patch_dist = state.get("patch_distribution", {})
 
     if not cats:
-        lines.append(_box_row(f"{C_GRAY}No categories configured.{C_RESET}", pw))
+        lines.append(_box_row(f"{C_SILVER}No categories configured.{C_RESET}", pw))
         lines.append(_box_bot(pw))
         return lines
 
@@ -456,15 +556,22 @@ def _render_production_panel(state, term_width):
         info  = ovr.get(cat, {})
         done  = int(info.get("created", 0)) if isinstance(info, dict) else 0
         tgt   = int(info.get("target",  0)) if isinstance(info, dict) else 0
-        pct   = min(100.0, 100.0 * done / tgt) if tgt > 0 else 0.0
 
-        # Category-level bar (full inner_w)
+        # Add in-flight patches for this category
+        in_flight_cat = sum(
+            s.get("patches_per_category", {}).get(cat, 0)
+            for s in state.get("active_streams", [])
+            if s.get("state") == "running"
+        )
+        effective_done = done + in_flight_cat
+        pct = min(100.0, 100.0 * effective_done / tgt) if tgt > 0 else 0.0
+
         lines.append(_box_row(
-            _bar_row(cat, pct, done, tgt, inner_w, color, cat_label_w),
+            _bar_row(cat, pct, effective_done, tgt, inner_w, color, cat_label_w),
             pw,
         ))
 
-        # ── Format-template sub-rows (indented 2 chars) ───────────────────
+        # ── Format-template sub-rows (indented 4 chars) ───────────────────
         cat_fmts  = patch_dist.get(cat, {})
         fmt_items = sorted(cat_fmts.items(), key=lambda kv: -kv[1].get("target", 0))
 
@@ -474,13 +581,11 @@ def _render_production_panel(state, term_width):
             fmt_pct = (fmt_completed / fmt_target * 100) if fmt_target > 0 else 0.0
             fc = _FMT_COLORS[fi % len(_FMT_COLORS)]
 
-            # Indent 2: "  ╰ "  = 4 visible chars
-            fmt_indent   = 4
-            fmt_label_w  = max(6, min(16, inner_w // 4))
-            fmt_inner_w  = inner_w - fmt_indent
+            fmt_label_w = max(6, min(16, inner_w // 4))
+            fmt_inner_w = inner_w - 4  # 4 for "  ╰ "
 
             fmt_bar_row = (
-                f"  {C_GRAY}╰{C_RESET} "
+                f"  {C_SILVER}╰{C_RESET} "
                 + _bar_row(
                     _trunc(fmt_name, fmt_label_w),
                     fmt_pct, fmt_completed, fmt_target,
@@ -489,29 +594,27 @@ def _render_production_panel(state, term_width):
             )
             lines.append(_box_row(fmt_bar_row, pw))
 
-            # ── Degradation sub-rows (indented 6 chars, one per template) ─
-            deg_planned_for_fmt: dict = fmt_data.get("deg_planned", {})
-            deg_completed_all:   dict = fmt_data.get("deg_completed", {})
+            # ── Degradation sub-rows (one per template) ───────────────────
+            deg_planned: dict  = fmt_data.get("deg_planned", {})
+            deg_completed: dict = fmt_data.get("deg_completed", {})
 
-            if deg_planned_for_fmt:
-                deg_total_planned = sum(deg_planned_for_fmt.values())
-                sorted_deg = sorted(deg_planned_for_fmt.items(), key=lambda kv: -kv[1])
-
-                for di, (dname, dplanned) in enumerate(sorted_deg):
-                    dc_color  = _DEG_COLORS[di % len(_DEG_COLORS)]
-                    dpct_plan = (100.0 * dplanned / deg_total_planned
-                                 if deg_total_planned else 0.0)
-                    dcompleted = deg_completed_all.get(dname, 0)
-                    # Short display: "      ╰ dname_trunc  done/planned (pct%)"
-                    d_lbl  = _trunc(dname, 18)
-                    d_line = (
-                        f"      {C_GRAY}╰{C_RESET} "
+            if deg_planned:
+                deg_total = sum(deg_planned.values())
+                for di, (dname, dplanned) in enumerate(
+                    sorted(deg_planned.items(), key=lambda kv: -kv[1])
+                ):
+                    dc_color = _DEG_COLORS[di % len(_DEG_COLORS)]
+                    dpct_plan = (100.0 * dplanned / deg_total) if deg_total else 0.0
+                    dcompleted = deg_completed.get(dname, 0)
+                    d_lbl = _trunc(dname, 18)
+                    lines.append(_box_row(
+                        f"      {C_SILVER}╰{C_RESET} "
                         f"{dc_color}{d_lbl}{C_RESET}"
-                        f"  {C_GRAY}{format_number(dcompleted)}"
-                        f"/{format_number(dplanned)}"
-                        f" ({dpct_plan:.0f}%){C_RESET}"
-                    )
-                    lines.append(_box_row(d_line, pw))
+                        f"  {C_SILVER}{_abbrev_num(dcompleted)}"
+                        f"/{_abbrev_num(dplanned)}"
+                        f" ({dpct_plan:.0f}%){C_RESET}",
+                        pw,
+                    ))
 
     lines.append(_box_bot(pw))
     return lines
@@ -525,33 +628,40 @@ def _render_eta_panel(state, term_width):
 
     streams    = state.get("active_streams", [])
     total_fps  = sum(s.get("live_fps", 0.0) for s in streams)
+    live_sps   = state.get("live_sps", 0.0)
     n_active   = max(1, state.get("n_active_streams", 0))
     vid_idx    = state.get("current_video_index", 0)
     total_vids = state.get("total_videos", 0)
     output_fmt = state.get("output_format", "BMP")
     fc         = C_GREEN if output_fmt == "BMP" else C_YELLOW
 
+    fps_str = f"{total_fps:.1f}"
+    sps_str = f"{live_sps:.1f}" if live_sps > 0 else "—"
+
     lines.append(_box_row(
-        f"{C_GRAY}Videos:{C_RESET} {vid_idx}/{total_vids}"
-        f"   {C_GRAY}Streams:{C_RESET} {C_BOLD}{n_active}{C_RESET}"
-        f"   {C_GRAY}FPS:{C_RESET} {C_BOLD}{total_fps:.1f}{C_RESET}"
-        f"   {C_GRAY}Output:{C_RESET} {fc}{C_BOLD}{output_fmt}{C_RESET}",
+        f"{C_SILVER}Videos:{C_RESET} {vid_idx}/{total_vids}"
+        f"   {C_SILVER}Streams:{C_RESET} {C_BOLD}{n_active}{C_RESET} active"
+        f"   {C_SILVER}FPS:{C_RESET} {C_BOLD}{fps_str}{C_RESET}"
+        f"   {C_GREEN}SPS:{C_RESET} {C_BOLD}{sps_str}{C_RESET}"
+        f"   {C_SILVER}Output:{C_RESET} {fc}{C_BOLD}{output_fmt}{C_RESET}",
         pw,
     ))
 
     # ETA per category
-    eta_dict = state.get("eta", {})
-    cats     = state.get("categories", [])
+    eta_dict  = state.get("eta", {})
+    cats      = state.get("categories", [])
     eta_parts = []
     for i, cat in enumerate(cats):
         color = _category_color(cat, i)
         eta_v = eta_dict.get(cat, "—")
         eta_s = format_time(eta_v) if isinstance(eta_v, (int, float)) and eta_v > 0 else "—"
-        eta_parts.append(f"{color}{_category_display_name(cat)}{C_RESET}{C_GRAY}:{C_RESET}{eta_s}")
+        eta_parts.append(
+            f"{color}{_category_display_name(cat)}{C_RESET}{C_SILVER}:{C_RESET}{eta_s}"
+        )
 
     if eta_parts:
         lines.append(_box_row(
-            f"{C_GRAY}ETA:  {C_RESET}" + "  │  ".join(eta_parts),
+            f"{C_SILVER}ETA:  {C_RESET}" + "  │  ".join(eta_parts),
             pw,
         ))
 
@@ -561,11 +671,16 @@ def _render_eta_panel(state, term_width):
     if isinstance(eta_total, (int, float)) and eta_total > 0 and ps:
         planned   = ps.get("planned_total", 0)
         completed = ps.get("completed_total", 0)
-        remaining = max(0, planned - completed)
+        in_flight = sum(
+            s.get("patches_created", 0)
+            for s in state.get("active_streams", [])
+            if s.get("state") == "running"
+        )
+        remaining = max(0, planned - completed - in_flight)
         lines.append(_box_row(
-            f"{C_GRAY}Global ETA (plan):{C_RESET}  "
-            f"{C_BOLD}{format_time(eta_total)}{C_RESET}  "
-            f"{C_GRAY}remaining:{C_RESET} {format_number(remaining)} patches",
+            f"{C_SILVER}Global ETA:{C_RESET}  "
+            f"{C_BOLD}{format_time(eta_total)}{C_RESET}"
+            f"  {C_SILVER}remaining:{C_RESET} {C_BOLD}{_abbrev_num(remaining)}{C_RESET} patches",
             pw,
         ))
 
@@ -579,11 +694,10 @@ def _render_title(term_width):
     pw = min(term_width, 100)
     title = (
         f"{C_BOLD}DATASET GENERATOR V2{C_RESET}"
-        f"  {C_GRAY}·{C_RESET}  Multi-Stream"
-        f"  {C_GRAY}·{C_RESET}  {C_GREEN}libplacebo{C_RESET}"
-        f"  {C_GRAY}·{C_RESET}  {C_YELLOW}BMP{C_RESET}/{C_CYAN}PNG{C_RESET}"
+        f"  {C_SILVER}·{C_RESET}  Multi-Stream"
+        f"  {C_SILVER}·{C_RESET}  {C_GREEN}libplacebo{C_RESET}"
+        f"  {C_SILVER}·{C_RESET}  {C_YELLOW}BMP{C_RESET}/{C_CYAN}PNG{C_RESET}"
     )
-    # Centre inside box
     inner     = pw - 2
     title_vis = get_visible_len(title)
     left_pad  = max(0, (inner - title_vis) // 2)
@@ -599,31 +713,48 @@ def _render_title(term_width):
 
 def draw_dataset_ui(state):
     """
-    Draw the complete dataset-generation dashboard.
+    Draw (or redraw in-place) the complete dataset-generation dashboard.
 
-    Called from ``_update_terminal_ui()`` (heartbeat thread) and from
-    ``run()`` once right before execution starts.  **Must not be called**
-    during Phases 1–3 (scan / distribution / planning) because the plan does
-    not yet exist and the GUI cannot show accurate planned-vs-completed data.
+    Uses cursor-homing (ANSI_HOME) instead of a full-screen clear to avoid
+    visible flicker.  Each rendered line is right-padded with spaces to
+    overwrite the previous content at that position.  After the last rendered
+    line, \033[J erases any stale rows from a taller previous render.
 
-    All panels obey the current terminal width: no line ever escapes its box.
+    Must only be called AFTER Phase 3 (plan creation), because before that
+    the plan does not exist and the panels cannot show accurate data.
 
     Args:
         state: ``ui_state`` dict from DatasetGeneratorV2UHD.
     """
-    term_width, _ = shutil.get_terminal_size((100, 50))
-    # Never render wider than the actual terminal
+    global _prev_line_count
+
+    term_width, _term_height = shutil.get_terminal_size((100, 50))
     term_width = max(40, term_width)
 
     out = []
     out.extend(_render_title(term_width))
     out.extend(_render_gpu_panels(state.get("active_streams", []), term_width))
+    out.extend(_render_current_film_panel(state, term_width))
     out.extend(_render_write_queue_panel(state, term_width))
     out.extend(_render_plan_summary_panel(state, term_width))
     out.extend(_render_production_panel(state, term_width))
     out.extend(_render_eta_panel(state, term_width))
 
-    sys.stdout.write(ANSI_CLEAR + ANSI_HOME)
-    sys.stdout.write("\n".join(out))
-    sys.stdout.write("\n")
+    # ── Flicker-free write ────────────────────────────────────────────────
+    # Move cursor to top-left (no clear).  Each line is padded to term_width
+    # so it fully overwrites the previous content at that position.
+    buf = [ANSI_HOME]
+    for line in out:
+        vis_len = get_visible_len(line)
+        pad = max(0, term_width - vis_len)
+        buf.append(line + ' ' * pad)
+
+    # Erase stale lines from a taller previous render.
+    current_lines = len(out)
+    for _ in range(max(0, _prev_line_count - current_lines)):
+        buf.append(' ' * term_width)
+    _prev_line_count = current_lines
+
+    sys.stdout.write('\n'.join(buf))
+    sys.stdout.write('\n')
     sys.stdout.flush()

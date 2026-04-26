@@ -12,7 +12,8 @@ import sys
 
 # ANSI Color Codes
 C_GREEN = "\033[92m"
-C_GRAY = "\033[90m"
+C_GRAY = "\033[90m"      # dark gray  – purely decorative (e.g. unfilled bar ░)
+C_SILVER = "\033[37m"    # standard gray – readable secondary labels on dark BGs
 C_RESET = "\033[0m"
 C_BOLD = "\033[1m"
 C_CYAN = "\033[96m"

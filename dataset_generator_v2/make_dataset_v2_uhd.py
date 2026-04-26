@@ -21,6 +21,7 @@ generator_config_active.json → a read-only snapshot given to AI agents for rev
 """
 
 import hashlib
+import copy
 import os
 import sys
 import json
@@ -1589,7 +1590,12 @@ class DatasetGeneratorV2UHD:
                     })
             self.ui_state["current_plan_items"] = current_items
 
-            clear_screen()
+            # ── Global live SPS (patches per second) ─────────────────────
+            elapsed = time.time() - self.start_time
+            patches_done = self.ui_state.get('patches_created_total', 0)
+            self.ui_state['live_sps'] = (patches_done / elapsed) if elapsed > 0 else 0.0
+
+            # Draw without full-screen clear to avoid flicker (ANSI_HOME only).
             draw_dataset_ui(self.ui_state)
 
         except Exception as e:
@@ -2933,15 +2939,20 @@ class DatasetGeneratorV2UHD:
                     "libplacebo" if self._vulkan_device_pool and self._vulkan_device_pool[0] is not None
                     else "CPU/Vulkan-SW"
                 ),
-                "degrade_counts":   {},   # {cat: {template_name: count}}
-                "current_video_idx": -1,
-                "n_videos_done":    0,
+                "degrade_counts":       {},   # {cat: {template_name: count}}
+                "patches_per_category": {},   # {cat: count} live in-flight
+                "current_video_idx":    -1,
+                "n_videos_done":        0,
             })
 
         streams_lock = threading.Lock()
+        # Queue capacity: a reasonable upper bound for the async write queue.
+        _wq_cap = int(self.config.get("processing", {}).get("write_queue_max", 500))
         self.ui_state["active_streams"] = stream_states
         self.ui_state["n_active_streams"] = 0
         self.ui_state["n_gpus_available"] = n_vk_slots
+        self.ui_state["total_streams"]    = n_streams
+        self.ui_state["wq_capacity"]      = _wq_cap
 
         # ── Stream worker ────────────────────────────────────────────────────
         def stream_worker(stream_id: int) -> None:
@@ -3047,17 +3058,19 @@ class DatasetGeneratorV2UHD:
                                          raw_frames_piped, timing=None):
                             elapsed = time.monotonic() - _t0
                             live_fps = raw_frames_piped / elapsed if elapsed > 0 else 0.0
+                            live_sps = sum(patches_so_far.values()) / elapsed if elapsed > 0 else 0.0
                             with streams_lock:
                                 ss = stream_states[sid]
                                 ss["frames_processed"] = raw_frames_piped
                                 ss["patches_created"] = sum(patches_so_far.values())
+                                ss["patches_per_category"] = dict(patches_so_far)
                                 ss["live_fps"] = live_fps
+                                ss["live_sps"] = live_sps
                                 if timing:
                                     ss["write_queue_depth"] = timing.get("q_size_last", 0)
                                     dc = timing.get("degrade_counts")
                                     if dc:
                                         # Deep-copy so the dict is not mutated externally.
-                                        import copy
                                         ss["degrade_counts"] = copy.deepcopy(dc)
                                 # Aggregate cross-stream patch total for global display.
                                 agg = prior_total + sum(
