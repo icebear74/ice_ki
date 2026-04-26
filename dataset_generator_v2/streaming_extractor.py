@@ -75,7 +75,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from enum import Enum
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set, Tuple
@@ -269,12 +269,9 @@ class StreamRingBuffer:
             frame_size if frame_size is not None else width * height * 3 // 2
         )
         self._bytes_limit: int = bytes_limit
-        # OrderedDict preserves insertion order so `next(iter(d))` is always the
-        # oldest (smallest-index) entry without an O(n) min() scan.
-        import collections as _collections
-        self._frames: "_collections.OrderedDict[int, np.ndarray]" = (
-            _collections.OrderedDict()
-        )
+        # OrderedDict preserves insertion order so popitem(last=False) evicts
+        # the oldest (first inserted) entry in O(1) without scanning all keys.
+        self._frames: "OrderedDict[int, np.ndarray]" = OrderedDict()
         self._bytes_used: int = 0
 
     # -- read-only properties ------------------------------------------------

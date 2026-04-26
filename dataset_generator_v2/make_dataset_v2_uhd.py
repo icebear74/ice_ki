@@ -2032,7 +2032,7 @@ class DatasetGeneratorV2UHD:
         _video_stem = Path(video_path).stem[-40:]
         _stream_states: List[dict] = []
         for _wi in range(len(groups)):
-            _gpu_idx = _gpu_pool[_wi % _n_gpus] if _gpu_pool else None
+            _gpu_idx = _gpu_pool[_wi % _n_gpus] if _n_gpus > 0 else None
             _stream_states.append({
                 "stream_id": _wi,
                 "video_name": _video_stem,
@@ -2087,7 +2087,7 @@ class DatasetGeneratorV2UHD:
         def _run_worker(worker_idx: int, group: List[Tuple[int, str, str]], wcfg: dict) -> None:
             # Round-robin GPU assignment for vulkan_device (libplacebo path).
             # None when running in CPU-only mode (no GPUs detected).
-            _gpu_idx = _gpu_pool[worker_idx % _n_gpus] if _gpu_pool else None
+            _gpu_idx = _gpu_pool[worker_idx % _n_gpus] if _n_gpus > 0 else None
             # Mark this stream as running.
             with patches_lock:
                 if worker_idx < len(self.ui_state["active_streams"]):

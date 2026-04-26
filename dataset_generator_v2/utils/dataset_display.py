@@ -313,7 +313,7 @@ def _draw_active_streams_section(state, width):
 
     for s in streams:
         sid     = s.get('stream_id', 0)
-        gidx    = s.get('gpu_index', 0)
+        gidx    = s.get('gpu_index', -1)
         vname   = s.get('video_name', '?')[:35]
         st      = s.get('state', 'queued')
         frames  = s.get('frames_processed', 0)
