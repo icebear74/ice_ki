@@ -372,7 +372,31 @@ def _get_ffmpeg_filters() -> str:
     return _ffmpeg_filters_output
 
 
-def _discover_vulkan_devices() -> List[Tuple[int, str]]:
+# Strings found in Vulkan device descriptions that identify software renderers.
+# Used by is_software_vulkan_device() to warn when no real GPU is available.
+_SOFTWARE_VULKAN_KEYWORDS: tuple = (
+    "llvmpipe",
+    "lavapipe",
+    "swiftshader",
+    "swrast",
+    "software",
+    "mesa",
+)
+
+
+def is_software_vulkan_device(description: str) -> bool:
+    """Return True when *description* looks like a software Vulkan renderer.
+
+    Checks for well-known software-renderer names (llvmpipe, lavapipe,
+    SwiftShader, swrast, Mesa) in the device description string that FFmpeg
+    reports during Vulkan device enumeration.  A ``True`` result means the
+    device is not a real GPU and HDR→SDR tone-mapping will run on the CPU.
+    """
+    desc_lower = description.lower()
+    return any(kw in desc_lower for kw in _SOFTWARE_VULKAN_KEYWORDS)
+
+
+
     """Return ``[(vulkan_index, description), …]`` by asking FFmpeg directly.
 
     Uses ``ffmpeg -init_hw_device vulkan=probe_list:list`` to enumerate all
@@ -2276,6 +2300,10 @@ def extract_and_save_streaming_distributed(
             if item is None:
                 _process_queue.task_done()
                 break
+            # Track how many workers are currently busy.
+            with _patches_lock:
+                _active_workers_ctr[0] += 1
+                _t_phases["n_workers_active"] = _active_workers_ctr[0]
             try:
                 center, window_frames, cat_fmt_list = item
                 ts = center / fps
@@ -2364,12 +2392,16 @@ def extract_and_save_streaming_distributed(
                 if logger:
                     logger.warning(f"[processing_worker] Error: {_exc!r}")
             finally:
+                with _patches_lock:
+                    _active_workers_ctr[0] = max(0, _active_workers_ctr[0] - 1)
+                    _t_phases["n_workers_active"] = _active_workers_ctr[0]
                 _process_queue.task_done()
 
     # Processing workers: image work (crop, degradation, PNG encode) is
     # CPU-bound.  Scale with available CPU cores, capped at 8 to avoid
     # excessive memory pressure from concurrent 7-frame window copies.
     _n_processing_workers = min(8, os.cpu_count() or 4)
+    _t_phases["n_workers_total"] = _n_processing_workers
     _processing_threads = [
         threading.Thread(target=_processing_worker, daemon=True)
         for _ in range(_n_processing_workers)
@@ -2516,16 +2548,23 @@ def extract_and_save_streaming_distributed(
     # written by processing worker threads and read by the main thread.
     _patches_lock = threading.Lock()
 
+    # Active-worker counter: how many processing workers are currently busy.
+    # Updated inside _processing_worker under _patches_lock.
+    _active_workers_ctr: List[int] = [0]
+
     # --- Per-video timing accumulators (mutated inside _consume_raw_frame) ---
     _t_phases: dict = {
-        "n_frames_buf": 0,   # total raw frames processed through buffer
-        "n_centers":    0,   # centers fully evaluated (= frames_examined, incl. black)
-        "t_buf_s":      0.0, # total time: yuv→bgr convert + copy + buffer insert/evict
-        "t_black_s":    0.0, # total time: black-frame check (per center)
-        "t_patch_s":    0.0, # total time: create_patch_pair calls (per center×format)
-        "t_write_s":    0.0, # total time: write_queue.put (per patch)
-        "n_patches":    0,   # patches enqueued for writing
-        "q_size_last":  0,   # last observed write-queue depth
+        "n_frames_buf":      0,   # total raw frames processed through buffer
+        "n_centers":         0,   # centers fully evaluated (= frames_examined, incl. black)
+        "t_buf_s":           0.0, # total time: yuv→bgr convert + copy + buffer insert/evict
+        "t_black_s":         0.0, # total time: black-frame check (per center)
+        "t_patch_s":         0.0, # total time: create_patch_pair calls (per center×format)
+        "t_write_s":         0.0, # total time: write_queue.put (per patch)
+        "n_patches":         0,   # patches enqueued for writing
+        "q_size_last":       0,   # last observed write-queue depth
+        "proc_queue_size":   0,   # last observed processing-queue depth
+        "n_workers_active":  0,   # processing workers currently busy
+        "n_workers_total":   0,   # total processing-worker count
         # Degradation-template counters: {category: {template_name: count}}
         # Written every time a patch is enqueued so the GUI can show live
         # per-degradation-template statistics without post-processing.
@@ -2668,6 +2707,7 @@ def extract_and_save_streaming_distributed(
                     _process_queue.put((center, window, center_map[center]))
                     frames_examined += 1
                     _t_phases["n_centers"] += 1
+                    _t_phases["proc_queue_size"] = _process_queue.qsize()
 
                     # Periodic timing debug log (every 50 centres enqueued).
                     if _t_phases["n_centers"] >= _next_timing_log[0]:
@@ -2752,10 +2792,13 @@ def extract_and_save_streaming_distributed(
                 if _elapsed > 0:
                     _fps = _actual_frame / _elapsed
                     _sps_actual = frames_examined / _elapsed
+                    _pq_size = _process_queue.qsize()
+                    _t_phases["proc_queue_size"] = _pq_size
                     _log(
                         f"  📊 raw {_actual_frame:>5}/{last_needed + 1}  "
                         f"fps {_fps:>6.1f}  SPS {_sps_actual:>6.2f}  "
-                        f"(scenes: {frames_examined}  pq:{_process_queue.qsize()})"
+                        f"(scenes: {frames_examined}  pq:{_pq_size}"
+                        f"  workers:{_active_workers_ctr[0]}/{_n_processing_workers})"
                     )
 
     finally:
