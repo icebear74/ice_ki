@@ -1375,6 +1375,14 @@ def sample_degradation_template_params(
     return params if params else None
 
 
+# Keys that belong to the post-stack color/intensity adjustment stage.
+# Centralised here so both _apply_degrade_template_poststack and any future
+# caller that needs to check for active color stages use the same definition.
+_COLOR_ADJUSTMENT_KEYS: Tuple[str, ...] = (
+    "contrast", "brightness", "gamma", "black_lift"
+)
+
+
 def apply_degradation_template_params(
     frame: np.ndarray,
     params: dict,
@@ -1445,8 +1453,15 @@ def _apply_degrade_template_prestack(
         params: Dict produced by :func:`sample_degradation_template_params`.
 
     Returns:
-        Degraded frame as uint8 numpy array.  Returns *frame* unchanged when
-        no pre-stack stage is active (no unnecessary copy is made).
+        Degraded frame as uint8 numpy array.
+
+    .. note::
+        When no pre-stack stage is active the function returns *frame* directly
+        (no copy).  This is safe inside :func:`create_patch_pair` because
+        *frame* is always the result of a ``cv2.resize`` call (which allocates
+        a fresh array), so the caller never holds an alias to the original
+        source data.  If you call this function outside of that context and need
+        a guaranteed independent copy, copy the input beforehand.
     """
     result = frame  # avoid upfront copy – each active stage returns a new array
 
@@ -1531,7 +1546,7 @@ def _apply_degrade_template_poststack(
     """
     sat = params.get("saturation", 1.0)
     has_sat = float(sat) != 1.0
-    has_color = any(k in params for k in ("contrast", "brightness", "gamma", "black_lift"))
+    has_color = any(k in params for k in _COLOR_ADJUSTMENT_KEYS)
 
     if not has_sat and not has_color:
         return lr_stacked
