@@ -453,18 +453,27 @@ def map_cuda_to_vulkan_device(cuda_index: int) -> Optional[int]:
 
     Searches the FFmpeg Vulkan device list for a description that contains the
     GPU name reported by nvidia-smi for *cuda_index*.  Returns the Vulkan index
-    when a unique match is found, or ``None`` when:
+    when a unique match is found.
 
-    * FFmpeg reports no Vulkan devices.
-    * The CUDA GPU name cannot be resolved.
-    * The name does not match any Vulkan device (different drivers / ordering).
+    When name-based matching fails (no Vulkan devices found, GPU name not in
+    any Vulkan description, or multiple ambiguous matches), the function falls
+    back to a **positional best-effort**: CUDA device *N* is assumed to
+    correspond to Vulkan device *N*.  The caller should validate the result via
+    :func:`libplacebo_available` before use — if the device does not actually
+    support Vulkan/libplacebo that probe will return ``False`` and the stream
+    will fall back to CPU mode automatically.
 
-    Callers should treat ``None`` as "let FFmpeg pick any device" rather than
-    as a hard failure.
+    ``None`` is returned only when there is genuinely a single Vulkan device
+    already covered by the ``len == 1`` shortcut and an unexpected code path is
+    reached, or when all other strategies have been exhausted.
     """
     vulkan_devices = _discover_vulkan_devices()
     if not vulkan_devices:
-        return None
+        # Vulkan enumeration was empty or failed (e.g. FFmpeg output format did
+        # not match the parser).  Use the CUDA index as a positional best-effort
+        # so that different streams target different GPU ordinals.  The
+        # libplacebo_available() per-device probe will validate before first use.
+        return cuda_index
 
     # If there is only one Vulkan device, that is the only possible mapping
     # regardless of the CUDA index.
@@ -490,8 +499,8 @@ def map_cuda_to_vulkan_device(cuda_index: int) -> Optional[int]:
         pass
 
     if not cuda_name:
-        # Cannot resolve name — return None (caller will use None = FFmpeg choice).
-        return None
+        # Cannot resolve name — fall back to positional mapping.
+        return cuda_index
 
     # Match by checking whether the CUDA GPU name is a substring of the Vulkan
     # device description (both report e.g. "NVIDIA GeForce RTX 4090").
@@ -508,11 +517,10 @@ def map_cuda_to_vulkan_device(cuda_index: int) -> Optional[int]:
     # Multiple or no matches — fall back to positional mapping as last resort.
     # This is only reached when the Vulkan description does not contain the
     # nvidia-smi GPU name (unusual driver / vendor combination).
-    # Log a warning so it is visible during debugging.
-    _max_vk = vulkan_devices[-1][0] if vulkan_devices else 0
-    if cuda_index <= _max_vk:
-        return cuda_index  # positional best-effort
-    return None
+    # Unconditionally use cuda_index so that each CUDA device targets a
+    # distinct Vulkan ordinal even when the Vulkan list is shorter than the
+    # CUDA device count.
+    return cuda_index
 
 
 def cuda_available() -> bool:
