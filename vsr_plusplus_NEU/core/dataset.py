@@ -24,19 +24,30 @@ VSRDataset - Video Super-Resolution Dataset Loader
 # =============================================================================
 
 # =============================================================================
-# TODO – BMP OUTPUT FORMAT SUPPORT
+# TODO – DATASET FILE FORMAT MAY CHANGE (intentional reminder for trainer rework)
 # =============================================================================
-# The dataset generator now supports BMP as an alternative output format
-# (OutputFormat.BMP in streaming_extractor.py).  When enabled via
-# generator_config.json ("output_format": "bmp"), patches are written as
-# uncompressed .bmp files instead of .png for maximum write throughput.
+# The dataset generator currently writes .png patches (PNG compression level 1).
+# A future update may switch the output format, for example:
+#   • BMP  – uncompressed, fastest write/read, directly viewable on Windows
+#   • PNG  – low-compression (level 0–1), still Windows-viewable
 #
-# This loader currently hard-codes ".png" in several filename patterns and
-# glob expressions.  Before using BMP-format datasets for training, update:
-#   • _collect_png_files() (once added) to also match "*.bmp"
-#   • Any hard-coded ".png" extension checks in __getitem__ / path assembly
-#   • The index cache key to include the file extension so that a dataset
-#     re-generated with a different format invalidates the old cache
+# The target format is configurable via generator_config.json:
+#   "output_format": "bmp"   →  .bmp files (preferred fast default candidate)
+#   "output_format": "png"   →  .png files (current default, compatibility mode)
+#
+# IMPORTANT for future loader migration:
+#   • Do NOT hard-code the extension ".png" in any new loader code.
+#   • Use glob patterns like "**/*.png" OR "**/*.bmp", or make the extension
+#     configurable so the loader can handle whichever format the generator used.
+#   • The file stem / naming convention (video_stem + timestamp) will remain
+#     stable even if the extension changes — only the suffix differs.
+#   • Update the index cache key to include the file extension so that a dataset
+#     re-generated with a different format invalidates the old cache correctly.
+#   • Any _collect_png_files() helper (see LOADER_UPDATE_REQUIRED.md) must be
+#     extended to also match "*.bmp" before BMP datasets can be used for training.
+#
+# This TODO is an intentional reminder for the later trainer rework.
+# See also: LOADER_UPDATE_REQUIRED.md and the pending bucket-subdir migration above.
 # =============================================================================
 
 Loads VSR training data with new dataset structure:

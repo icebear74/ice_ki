@@ -1987,7 +1987,8 @@ class DatasetGeneratorV2UHD:
         _fmt_str = self.config.get("output_format", "png").lower()
         output_format = OutputFormat.BMP if _fmt_str == "bmp" else OutputFormat.PNG
 
-        _n_gpus = len(self._available_gpu_indices)
+        _n_gpus = max(len(self._available_gpu_indices), 1)
+        _gpu_pool = self._available_gpu_indices if self._available_gpu_indices else [0]
 
         # Split assignments into N temporally-ordered chunks.
         # Temporal ordering ensures each worker's FFmpeg process seeks to a
@@ -2020,7 +2021,7 @@ class DatasetGeneratorV2UHD:
         _video_stem = Path(video_path).stem[-40:]
         _stream_states: List[dict] = []
         for _wi in range(len(groups)):
-            _gpu_idx = self._available_gpu_indices[_wi % _n_gpus]
+            _gpu_idx = _gpu_pool[_wi % _n_gpus]
             _stream_states.append({
                 "stream_id": _wi,
                 "video_name": _video_stem,
@@ -2071,7 +2072,7 @@ class DatasetGeneratorV2UHD:
 
         def _run_worker(worker_idx: int, group: List[Tuple[int, str, str]], wcfg: dict) -> None:
             # Round-robin GPU assignment for vulkan_device (libplacebo CPU path).
-            _gpu_idx = self._available_gpu_indices[worker_idx % _n_gpus]
+            _gpu_idx = _gpu_pool[worker_idx % _n_gpus]
             # Mark this stream as running.
             with patches_lock:
                 if worker_idx < len(self.ui_state["active_streams"]):
@@ -2322,9 +2323,9 @@ class DatasetGeneratorV2UHD:
                 center_snap_seconds=self.config.get("processing", {}).get("center_snap_seconds", 1.0),
                 stream_width=STREAM_OPT_WIDTH,
                 stream_height=STREAM_OPT_HEIGHT,
-                cuda_device=self._available_gpu_indices[0],
+                cuda_device=self._available_gpu_indices[0] if self._available_gpu_indices else 0,
                 color_trc=color_trc,
-                vulkan_device=self._available_gpu_indices[0],
+                vulkan_device=self._available_gpu_indices[0] if self._available_gpu_indices else None,
                 output_format=output_format,
             )
 

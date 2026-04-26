@@ -56,6 +56,10 @@ def draw_dataset_ui(state):
             - avg_time_per_scene: float
             - categories: list of category keys (dynamic, from config)
             - format_sizes: list of size keys (dynamic, from config)
+            - active_streams: list of per-worker dicts (stream_id, video_name,
+              gpu_index, gpu_name, state, frames_processed, patches_created,
+              write_queue_depth) — populated during parallel extraction
+            - n_active_streams: int — quick count of running streams
     """
     # Get terminal size
     term_width, term_height = shutil.get_terminal_size((100, 50))
@@ -77,6 +81,9 @@ def draw_dataset_ui(state):
     
     # Statistics and ETA
     _draw_statistics_and_eta(state, term_width)
+
+    # Active Streams (multi-GPU) — only when parallel workers are active
+    _draw_active_streams_section(state, term_width)
 
     # Timing Breakdown (only when data is available)
     _draw_timing_breakdown(state, term_width)
@@ -280,6 +287,57 @@ def _draw_statistics_and_eta(state, width):
         total_str = str(total_eta)
     print(f"  {C_WHITE}{C_BOLD}{'GESAMT':10s}: {total_str:>15s}{C_RESET}")
     
+    print()
+
+
+def _draw_active_streams_section(state, width):
+    """Draw the per-stream / per-GPU status table for parallel extraction."""
+    streams = state.get('active_streams', [])
+    if not streams:
+        return  # nothing to show when no parallel workers are active
+
+    _state_color = {
+        "queued":  C_WHITE,
+        "running": C_GREEN,
+        "done":    C_CYAN,
+        "error":   C_RED,
+    }
+
+    print_section_header("AKTIVE STREAMS (Multi-GPU)")
+    header = (
+        f"  {'St':>2}  {'GPU':>3}  {'Name':<35}  {'State':>7}"
+        f"  {'Frames':>8}  {'Patches':>7}  {'Queue':>5}"
+    )
+    print(f"{C_GRAY}{header}{C_RESET}")
+    print(f"  {'─' * (width - 4)}")
+
+    for s in streams:
+        sid     = s.get('stream_id', 0)
+        gidx    = s.get('gpu_index', 0)
+        vname   = s.get('video_name', '?')[:35]
+        st      = s.get('state', 'queued')
+        frames  = s.get('frames_processed', 0)
+        patches = s.get('patches_created', 0)
+        qdepth  = s.get('write_queue_depth', 0)
+        scol    = _state_color.get(st, C_WHITE)
+        # Queue warning colour: yellow when > 128, red when > 200 (maxsize=256)
+        qcol    = C_RED if qdepth > 200 else (C_YELLOW if qdepth > 128 else C_GREEN)
+        print(
+            f"  {C_BOLD}{sid:>2}{C_RESET}  "
+            f"{C_MAGENTA}{gidx:>3}{C_RESET}  "
+            f"{C_CYAN}{vname:<35}{C_RESET}  "
+            f"{scol}{st:>7}{C_RESET}  "
+            f"{C_GREEN}{frames:>8,d}{C_RESET}  "
+            f"{C_YELLOW}{patches:>7,d}{C_RESET}  "
+            f"{qcol}{qdepth:>5d}{C_RESET}"
+        )
+
+    n_running = state.get('n_active_streams', 0)
+    total     = len(streams)
+    print(
+        f"\n  {C_BOLD}{n_running}/{total}{C_RESET} Streams aktiv  "
+        f"{C_GRAY}(round-robin GPU-Zuweisung){C_RESET}"
+    )
     print()
 
 
