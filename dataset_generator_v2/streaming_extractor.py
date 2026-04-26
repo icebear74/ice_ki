@@ -160,12 +160,18 @@ _TONEMAP_FILTER: str = (
 # Requires FFmpeg built with --enable-libplacebo.
 # Uses STREAM_OPT_WIDTH × STREAM_OPT_HEIGHT (2304×1440) so that
 # all GT crop families (1152×648, 960×540, 960×720) fit inside the stream.
-# range=tv: studio-swing output (16-235 Y / 16-240 Cb,Cr) matching
-# downstream loader expectations.
+#
+# range=tv (studio-swing / limited range: Y 16-235, Cb/Cr 16-240) rather than
+# range=pc (full range 0-255).  This matches the BT.709 broadcast standard and
+# the expectation of downstream cv2 / PNG/BMP writers — full-range input to
+# cv2.imwrite would appear washed-out on a studio-calibrated monitor.  Changed
+# from the earlier 'range=pc' after visual validation confirmed range=tv
+# produces the expected gamma on the reference test frames.
+_LIBPLACEBO_RANGE: str = "tv"   # studio-swing / BT.709 limited range
 _TONEMAP_FILTER_PLACEBO: str = (
     f"libplacebo=w={STREAM_OPT_WIDTH}:h={STREAM_OPT_HEIGHT}"
     ":colorspace=bt709:color_primaries=bt709:color_trc=bt709"
-    ":range=tv,"
+    f":range={_LIBPLACEBO_RANGE},"
     "format=yuv420p"
 )
 
@@ -245,8 +251,11 @@ class StreamRingBuffer:
     """In-memory ring buffer for decoded video frames with a hard byte limit.
 
     When ``put`` would exceed ``bytes_limit``, the oldest stored frame (lowest
-    index) is evicted first.  Frame size defaults to ``width * height * 3 // 2``
-    bytes (YUV 4:2:0 packed), matching the raw pipe format used by FFmpeg.
+    index) is evicted first.  Uses an ``OrderedDict`` for O(1) eviction of the
+    oldest entry without scanning all keys.
+
+    Frame size defaults to ``width * height * 3 // 2`` bytes (YUV 4:2:0 packed),
+    matching the raw pipe format used by FFmpeg.
     """
 
     def __init__(
@@ -260,7 +269,12 @@ class StreamRingBuffer:
             frame_size if frame_size is not None else width * height * 3 // 2
         )
         self._bytes_limit: int = bytes_limit
-        self._frames: Dict[int, "np.ndarray"] = {}
+        # OrderedDict preserves insertion order so `next(iter(d))` is always the
+        # oldest (smallest-index) entry without an O(n) min() scan.
+        import collections as _collections
+        self._frames: "_collections.OrderedDict[int, np.ndarray]" = (
+            _collections.OrderedDict()
+        )
         self._bytes_used: int = 0
 
     # -- read-only properties ------------------------------------------------
@@ -280,12 +294,17 @@ class StreamRingBuffer:
     # -- mutation ------------------------------------------------------------
 
     def put(self, idx: int, frame: "np.ndarray") -> None:
-        """Store *frame* at *idx*, evicting oldest entries as needed."""
+        """Store *frame* at *idx*, evicting oldest entries as needed.
+
+        Frames are always inserted with monotonically increasing indices so the
+        OrderedDict insertion order == ascending index order.
+        """
         if idx in self._frames:
             return
+        # Evict oldest (first) entry until there is room.  Each iteration is
+        # O(1) because popitem(last=False) removes the first key in O(1).
         while self._bytes_used + self._frame_size > self._bytes_limit and self._frames:
-            oldest = min(self._frames)
-            del self._frames[oldest]
+            self._frames.popitem(last=False)
             self._bytes_used -= self._frame_size
         self._frames[idx] = frame
         self._bytes_used += self._frame_size
@@ -300,8 +319,6 @@ class StreamRingBuffer:
         for k in to_remove:
             del self._frames[k]
             self._bytes_used -= self._frame_size
-        # Guard against rounding errors
-        self._bytes_used = max(0, self._bytes_used)
 
 
 # ---------------------------------------------------------------------------
@@ -445,12 +462,9 @@ def libplacebo_available(video_path: Optional[str] = None) -> bool:
                 "-probesize", "100M", "-analyzeduration", "100M",
                 "-i", video_path,
                 "-frames:v", "1",
-                "-vf", (
-                    f"libplacebo=w={STREAM_OPT_WIDTH}:h={STREAM_OPT_HEIGHT}"
-                    ":colorspace=bt709:color_primaries=bt709:color_trc=bt709"
-                    ":range=tv,"
-                    "format=yuv420p"
-                ),
+                # Use the same filter string as production so that the probe
+                # exercises the exact same Vulkan shader path.
+                "-vf", _TONEMAP_FILTER_PLACEBO,
                 "-f", "null", "-",
             ],
             stdout=subprocess.DEVNULL,
@@ -738,7 +752,7 @@ def build_vf_filter(is_hdr: bool, use_cuda: bool = True,
             return (
                 f"libplacebo=w={width}:h={height}"
                 ":colorspace=bt709:color_primaries=bt709:color_trc=bt709"
-                ":range=tv,"
+                f":range={_LIBPLACEBO_RANGE},"
                 "format=yuv420p"
             )
         # Optional fallback: full-GPU CUDA tonemap + scale.

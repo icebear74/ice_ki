@@ -288,7 +288,15 @@ class DatasetGeneratorV2UHD:
             "eta": {},
             "live_fps": 0.0,
             "live_sps": 0.0,
-            "decode_backend": "libplacebo [Vulkan HDR→SDR] — GPU assignment: round-robin",
+            # Decode-backend label: reflect whether GPUs are available for Vulkan.
+            # libplacebo is the primary HDR path regardless of CUDA availability;
+            # GPU assignment uses round-robin across detected Vulkan devices.
+            "decode_backend": (
+                f"libplacebo [Vulkan HDR→SDR] — "
+                f"{len(self._available_gpu_indices)} GPU(s) round-robin"
+                if self._available_gpu_indices
+                else "libplacebo [Vulkan HDR→SDR — CPU/software fallback]"
+            ),
             "categories": list(self.category_targets.keys()),
             "format_sizes": list(next(iter(self.format_config.values()), {}).keys()),
             "format_labels": _format_labels,  # template_name → "WxH" string
@@ -1987,8 +1995,11 @@ class DatasetGeneratorV2UHD:
         _fmt_str = self.config.get("output_format", "png").lower()
         output_format = OutputFormat.BMP if _fmt_str == "bmp" else OutputFormat.PNG
 
-        _n_gpus = max(len(self._available_gpu_indices), 1)
-        _gpu_pool = self._available_gpu_indices if self._available_gpu_indices else [0]
+        # GPU pool for round-robin Vulkan device assignment (libplacebo path).
+        # When no GPUs are detected (CPU-only mode) the pool is empty and
+        # vulkan_device will be None, letting FFmpeg pick any Vulkan device.
+        _gpu_pool = self._available_gpu_indices  # may be empty for CPU-only
+        _n_gpus = len(_gpu_pool)  # 0 → CPU-only, no explicit Vulkan device
 
         # Split assignments into N temporally-ordered chunks.
         # Temporal ordering ensures each worker's FFmpeg process seeks to a
@@ -2021,12 +2032,15 @@ class DatasetGeneratorV2UHD:
         _video_stem = Path(video_path).stem[-40:]
         _stream_states: List[dict] = []
         for _wi in range(len(groups)):
-            _gpu_idx = _gpu_pool[_wi % _n_gpus]
+            _gpu_idx = _gpu_pool[_wi % _n_gpus] if _gpu_pool else None
             _stream_states.append({
                 "stream_id": _wi,
                 "video_name": _video_stem,
-                "gpu_index": _gpu_idx,
-                "gpu_name": self._available_gpu_names.get(_gpu_idx, f"GPU {_gpu_idx}"),
+                "gpu_index": _gpu_idx if _gpu_idx is not None else -1,
+                "gpu_name": (
+                    self._available_gpu_names.get(_gpu_idx, f"GPU {_gpu_idx}")
+                    if _gpu_idx is not None else "CPU (no GPU)"
+                ),
                 "state": "queued",
                 "frames_processed": 0,
                 "patches_created": 0,
@@ -2071,8 +2085,9 @@ class DatasetGeneratorV2UHD:
             return _on_progress
 
         def _run_worker(worker_idx: int, group: List[Tuple[int, str, str]], wcfg: dict) -> None:
-            # Round-robin GPU assignment for vulkan_device (libplacebo CPU path).
-            _gpu_idx = _gpu_pool[worker_idx % _n_gpus]
+            # Round-robin GPU assignment for vulkan_device (libplacebo path).
+            # None when running in CPU-only mode (no GPUs detected).
+            _gpu_idx = _gpu_pool[worker_idx % _n_gpus] if _gpu_pool else None
             # Mark this stream as running.
             with patches_lock:
                 if worker_idx < len(self.ui_state["active_streams"]):
@@ -2323,9 +2338,17 @@ class DatasetGeneratorV2UHD:
                 center_snap_seconds=self.config.get("processing", {}).get("center_snap_seconds", 1.0),
                 stream_width=STREAM_OPT_WIDTH,
                 stream_height=STREAM_OPT_HEIGHT,
-                cuda_device=self._available_gpu_indices[0] if self._available_gpu_indices else 0,
+                # Only pass cuda_device when CUDA is actually in use; passing 0
+                # in CPU-only mode would not cause harm but is misleading.
+                cuda_device=(
+                    self._available_gpu_indices[0] if self.use_cuda and self._available_gpu_indices else 0
+                ),
                 color_trc=color_trc,
-                vulkan_device=self._available_gpu_indices[0] if self._available_gpu_indices else None,
+                # vulkan_device drives the explicit Vulkan device selection for
+                # libplacebo.  None = FFmpeg picks any available Vulkan device.
+                vulkan_device=(
+                    self._available_gpu_indices[0] if self._available_gpu_indices else None
+                ),
                 output_format=output_format,
             )
 
