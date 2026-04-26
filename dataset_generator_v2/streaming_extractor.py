@@ -2287,7 +2287,7 @@ def extract_and_save_streaming_distributed(
                         _n_black_ctr[0] += 1
                     if logger:
                         logger.info(f"  ⏭ frame {center} skipped (black frame)")
-                    _process_queue.task_done()
+                    # Do NOT call task_done() here — the finally block handles it.
                     continue
 
                 _any_patch_saved = False
