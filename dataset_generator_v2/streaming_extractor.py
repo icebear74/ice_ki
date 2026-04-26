@@ -1375,6 +1375,14 @@ def sample_degradation_template_params(
     return params if params else None
 
 
+# Keys that belong to the post-stack color/intensity adjustment stage.
+# Centralised here so both _apply_degrade_template_poststack and any future
+# caller that needs to check for active color stages use the same definition.
+_COLOR_ADJUSTMENT_KEYS: Tuple[str, ...] = (
+    "contrast", "brightness", "gamma", "black_lift"
+)
+
+
 def apply_degradation_template_params(
     frame: np.ndarray,
     params: dict,
@@ -1396,6 +1404,15 @@ def apply_degradation_template_params(
 
     GT frames are never passed through this function; only LR frames are degraded.
 
+    .. note::
+        Inside :func:`create_patch_pair` the pipeline is split into a
+        **pre-stack** stage (:func:`_apply_degrade_template_prestack`, stages
+        1–4) and a **post-stack** stage
+        (:func:`_apply_degrade_template_poststack`, stages 5–6) so that the
+        global color/intensity adjustments are applied once on the stacked LR
+        image instead of once per frame.  This function remains available for
+        single-frame use cases.
+
     Args:
         frame:  Single LR BGR frame (uint8 numpy array).
         params: Dict produced by :func:`sample_degradation_template_params`.
@@ -1403,7 +1420,50 @@ def apply_degradation_template_params(
     Returns:
         Degraded frame as uint8 numpy array.
     """
-    result: np.ndarray = frame.copy()
+    result = _apply_degrade_template_prestack(frame, params)
+    result = _apply_degrade_template_poststack(result, params)
+    return result
+
+
+def _apply_degrade_template_prestack(
+    frame: np.ndarray,
+    params: dict,
+) -> np.ndarray:
+    """
+    Apply the spatially sensitive (pre-stack) degradation stages to a single LR frame.
+
+    These stages must remain per-frame because applying them to the vertically
+    stacked LR image would produce incorrect cross-frame artifacts:
+
+    * **Blur** – Gaussian kernel would smear pixel rows across frame boundaries.
+    * **Noise** – each frame must receive independent noise samples (same sigma,
+      different draws); merging into one post-stack draw would alter the
+      statistical independence between frames.
+    * **JPEG** – the DCT codec operates on 8×8 blocks; encoding the full stack
+      would generate blocking artifacts that span frame boundaries.
+    * **Chroma bleed** – horizontal Gaussian blur in YCrCb space; frame-boundary
+      rows would contaminate adjacent frames.
+
+    The global color/intensity stages (saturation, contrast, brightness, gamma,
+    black_lift) are intentionally absent here; they are applied once to the
+    stacked LR image by :func:`_apply_degrade_template_poststack`.
+
+    Args:
+        frame:  Single LR BGR frame (uint8 numpy array).
+        params: Dict produced by :func:`sample_degradation_template_params`.
+
+    Returns:
+        Degraded frame as uint8 numpy array.
+
+    .. note::
+        When no pre-stack stage is active the function returns *frame* directly
+        (no copy).  This is safe inside :func:`create_patch_pair` because
+        *frame* is always the result of a ``cv2.resize`` call (which allocates
+        a fresh array), so the caller never holds an alias to the original
+        source data.  If you call this function outside of that context and need
+        a guaranteed independent copy, copy the input beforehand.
+    """
+    result = frame  # avoid upfront copy – each active stage returns a new array
 
     # ── 1. Blur ──────────────────────────────────────────────────────────────
     if "blur_sigma" in params:
@@ -1421,7 +1481,7 @@ def apply_degradation_template_params(
             if params.get("color_noise", False):
                 noise = np.random.normal(0.0, sigma, result.shape).astype(np.float32)
             else:
-                # Luma noise: identical value across channels
+                # Luma noise: identical value replicated across channels
                 gray_noise = np.random.normal(0.0, sigma, result.shape[:2]).astype(np.float32)
                 noise = np.stack([gray_noise, gray_noise, gray_noise], axis=2)
             result = np.clip(result.astype(np.float32) + noise, 0, 255).astype(np.uint8)
@@ -1434,7 +1494,6 @@ def apply_degradation_template_params(
             result = cv2.imdecode(buf, cv2.IMREAD_COLOR)
 
     # ── 4. Chroma bleed (analog horizontal chroma smearing) ──────────────────
-    # Sampled from templates["degradation_templates"][*].chroma.chroma_bleed_*.
     # Simulates the lower chroma bandwidth of analog / early digital TV:
     # Cb and Cr channels are blurred horizontally proportional to the strength.
     bleed = float(params.get("chroma_bleed", 0.0))
@@ -1450,15 +1509,57 @@ def apply_degradation_template_params(
             np.clip(ycrcb, 0, 255).astype(np.uint8), cv2.COLOR_YCrCb2BGR
         )
 
-    # ── 5. Saturation ────────────────────────────────────────────────────────
+    return result
+
+
+def _apply_degrade_template_poststack(
+    lr_stacked: np.ndarray,
+    params: dict,
+) -> np.ndarray:
+    """
+    Apply global color/intensity degradation stages to the stacked LR image.
+
+    These stages are safe to run **once** on the stacked image (H×N × W × 3)
+    instead of once per individual frame (H × W × 3) because they are purely
+    per-pixel operations with no spatial neighbourhood that could produce
+    cross-frame contamination:
+
+    * **Saturation** – per-pixel HSV S-channel scaling; identical result whether
+      applied per-frame or to the full stack.
+    * **Contrast / brightness / gamma / black_lift** – per-pixel linear and
+      power operations; same argument as saturation.
+
+    Running these stages once on the stacked image instead of N times on
+    individual frames (N = 5 or 7) eliminates:
+
+    * N−1 BGR↔HSV color-space round-trips (saved per scene: up to 6 × 2 = 12).
+    * N−1 float32 passes for the color adjustment (saved: up to 6).
+    * N−1 astype() calls (saved: up to 12).
+
+    Args:
+        lr_stacked: Vertically stacked LR image (H*N × W × 3, uint8).
+        params:     Dict produced by :func:`sample_degradation_template_params`.
+
+    Returns:
+        Adjusted stacked LR image (uint8).  Returns *lr_stacked* unchanged
+        (no copy) when neither the saturation nor the color stage is active.
+    """
     sat = params.get("saturation", 1.0)
-    if sat != 1.0:
+    has_sat = float(sat) != 1.0
+    has_color = any(k in params for k in _COLOR_ADJUSTMENT_KEYS)
+
+    if not has_sat and not has_color:
+        return lr_stacked
+
+    result = lr_stacked
+
+    # ── Saturation ────────────────────────────────────────────────────────────
+    if has_sat:
         hsv = cv2.cvtColor(result, cv2.COLOR_BGR2HSV).astype(np.float32)
-        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * sat, 0, 255)
+        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * float(sat), 0, 255)
         result = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
 
-    # ── 6. Color: contrast / brightness / gamma / black-lift ─────────────────
-    has_color = any(k in params for k in ("contrast", "brightness", "gamma", "black_lift"))
+    # ── Color: contrast / brightness / gamma / black-lift ─────────────────────
     if has_color:
         result_f = result.astype(np.float32) / 255.0
         result_f = result_f + float(params.get("black_lift", 0.0))
@@ -1718,13 +1819,23 @@ def create_patch_pair(
     Two degradation paths are supported, applied in this priority order:
 
     1. *New template-based* (``deg_spec`` arg): parameters are sampled via
-       :func:`sample_degradation_template_params` and applied via
-       :func:`apply_degradation_template_params`.  Supports blur,
-       compression, noise, chroma bleed, and colour stages.
+       :func:`sample_degradation_template_params` once per scene and applied
+       in a **split pre/post-stack pipeline**:
+
+       * **Pre-stack** (:func:`_apply_degrade_template_prestack`) – applied to
+         each individual LR frame: blur, noise, JPEG, chroma bleed.  These
+         stages are spatially sensitive and must not span frame boundaries.
+       * **Post-stack** (:func:`_apply_degrade_template_poststack`) – applied
+         once to the vertically stacked LR image: saturation and global color
+         adjustments (contrast, brightness, gamma, black_lift).  These are
+         pure per-pixel operations that are safe on the stack, and running
+         them once instead of N times eliminates N−1 color-space round-trips
+         per scene.
 
     2. *Legacy flat* (``degrade_cfg`` arg): used when ``deg_spec`` is
        ``None``; forwards to :func:`_sample_degrade_params` /
-       :func:`_apply_degrade_params` for backward compatibility.
+       :func:`_apply_degrade_params` for backward compatibility.  All stages
+       (noise, blur, JPEG) are applied per-frame.
 
     In both cases parameters are **sampled once per scene** so that all LR
     frames in the window share the same settings — consistent with real
@@ -1781,20 +1892,30 @@ def create_patch_pair(
             f"and that config_io.validate_active_config() has passed."
         )
 
-    # ── Degradation: resolve which sampler to use ─────────────────────────────
+    # ── Degradation: resolve which sampler / apply functions to use ──────────
     # deg_spec (new template) takes priority over degrade_cfg (legacy flat cfg).
+    #
+    # Template path uses a split pre/post-stack design:
+    #   _apply_fn    → per-frame (blur, noise, JPEG, chroma bleed)
+    #   _poststack_fn → once on stacked LR (saturation, color adjustments)
+    #
+    # Legacy path keeps all stages per-frame (blur, noise, JPEG only – none of
+    # those are safe to move post-stack given their spatial nature).
     center_raw = frames[center_idx]
     if deg_spec is not None:
         # New template-based degradation – sample once per scene.
         _scene_params = sample_degradation_template_params(deg_spec, center_frame=center_raw)
-        _apply_fn = apply_degradation_template_params
+        _apply_fn = _apply_degrade_template_prestack
+        _poststack_fn = _apply_degrade_template_poststack
     elif degrade_cfg is not None:
-        # Legacy degradation – keep old behaviour.
+        # Legacy degradation – all stages are per-frame (spatial).
         _scene_params = _sample_degrade_params(degrade_cfg, center_frame=center_raw)
         _apply_fn = _apply_degrade_params
+        _poststack_fn = None
     else:
         _scene_params = None
         _apply_fn = None
+        _poststack_fn = None
 
     if source_mode == "resize":
         # ── Resize path: full-frame rescale ──────────────────────────────────
@@ -1875,6 +1996,14 @@ def create_patch_pair(
             lr_frames.append(lr)
 
     lr_stacked = np.concatenate(lr_frames, axis=0)
+
+    # ── Post-stack degradation (template path only) ───────────────────────────
+    # Saturation and global color adjustments are applied once here on the full
+    # stacked LR image instead of once per frame.  For 7 frames this eliminates
+    # 6 × (BGR↔HSV round-trip + float32 color pass) per scene.
+    if _poststack_fn is not None and _scene_params is not None:
+        lr_stacked = _poststack_fn(lr_stacked, _scene_params)
+
     return gt, lr_stacked
 
 
