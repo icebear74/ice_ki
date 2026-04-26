@@ -2335,6 +2335,10 @@ def extract_and_save_streaming_distributed(
         "t_write_s":    0.0, # total time: write_queue.put (per patch)
         "n_patches":    0,   # patches enqueued for writing
         "q_size_last":  0,   # last observed write-queue depth
+        # Degradation-template counters: {category: {template_name: count}}
+        # Written every time a patch is enqueued so the GUI can show live
+        # per-degradation-template statistics without post-processing.
+        "degrade_counts": {},
     }
     _next_timing_log: List[int] = [50]  # mutable box: write debug log at this n_centers
 
@@ -2484,16 +2488,13 @@ def extract_and_save_streaming_distributed(
                             if not cfg:
                                 continue
 
-                            # Determine source_mode from cfg; fall back to legacy name
-                            # check so existing callers that don't populate source_mode
-                            # still work correctly.
-                            _source_mode = cfg.get("source_mode")
+                            # source_mode is ALWAYS set by the template config
+                            # (validated at startup by config_io.validate_active_config).
+                            # No hardcoded fallback on old format names — the config
+                            # is the single source of truth.
+                            _source_mode = cfg.get("source_mode", "crop")
                             if _source_mode not in ("resize", "crop"):
-                                _source_mode = (
-                                    "resize"
-                                    if fmt_name in ("medium_169", "720_169")
-                                    else "crop"
-                                )
+                                _source_mode = "crop"
                             # Resize mode produces the same output on every attempt —
                             # no benefit in retrying a random crop.
                             max_attempts = 1 if _source_mode == "resize" else 6
@@ -2502,6 +2503,7 @@ def extract_and_save_streaming_distributed(
                             # format's degradation_mix if available; fall back to the
                             # global degrade_cfg for legacy callers.
                             _deg_spec: Optional[dict] = None
+                            _chosen: Optional[str] = None
                             _deg_mix = cfg.get("degradation_mix")
                             _deg_tmpls = cfg.get("degradation_templates")
                             if _deg_mix and _deg_tmpls:
@@ -2547,6 +2549,14 @@ def extract_and_save_streaming_distributed(
                                 patches_created[category] = (
                                     patches_created.get(category, 0) + 1
                                 )
+                                # Track which degradation template was used so the
+                                # GUI can display live per-template statistics.
+                                if _chosen is not None:
+                                    _dc = _t_phases["degrade_counts"]
+                                    _dc.setdefault(category, {})
+                                    _dc[category][_chosen] = (
+                                        _dc[category].get(_chosen, 0) + 1
+                                    )
 
                         if not _any_patch_saved:
                             _n_quality_fail += 1
