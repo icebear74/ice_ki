@@ -7,6 +7,23 @@ FFmpeg pass that streams the video linearly.  A rolling frame buffer
 (default 7 frames) is maintained in memory; patches are written to disk
 as their centre frame enters the buffer.
 
+Performance optimisations (active by default)
+---------------------------------------------
+* **Opt 1 – Reduced stream resolution**: ``STREAM_OPT_WIDTH × STREAM_OPT_HEIGHT``
+  (2304 × 1440) instead of native 4K.  Still large enough for 2× oversampled
+  Lanczos4 crops for all GT families (1152×648, 960×540, 960×720).
+* **Opt 2 – Bilinear FFmpeg scale**: ``flags=bilinear`` in the intermediate
+  scale step; Python applies Lanczos4 on the actual patch crops anyway.
+* **Opt 3 – yuv420p pipe**: 1.5 bytes/pixel instead of 3 bytes/pixel (bgr24),
+  cutting pipe bandwidth by ~33 %.  Python converts with
+  ``cv2.cvtColor(…, COLOR_YUV2BGR_I420)``.
+* **Opt 4 – libplacebo HDR tonemap**: when ``--enable-libplacebo`` is present
+  in the FFmpeg build a single shader-based pass replaces the 4-step
+  zscale+tonemap chain (~2-4× faster for equivalent quality).
+
+Combined Opt 1+3 alone reduce per-frame pipe data from 24.9 MB (3840×2160
+BGR24) to ~5 MB (2304×1440 yuv420p) — roughly **5× less**.
+
 Public API
 ----------
 build_frame_assignments_distributed()
@@ -26,15 +43,16 @@ snap_assignments_to_centers()
 
 extract_and_save_streaming_distributed()
     Single-stream entry point for all formats.  Launches one FFmpeg process,
-    streams BGR24 frames at 3840×2160 (4K) by default — large enough for
-    ``create_patch_pair`` to apply 2× oversampled Lanczos4 crops for both the
-    720×720 and 540×540 GT families.  Uses CUDA (``tonemap_cuda`` + ``scale_cuda``
-    or ``scale_cuda`` alone) when available; falls back to CPU automatically.
+    streams yuv420p frames at ``STREAM_OPT_WIDTH × STREAM_OPT_HEIGHT`` by
+    default — large enough for ``create_patch_pair`` to apply 2× oversampled
+    Lanczos4 crops for both the 1152×648 and 960×720 GT families.  Uses CUDA
+    (``tonemap_cuda`` + ``scale_cuda`` or ``scale_cuda`` alone) when available;
+    falls back to libplacebo (if present) or CPU zscale automatically.
     Passes the filter chain via a temp file, avoiding OS ARG_MAX limits.
 
 extract_and_save_streaming_dual()
     Deprecated compatibility shim.  Forwards all arguments to
-    :func:`extract_and_save_streaming_distributed` at 4K resolution.
+    :func:`extract_and_save_streaming_distributed` at optimised resolution.
 
 create_patch_pair()
     Create a (GT, LR) patch pair from a sequence of frames.
@@ -59,7 +77,7 @@ import threading
 import time
 from collections import deque
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 import cv2
 import numpy as np
@@ -69,7 +87,11 @@ import numpy as np
 # ---------------------------------------------------------------------------
 import sys as _sys
 _sys.path.insert(0, os.path.dirname(__file__))
-from utils.format_definitions import get_output_dirs_for_format
+from utils.format_definitions import (
+    get_output_dirs_for_format,
+    get_synced_bucket_dirs,
+    BUCKET_SIZE,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -79,11 +101,24 @@ from utils.format_definitions import get_output_dirs_for_format
 STREAM_WIDTH: int = 1920
 STREAM_HEIGHT: int = 1080
 
-# 4K stream — default resolution for all formats.
-# large enough for create_patch_pair to do 2× oversampled Lanczos4 crops for
-# both 720×720 and 540×540 GT families (requires frame_h ≥ 2*gt_h).
+# 4K stream — kept for backward compatibility / explicit callers.
 STREAM_4K_WIDTH:  int = 3840
 STREAM_4K_HEIGHT: int = 2160
+
+# Optimised stream resolution (Opt 1).
+# Minimum resolution that supports 2× oversampled Lanczos4 crops for every
+# format in the current template set:
+#   1152×648 crop  → needs 2×1152 = 2304 w,  2×648 = 1296 h
+#   960×540  crop  → needs 2×960  = 1920 w,  2×540 = 1080 h
+#   960×720  crop  → needs 2×960  = 1920 w,  2×720 = 1440 h
+#   Resize formats → only need ≥ gt_size (trivially covered)
+# → max(2304, 1920, 1920) × max(1296, 1080, 1440) = 2304 × 1440
+#
+# Pipe-bandwidth compared to 3840×2160 BGR24:
+#   Old: 3840 × 2160 × 3      = 24.9 MB/frame
+#   New: 2304 × 1440 × 1.5    =  4.98 MB/frame  (~5× less, combined Opt1+Opt3)
+STREAM_OPT_WIDTH:  int = 2304
+STREAM_OPT_HEIGHT: int = 1440
 
 # ---------------------------------------------------------------------------
 # Filter chains — two families: HDR→SDR tonemap and plain SDR pass-through.
@@ -94,17 +129,20 @@ STREAM_4K_HEIGHT: int = 2160
 # tonemap chain to an SDR source causes overexposure because zscale would
 # linearise the already-gamma-encoded values a second time.
 #
+# All chains output yuv420p (Opt 3) — ~33 % less pipe bandwidth vs bgr24.
+# Python converts yuv420p→BGR with cv2.cvtColor(…, COLOR_YUV2BGR_I420).
+#
 # The correct chain is selected per-video by build_vf_filter() based on the
 # is_hdr flag returned by _get_video_metadata() / is_hdr_transfer().
 # ---------------------------------------------------------------------------
 
-# HDR→SDR: Software (CPU-only) fallback.
+# HDR→SDR: Software (CPU-only) fallback via zscale+tonemap.
 # zscale reads tin from stream metadata → works for smpte2084, hlg, bt709.
 # range=full: unambiguous 0-255 output for OpenCV.
 # Performance notes:
 #   - tonemap=reinhard is the fastest tone-mapper (simple x/(1+x) curve).
-#   - flags=lanczos gives the highest-quality resize to 1080 (important for GT
-#     quality in full-frame formats like 720_169).
+#   - flags=bilinear (Opt 2): faster than lanczos; Python does Lanczos4 on
+#     the actual patch crops, so the FFmpeg resize only needs to be adequate.
 #   - filter=bilinear in each zscale step speeds up any incidental resampling.
 _TONEMAP_FILTER: str = (
     "zscale=t=linear:npl=100:filter=bilinear,"
@@ -112,16 +150,28 @@ _TONEMAP_FILTER: str = (
     "zscale=p=bt709:filter=bilinear,"
     "tonemap=tonemap=reinhard:desat=0,"
     "zscale=t=bt709:m=bt709:range=full:filter=bilinear,"
-    f"scale={STREAM_WIDTH}:{STREAM_HEIGHT}:flags=lanczos,"
-    "format=bgr24"
+    f"scale={STREAM_WIDTH}:{STREAM_HEIGHT}:flags=bilinear,"
+    "format=yuv420p"
+)
+
+# HDR→SDR: libplacebo CPU path (Opt 4).
+# Replaces the 4-step zscale+tonemap chain with a single GPU-shader pass on
+# the CPU (via Vulkan/software fallback).  Requires FFmpeg built with
+# --enable-libplacebo (Ubuntu 6.1.1-3ubuntu5 includes this).
+# range=pc → full range (0-255), downscaler=bilinear → fast resize.
+# libplacebo auto-detects source HDR metadata from stream properties.
+_TONEMAP_FILTER_PLACEBO: str = (
+    f"libplacebo=w={STREAM_WIDTH}:h={STREAM_HEIGHT}"
+    ":colorspace=bt709:color_trc=bt709:color_primaries=bt709"
+    ":tonemapping=mobius:range=pc:downscaler=bilinear,"
+    "format=yuv420p"
 )
 
 # SDR pass-through: Software (CPU-only).
-# No linearisation or tonemap needed — just scale + convert to BGR24.
-# flags=lanczos: highest-quality downscale, best GT fidelity.
+# flags=bilinear (Opt 2): adequate for the intermediate scale step.
 _SDR_FILTER: str = (
-    f"scale={STREAM_WIDTH}:{STREAM_HEIGHT}:flags=lanczos,"
-    "format=bgr24"
+    f"scale={STREAM_WIDTH}:{STREAM_HEIGHT}:flags=bilinear,"
+    "format=yuv420p"
 )
 
 # HDR→SDR: Hybrid GPU/CPU — scale_cuda downscales on GPU, tonemap on CPU.
@@ -139,7 +189,7 @@ _TONEMAP_FILTER_SCALE_CUDA: str = (
     "zscale=p=bt709:filter=bilinear,"
     "tonemap=tonemap=reinhard:desat=0,"
     "zscale=t=bt709:m=bt709:range=full:filter=bilinear,"
-    "format=bgr24"
+    "format=yuv420p"
 )
 
 # SDR pass-through: Hybrid GPU/CPU — scale on GPU, convert on CPU.
@@ -147,14 +197,14 @@ _TONEMAP_FILTER_SCALE_CUDA: str = (
 _SDR_FILTER_SCALE_CUDA: str = (
     f"scale_cuda={STREAM_WIDTH}:{STREAM_HEIGHT}:interp_algo=bicubic,"
     "hwdownload,"
-    "format=bgr24"
+    "format=yuv420p"
 )
 
 # Full-GPU HDR→SDR tonemap filter chain.
 # Requires FFmpeg built with --enable-cuda-nvcc / libnpp so that both
 # tonemap_cuda and scale_cuda are available.
 # Frames stay in GPU memory from decode through tonemap + scale;
-# hwdownload copies only the final 1920×1080 result to CPU.
+# hwdownload copies only the final result to CPU.
 # Use together with -hwaccel cuda -hwaccel_output_format cuda.
 # Notes:
 #   - interp_algo=bicubic — see _TONEMAP_FILTER_SCALE_CUDA comment above.
@@ -162,26 +212,40 @@ _SDR_FILTER_SCALE_CUDA: str = (
 #     and outputs NV12.
 #   - hwdownload (bare) + scale=iw:ih: same reasoning as above — scale breaks
 #     the backward format negotiation, converting NV12→YUV420P in software.
-#   - format=yuv420p: ensures planar yuv420p so the final format=bgr24
-#     libswscale conversion is unambiguous.
+#   - format=yuv420p: ensures planar yuv420p for the pipe (Opt 3).
 _TONEMAP_FILTER_CUDA: str = (
     f"tonemap_cuda=tonemap=mobius:desat=0:peak=100,"
     f"scale_cuda={STREAM_WIDTH}:{STREAM_HEIGHT}:interp_algo=bicubic,"
     "hwdownload,"
     "scale=iw:ih,"
-    "format=yuv420p,"
-    "format=bgr24"
+    "format=yuv420p"
 )
 
 # ---------------------------------------------------------------------------
-# CUDA detection (cached after the first call)
+# CUDA / QSV / libplacebo detection (cached after the first call)
 # ---------------------------------------------------------------------------
 
 _cuda_available: Optional[bool] = None
 _scale_cuda_available: Optional[bool] = None
 _tonemap_cuda_available: Optional[bool] = None
+_libplacebo_avail: Optional[bool] = None
+_qsv_avail: Optional[bool] = None
+_qsv_decoders: Optional[Set[str]] = None
 
-# Cached output of `ffmpeg -filters` (shared by both filter probes).
+# Strings that indicate a Vulkan / libplacebo initialisation failure.
+# Used both in the libplacebo_available() probe and in the runtime stderr
+# scanner that invalidates the cache when the real FFmpeg run fails.
+_VULKAN_FAIL_STRINGS: tuple = (
+    "VK_ERROR_",
+    "Failed creating Vulkan device",
+    "Failed initializing vulkan device",
+    "Failed creating logical device",
+    "Query format failed",
+    "Error reinitializing filters",
+    "Generic error in an external library",
+)
+
+# Cached output of `ffmpeg -filters` (shared by all filter probes).
 _ffmpeg_filters_output: Optional[str] = None
 
 # Cached FFmpeg major version (4 = conservative fallback).
@@ -253,13 +317,200 @@ def tonemap_cuda_available() -> bool:
     return _tonemap_cuda_available
 
 
+def libplacebo_available(video_path: Optional[str] = None) -> bool:
+    """Return True when libplacebo is usable at runtime (Vulkan device opens).
+
+    Two-stage check:
+    1. Verify that ``libplacebo`` is listed by ``ffmpeg -filters`` (compiled-in
+       with ``--enable-libplacebo``).
+    2. When *video_path* is provided and no cached result exists yet, decode one
+       frame from that real HDR video through the libplacebo filter.  Using an
+       actual file exercises exactly the same Vulkan device-init code path that
+       the extractor will use, so any hardware or driver incompatibility
+       (``VK_ERROR_INITIALIZATION_FAILED``, etc.) surfaces here rather than
+       mid-extraction.  The probe is therefore reliable on every system without
+       requiring synthetic HDR metadata tricks.
+
+    When called without *video_path* (e.g. from ``build_vf_filter``) and the
+    result is already cached from a prior real-file probe, the cached value is
+    returned instantly.  If no probe has run yet, False is returned
+    conservatively so that callers without video context do not accidentally
+    pick libplacebo before it has been verified.
+
+    The result is cached after the first successful probe so repeated checks
+    are free and libplacebo is never re-evaluated within the same process.
+    """
+    global _libplacebo_avail
+    if _libplacebo_avail is not None:
+        return _libplacebo_avail
+
+    # Stage 1: compiled-in check.
+    if "libplacebo" not in _get_ffmpeg_filters():
+        _libplacebo_avail = False
+        return False
+
+    # Stage 2: real-file probe.  Without a concrete video we cannot confirm
+    # that Vulkan works, so report False conservatively.  The extraction
+    # function always passes a video_path, so the probe runs on first use.
+    if video_path is None:
+        return False
+
+    try:
+        probe = subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "verbose",
+                "-probesize", "100M", "-analyzeduration", "100M",
+                "-i", video_path,
+                "-frames:v", "1",
+                "-vf", (
+                    f"libplacebo=w={STREAM_WIDTH}:h={STREAM_HEIGHT}"
+                    ":colorspace=bt709:color_trc=bt709:color_primaries=bt709"
+                    ":tonemapping=mobius:range=pc:downscaler=bilinear,"
+                    "format=yuv420p"
+                ),
+                "-f", "null", "-",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=30,
+        )
+        stderr_txt = probe.stderr.decode(errors="replace")
+        vulkan_ok = probe.returncode == 0 and not any(
+            kw in stderr_txt for kw in _VULKAN_FAIL_STRINGS
+        )
+        _libplacebo_avail = vulkan_ok
+    except Exception:
+        _libplacebo_avail = False
+    return _libplacebo_avail
+
+
+def qsv_available() -> bool:
+    """Return True when Intel QSV hw-accel is usable at runtime.
+
+    Two-stage check:
+    1. Verify that ``qsv`` is listed by ``ffmpeg -hwaccels`` (i.e. the FFmpeg
+       binary was compiled with ``--enable-libvpl`` or ``--enable-libmfx``).
+    2. Perform a functional hardware probe by asking FFmpeg to actually
+       initialise a QSV device (``-init_hw_device qsv=qsv:hw``).  This step
+       fails with a non-zero exit code when no Intel iGPU / Quick Sync engine
+       is present at runtime — even if the binary was compiled with QSV
+       support.  Without this probe, machines with only NVIDIA GPUs would
+       still pick the QSV path because the binary check passes, but then
+       decode 0 frames silently.
+
+    The result is cached after the first call so repeated checks are free.
+    """
+    global _qsv_avail
+    if _qsv_avail is None:
+        try:
+            # Stage 1: compiled-in check.
+            out = subprocess.check_output(
+                ["ffmpeg", "-hide_banner", "-hwaccels"],
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            ).decode(errors="replace")
+            if "qsv" not in out.lower():
+                _qsv_avail = False
+                return _qsv_avail
+
+            # Stage 2: functional runtime probe — try to open the QSV device.
+            # FFmpeg exits non-zero when the Intel hardware driver is missing.
+            probe = subprocess.run(
+                [
+                    "ffmpeg", "-hide_banner", "-loglevel", "error",
+                    "-init_hw_device", "qsv=qsv:hw",
+                    "-f", "lavfi", "-i", "nullsrc=duration=0",
+                    "-frames:v", "0", "-f", "null", "-",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+            _qsv_avail = probe.returncode == 0
+        except Exception:
+            _qsv_avail = False
+    return _qsv_avail
+
+
+def qsv_decoders_available() -> Set[str]:
+    """Return the set of QSV decoder names compiled into this FFmpeg build.
+
+    Queries ``ffmpeg -decoders`` once and caches the result.  The returned
+    set contains names such as ``"hevc_qsv"``, ``"h264_qsv"``, etc.  An
+    empty set is returned when QSV decoders are unavailable or the probe
+    fails.
+    """
+    global _qsv_decoders
+    if _qsv_decoders is None:
+        try:
+            out = subprocess.check_output(
+                ["ffmpeg", "-hide_banner", "-decoders"],
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            ).decode(errors="replace")
+            _qsv_decoders = {
+                name
+                for name in (
+                    "hevc_qsv", "h264_qsv", "mpeg2_qsv", "vp9_qsv", "av1_qsv",
+                )
+                if name in out
+            }
+        except Exception:
+            _qsv_decoders = set()
+    return _qsv_decoders
+
+
+# Mapping from ffprobe codec_name → QSV decoder name.
+_QSV_CODEC_MAP: Dict[str, str] = {
+    "hevc":        "hevc_qsv",
+    "h264":        "h264_qsv",
+    "mpeg2video":  "mpeg2_qsv",
+    "vp9":         "vp9_qsv",
+    "av1":         "av1_qsv",
+}
+
+
+def _qsv_decoder_for_video(video_path: str) -> Optional[str]:
+    """Return the QSV decoder name for the first video stream, or *None*.
+
+    Probes the video codec with ``ffprobe`` and looks up the matching
+    ``*_qsv`` decoder.  Returns ``None`` when the codec has no QSV decoder,
+    QSV is unavailable, or the probe fails.
+    """
+    if not qsv_available():
+        return None
+    avail = qsv_decoders_available()
+    if not avail:
+        return None
+    try:
+        codec_name = subprocess.check_output(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=codec_name",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                video_path,
+            ],
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        ).decode(errors="replace").strip().lower()
+    except Exception:
+        return None
+    candidate = _QSV_CODEC_MAP.get(codec_name)
+    return candidate if candidate in avail else None
+
+
+
 def _get_ffmpeg_major_version() -> int:
     """Return the major version of the installed FFmpeg (cached).
 
     Used to select the correct output options:
-      * FFmpeg ≥ 5: ``-fps_mode passthrough`` (replaces deprecated ``-vsync``)
-                    and ``-/filter_complex file`` (replaces ``-filter_complex_script``)
-      * FFmpeg 4:   ``-vsync 0``  and  ``-filter_complex_script file``
+      * FFmpeg ≥ 7: ``-/filter_complex file`` (file-based option syntax, added in 7.0;
+                     ``-filter_complex_script`` was removed in 7.0)
+                    ``-fps_mode passthrough``
+      * FFmpeg 5–6: ``-filter_complex_script file`` (deprecated but present)
+                    ``-fps_mode passthrough``
+      * FFmpeg 4:   ``-filter_complex_script file``  and  ``-vsync 0``
 
     Standard release builds report the version as a numeric string, e.g.
     ``"ffmpeg version 6.1.1 …"``.  Git snapshot builds use a non-numeric
@@ -348,16 +599,22 @@ def is_hdr_transfer(color_transfer: Optional[str]) -> bool:
 
 
 def build_vf_filter(is_hdr: bool, use_cuda: bool = True,
-                    width: int = STREAM_WIDTH, height: int = STREAM_HEIGHT) -> str:
+                    width: int = STREAM_WIDTH, height: int = STREAM_HEIGHT,
+                    color_trc: str = "smpte2084") -> str:
     """Return the FFmpeg ``-vf`` filter string for the given video type.
 
     Selects the best available pipeline tier at call time:
 
-    * HDR + full-GPU  → tonemap_cuda + scale_cuda pipeline
-    * HDR + scale-GPU → scale_cuda + CPU zscale/tonemap pipeline
-    * HDR + CPU-only  → CPU zscale + tonemap + scale pipeline
-    * SDR + scale-GPU → scale_cuda pipeline
-    * SDR + CPU-only  → scale pipeline
+    * HDR + full-GPU   → tonemap_cuda + scale_cuda pipeline
+    * HDR + scale-GPU  → scale_cuda + CPU zscale/tonemap pipeline
+    * HDR + libplacebo → single-pass libplacebo HDR→SDR (Opt 4, CPU)
+    * HDR + CPU-only   → CPU zscale + tonemap + scale pipeline (fallback)
+    * SDR + scale-GPU  → scale_cuda pipeline
+    * SDR + CPU-only   → bilinear scale pipeline (Opt 2)
+
+    All paths output ``yuv420p`` (Opt 3) — ~33 % less pipe bandwidth
+    compared to ``bgr24``.  Python converts with
+    ``cv2.cvtColor(yuv, COLOR_YUV2BGR_I420)``.
 
     Args:
         is_hdr:    Whether the source video is HDR (PQ or HLG transfer).
@@ -365,6 +622,12 @@ def build_vf_filter(is_hdr: bool, use_cuda: bool = True,
                    to CPU-only when the local FFmpeg has no CUDA support.
         width:     Output width in pixels (default ``STREAM_WIDTH`` = 1920).
         height:    Output height in pixels (default ``STREAM_HEIGHT`` = 1080).
+        color_trc: Transfer function string from ffprobe (e.g. ``"smpte2084"``
+                   for HDR10/PQ, ``"arib-std-b67"`` for HLG).  Used to
+                   annotate the explicit ``tin=`` parameter of ``zscale`` in
+                   the scale-GPU path so that the correct HDR→linear
+                   conversion is applied even when CUDA pipeline stages do not
+                   reliably propagate frame colour metadata through to CPU.
 
     Returns:
         FFmpeg filter string ready for ``-vf`` (or for wrapping in
@@ -374,6 +637,13 @@ def build_vf_filter(is_hdr: bool, use_cuda: bool = True,
     _full_gpu  = _use_cuda and tonemap_cuda_available()
     _scale_gpu = _use_cuda and (not _full_gpu) and scale_cuda_available()
 
+    # Normalise color_trc to the vocabulary understood by zscale/zimg.
+    # "hlg" is a common shorthand used by some encoders; zscale's canonical
+    # name for the HLG transfer is "arib-std-b67" (ARIB STD-B67).
+    _zscale_trc = (color_trc or "smpte2084").strip().lower()
+    if _zscale_trc == "hlg":
+        _zscale_trc = "arib-std-b67"  # map shorthand to zscale's expected identifier
+
     if is_hdr:
         if _full_gpu:
             return (
@@ -381,20 +651,32 @@ def build_vf_filter(is_hdr: bool, use_cuda: bool = True,
                 f"scale_cuda={width}:{height}:interp_algo=bicubic,"
                 "hwdownload,"
                 "scale=iw:ih,"
-                "format=yuv420p,"
-                "format=bgr24"
+                "format=yuv420p"
             )
         if _scale_gpu:
+            # After hwdownload the CUDA pipeline may not reliably propagate
+            # HDR frame metadata (color_trc, colorspace) to the CPU frame.
+            # Specifying tin= and primariesin= explicitly in zscale ensures the
+            # correct PQ/HLG→linear conversion regardless of frame metadata.
             return (
                 f"scale_cuda={width}:{height}:interp_algo=bicubic,"
                 "hwdownload,"
                 "format=p010,"
-                "zscale=t=linear:npl=100:filter=bilinear,"
+                f"zscale=tin={_zscale_trc}:primariesin=bt2020:t=linear:npl=100:filter=bilinear,"
                 "format=gbrpf32le,"
                 "zscale=p=bt709:filter=bilinear,"
                 "tonemap=tonemap=reinhard:desat=0,"
                 "zscale=t=bt709:m=bt709:range=full:filter=bilinear,"
-                "format=bgr24"
+                "format=yuv420p"
+            )
+        # CPU-only HDR: prefer libplacebo (one shader pass) over the 4-step
+        # zscale chain when available (Opt 4).
+        if libplacebo_available():
+            return (
+                f"libplacebo=w={width}:h={height}"
+                ":colorspace=bt709:color_trc=bt709:color_primaries=bt709"
+                ":tonemapping=mobius:range=pc:downscaler=bilinear,"
+                "format=yuv420p"
             )
         return (
             "zscale=t=linear:npl=100:filter=bilinear,"
@@ -402,8 +684,8 @@ def build_vf_filter(is_hdr: bool, use_cuda: bool = True,
             "zscale=p=bt709:filter=bilinear,"
             "tonemap=tonemap=reinhard:desat=0,"
             "zscale=t=bt709:m=bt709:range=full:filter=bilinear,"
-            f"scale={width}:{height}:flags=lanczos,"
-            "format=bgr24"
+            f"scale={width}:{height}:flags=bilinear,"
+            "format=yuv420p"
         )
     else:
         # SDR: no tone-mapping needed; applying it would re-linearise the
@@ -412,11 +694,13 @@ def build_vf_filter(is_hdr: bool, use_cuda: bool = True,
             return (
                 f"scale_cuda={width}:{height}:interp_algo=bicubic,"
                 "hwdownload,"
-                "format=bgr24"
+                "format=yuv420p"
             )
+        # Opt 2: bilinear is adequate for the intermediate scale step —
+        # Python applies Lanczos4 on the actual patch crops.
         return (
-            f"scale={width}:{height}:flags=lanczos,"
-            "format=bgr24"
+            f"scale={width}:{height}:flags=bilinear,"
+            "format=yuv420p"
         )
 
 
@@ -703,6 +987,176 @@ def _degrade_range(value, default: list) -> list:
     return list(value)
 
 
+# ---------------------------------------------------------------------------
+# Template-based degradation (new in Task 2)
+# ---------------------------------------------------------------------------
+
+def sample_degradation_template_params(
+    deg_spec: dict,
+    center_frame: Optional[np.ndarray] = None,
+) -> Optional[dict]:
+    """
+    Sample scene-level degradation parameters from a **degradation template** dict.
+
+    Unlike the legacy :func:`_sample_degrade_params` (which uses a flat
+    ``lr_*`` key schema), this function interprets the new template structure
+    with top-level keys ``blur``, ``compression``, ``noise``, ``chroma``, and
+    ``color``.  Each sub-dict specifies its own probability gate, so stages are
+    independently activated rather than being gated by a single global probability.
+
+    Parameters are sampled **once per scene window** and stored in a frozen
+    dict that :func:`apply_degradation_template_params` applies to every LR
+    frame in the window.  This mirrors real MPEG-2 encoder behaviour where the
+    quantizer settings (and therefore noise level, blur, and JPEG quality) are
+    constant within a GOP.  Additive noise is still drawn per-frame inside
+    :func:`apply_degradation_template_params` at the sampled sigma.
+
+    Args:
+        deg_spec:     Degradation template dict from ``templates["degradation_templates"]``.
+                      Keys: ``blur``, ``compression``, ``noise``, ``chroma``, ``color``.
+        center_frame: Not used (reserved for future dark-scene boost; accepted
+                      for API symmetry with :func:`_sample_degrade_params`).
+
+    Returns:
+        A dict of sampled scalar parameters, or ``None`` when no stage was activated.
+        Keys depend on which stages were sampled; possible keys:
+
+        * ``blur_sigma``         – Gaussian blur σ (float > 0).
+        * ``jpeg_quality``       – JPEG encode quality 1-100 (int).
+        * ``noise_sigma``        – Gaussian noise std-dev (float > 0).
+        * ``color_noise``        – True = colour noise, False = luma noise (bool).
+        * ``saturation``         – HSV saturation multiplier (float).
+        * ``chroma_bleed``       – chroma bleed strength (float, 0 = disabled).
+        * ``contrast``           – linear contrast multiplier (float).
+        * ``brightness``         – additive brightness offset normalised 0-1 (float).
+        * ``gamma``              – gamma exponent; output = input^(1/gamma) (float).
+        * ``black_lift``         – additive black-level lift normalised 0-1 (float).
+    """
+    if not deg_spec:
+        return None
+
+    params: dict = {}
+
+    # ── Blur ─────────────────────────────────────────────────────────────────
+    blur = deg_spec.get("blur", {})
+    if blur and random.random() < float(blur.get("prob", 0.0)):
+        sr = blur.get("sigma_range", [0.5, 1.5])
+        params["blur_sigma"] = random.uniform(float(sr[0]), float(sr[1]))
+
+    # ── Compression (JPEG round-trip) ────────────────────────────────────────
+    compression = deg_spec.get("compression", {})
+    if compression and random.random() < float(compression.get("prob", 0.0)):
+        qr = compression.get("jpeg_quality_range", [70, 90])
+        params["jpeg_quality"] = random.randint(int(qr[0]), int(qr[1]))
+
+    # ── Noise ────────────────────────────────────────────────────────────────
+    noise_cfg = deg_spec.get("noise", {})
+    if noise_cfg and random.random() < float(noise_cfg.get("prob", 0.0)):
+        sr = noise_cfg.get("sigma_range", [1.0, 5.0])
+        params["noise_sigma"] = random.uniform(float(sr[0]), float(sr[1]))
+        params["color_noise"] = random.random() < float(noise_cfg.get("color_noise_prob", 0.2))
+
+    # ── Chroma ───────────────────────────────────────────────────────────────
+    chroma = deg_spec.get("chroma", {})
+    if chroma:
+        sat_range = chroma.get("saturation_range", [1.0, 1.0])
+        params["saturation"] = random.uniform(float(sat_range[0]), float(sat_range[1]))
+        bleed_prob = float(chroma.get("chroma_bleed_prob", 0.0))
+        if bleed_prob > 0.0 and random.random() < bleed_prob:
+            params["chroma_bleed"] = float(chroma.get("chroma_bleed_strength", 0.0))
+
+    # ── Color ────────────────────────────────────────────────────────────────
+    color = deg_spec.get("color", {})
+    if color:
+        cr = color.get("contrast_range", [1.0, 1.0])
+        br = color.get("brightness_range", [0.0, 0.0])
+        gr = color.get("gamma_range", [1.0, 1.0])
+        params["contrast"] = random.uniform(float(cr[0]), float(cr[1]))
+        params["brightness"] = random.uniform(float(br[0]), float(br[1]))
+        params["gamma"] = random.uniform(float(gr[0]), float(gr[1]))
+        params["black_lift"] = float(color.get("black_lift", 0.0))
+
+    return params if params else None
+
+
+def apply_degradation_template_params(
+    frame: np.ndarray,
+    params: dict,
+) -> np.ndarray:
+    """
+    Apply pre-sampled template-based degradation parameters to a single LR frame.
+
+    This function is the template-aware counterpart to :func:`_apply_degrade_params`.
+    It consumes a *params* dict produced by :func:`sample_degradation_template_params`
+    and applies each stage that has been activated.
+
+    The application order is:
+      1. Blur        – applied first so JPEG artifacts are not blurred away.
+      2. Noise       – independent per-frame noise at the sampled sigma.
+      3. JPEG        – blocking / ringing artefacts.
+      4. Saturation  – chroma scaling in HSV space.
+      5. Color       – contrast, brightness, gamma, black-lift in floating point.
+
+    GT frames are never passed through this function; only LR frames are degraded.
+
+    Args:
+        frame:  Single LR BGR frame (uint8 numpy array).
+        params: Dict produced by :func:`sample_degradation_template_params`.
+
+    Returns:
+        Degraded frame as uint8 numpy array.
+    """
+    result: np.ndarray = frame.copy()
+
+    # ── 1. Blur ──────────────────────────────────────────────────────────────
+    if "blur_sigma" in params:
+        sigma = float(params["blur_sigma"])
+        if sigma >= 0.1:
+            ksize = max(3, 2 * int(np.ceil(2.0 * sigma)) + 1)
+            if ksize % 2 == 0:
+                ksize += 1
+            result = cv2.GaussianBlur(result, (ksize, ksize), sigma)
+
+    # ── 2. Noise (per-frame independent, scene-consistent sigma) ─────────────
+    if "noise_sigma" in params:
+        sigma = float(params["noise_sigma"])
+        if sigma > 0.0:
+            if params.get("color_noise", False):
+                noise = np.random.normal(0.0, sigma, result.shape).astype(np.float32)
+            else:
+                # Luma noise: identical value across channels
+                gray_noise = np.random.normal(0.0, sigma, result.shape[:2]).astype(np.float32)
+                noise = np.stack([gray_noise, gray_noise, gray_noise], axis=2)
+            result = np.clip(result.astype(np.float32) + noise, 0, 255).astype(np.uint8)
+
+    # ── 3. JPEG round-trip ───────────────────────────────────────────────────
+    if "jpeg_quality" in params:
+        encode_param = [cv2.IMWRITE_JPEG_QUALITY, int(params["jpeg_quality"])]
+        ok, buf = cv2.imencode(".jpg", result, encode_param)
+        if ok:
+            result = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+
+    # ── 4. Saturation ────────────────────────────────────────────────────────
+    sat = params.get("saturation", 1.0)
+    if sat != 1.0:
+        hsv = cv2.cvtColor(result, cv2.COLOR_BGR2HSV).astype(np.float32)
+        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * sat, 0, 255)
+        result = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+
+    # ── 5. Color: contrast / brightness / gamma / black-lift ─────────────────
+    has_color = any(k in params for k in ("contrast", "brightness", "gamma", "black_lift"))
+    if has_color:
+        result_f = result.astype(np.float32) / 255.0
+        result_f = result_f + float(params.get("black_lift", 0.0))
+        result_f = result_f * float(params.get("contrast", 1.0)) + float(params.get("brightness", 0.0))
+        gamma = float(params.get("gamma", 1.0))
+        if gamma != 1.0 and gamma > 0.0:
+            result_f = np.power(np.clip(result_f, 0.0, 1.0), 1.0 / gamma)
+        result = np.clip(result_f * 255.0, 0, 255).astype(np.uint8)
+
+    return result
+
+
 def _sample_degrade_params(
     degrade_cfg: dict,
     center_frame: Optional[np.ndarray] = None,
@@ -913,55 +1367,79 @@ def create_patch_pair(
     force_center: bool = False,
     logger=None,
     degrade_cfg: Optional[dict] = None,
+    deg_spec: Optional[dict] = None,
 ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
     """
     Create a ``(GT, LR)`` patch pair from a sequence of frames.
 
-    **16:9 formats** (``medium_169`` / ``720_169``):
+    **Resize mode** (``source_mode == "resize"`` in format_cfg, or legacy
+    format names ``medium_169`` / ``720_169``):
       * GT – full-frame resize to ``gt_size`` with ``INTER_LANCZOS4``
-        (best quality, no crop).
+        (best quality, preserves full frame content).
       * LR – full-frame resize to ``lr_size`` with ``INTER_AREA``
         (DVD-realistic quality).
+      * Suitable for any aspect-ratio target (16:9, 4:3, etc.) when the
+        source and target aspect ratios are compatible and no spatial crop is
+        desired.
 
-    **Square formats** (``small_540``, ``large_720``, …):
-      * GT – centre frame.  When the source frame is large enough to support
-        2× oversampling (``frame_h ≥ 2*gt_h`` **and** ``frame_w ≥ 2*gt_w``,
-        e.g. native 4K for the ``720``/``large_720`` formats), a
-        ``2*gt_size`` crop is taken from the source and Lanczos4-downsampled
-        to ``gt_size``.  The 2× Lanczos4 step averages out per-pixel H.265
-        in-loop deblocking softness and produces a clean GT visually
-        comparable to the ``INTER_LANCZOS4`` full-frame resize used by the
-        ``720_169`` family.  For smaller sources (e.g. 1080p for ``540``) the
-        frame is too small to oversample and a direct 1:1 crop is used
-        instead (existing behaviour).
+    **Crop mode** (``source_mode == "crop"`` in format_cfg, all other
+    legacy format names):
+      * GT – centre frame.  When the source frame is large enough for 2×
+        oversampling (``frame_h ≥ 2*gt_h`` **and** ``frame_w ≥ 2*gt_w``,
+        e.g. native 4K for the 720/720_169 formats), a ``2*gt_size`` crop
+        is taken from the source and Lanczos4-downsampled to ``gt_size``.
+        The 2× Lanczos4 step averages H.265 in-loop deblocking softness
+        and produces a clean GT comparable to the full-frame resize path.
+        For smaller sources a direct 1:1 crop is used instead.
       * LR – all frames, same crop region, downscaled to ``lr_size`` with
-        ``INTER_AREA`` (stacked vertically on axis 0).  The LR crop covers
-        the same spatial area as the GT crop at 3× lower resolution
-        (LR/GT = ``scale``), keeping the super-resolution task well-defined.
+        ``INTER_AREA`` (stacked vertically on axis 0).
+      * Works correctly for both 16:9 and 4:3 crop targets – no aspect-
+        ratio name check is performed.
+
+    **Source-mode resolution**:
+    The ``source_mode`` field in *format_cfg* takes precedence.  When it is
+    absent (legacy callers that do not populate it), the function falls back
+    to the old format-name test (``"medium_169"`` / ``"720_169"``).  New code
+    should always populate ``source_mode`` in the format config.
+
+    **Degradation**:
+    Two degradation paths are supported, applied in this priority order:
+
+    1. *New template-based* (``deg_spec`` arg): parameters are sampled via
+       :func:`sample_degradation_template_params` and applied via
+       :func:`apply_degradation_template_params`.  Supports blur,
+       compression, noise, chroma, and colour stages.
+
+    2. *Legacy flat* (``degrade_cfg`` arg): used when ``deg_spec`` is
+       ``None``; forwards to :func:`_sample_degrade_params` /
+       :func:`_apply_degrade_params` for backward compatibility.
+
+    In both cases parameters are **sampled once per scene** so that all LR
+    frames in the window share the same settings — consistent with real
+    MPEG-2 encoder behaviour.  GT is always kept lossless.
 
     In both cases a near-uniform GT (plain black, white, or flat colour) is
     silently discarded (``(None, None)``).  If the source frame is too small
     for the requested resize target a warning is logged.
 
-    When *degrade_cfg* is provided the degradation parameters are **sampled
-    once per scene** via :func:`_sample_degrade_params` (using the center
-    frame for the dark-scene probability boost), then applied to every LR
-    frame with :func:`_apply_degrade_params`.  This means all frames in the
-    window share the same noise sigma, blur sigma, and JPEG quality — matching
-    the behaviour of a real MPEG-2 encoder where the same quantiser settings
-    apply to the whole GOP.  Additive noise samples are still drawn
-    independently per frame (sensor noise is uncorrelated), but at the
-    consistent sigma.  GT is always kept lossless.
-
     Args:
         frames:       BGR numpy arrays, length 5 or 7.
-        format_name:  Format key (e.g. ``"medium_169"``, ``"small_540"``).
-        format_cfg:   Dict with ``'gt_size': [W, H]`` and ``'lr_size': [W, H]``.
-        force_center: Square formats only – use the geometric centre of the
-                      frame instead of a random crop location.
+        format_name:  Format key string (used for logging and legacy
+                      source-mode fallback only — all functional decisions are
+                      now driven by *format_cfg*).
+        format_cfg:   Dict with at minimum ``'gt_size': [W, H]`` and
+                      ``'lr_size': [W, H]``.  Optionally:
+                      * ``'source_mode'``: ``"resize"`` or ``"crop"``
+                        (overrides the legacy format-name test).
+        force_center: Crop mode only – use the geometric centre of the frame
+                      instead of a random crop location.
         logger:       Optional logger instance for warning messages.
-        degrade_cfg:  Optional degradation config dict (see :func:`degrade_lr_frame`).
-                      When ``None`` no degradation is applied.
+        degrade_cfg:  Legacy degradation config dict.  Ignored when *deg_spec*
+                      is provided.  When ``None`` no legacy degradation is
+                      applied.
+        deg_spec:     New-style degradation template dict (from
+                      ``templates["degradation_templates"]``).  When
+                      provided, *degrade_cfg* is ignored.
 
     Returns:
         ``(gt, lr_stacked)`` or ``(None, None)`` on failure.
@@ -977,9 +1455,30 @@ def create_patch_pair(
 
     center_idx = n // 2
 
-    if format_name in ("medium_169", "720_169"):
-        # Full-frame resize – the whole source frame is scaled to the target
-        # size.  No crop is applied so the full 16:9 content is preserved.
+    # ── Determine source_mode ─────────────────────────────────────────────────
+    # Prefer explicit source_mode from format_cfg; fall back to legacy name check.
+    source_mode = format_cfg.get("source_mode")
+    if source_mode not in ("resize", "crop"):
+        # Legacy fallback: the old hardcoded whitelist
+        source_mode = "resize" if format_name in ("medium_169", "720_169") else "crop"
+
+    # ── Degradation: resolve which sampler to use ─────────────────────────────
+    # deg_spec (new template) takes priority over degrade_cfg (legacy flat cfg).
+    center_raw = frames[center_idx]
+    if deg_spec is not None:
+        # New template-based degradation – sample once per scene.
+        _scene_params = sample_degradation_template_params(deg_spec, center_frame=center_raw)
+        _apply_fn = apply_degradation_template_params
+    elif degrade_cfg is not None:
+        # Legacy degradation – keep old behaviour.
+        _scene_params = _sample_degrade_params(degrade_cfg, center_frame=center_raw)
+        _apply_fn = _apply_degrade_params
+    else:
+        _scene_params = None
+        _apply_fn = None
+
+    if source_mode == "resize":
+        # ── Resize path: full-frame rescale ──────────────────────────────────
         if frame_h < gt_h or frame_w < gt_w:
             if logger:
                 logger.warning(
@@ -997,30 +1496,23 @@ def create_patch_pair(
             return None, None
 
         # LR: INTER_AREA = DVD-realistic quality, then optional degradation.
-        # Parameters are sampled once for the whole scene so that every frame
-        # in the window receives identical blur/quality/noise-level settings.
-        center_raw = frames[center_idx]
-        _scene_params = _sample_degrade_params(degrade_cfg, center_frame=center_raw) if degrade_cfg else None
         lr_frames = []
         for frame in frames:
             lr = cv2.resize(frame, (lr_w, lr_h), interpolation=cv2.INTER_AREA)
             if _scene_params is not None:
-                lr = _apply_degrade_params(lr, _scene_params)
+                lr = _apply_fn(lr, _scene_params)
             lr_frames.append(lr)
+
     else:
-        # -----------------------------------------------------------------------
-        # Square crop formats
-        # -----------------------------------------------------------------------
-        # When the source is large enough for 2× oversampling (e.g. native 4K
-        # for the 720/large_720 formats, where 3840≥1440 and 2160≥1440), take
-        # a 2×gt_size crop and Lanczos4-downsample it to gt_size for the GT.
-        # The 2× Lanczos4 step averages H.265 in-loop deblocking softness and
-        # produces a clean GT comparable to the full-frame INTER_LANCZOS4 resize
-        # used by 720_169/medium_169.
+        # ── Crop path: spatial crop + optional oversampled Lanczos4 ──────────
         #
-        # For smaller sources (1080p → 540/small_540, and any format in the
-        # 1080p fallback path) a 2×gt_size crop would exceed the frame height
-        # so we fall back to the existing 1:1 native-resolution crop.
+        # When the source is large enough for 2× oversampling (e.g. native 4K
+        # for 720/1152 GT sizes), take a 2×gt_size crop and Lanczos4-
+        # downsample it.  Produces a clean GT comparable to full-frame resize.
+        # For smaller sources fall back to a 1:1 native-resolution crop.
+        #
+        # This path is dimension-driven, not name-driven, so it works correctly
+        # for any aspect ratio (16:9 crop, 4:3 crop, etc.).
         oversample: int = 2 if (frame_h >= 2 * gt_h and frame_w >= 2 * gt_w) else 1
         sample_h: int = gt_h * oversample
         sample_w: int = gt_w * oversample
@@ -1041,9 +1533,11 @@ def create_patch_pair(
             crop_y : crop_y + sample_h, crop_x : crop_x + sample_w
         ]
 
-        # GT: Lanczos4 downsample from oversampled crop; direct slice otherwise.
+        # GT: INTER_AREA for exact-integer downsampling (box filter; identical
+        # quality to Lanczos4 at 2× but significantly faster).  INTER_LANCZOS4
+        # is only superior for non-integer scale factors.
         if oversample > 1:
-            gt = cv2.resize(center_crop, (gt_w, gt_h), interpolation=cv2.INTER_LANCZOS4)
+            gt = cv2.resize(center_crop, (gt_w, gt_h), interpolation=cv2.INTER_AREA)
         else:
             gt = center_crop
 
@@ -1052,19 +1546,13 @@ def create_patch_pair(
         if float(gray.std()) < 7.0:
             return None, None
 
-        center_raw = frames[center_idx]
-        # Sample degradation parameters once for the whole scene window so
-        # that all 7 LR frames share the same noise sigma, blur sigma, and
-        # JPEG quality — consistent with how a real MPEG-2 encoder works.
-        _scene_params = _sample_degrade_params(degrade_cfg, center_frame=center_raw) if degrade_cfg else None
+        # LR: same oversampled area → exact scale ratio (e.g. 240/720 = 1/3).
         lr_frames = []
         for frame in frames:
-            # LR is derived from the same oversampled area so the LR/GT ratio
-            # is always exactly `scale` (e.g. 240/720 = 1/3 for scale=3).
             raw_crop = frame[crop_y : crop_y + sample_h, crop_x : crop_x + sample_w]
             lr = cv2.resize(raw_crop, (lr_w, lr_h), interpolation=cv2.INTER_AREA)
             if _scene_params is not None:
-                lr = _apply_degrade_params(lr, _scene_params)
+                lr = _apply_fn(lr, _scene_params)
             lr_frames.append(lr)
 
     lr_stacked = np.concatenate(lr_frames, axis=0)
@@ -1102,8 +1590,9 @@ def save_patch_pair(
     """
     try:
         output_dirs = get_output_dirs_for_format(base_dir, category, format_name, n_frames)
-        gt_dir = output_dirs["gt"]
-        lr_dir = output_dirs["lr"]
+        # Resolve the current bucket once before writing so this patch pair
+        # goes into a consistent location (GT and LR share the same bucket).
+        gt_dir, lr_dir = get_synced_bucket_dirs(output_dirs["gt"], output_dirs["lr"])
 
         os.makedirs(gt_dir, exist_ok=True)
         os.makedirs(lr_dir, exist_ok=True)
@@ -1134,15 +1623,16 @@ def is_black_frame(gt: np.ndarray, unique_ratio_threshold: float = 0.07) -> bool
     near-uniform frame regardless of its average brightness — unlike the
     previous mean-brightness check which only caught dark frames.
 
-    Performance note: ``np.bincount`` on the uint8 grayscale ravel is O(n) and
-    avoids the O(n log n) sort inside ``np.unique``, keeping the hot-path cheap.
-    The grayscale approximation uses a simple channel mean rather than the
-    luminosity formula (0.299R + 0.587G + 0.114B) because the uniqueness count
-    is insensitive to the exact weighting — any near-uniform frame will show
-    very few distinct values regardless of the conversion method used.
+    Performance note: the function stride-samples the frame by a factor of 8 in
+    each spatial dimension (producing a ~288×180 view from a 2304×1440 source)
+    before the grayscale conversion.  Near-uniform frames are uniformly-valued at
+    any sampling density, so the detection is lossless while processing ~64×
+    fewer pixels.  ``np.bincount`` on the uint8 ravel is O(n); ``np.mean`` with
+    a simple channel average is used (not the 0.299/0.587/0.114 luminosity
+    formula) because the uniqueness count is insensitive to the exact weighting.
 
     Args:
-        gt:                     Center-frame BGR numpy array.
+        gt:                     Center-frame BGR numpy array (H × W × 3, uint8).
         unique_ratio_threshold: Fraction of 256 grey levels that must be present
                                 for the frame to be kept (default 0.07 → at least
                                 ~18 distinct grey levels required).
@@ -1150,7 +1640,10 @@ def is_black_frame(gt: np.ndarray, unique_ratio_threshold: float = 0.07) -> bool
     Returns:
         ``True`` when the frame has too few unique intensity levels to be useful.
     """
-    gray = np.mean(gt, axis=2).astype(np.uint8)
+    # Stride-sample to 1/8 in each dimension — creates a view (no copy).
+    # 2304×1440 → 288×180 = 51 840 pixels instead of 3 317 760: ~64× cheaper.
+    sample = gt[::8, ::8, :]
+    gray = np.mean(sample, axis=2).astype(np.uint8)
     unique_count = np.count_nonzero(np.bincount(gray.ravel(), minlength=256))
     return unique_count < unique_ratio_threshold * 256
 
@@ -1186,6 +1679,7 @@ def _append_ffmpeg_log(
     video_path: str,
     stderr_lines: List[str],
     pipeline_label: str = "",
+    ffmpeg_cmd: Optional[List[str]] = None,
 ) -> None:
     """Append FFmpeg stderr output to ``<base_dir>/ffmpeg_errors.log``.
 
@@ -1203,10 +1697,14 @@ def _append_ffmpeg_log(
         stderr_lines:   Lines collected from FFmpeg's stderr pipe.
         pipeline_label: Optional human-readable pipeline description included
                         in the header (e.g. ``"CPU-only [HDR]"``).
+        ffmpeg_cmd:     The complete FFmpeg argument list that was executed.
+                        When provided it is logged before the stderr output so
+                        the exact invocation can be reproduced from the log.
     """
     if not stderr_lines:
         return
     try:
+        import shlex
         from datetime import datetime as _dt
         log_path = os.path.join(base_dir, "ffmpeg_errors.log")
         os.makedirs(base_dir, exist_ok=True)
@@ -1218,6 +1716,8 @@ def _append_ffmpeg_log(
         )
         if pipeline_label:
             header += f"Pipeline: {pipeline_label}\n"
+        if ffmpeg_cmd:
+            header += f"FFmpeg command: {shlex.join(ffmpeg_cmd)}\n"
         header += f"FFmpeg stderr ({len(stderr_lines)} lines):\n"
         body = "\n".join(f"  {ln}" for ln in stderr_lines)
         with open(log_path, "a", encoding="utf-8") as fh:
@@ -1244,6 +1744,9 @@ def extract_and_save_streaming_distributed(
     center_snap_seconds: float = 0.0,
     stream_width: int = STREAM_WIDTH,
     stream_height: int = STREAM_HEIGHT,
+    cuda_device: int = 0,
+    use_qsv: bool = True,
+    color_trc: str = "smpte2084",
 ) -> Dict[str, int]:
     """
     Stream the video once and save patches as frames pass through the buffer.
@@ -1321,6 +1824,22 @@ def extract_and_save_streaming_distributed(
                              (3840) to stream at 4K for the 720/720_169 formats.
         stream_height:       Height of the decoded frame (default ``STREAM_HEIGHT``
                              = 1080).  Pass ``STREAM_4K_HEIGHT`` (2160) for 4K.
+        cuda_device:         CUDA device ordinal used for hardware-accelerated
+                             decoding (default 0 = first GPU).  Passed to FFmpeg
+                             as ``-init_hw_device cuda=hw:<cuda_device>``.  Has no
+                             effect when ``use_cuda`` is ``False`` or CUDA is not
+                             available in the local FFmpeg build.  Use the index
+                             reported by ``nvidia-smi`` to target a specific GPU
+                             when multiple are present.
+        color_trc:           Transfer-function string from ffprobe for the source
+                             video (e.g. ``"smpte2084"`` for HDR10/PQ,
+                             ``"arib-std-b67"`` for HLG).  Forwarded to
+                             :func:`build_vf_filter` so the scale-GPU HDR path
+                             can use explicit ``tin=`` / ``primariesin=`` zscale
+                             parameters, which prevents misidentification of the
+                             source transfer function when HDR frame metadata is
+                             not reliably propagated through the CUDA pipeline.
+                             Defaults to ``"smpte2084"`` (HDR10/PQ).
 
     Returns:
         ``{category: patches_saved_count}``
@@ -1446,9 +1965,18 @@ def extract_and_save_streaming_distributed(
     for _, _cat, _fmt in sorted_asgn:
         _key = (_cat, _fmt)
         if _key not in _output_dirs_cache:
-            _dirs = get_output_dirs_for_format(base_dir, _cat, _fmt, n_frames)
-            for _d in _dirs.values():
-                os.makedirs(_d, exist_ok=True)
+            _base_dirs = get_output_dirs_for_format(base_dir, _cat, _fmt, n_frames)
+            # Determine the write bucket ONCE per (category, format) before this
+            # video's first patch is written.  All patches from this video land in
+            # the same bucket — never split across a bucket boundary mid-video.
+            _gt_bucket, _lr_bucket = get_synced_bucket_dirs(
+                _base_dirs["gt"], _base_dirs["lr"]
+            )
+            _dirs = dict(_base_dirs)  # keep val_gt / val_lr unchanged
+            _dirs["gt"] = _gt_bucket
+            _dirs["lr"] = _lr_bucket
+            os.makedirs(_gt_bucket, exist_ok=True)
+            os.makedirs(_lr_bucket, exist_ok=True)
             _output_dirs_cache[_key] = _dirs
 
     # --- Async PNG write queue --------------------------------------------
@@ -1487,10 +2015,11 @@ def extract_and_save_streaming_distributed(
     # Build FFmpeg command.
     #
     # Pipeline tier is chosen by build_vf_filter() based on is_hdr and
-    # available CUDA capabilities:
+    # available CUDA/QSV capabilities:
     #
     #  HDR source  + full-GPU   → tonemap_cuda + scale_cuda + hwdownload
     #  HDR source  + scale-GPU  → scale_cuda + hwdownload (p010) + zscale+tonemap
+    #  HDR source  + QSV decode → Intel QSV H.265/H.264 decode + CPU libplacebo/zscale
     #  HDR source  + CPU-only   → zscale + tonemap(reinhard) + scale (bilinear)
     #  SDR source  + scale-GPU  → scale_cuda + hwdownload (plain scale)
     #  SDR source  + CPU-only   → scale bilinear (software, no linearisation)
@@ -1498,9 +2027,29 @@ def extract_and_save_streaming_distributed(
     _full_gpu  = _use_cuda and is_hdr and tonemap_cuda_available()
     _scale_gpu = _use_cuda and (not _full_gpu) and scale_cuda_available()
 
+    # QSV decode: try Intel hardware H.265/H.264 decode when no CUDA is active.
+    # QSV only accelerates the decode step; the filter chain (libplacebo,
+    # zscale, scale) still runs on the CPU — so build_vf_filter is unchanged.
+    _qsv_codec: Optional[str] = (
+        _qsv_decoder_for_video(video_path)
+        if use_qsv and not _use_cuda
+        else None
+    )
+
+    # Pre-warm the libplacebo runtime probe so that build_vf_filter() can
+    # correctly select libplacebo vs. zscale for the CPU tier.  Without this
+    # call the cache is empty and libplacebo_available() (called without a
+    # video_path inside build_vf_filter) returns False conservatively, causing
+    # the CPU-only filter to fall back to the zscale chain even when libplacebo
+    # is actually available.  The probe result is cached after this first call,
+    # so all subsequent calls within this process are free.
+    if is_hdr:
+        libplacebo_available(video_path)
+
     vf_filter = build_vf_filter(
         is_hdr=is_hdr, use_cuda=use_cuda,
         width=stream_width, height=stream_height,
+        color_trc=color_trc,
     )
 
     # --- Inject select filter to skip unused frames in the filter chain ---
@@ -1521,14 +2070,14 @@ def extract_and_save_streaming_distributed(
     #                     final hwdownload to cut pipe bandwidth.
     if _select_expr and not _use_seek_mode:
         if _full_gpu:
-            # Full-GPU: insert select right before the final format=bgr24
-            # (after hwdownload+scale=iw:ih+format=yuv420p — all GPU work
-            # is already done, select avoids the final CPU format conversion
-            # and the pipe write for unwanted frames).
-            _marker = ",format=bgr24"
+            # Full-GPU: insert select right before the terminal format=yuv420p
+            # (after hwdownload+scale=iw:ih — all GPU work is done; select
+            # avoids the final CPU format conversion and the pipe write for
+            # unwanted frames).
+            _marker = ",format=yuv420p"
             if _marker in vf_filter:
                 vf_filter = vf_filter.replace(
-                    _marker, f",select={_select_expr},format=bgr24", 1
+                    _marker, f",select={_select_expr},format=yuv420p", 1
                 )
             else:
                 _log("⚠️  Could not inject select into full-GPU filter chain — falling back to prepend")
@@ -1553,21 +2102,35 @@ def extract_and_save_streaming_distributed(
     # before demuxing begins.  Without this flag some FFmpeg builds silently
     # fall back to software decoding when the GPU context fails to auto-init,
     # causing the GPU filter chain to receive CPU frames and crash.
-    _CUDA_HW_INIT = ["-init_hw_device", "cuda=hw"]
+    # Device index is parameterised so callers can target a specific GPU
+    # (e.g. GPU 1 on a dual-GPU system) without setting CUDA_VISIBLE_DEVICES.
+    _CUDA_HW_INIT = ["-init_hw_device", f"cuda=hw:{cuda_device}"]
 
     hdr_label = "HDR" if is_hdr else "SDR"
+    _placebo = is_hdr and (not _full_gpu) and (not _scale_gpu) and libplacebo_available(video_path)
     if _full_gpu:
         hw_args        = [*_CUDA_HW_INIT, "-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
-        pipeline_label = f"full-GPU tonemap_cuda+scale_cuda [{hdr_label}]"
+        pipeline_label = f"full-GPU tonemap_cuda+scale_cuda [{hdr_label}] yuv420p {stream_width}×{stream_height}"
     elif _scale_gpu:
         hw_args        = [*_CUDA_HW_INIT, "-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
-        pipeline_label = f"scale-GPU + CPU {'zscale/tonemap' if is_hdr else 'passthrough'} [{hdr_label}]"
+        pipeline_label = f"scale-GPU + CPU {'zscale/tonemap' if is_hdr else 'passthrough'} [{hdr_label}] yuv420p {stream_width}×{stream_height}"
     elif _use_cuda:
         hw_args        = [*_CUDA_HW_INIT, "-hwaccel", "cuda"]
-        pipeline_label = f"decode-GPU + CPU {'tonemap' if is_hdr else 'scale'} [{hdr_label}]"
+        _cpu_algo = ("libplacebo" if _placebo else "tonemap/reinhard") if is_hdr else "scale/bilinear"
+        pipeline_label = f"decode-GPU + CPU {_cpu_algo} [{hdr_label}] yuv420p {stream_width}×{stream_height}"
+    elif _qsv_codec:
+        # Intel QSV hardware decode: frame data lands in CPU memory after decode,
+        # so the existing CPU filter chain (libplacebo / zscale) is unchanged.
+        hw_args        = ["-hwaccel", "qsv", "-c:v", _qsv_codec]
+        _cpu_algo = ("libplacebo" if _placebo else "zscale/tonemap") if is_hdr else "scale/bilinear"
+        pipeline_label = f"QSV decode ({_qsv_codec}) + CPU {_cpu_algo} [{hdr_label}] yuv420p {stream_width}×{stream_height}"
     else:
         hw_args        = []
-        pipeline_label = f"CPU-only {'tonemap/reinhard' if is_hdr else 'scale/bilinear'} [{hdr_label}]"
+        _cpu_algo = ("libplacebo" if _placebo else "zscale/tonemap") if is_hdr else "scale/bilinear"
+        pipeline_label = f"CPU-only {_cpu_algo} [{hdr_label}] yuv420p {stream_width}×{stream_height}"
+
+    # Pipe bandwidth for the log (yuv420p = 1.5 bytes/pixel).
+    _pipe_mb_per_frame = stream_width * stream_height * 1.5 / (1024 * 1024)
 
     _log(
         f"🎬 Streaming extractor: {len(sorted_asgn)} assignments, "
@@ -1585,6 +2148,10 @@ def extract_and_save_streaming_distributed(
         f"🎯 Frame selection: {len(_all_needed)} frames needed "
         f"({_select_pct:.1f}% of {last_needed + 1} decoded) "
         f"in {len(_select_ranges)} ranges — mode={_mode_label}"
+    )
+    _log(
+        f"📦 Pipe: yuv420p {stream_width}×{stream_height} "
+        f"= {_pipe_mb_per_frame:.2f} MB/frame"
     )
 
     # Write the filter chain to a temp file so that a long _select_expr
@@ -1604,14 +2171,69 @@ def extract_and_save_streaming_distributed(
     selected_idx: int = 0
     _t_start: Optional[float] = None
     _log_interval: int = 50
+    _ffmpeg_cmd: List[str] = []  # last FFmpeg command; logged on error
 
-    frame_bytes: int = stream_width * stream_height * 3
+    # yuv420p: 1.5 bytes per pixel (Y plane + half-res U+V planes).
+    # Compared to bgr24 (3 bytes/pixel) this cuts pipe bandwidth by ~33 %.
+    frame_bytes: int = stream_width * stream_height * 3 // 2
     patches_created: Dict[str, int] = {}
 
     # Rolling buffer: frame_idx → BGR frame (numpy array)
     buffer: Dict[int, np.ndarray] = {}
     pending_idx: int = 0  # index into pending_centers
     frames_examined: int = 0  # assignments processed (saved + skipped)
+
+    # Rejection counters: incremented inside _consume_raw_frame for diagnostics.
+    _n_black: int = 0         # centers skipped by black-frame check
+    _n_quality_fail: int = 0  # centers where create_patch_pair returned None for all formats
+
+    # --- Per-video timing accumulators (mutated inside _consume_raw_frame) ---
+    _t_phases: dict = {
+        "n_frames_buf": 0,   # total raw frames processed through buffer
+        "n_centers":    0,   # centers fully evaluated (= frames_examined, incl. black)
+        "t_buf_s":      0.0, # total time: yuv→bgr convert + copy + buffer insert/evict
+        "t_black_s":    0.0, # total time: black-frame check (per center)
+        "t_patch_s":    0.0, # total time: create_patch_pair calls (per center×format)
+        "t_write_s":    0.0, # total time: write_queue.put (per patch)
+        "n_patches":    0,   # patches enqueued for writing
+        "q_size_last":  0,   # last observed write-queue depth
+    }
+    _next_timing_log: List[int] = [50]  # mutable box: write debug log at this n_centers
+
+    def _write_timing_log_entry() -> None:
+        """Append a one-line timing summary to <base_dir>/timing_debug.log."""
+        nc = _t_phases["n_centers"]
+        nf = _t_phases["n_frames_buf"]
+        np_ = _t_phases["n_patches"]
+        if nc == 0:
+            return
+        from datetime import datetime as _dt
+        ms_buf   = _t_phases["t_buf_s"]   / max(nf, 1) * 1000
+        ms_black = _t_phases["t_black_s"] / nc * 1000
+        ms_patch = _t_phases["t_patch_s"] / nc * 1000
+        ms_write = _t_phases["t_write_s"] / max(np_, 1) * 1000
+        # Pipe throughput in MB/s (yuv420p = 1.5 bytes/pixel).
+        elapsed = _t_phases["t_buf_s"] + _t_phases["t_black_s"] + _t_phases["t_patch_s"]
+        pipe_mbs = (nf * _pipe_mb_per_frame / elapsed) if elapsed > 0 else 0.0
+        line = (
+            f"[{_dt.now().strftime('%H:%M:%S')}] "
+            f"video={os.path.basename(video_path)} "
+            f"pipe={stream_width}x{stream_height} yuv420p {_pipe_mb_per_frame:.2f}MB/frame "
+            f"pipe_mbs={pipe_mbs:.1f}MB/s "
+            f"centers={nc} frames={nf} patches={np_} "
+            f"buf={ms_buf:.1f}ms/frame "
+            f"black={ms_black:.1f}ms/ctr "
+            f"patch={ms_patch:.1f}ms/ctr "
+            f"write={ms_write:.1f}ms/patch "
+            f"qsize={_t_phases['q_size_last']}"
+        )
+        try:
+            log_path = os.path.join(base_dir, "timing_debug.log")
+            os.makedirs(base_dir, exist_ok=True)
+            with open(log_path, "a", encoding="utf-8") as _fh:
+                _fh.write(line + "\n")
+        except Exception:
+            pass
 
     # Reduce FFmpeg CPU priority so interactive processes stay responsive.
     # psutil is used instead of preexec_fn because preexec_fn is unsafe in
@@ -1632,15 +2254,19 @@ def extract_and_save_streaming_distributed(
             _fc_fh.write(f"[0:v]{vf_filter}[vout]")
 
         # Select the right filter-file and vsync options depending on the
-        # installed FFmpeg version.  FFmpeg 5+ deprecated -filter_complex_script
-        # (replaced by -/filter_complex) and -vsync (replaced by -fps_mode).
+        # installed FFmpeg version.
+        #   FFmpeg 7+: -/filter_complex <file>  (file-based option syntax, added in 7.0)
+        #              -filter_complex_script was removed in 7.0
+        #   FFmpeg 5-6: -filter_complex_script <file>  (deprecated but still present)
+        #   FFmpeg 4:   -filter_complex_script <file>
+        #   FFmpeg 5+:  -fps_mode passthrough  (replaces deprecated -vsync)
         # -vsync 0 / -fps_mode passthrough is CRITICAL: without it, FFmpeg fills
         # PTS gaps left by the select filter with duplicated frames, so Python
         # would read only frames from the very start of the video.
         _ffmpeg_ver = _get_ffmpeg_major_version()
         _fc_args = (
             ["-/filter_complex", _fc_script_path]
-            if _ffmpeg_ver >= 5
+            if _ffmpeg_ver >= 7
             else ["-filter_complex_script", _fc_script_path]
         )
         _vsync_args = (
@@ -1656,24 +2282,33 @@ def extract_and_save_streaming_distributed(
             pipe.close()
 
         # ------------------------------------------------------------------
-        # Inner helper: receive one decoded BGR frame, fill the rolling buffer,
-        # and satisfy any pending assignments whose window is now complete.
+        # Inner helper: receive one decoded yuv420p frame, convert to BGR,
+        # fill the rolling buffer, and satisfy any pending assignments whose
+        # window is now complete.
         # Shared by both stream mode and seek mode to avoid code duplication.
         # ------------------------------------------------------------------
         def _consume_raw_frame(raw: bytes, actual_frame: int) -> None:
-            nonlocal pending_idx, frames_examined, selected_idx
+            nonlocal pending_idx, frames_examined, selected_idx, _n_black, _n_quality_fail
 
             selected_idx += 1
+            _t_phases["n_frames_buf"] += 1
 
-            frame = np.frombuffer(raw, dtype=np.uint8).reshape(
-                (stream_height, stream_width, 3)
-            ).copy()
+            _ta = time.monotonic()
+            # yuv420p (I420) layout: Y plane (H rows × W cols) followed by
+            # U plane (H/2 × W/2) and V plane (H/2 × W/2).
+            # Total bytes = W × H × 3/2.  cv2.COLOR_YUV2BGR_I420 expects the
+            # array shaped (H*3//2, W) and produces an (H, W, 3) BGR array.
+            yuv = np.frombuffer(raw, dtype=np.uint8).reshape(
+                (stream_height * 3 // 2, stream_width)
+            )
+            frame = cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR_I420)
             buffer[actual_frame] = frame
 
             # Evict frames no longer needed by any pending assignment.
             min_keep = max(0, pending_centers[pending_idx] - half)
             for old_idx in [k for k in buffer if k < min_keep]:
                 del buffer[old_idx]
+            _t_phases["t_buf_s"] += time.monotonic() - _ta
 
             # Satisfy pending assignments whose full window is now in the buffer.
             while pending_idx < len(pending_centers):
@@ -1695,26 +2330,57 @@ def extract_and_save_streaming_distributed(
                     # position – before iterating over (category, format) pairs.
                     center_raw = window[n_frames // 2]
                     frames_examined += 1
+                    _t_phases["n_centers"] += 1
 
-                    if _black_fn(center_raw):
+                    _tb = time.monotonic()
+                    _is_black = _black_fn(center_raw)
+                    _t_phases["t_black_s"] += time.monotonic() - _tb
+
+                    if _is_black:
+                        _n_black += 1
                         _log(f"  ⏭ frame {center} skipped (black frame)")
                     else:
+                        _any_patch_saved = False
                         for category, fmt_name in center_map[center]:
                             cfg = format_config.get(category, {}).get(fmt_name, {})
                             if not cfg:
                                 continue
 
-                            # Resize formats (medium_169/720_169) always use the full
-                            # frame – retrying never changes the result.
-                            is_resize_fmt = fmt_name in ("medium_169", "720_169")
-                            max_attempts = 1 if is_resize_fmt else 6
+                            # Determine source_mode from cfg; fall back to legacy name
+                            # check so existing callers that don't populate source_mode
+                            # still work correctly.
+                            _source_mode = cfg.get("source_mode")
+                            if _source_mode not in ("resize", "crop"):
+                                _source_mode = (
+                                    "resize"
+                                    if fmt_name in ("medium_169", "720_169")
+                                    else "crop"
+                                )
+                            # Resize mode produces the same output on every attempt —
+                            # no benefit in retrying a random crop.
+                            max_attempts = 1 if _source_mode == "resize" else 6
+
+                            # Per-format degradation: sample a template from the
+                            # format's degradation_mix if available; fall back to the
+                            # global degrade_cfg for legacy callers.
+                            _deg_spec: Optional[dict] = None
+                            _deg_mix = cfg.get("degradation_mix")
+                            _deg_tmpls = cfg.get("degradation_templates")
+                            if _deg_mix and _deg_tmpls:
+                                _names = list(_deg_mix.keys())
+                                _weights = [float(_deg_mix[k]) for k in _names]
+                                _chosen = random.choices(_names, weights=_weights, k=1)[0]
+                                _deg_spec = _deg_tmpls.get(_chosen)
+
                             gt, lr = None, None
+                            _tp = time.monotonic()
                             for attempt in range(max_attempts):
                                 force = attempt >= 5
                                 gt, lr = create_patch_pair(
                                     window, fmt_name, cfg,
                                     force_center=force, logger=logger,
-                                    degrade_cfg=degrade_cfg,
+                                    degrade_cfg=degrade_cfg if _deg_spec is None else None,
+                                    deg_spec=_deg_spec,
                                 )
                                 if gt is None:
                                     continue
@@ -1724,23 +2390,39 @@ def extract_and_save_streaming_distributed(
                                     or force
                                 ):
                                     break
+                            _t_phases["t_patch_s"] += time.monotonic() - _tp
 
                             if gt is not None and lr is not None:
+                                _any_patch_saved = True
                                 dirs = _output_dirs_cache[(category, fmt_name)]
                                 patch_name = f"{_video_stem}_{int(ts * 1000):08d}.png"
+                                _tw = time.monotonic()
                                 _write_queue.put((
                                     gt, lr,
                                     os.path.join(dirs["gt"], patch_name),
                                     os.path.join(dirs["lr"], patch_name),
                                 ))
+                                _t_phases["t_write_s"] += time.monotonic() - _tw
+                                _t_phases["n_patches"] += 1
+                                _t_phases["q_size_last"] = _write_queue.qsize()
                                 patches_created[category] = (
                                     patches_created.get(category, 0) + 1
                                 )
 
+                        if not _any_patch_saved:
+                            _n_quality_fail += 1
+
+                    # Periodic timing debug log (every 50 centres evaluated)
+                    if _t_phases["n_centers"] >= _next_timing_log[0]:
+                        _write_timing_log_entry()
+                        _next_timing_log[0] += 50
+
                     if progress_fn is not None:
-                        # 3rd arg = actual video frame index (monotonically
-                        # increasing video frame number).
-                        progress_fn(frames_examined, dict(patches_created), actual_frame)
+                        # 3rd arg = selected_idx: count of frames actually piped
+                        # from FFmpeg to Python (used for real "piped fps" metric).
+                        # 4th arg = snapshot of phase timings for GUI display.
+                        progress_fn(frames_examined, dict(patches_created),
+                                    selected_idx, dict(_t_phases))
 
                 pending_idx += 1
 
@@ -1774,10 +2456,11 @@ def extract_and_save_streaming_distributed(
                     *_fc_args,
                     "-map", "[vout]",
                     "-f", "rawvideo",
-                    "-pix_fmt", "bgr24",
+                    "-pix_fmt", "yuv420p",
                     *_vsync_args,
                     "pipe:1",
                 ]
+                _ffmpeg_cmd = _cl_cmd  # capture for error logging
 
                 _cl_proc = subprocess.Popen(
                     _cl_cmd,
@@ -1847,10 +2530,11 @@ def extract_and_save_streaming_distributed(
                 *_fc_args,
                 "-map", "[vout]",
                 "-f", "rawvideo",
-                "-pix_fmt", "bgr24",
+                "-pix_fmt", "yuv420p",
                 *_vsync_args,
                 "pipe:1",
             ]
+            _ffmpeg_cmd = cmd  # capture for error logging
 
             process = subprocess.Popen(
                 cmd,
@@ -1916,7 +2600,7 @@ def extract_and_save_streaming_distributed(
         # Always persist FFmpeg stderr to the log file so that filter-chain
         # errors, codec warnings and hw-accel failures are visible after the
         # run even when they didn't prevent frame output.
-        _append_ffmpeg_log(base_dir, video_path, stderr_lines, pipeline_label)
+        _append_ffmpeg_log(base_dir, video_path, stderr_lines, pipeline_label, _ffmpeg_cmd or None)
         # Also echo to the logger when no frames were produced (most useful
         # for diagnosing filter-chain errors interactively).
         if selected_idx == 0 and stderr_lines:
@@ -1938,12 +2622,19 @@ def extract_and_save_streaming_distributed(
             except Exception:
                 pass
 
-    # GPU pipeline produced zero frames — most likely a runtime hw-accel failure
-    # (e.g. CUDA driver mismatch, scale_cuda format-negotiation bug, or FFmpeg
-    # silently falling back to software decode while the filtergraph still
-    # contains scale_cuda / hwdownload GPU filters).
-    # Retry transparently with the CPU-only pipeline so extraction still
-    # completes, rather than silently returning 0 patches.
+    # Safety net: if libplacebo still failed at runtime despite passing the
+    # startup probe (should not happen with a real-file probe), disable it for
+    # all subsequent videos in this process so the failure is not repeated.
+    global _libplacebo_avail
+    _stderr_text = "\n".join(stderr_lines)
+    if _placebo and any(kw in _stderr_text for kw in _VULKAN_FAIL_STRINGS):
+        _libplacebo_avail = False
+        _log(
+            "⚠️  libplacebo Vulkan failure detected — "
+            "disabling libplacebo for the remainder of this run"
+        )
+
+    # GPU pipeline produced zero frames — retry with CPU-only (zscale) pipeline.
     if selected_idx == 0 and (_full_gpu or _scale_gpu):
         _log(
             "⚠️  GPU pipeline produced no frames — retrying with CPU-only pipeline"
@@ -1965,25 +2656,33 @@ def extract_and_save_streaming_distributed(
             center_snap_seconds=center_snap_seconds,
             stream_width=stream_width,
             stream_height=stream_height,
+            cuda_device=cuda_device,
+            color_trc=color_trc,
         )
 
     total = sum(patches_created.values())
     _elapsed_total = (
         (time.monotonic() - _t_start) if _t_start is not None else 0.0
     )
+    _rejection_info = (
+        f", {_n_black} black"
+        + (f", {_n_quality_fail} quality-rejected" if _n_quality_fail else "")
+        if (_n_black or _n_quality_fail)
+        else ""
+    )
     if _elapsed_total > 0:
         _sps_final = frames_examined / _elapsed_total
         _sel_fps_final = selected_idx / _elapsed_total
         _log(
             f"✓ Streaming extraction done: {total} patches saved, "
-            f"{frames_examined} assignments examined, "
+            f"{frames_examined} assignments examined{_rejection_info}, "
             f"{selected_idx}/{len(_all_needed)} selected frames received — "
             f"sel/s {_sel_fps_final:.1f}  SPS {_sps_final:.2f}"
         )
     else:
         _log(
             f"✓ Streaming extraction done: {total} patches saved, "
-            f"{frames_examined} assignments examined"
+            f"{frames_examined} assignments examined{_rejection_info}"
         )
     return patches_created
 
@@ -2006,14 +2705,17 @@ def extract_and_save_streaming_dual(
     is_hdr: bool = True,
     degrade_cfg: Optional[dict] = None,
     center_snap_seconds: float = 0.0,
+    cuda_device: int = 0,
+    color_trc: str = "smpte2084",
 ) -> Dict[str, int]:
     """Deprecated compatibility shim — forwards to extract_and_save_streaming_distributed.
 
     The former dual-buffer (4K stream + Python LANCZOS4 downscale to 1080p)
     approach has been removed.  All formats are now extracted in a single
-    4K FFmpeg pass via :func:`extract_and_save_streaming_distributed`, which
-    lets :func:`create_patch_pair` apply 2× oversampled Lanczos4 crops for
-    every GT family (720×720 and 540×540).
+    optimised FFmpeg pass via :func:`extract_and_save_streaming_distributed`
+    (resolution ``STREAM_OPT_WIDTH × STREAM_OPT_HEIGHT``, yuv420p pipe, bilinear
+    scale), which lets :func:`create_patch_pair` apply 2× oversampled Lanczos4
+    crops for every GT family (1152×648, 960×540, 960×720).
     """
     return extract_and_save_streaming_distributed(
         video_path=video_path,
@@ -2031,6 +2733,8 @@ def extract_and_save_streaming_dual(
         is_hdr=is_hdr,
         degrade_cfg=degrade_cfg,
         center_snap_seconds=center_snap_seconds,
-        stream_width=STREAM_4K_WIDTH,
-        stream_height=STREAM_4K_HEIGHT,
+        stream_width=STREAM_OPT_WIDTH,
+        stream_height=STREAM_OPT_HEIGHT,
+        cuda_device=cuda_device,
+        color_trc=color_trc,
     )

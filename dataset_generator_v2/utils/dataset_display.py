@@ -77,6 +77,9 @@ def draw_dataset_ui(state):
     
     # Statistics and ETA
     _draw_statistics_and_eta(state, term_width)
+
+    # Timing Breakdown (only when data is available)
+    _draw_timing_breakdown(state, term_width)
     
     # Flush output
     sys.stdout.flush()
@@ -161,8 +164,13 @@ def _draw_patch_distribution_table(state, width):
                     seen.append(k)
         format_sizes = seen or ['540', '169', '720']
 
-    # Map raw size keys to display labels (e.g. '720_169' → '169')
-    size_labels = [_size_label(k) for k in format_sizes]
+    # Use real gt_size labels (e.g. "1152×648") when available; fall back to
+    # the legacy _size_label truncation only when the mapping is absent.
+    format_labels_map = state.get('format_labels', {})
+    size_labels = [
+        format_labels_map.get(k) or _size_label(k)
+        for k in format_sizes
+    ]
 
     # Table header
     col_w = 15
@@ -181,9 +189,8 @@ def _draw_patch_distribution_table(state, width):
         total_count = 0
         cells = []
         for size_key, lbl in zip(format_sizes, size_labels):
-            # patch_distribution is keyed by raw format name (e.g. '720_169').
-            # Fall back to the short label ('169') for backward compatibility with
-            # any state dicts produced before this fix.
+            # patch_distribution is keyed by raw format name (e.g. '1152_169').
+            # Fall back to the short label for backward compatibility.
             entry = cat_data.get(size_key) or cat_data.get(lbl) or {'count': 0, 'target': 0}
             count = entry.get('count', 0)
             target = entry.get('target', 0)
@@ -201,7 +208,13 @@ def _draw_statistics_and_eta(state, width):
     """Draw statistics and ETA section"""
     print_section_header("STATISTIKEN & GESCHÄTZTE RESTZEIT")
 
-    frames_read   = state.get('frames_read_total', 0)       # raw frames decoded by FFmpeg
+    # Parallel-worker status line (only shown while workers are running)
+    parallel_status = state.get('parallel_status', '')
+    if parallel_status:
+        print(f"  {C_YELLOW}{parallel_status}{C_RESET}")
+        print()
+
+    frames_read   = state.get('frames_read_total', 0)       # frames actually piped from FFmpeg to Python
     frames_total  = state.get('frames_processed_total', 0)  # center-frame assignments evaluated
     gt_total      = state.get('patches_created_total', 0)   # GT-Bilder saved (= Szenen, cross-category sum)
     skipped       = max(0, frames_total - gt_total)
@@ -209,13 +222,13 @@ def _draw_statistics_and_eta(state, width):
     live_fps      = state.get('live_fps', 0.0)
     live_sps      = state.get('live_sps', 0.0)
 
-    # Gelesen     = raw FFmpeg frames decoded
+    # Piped      = frames actually piped from FFmpeg stdout to Python (selected frames only)
     # Szenen      = center-frame assignments evaluated (= unique scene positions across categories)
     # GT-Bilder   = GT files saved; each GT-Bild corresponds to exactly 1 scene and 1 stacked LR
     #               file containing n_frames LR frames (e.g. 7 × 30 000 = 210 000 LR frames)
     # Übersprungen = assignments that produced no GT file (black frame or crop failure)
     line1 = (
-        f"  Gelesen: {C_GREEN}{format_number(frames_read):>8s}{C_RESET}  |  "
+        f"  Piped: {C_GREEN}{format_number(frames_read):>8s}{C_RESET}  |  "
         f"Szenen: {C_GREEN}{format_number(frames_total):>8s}{C_RESET}  |  "
         f"GT-Bilder: {C_GREEN}{format_number(gt_total):>8s}{C_RESET}  |  "
         f"Übersprungen: {C_GREEN}{format_number(skipped):>6s}{C_RESET}"
@@ -229,9 +242,14 @@ def _draw_statistics_and_eta(state, width):
         fps_str = f"{live_fps:>7.1f}" if live_fps > 0 else "    N/A"
         sps_str = f"{live_sps:>7.2f}" if live_sps > 0 else "    N/A"
         print(
-            f"  FPS (decoded): {C_CYAN}{fps_str}{C_RESET}  |  "
+            f"  FPS (piped): {C_CYAN}{fps_str}{C_RESET}  |  "
             f"SPS (scenes/s): {C_CYAN}{sps_str}{C_RESET}"
         )
+
+    # Decode backend (CPU / GPU N + pipeline tier) — always shown
+    backend = state.get("decode_backend", "")
+    if backend and backend != "–":
+        print(f"  Decode-Backend : {C_CYAN}{backend}{C_RESET}")
 
     print()
     
@@ -262,4 +280,67 @@ def _draw_statistics_and_eta(state, width):
         total_str = str(total_eta)
     print(f"  {C_WHITE}{C_BOLD}{'GESAMT':10s}: {total_str:>15s}{C_RESET}")
     
+    print()
+
+
+def _draw_timing_breakdown(state, width):
+    """Draw per-phase timing breakdown to help identify the performance bottleneck."""
+    t = state.get('timing_phases', {})
+    nc  = t.get('n_centers', 0)
+    nf  = t.get('n_frames_buf', 0)
+    np_ = t.get('n_patches', 0)
+    if nc == 0:
+        return  # No timing data yet — skip section
+
+    print_section_header("TIMING BREAKDOWN (Bottleneck-Analyse)")
+
+    ms_buf   = t.get('t_buf_s',   0.0) / max(nf, 1) * 1000
+    ms_black = t.get('t_black_s', 0.0) / nc * 1000
+    ms_patch = t.get('t_patch_s', 0.0) / nc * 1000
+    ms_write = t.get('t_write_s', 0.0) / max(np_, 1) * 1000
+    ms_total = ms_buf + ms_black + ms_patch + ms_write
+    qsize    = t.get('q_size_last', 0)
+
+    def _bar(ms, total_ms, w=20):
+        frac = (ms / total_ms) if total_ms > 0 else 0.0
+        filled = int(frac * w)
+        return '█' * filled + '░' * (w - filled)
+
+    def _phase_line(label, ms, unit, bar):
+        return (
+            f"  {C_CYAN}{label:<18s}{C_RESET}"
+            f"  {C_GREEN}{ms:>8.1f}ms{C_RESET}/{unit}  "
+            f"{C_YELLOW}{bar}{C_RESET}"
+        )
+
+    print(_phase_line("Buffer/Frame",   ms_buf,   "frame", _bar(ms_buf,   ms_total)))
+    print(_phase_line("Schwarz-Check",  ms_black, "ctr",   _bar(ms_black, ms_total)))
+    print(_phase_line("Patch-Erzeugung",ms_patch, "ctr",   _bar(ms_patch, ms_total)))
+    print(_phase_line("Write-Queue",    ms_write, "patch", _bar(ms_write, ms_total)))
+
+    # Warn if the write queue is backing up (> 80% full, maxsize=256)
+    q_warn = f"  {C_RED}⚠ Queue fast voll!{C_RESET}" if qsize > 200 else ""
+    print(
+        f"  {'Write-Queue Tiefe':<18s}  {C_GREEN}{qsize:>3d}{C_RESET}/256{q_warn}"
+    )
+
+    # Theoretical max SPS from Python-side work alone (excludes FFmpeg decode time)
+    if ms_total > 0:
+        max_sps = 1000.0 / ms_total
+        print(
+            f"  {'Python-seitig max':<18s}  {C_CYAN}{max_sps:>6.2f}{C_RESET} SPS "
+            f"(exkl. FFmpeg-Decode)"
+        )
+        # If Python-side max >> actual SPS, FFmpeg decode is the bottleneck.
+        live_sps = state.get('live_sps', 0.0)
+        if live_sps > 0 and max_sps > live_sps * 2:
+            print(
+                f"  {C_YELLOW}→ Bottleneck: FFmpeg-Decode "
+                f"(Python {max_sps:.1f} SPS >> Actual {live_sps:.2f} SPS){C_RESET}"
+            )
+        elif live_sps > 0 and max_sps <= live_sps * 1.3:
+            print(
+                f"  {C_RED}→ Bottleneck: Python-Verarbeitung "
+                f"(Patch-Erzeugung oder Write-Queue){C_RESET}"
+            )
     print()

@@ -2,7 +2,14 @@
 """
 Shared config IO and validation layer for dataset_generator_v2.
 
-Provides load/save/validate for templates.json and generator_config_v2.active.json.
+Provides load/save/validate for templates.json and generator_config.json.
+
+NOTE – config file naming convention
+=====================================
+generator_config.json        → the ONLY file used at runtime by all tools.
+                               Listed in .gitignore (machine-local, never committed).
+generator_config_active.json → a read-only snapshot given to AI agents for review.
+                               NEVER loaded by any code; only humans/agents read it.
 """
 
 import json
@@ -106,7 +113,7 @@ def save_templates(templates: dict, path: str) -> None:
 
 
 def load_active_config(path: str) -> dict:
-    """Load generator_config_v2.active.json from disk."""
+    """Load generator_config.json from disk."""
     with open(path, 'r', encoding='utf-8') as f:
         return json.load(f)
 
@@ -190,7 +197,7 @@ def create_default_templates() -> dict:
 def create_default_active_config() -> dict:
     """Return a minimal default active config."""
     return {
-        "_format": "generator_config_v2",
+        "_format": "generator_config",
         "_version": "2.0",
         "_description": "Active dataset project config. Edit via video_manager.py",
         "root_path": "/mnt/data/training/datasetNeu",

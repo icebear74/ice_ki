@@ -1,10 +1,23 @@
 #!/usr/bin/env python3
 """
-Dataset Generator V2 - UHD Quality with Original Features
-Combines:
-- UHD quality preservation from new implementation
-- GUI, priorities, multi-category support from original
-- Complete video list and configurations
+Dataset Generator V2 – UHD Quality
+
+Loads configuration exclusively from:
+  - dataset_generator_v2/templates.json
+  - dataset_generator_v2/generator_config.json
+
+via the shared config utility (utils/config_io.py) introduced in Task 1.
+
+No hard-coded format names, category names, output paths, or distribution
+assumptions.  All functional decisions are driven entirely by the active config
+and the templates file.
+
+NOTE – config file naming convention
+=====================================
+generator_config.json       → the ONLY file used at runtime by all tools.
+                              It is listed in .gitignore (machine-local, not committed).
+generator_config_active.json → a read-only snapshot given to AI agents for review.
+                              It is NEVER loaded by any code; only humans/agents read it.
 """
 
 import os
@@ -21,7 +34,7 @@ import signal
 import threading
 import queue
 import time
-import psutil  # For memory monitoring
+import psutil
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional
@@ -30,25 +43,36 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # Add utils to path
 sys.path.insert(0, os.path.dirname(__file__))
 
-from utils.format_definitions import (
-    FORMATS, CATEGORY_FORMAT_DISTRIBUTION, CATEGORY_PATHS,
-    select_random_format, get_output_dirs_for_format
+from utils.config_io import (
+    load_templates,
+    load_active_config,
+    save_active_config,
+    ensure_templates_file,
+    validate_templates,
+    validate_active_config,
 )
+from utils.format_definitions import get_output_dirs_for_format
 from streaming_extractor import (
     build_assignments_per_category,
     extract_and_save_streaming_distributed,
     STREAM_4K_WIDTH,
     STREAM_4K_HEIGHT,
+    STREAM_OPT_WIDTH,
+    STREAM_OPT_HEIGHT,
     create_patch_pair,
     is_black_frame as _streaming_is_black_frame,
     is_hdr_transfer,
     build_vf_filter,
+    cuda_available,
+    scale_cuda_available,
+    tonemap_cuda_available,
+    libplacebo_available,
+    _get_ffmpeg_major_version,
 )
 from utils.progress_tracker import ProgressTracker
 from generation_plan import GenerationPlan
 from utils.dataset_display import draw_dataset_ui
 from utils.terminal_ui import hide_cursor, show_cursor, clear_screen
-from utils.config_normalizer import normalize_config
 from category_utils import get_video_categories, normalize_categories
 
 try:
@@ -65,187 +89,1115 @@ except ImportError:
     print("Warning: 'rich' library not found. Install with: pip install rich")
 
 console = Console() if RICH_AVAILABLE else None
-# Don't configure basic logging here - will be done in _setup_logger based on UI mode
 logger = logging.getLogger(__name__)
+
+# Default config file names (relative to the script directory)
+_TEMPLATES_FILENAME = "templates.json"
+_ACTIVE_CONFIG_FILENAME = "generator_config.json"
+
+
+def _detect_nvidia_gpus() -> List[Tuple[int, str]]:
+    """Return ``[(device_index, gpu_name), …]`` for all NVIDIA GPUs.
+
+    Queries ``nvidia-smi``.  Returns an empty list when ``nvidia-smi`` is not
+    installed, the driver is unavailable, or no NVIDIA GPU is present.
+    """
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=index,name", "--format=csv,noheader"],
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        ).decode(errors="replace").strip()
+        gpus: List[Tuple[int, str]] = []
+        for line in out.splitlines():
+            parts = line.split(",", 1)
+            if len(parts) == 2:
+                try:
+                    gpus.append((int(parts[0].strip()), parts[1].strip()))
+                except ValueError:
+                    pass
+        return gpus
+    except Exception:
+        return []
 
 
 class DatasetGeneratorV2UHD:
     """
-    Enhanced Dataset Generator V2
-    - UHD quality preservation (tonemap only, NO resize)
-    - Multi-category support (master, universal, space, toon)
-    - Priority-based video processing
-    - Rich GUI with progress tracking
-    - Complete video list from original config
+    Dataset Generator V2 – dynamic, template-driven, no hard-coded formats.
+
+    Configuration is loaded exclusively from:
+      * ``templates.json``         – format and degradation templates
+      * ``generator_config.json``  – categories, videos, settings
+
+    Both files are validated at startup via ``utils/config_io.py``.  The
+    generator fails early with a clear error message when a required field is
+    missing or a template reference cannot be resolved.
     """
-    
+
     MAX_DISPLAYED_PRIORITIES = 10
-    
-    def __init__(self, config_path: str = "generator_config_v2.json"):
-        """Initialize generator with full config support"""
-        # Load and normalize V2 config
-        with open(config_path, 'r') as f:
-            self.config = json.load(f)
 
-        self.config = normalize_config(self.config)
+    def __init__(self, config_dir: Optional[str] = None, force_benchmark: bool = False):
+        """
+        Initialise the generator.
 
-        self.settings = self.config['base_settings']
-        self.videos = self.config.get('videos', [])
-        self.format_config = self.config.get('format_config', {})
-        self.category_targets = self.config.get('category_targets', {})
-        
-        # Initialize paths (MUST be before logger setup!)
-        self.base_dir = self.settings['output_base_dir']
-        self.temp_dir = self.settings['temp_dir']
-        self.status_file = self.settings['status_file']
-        
-        # Terminal UI setting (MUST be before logger setup!)
-        self.use_terminal_ui = True  # Enable terminal GUI by default
-        
-        # Initialize logger
+        Args:
+            config_dir:       Directory that contains ``templates.json`` and
+                              ``generator_config.json``.  Defaults to the
+                              directory that contains this script.
+            force_benchmark:  When ``True``, always re-run the decode pipeline
+                              benchmark even if a recent cached result exists in
+                              ``<base_dir>/decode_benchmark.json``.  Pass
+                              ``--benchmark`` on the command line to set this.
+        """
+        if config_dir is None:
+            config_dir = os.path.dirname(os.path.abspath(__file__))
+
+        templates_path = os.path.join(config_dir, _TEMPLATES_FILENAME)
+        active_config_path = os.path.join(config_dir, _ACTIVE_CONFIG_FILENAME)
+
+        # ── Load and validate configs ─────────────────────────────────────────
+        self.templates = ensure_templates_file(templates_path)
+
+        if not os.path.exists(active_config_path):
+            print(
+                f"❌ Active config not found: {active_config_path}\n"
+                "   Please create it via video_manager.py or copy the default."
+            )
+            sys.exit(1)
+
+        self.config = load_active_config(active_config_path)
+
+        tmpl_errors = validate_templates(self.templates)
+        cfg_errors = validate_active_config(self.config, self.templates)
+        if tmpl_errors or cfg_errors:
+            print("❌ Config validation failed:")
+            for e in tmpl_errors:
+                print(f"  [templates] {e}")
+            for e in cfg_errors:
+                print(f"  [active config] {e}")
+            sys.exit(1)
+
+        # ── Extract the fields that the rest of the code relies on ────────────
+        self.categories: Dict[str, dict] = self.config["categories"]
+        self.videos: List[dict] = self.config.get("videos", [])
+        self.category_targets: Dict[str, int] = {
+            name: cat["target_total"] for name, cat in self.categories.items()
+        }
+
+        # Build the format_config dict expected by the streaming extractor.
+        # Resolves template references and attaches source_mode + degradation.
+        self.format_config: Dict[str, Dict[str, dict]] = self._build_format_config()
+
+        # ── Output paths ──────────────────────────────────────────────────────
+        self.base_dir: str = self.config["root_path"]
+        self.temp_dir: str = os.path.join(self.base_dir, "tmp")
+        self.status_file: str = os.path.join(self.base_dir, "generation_status.json")
+
+        # Terminal UI setting (must be set before logger setup)
+        self.use_terminal_ui = True
+
+        # ── Logger ────────────────────────────────────────────────────────────
         self.logger = self._setup_logger()
         sys.logger = self.logger
-        
-        # Use CUDA when the local FFmpeg build supports it; fall back to CPU.
-        from streaming_extractor import cuda_available
-        self.use_cuda = cuda_available()
+
+        # ── CUDA ──────────────────────────────────────────────────────────────
+        self.use_cuda: bool = cuda_available()
+        # cuda_device is the CUDA device ordinal used for hardware-accelerated
+        # decoding.  0 = first GPU (default).  Updated by _run_decode_benchmark.
+        self.cuda_device: int = 0
+        # List of all available GPU ordinals for round-robin assignment across
+        # parallel workers.  Falls back to [0] when CUDA is enabled but
+        # nvidia-smi returns nothing, or to [] for CPU-only mode.
+        _detected = _detect_nvidia_gpus()
+        self._available_gpu_indices: List[int] = (
+            [idx for idx, _ in _detected] if _detected
+            else ([0] if self.use_cuda else [])
+        )
+        # Optimal per-worker decode configs for within-film parallel extraction.
+        # Populated from the decode_benchmark.json cache (best_parallel entry).
+        # None = parallel mode disabled (single-worker extraction per film).
+        self._parallel_worker_configs: Optional[List[dict]] = None
         if self.use_cuda:
             self.logger.info("🚀 CUDA/GPU mode enabled (hardware-accelerated decoding & scaling)")
         else:
             self.logger.info("🖥️  CPU-only mode enabled (CUDA not available in this FFmpeg build)")
-        
-        # Videos are already sorted in JSON by multi-category priority
-        # Process them in exact JSON order (no additional sorting)
-        # This ensures videos with multiple categories are processed first
-        
-        self.logger.info(f"Loaded {len(self.videos)} videos from config (processing in JSON order)")
-        
-        # Extract format probabilities from format_config
-        self.format_probabilities = self._extract_format_probabilities()
-        
-        # Initialize video metadata cache
-        self.metadata_cache_file = os.path.join(self.base_dir, '.video_metadata_cache.json')
+
+        self.logger.info(f"Loaded {len(self.videos)} videos from active config")
+        self.logger.info(f"Categories: {list(self.category_targets.keys())}")
+        for cat, total in self.category_targets.items():
+            self.logger.info(f"  {cat}: target_total={total:,}")
+
+        # ── Metadata cache ────────────────────────────────────────────────────
+        self.metadata_cache_file = os.path.join(self.base_dir, ".video_metadata_cache.json")
         self.metadata_cache = self._load_metadata_cache()
-        
-        # Initialize progress tracker
+
+        # ── Progress tracking ─────────────────────────────────────────────────
         self.tracker = ProgressTracker(self.status_file)
         self.tracker.update_progress(total_videos=len(self.videos))
         self.tracker.initialize_categories(self.category_targets)
 
-        # Initialize generation plan (path-based resume — more robust than index).
-        # Priority order for the plan file:
-        #   1. Explicit "plan_file" key in base_settings
-        #   2. Default: {root_path}/extraction_plan.json
-        plan_file = self.settings.get(
-            "plan_file",
-            os.path.join(self.base_dir, "extraction_plan.json"),
-        )
+        plan_file = os.path.join(self.base_dir, "extraction_plan.json")
         self.plan = GenerationPlan(plan_file)
-        
-        # Runtime state
-        self.workers = self.config.get('workers', 6)
+
+        # ── Runtime state ─────────────────────────────────────────────────────
+        proc = self.config.get("processing", {})
+        self.workers: int = self.config.get("workers", 6)
         self.running = True
         self.paused = False
         self.last_update_time = time.time()
         self.update_interval = 0.5
         self.logger.info(f"⚡ Using {self.workers} threads for FFmpeg extraction")
-        
+
+        # ── UI heartbeat ──────────────────────────────────────────────────────
+        # A background thread refreshes the terminal UI every second so the
+        # display stays live even when the main thread is blocked (e.g. waiting
+        # for parallel FFmpeg workers to finish).
+        self._ui_lock = threading.Lock()          # prevents concurrent redraws
+        self._ui_heartbeat_stop = threading.Event()
+        self._ui_heartbeat_thread: Optional[threading.Thread] = None
+
         # Statistics
         self.start_time = time.time()
         self.extractions_count = 0
         self.success_count = 0
         self.current_video_name = ""
-        
-        # Terminal UI state
+
+        # ── Terminal UI state ─────────────────────────────────────────────────
+        # Build a display-label dict: template_name → "WxH" from gt_size.
+        # Used in the patch-distribution table so every column header shows
+        # the real pixel size (e.g. "1152×648") instead of the truncated
+        # template name suffix (which causes duplicates like "169" / "169").
+        _format_labels: Dict[str, str] = {}
+        for _cat_fc in self.format_config.values():
+            for _tmpl, _cfg in _cat_fc.items():
+                if _tmpl not in _format_labels:
+                    _gt = _cfg.get("gt_size", [0, 0])
+                    _format_labels[_tmpl] = f"{_gt[0]}×{_gt[1]}"
+
         self.ui_state = {
-            'current_video_name': "",
-            'current_video_index': 0,
-            'total_videos': len(self.videos),
-            'current_video_progress': {},
-            'overall_progress': {},
-            'patch_distribution': {},
-            'scenes_processed': 0,
-            'patches_created_total': 0,
-            'frames_processed_total': 0,
-            'frames_read_total': 0,
-            'avg_time_per_scene': 0.0,
-            'eta': {},
-            'live_fps': 0.0,   # decoded frames per second (FFmpeg pipeline throughput)
-            'live_sps': 0.0,   # scene-assignments processed per second
-            # Only categories that actually exist in the config
-            'categories': list(self.category_targets.keys()),
-            # Only format-size columns that actually exist in the config
-            'format_sizes': list(next(iter(self.format_config.values()), {}).keys()),
+            "current_video_name": "",
+            "current_video_index": 0,
+            "total_videos": len(self.videos),
+            "current_video_progress": {},
+            "overall_progress": {},
+            "patch_distribution": {},
+            "scenes_processed": 0,
+            "patches_created_total": 0,
+            "frames_processed_total": 0,
+            "frames_read_total": 0,
+            "avg_time_per_scene": 0.0,
+            "eta": {},
+            "live_fps": 0.0,
+            "live_sps": 0.0,
+            "decode_backend": "–",   # filled in by _run_decode_benchmark
+            "categories": list(self.category_targets.keys()),
+            "format_sizes": list(next(iter(self.format_config.values()), {}).keys()),
+            "format_labels": _format_labels,  # template_name → "WxH" string
+            "timing_phases": {},              # phase timings from streaming extractor
+            "parallel_status": "",            # e.g. "⚡ 16 workers active"
         }
-        # Terminal UI already set before logger init (line 89)
         self.ui_update_counter = 0
-        
-        # Display priority distribution
+
         if RICH_AVAILABLE:
             self._show_priority_distribution()
-        
-        # Setup signal handlers
+
+        # Signal handlers
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
-    
+
+        # ── Decode pipeline benchmark ─────────────────────────────────────────
+        # Runs at startup to pick the fastest GPU/CPU decode pipeline.
+        # Results are cached in <base_dir>/decode_benchmark.json and reused on
+        # subsequent runs unless force_benchmark=True (--benchmark CLI flag).
+        self._run_decode_benchmark(force=force_benchmark)
+
+    # ── Decode pipeline benchmark ─────────────────────────────────────────────
+
+    def _run_decode_benchmark(self, force: bool = False) -> None:
+        """Run a short FFmpeg decode-throughput benchmark and select the fastest pipeline.
+
+        Tests every meaningful decode pipeline variant (CPU-only, CUDA NVDEC per
+        GPU, CUDA NVDEC + scale_cuda per GPU, full-GPU tonemap_cuda per GPU when
+        HDR source and libnpp are available), then runs a comprehensive parallel
+        matrix with N = ``self.workers`` concurrent jobs to find the optimal
+        GPU/CPU split for production use.
+
+        All FFmpeg child processes are started at idle nice priority (same value
+        as the main extraction loop uses) to avoid disturbing other system
+        activity and to keep measurements consistent.
+
+        Results are printed to stdout in a detailed table so the operator can
+        see exactly which pipeline won and by how much.
+
+        The winning configuration is written to::
+
+            <base_dir>/decode_benchmark.json
+
+        and the instance attributes ``self.use_cuda`` and ``self.cuda_device``
+        are updated so every subsequent call to
+        ``extract_and_save_streaming_distributed`` uses the optimal backend.
+
+        The file is re-used on the next run when it is younger than
+        ``CACHE_MAX_AGE_DAYS`` days, unless *force* is ``True`` (triggered by
+        the ``--benchmark`` CLI flag).
+
+        Notes
+        -----
+        * Multi-category videos are fully handled in a single FFmpeg pass by the
+          extractor, so benchmarking one-pass 4 K decode is representative even
+          for videos that belong to several categories simultaneously.
+        * Parallel variants measure Family A (K × GPU + (N-K) × CPU sweep) and
+          Family B/C (dual-GPU split) so we can find the NVDEC saturation point
+          and whether CPU fill-up after saturating the GPU still pays off.
+        """
+        CACHE_MAX_AGE_DAYS = 7
+        WARMUP_FRAMES      = 20
+        BENCH_FRAMES       = 80
+        SEEK_SEC           = 60.0   # skip opening credits / black frames
+        W, H               = STREAM_OPT_WIDTH, STREAM_OPT_HEIGHT
+        FRAME_BYTES        = W * H * 3 // 2   # yuv420p = 1.5 bytes/pixel
+        # Increment this version whenever the benchmark probe logic changes so
+        # that stale cached results are automatically invalidated without
+        # requiring the user to pass --benchmark manually.
+        _CACHE_VERSION     = 4      # v4: libplacebo probe injects HDR metadata to force Vulkan init
+
+        cache_path = os.path.join(self.base_dir, "decode_benchmark.json")
+
+        # ── Load cache ────────────────────────────────────────────────────────
+        if not force:
+            try:
+                if os.path.exists(cache_path):
+                    cache = json.loads(Path(cache_path).read_text())
+                    age_days = (time.time() - cache.get("_ts", 0)) / 86400.0
+                    cache_ver = cache.get("_probe_version", 1)
+                    if age_days < CACHE_MAX_AGE_DAYS and cache_ver >= _CACHE_VERSION:
+                        best = cache.get("best", {})
+                        self.cuda_device = best.get("cuda_device", 0)
+                        self.use_cuda    = best.get("use_cuda", self.use_cuda)
+                        _backend_lbl = best.get("label", "?")
+                        _n_w         = cache.get("best_parallel", {})
+                        # Load optimal per-worker decode configs for parallel
+                        # within-film extraction (stored since this PR).
+                        if _n_w and _n_w.get("worker_configs"):
+                            self._parallel_worker_configs = _n_w["worker_configs"]
+                        _n_w_str     = (
+                            f"  |  {_n_w['n_workers']}× parallel: {_n_w['fps']:.0f} fps"
+                            if _n_w and _n_w.get("fps") else ""
+                        )
+                        self.ui_state["decode_backend"] = (
+                            f"{_backend_lbl}  [{best.get('fps', 0):.0f} fps single"
+                            f"{_n_w_str}]"
+                        )
+                        print(
+                            f"\n  ♻️  Decode benchmark cache ({age_days:.1f}d old) — "
+                            f"skipping re-run.\n"
+                            f"  Best pipeline : {_backend_lbl}\n"
+                            f"  Throughput    : {best.get('fps', 0):.1f} fps  "
+                            f"(use_cuda={self.use_cuda}, cuda_device={self.cuda_device})\n"
+                            f"  Cache file    : {cache_path}\n"
+                            f"  Tip           : run with --benchmark to force a fresh measurement.\n"
+                        )
+                        self.logger.info(
+                            f"Decode backend from cache: {_backend_lbl} "
+                            f"[cuda_device={self.cuda_device}, use_cuda={self.use_cuda}, "
+                            f"fps={best.get('fps',0):.1f}]"
+                        )
+                        return
+            except Exception:
+                pass  # corrupt / unreadable cache → run fresh
+
+        # ── Find a test video ─────────────────────────────────────────────────
+        test_video: Optional[str] = None
+        test_is_hdr: bool         = True
+        for v in self.videos:
+            p = v.get("path", "")
+            if os.path.exists(p):
+                meta = self._get_video_metadata(p)
+                if meta:
+                    test_video  = p
+                    test_is_hdr = meta.get("is_hdr", True)
+                    if test_is_hdr:
+                        break   # prefer HDR for most demanding / realistic test
+
+        if not test_video:
+            print(
+                "\n  ⚠️  Decode benchmark skipped: no accessible video found in the config.\n"
+                "       Add at least one reachable video path to generator_config.json.\n"
+            )
+            self.logger.warning("Decode benchmark skipped — no accessible video found")
+            return
+
+        # ── Detect GPUs ───────────────────────────────────────────────────────
+        available_gpus: List[Tuple[int, str]] = _detect_nvidia_gpus()
+
+        # ── FFmpeg version ────────────────────────────────────────────────────
+        ffmpeg_ver = _get_ffmpeg_major_version()
+
+        # ── Print header ──────────────────────────────────────────────────────
+        _W = 72
+        _SEP  = "═" * _W
+        _SEP2 = "─" * _W
+        print(f"\n{_SEP}")
+        print(f"  FFmpeg Decode Benchmark  –  {W}×{H} yuv420p (optimised)")
+        print(_SEP2)
+        print(f"  Test video    : {os.path.basename(test_video)}")
+        print(f"  Content type  : {'HDR (PQ/HLG)' if test_is_hdr else 'SDR (BT.709)'}")
+        if available_gpus:
+            for idx, name in available_gpus:
+                print(f"  GPU {idx}          : {name}")
+        else:
+            print(f"  GPUs          : none detected via nvidia-smi")
+        print(f"  Benchmark     : {BENCH_FRAMES} frames timed  +  {WARMUP_FRAMES} warmup frames")
+        print(f"  Seek offset   : {SEEK_SEC:.0f} s  (skip credits / black frames)")
+        print(f"  Output dir    : {self.base_dir}")
+        print(_SEP)
+
+        # ── Build filter chains ───────────────────────────────────────────────
+        # Filter chains are constructed explicitly for each tier so the benchmark
+        # can test each independently, regardless of which tier build_vf_filter()
+        # would auto-select.
+
+        def _cpu_filter(hdr: bool) -> str:
+            if hdr:
+                if libplacebo_available():
+                    return (
+                        f"libplacebo=w={W}:h={H}"
+                        ":colorspace=bt709:color_trc=bt709:color_primaries=bt709"
+                        ":tonemapping=mobius:range=pc:downscaler=bilinear,"
+                        "format=yuv420p"
+                    )
+                return (
+                    "zscale=t=linear:npl=100:filter=bilinear,"
+                    "format=gbrpf32le,"
+                    "zscale=p=bt709:filter=bilinear,"
+                    "tonemap=tonemap=reinhard:desat=0,"
+                    "zscale=t=bt709:m=bt709:range=full:filter=bilinear,"
+                    f"scale={W}:{H}:flags=bilinear,"
+                    "format=yuv420p"
+                )
+            return f"scale={W}:{H}:flags=bilinear,format=yuv420p"
+
+        def _scale_gpu_filter(hdr: bool) -> str:
+            if hdr:
+                # Use explicit tin= and primariesin= to guarantee correct HDR→SDR
+                # conversion regardless of CUDA frame metadata propagation.
+                return (
+                    f"scale_cuda={W}:{H}:interp_algo=bicubic,"
+                    "hwdownload,"
+                    "format=p010,"
+                    "zscale=tin=smpte2084:primariesin=bt2020:t=linear:npl=100:filter=bilinear,"
+                    "format=gbrpf32le,"
+                    "zscale=p=bt709:filter=bilinear,"
+                    "tonemap=tonemap=reinhard:desat=0,"
+                    "zscale=t=bt709:m=bt709:range=full:filter=bilinear,"
+                    "format=yuv420p"
+                )
+            return (
+                f"scale_cuda={W}:{H}:interp_algo=bicubic,"
+                "hwdownload,"
+                "format=yuv420p"
+            )
+
+        def _full_gpu_filter() -> str:
+            return (
+                "tonemap_cuda=tonemap=mobius:desat=0:peak=100,"
+                f"scale_cuda={W}:{H}:interp_algo=bicubic,"
+                "hwdownload,"
+                "scale=iw:ih,"
+                "format=yuv420p"
+            )
+
+        # ── Build variant list ────────────────────────────────────────────────
+        # Each entry: (variant_id, label, hw_args, filter_chain)
+        _placebo_suffix = "+libplacebo" if (test_is_hdr and libplacebo_available()) else ""
+        _cpu_fchain = _cpu_filter(test_is_hdr)
+        variants: List[Tuple[str, str, List[str], str]] = [
+            ("cpu", f"CPU-only{_placebo_suffix}", [], _cpu_fchain),
+        ]
+        if self.use_cuda:
+            for gpu_idx, gpu_name in available_gpus:
+                hw_init   = ["-init_hw_device", f"cuda=hw:{gpu_idx}"]
+                hw_decode = [*hw_init, "-hwaccel", "cuda"]
+                hw_cuda   = [*hw_init, "-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
+
+                # Tier A: NVDEC decode only, CPU filter chain
+                variants.append((
+                    f"gpu{gpu_idx}_decode",
+                    f"GPU {gpu_idx} ({gpu_name})  NVDEC decode only",
+                    hw_decode,
+                    _cpu_fchain,
+                ))
+
+                # Tier B: NVDEC + scale_cuda (GPU scale, CPU tonemap when HDR)
+                if scale_cuda_available():
+                    variants.append((
+                        f"gpu{gpu_idx}_scale",
+                        f"GPU {gpu_idx} ({gpu_name})  NVDEC + scale_cuda",
+                        hw_cuda,
+                        _scale_gpu_filter(test_is_hdr),
+                    ))
+
+                # Tier C: full-GPU tonemap (HDR only, requires libnpp)
+                if test_is_hdr and tonemap_cuda_available():
+                    variants.append((
+                        f"gpu{gpu_idx}_full",
+                        f"GPU {gpu_idx} ({gpu_name})  full-GPU tonemap_cuda+scale_cuda",
+                        hw_cuda,
+                        _full_gpu_filter(),
+                    ))
+
+        # ── Core single-run helper ─────────────────────────────────────────────
+        nice_val = self.config.get("processing", {}).get("ffmpeg_nice", 10)
+
+        def _bench_one(hw_args: List[str], fchain: str) -> Optional[float]:
+            """Decode WARMUP+BENCH frames through the pipeline; return fps or None."""
+            total   = WARMUP_FRAMES + BENCH_FRAMES
+            fc_fd, fc_path = tempfile.mkstemp(suffix=".txt", prefix="bench_fc_")
+            try:
+                with os.fdopen(fc_fd, "w") as fh:
+                    fh.write(f"[0:v]{fchain}[vout]")
+
+                fc_args = (
+                    ["-/filter_complex", fc_path]
+                    if ffmpeg_ver >= 7
+                    else ["-filter_complex_script", fc_path]
+                )
+                vsync = (
+                    ["-fps_mode", "passthrough"]
+                    if ffmpeg_ver >= 5
+                    else ["-vsync", "0"]
+                )
+                cmd = [
+                    "ffmpeg",
+                    "-threads", "0", "-filter_threads", "0",
+                    "-loglevel", "error",
+                    *hw_args,
+                    "-probesize", "100M", "-analyzeduration", "100M",
+                    "-ss", str(SEEK_SEC),
+                    "-i", test_video,
+                    "-frames:v", str(total),
+                    *fc_args,
+                    "-map", "[vout]",
+                    "-f", "rawvideo", "-pix_fmt", "yuv420p",
+                    *vsync,
+                    "pipe:1",   # direct raw-frame output to stdout for Python to read
+                ]
+                proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+                )
+                try:
+                    psutil.Process(proc.pid).nice(nice_val)
+                except Exception:
+                    pass
+
+                # Warmup: run the pipeline hot before timing begins
+                for _ in range(WARMUP_FRAMES):
+                    if len(proc.stdout.read(FRAME_BYTES)) < FRAME_BYTES:
+                        proc.kill(); proc.wait()
+                        return None
+
+                # Timed benchmark
+                t0 = time.monotonic()
+                received = 0
+                for _ in range(BENCH_FRAMES):
+                    if len(proc.stdout.read(FRAME_BYTES)) < FRAME_BYTES:
+                        break
+                    received += 1
+                elapsed = time.monotonic() - t0
+
+                try:
+                    proc.stdout.close()
+                except Exception:
+                    pass
+                proc.kill(); proc.wait()
+
+                if received < 10 or elapsed <= 0:
+                    return None
+                return received / elapsed
+
+            except Exception:
+                return None
+            finally:
+                try:
+                    os.unlink(fc_path)
+                except Exception:
+                    pass
+
+        # ── Run single-worker variants ────────────────────────────────────────
+        COL = 55
+        print(f"\n  {'Variant':<{COL}}  {'fps':>8}  Status")
+        print(f"  {'─'*COL}  {'─'*8}  ──────")
+
+        single_results: List[dict] = []
+        n_total = len(variants)
+        for i, (vid, label, hw_args, fchain) in enumerate(variants, 1):
+            # Print the variant label with a trailing ellipsis while running
+            prefix = f"  [{i}/{n_total}] {label}"
+            print(f"{prefix:<{COL + 10}} …", end="", flush=True)
+
+            fps = _bench_one(hw_args, fchain)
+
+            if fps is not None:
+                line = f"\r  [{i}/{n_total}] {label:<{COL - 7}}   {fps:7.1f}   ✓ OK"
+            else:
+                line = f"\r  [{i}/{n_total}] {label:<{COL - 7}}      n/a   ✗ pipeline unavailable"
+            print(line)
+
+            single_results.append({
+                "variant_id": vid, "label": label, "fps": fps,
+                "hw_args": hw_args, "filter": fchain,
+            })
+
+        # ── Parallel N-worker variants ────────────────────────────────────────
+        # Build every meaningful (GPU-streams, CPU-streams) combination for
+        # N = self.workers concurrent jobs, so we can answer:
+        #   • Does adding more GPU decode streams help or saturate NVDEC?
+        #   • Is it better to split N workers across two GPUs?
+        #   • Is CPU fill-up after GPU streams worth it?
+        #
+        # Variant families tested (N = self.workers):
+        #   A) K × best-GPU  +  (N-K) × CPU    K = 0 … N  (saturation sweep)
+        #   B) K × GPU0  +  K × GPU1  + (N-2K) × CPU     K = 1 … N//2  (if ≥2 GPUs)
+        #   C) balanced split:  ceil(N/2) × GPU0  +  floor(N/2) × GPU1 (if ≥2 GPUs)
+        #
+        # Each test runs all N threads simultaneously, measures combined fps.
+
+        valid_singles = [r for r in single_results if r["fps"] is not None]
+        best_single   = max(valid_singles, key=lambda r: r["fps"]) if valid_singles else None
+        parallel_results: List[dict] = []
+        N = max(self.workers, 2)   # at least 2 to make parallel testing meaningful
+
+        # Best single-GPU config (cpu args + filter chain) and CPU config
+        gpu_best_by_idx: Dict[int, dict] = {}   # gpu_device_int → best single result
+        for r in single_results:
+            vid_id = r["variant_id"]
+            if r["fps"] and not vid_id.startswith("cpu"):
+                try:
+                    gidx = int(vid_id.split("_")[0].replace("gpu", ""))
+                except ValueError:
+                    continue
+                if gidx not in gpu_best_by_idx or r["fps"] > gpu_best_by_idx[gidx]["fps"]:
+                    gpu_best_by_idx[gidx] = r
+        sorted_gpu_results = sorted(gpu_best_by_idx.values(),
+                                    key=lambda r: r["fps"], reverse=True)
+        cpu_result = next((r for r in single_results if r["variant_id"] == "cpu"), None)
+
+        def _bench_n_workers(configs: List[Tuple[List[str], str]]) -> Optional[float]:
+            """Run len(configs) FFmpeg workers simultaneously; return combined fps."""
+            n = len(configs)
+            fps_slots: List[Optional[float]] = [None] * n
+
+            def _w(slot: int, hw: List[str], fc: str) -> None:
+                fps_slots[slot] = _bench_one(hw, fc)
+
+            threads = [
+                threading.Thread(target=_w, args=(i, hw, fc), daemon=True)
+                for i, (hw, fc) in enumerate(configs)
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            valid = [f for f in fps_slots if f is not None]
+            return sum(valid) if valid else None
+
+        p_count = 0
+
+        def _hw_to_worker_cfg(hw: List[str]) -> dict:
+            """Convert hw_args list to a compact (use_cuda, cuda_device) dict."""
+            if not hw:
+                return {"use_cuda": False, "cuda_device": 0}
+            # "-init_hw_device cuda=hw:N" encodes the device ordinal.
+            for i, tok in enumerate(hw):
+                if tok == "-init_hw_device" and i + 1 < len(hw):
+                    val = hw[i + 1]
+                    if val.startswith("cuda=hw:"):
+                        try:
+                            device = int(val.split(":")[1])
+                            return {"use_cuda": True, "cuda_device": device}
+                        except (ValueError, IndexError):
+                            pass
+            return {"use_cuda": True, "cuda_device": 0}
+
+        def _run_par(vid_id: str, label: str, configs: List[Tuple[List[str], str]],
+                     reference_fps: Optional[float] = None) -> None:
+            nonlocal p_count
+            p_count += 1
+            n_w = len(configs)
+            line_pfx = f"  [P{p_count:02d}/{n_w}w] {label}"
+            print(f"{line_pfx:<{COL + 8}} …", end="", flush=True)
+            fps = _bench_n_workers(configs)
+            ratio = (
+                f"×{fps / reference_fps:.2f}"
+                if fps and reference_fps else "  n/a"
+            )
+            if fps:
+                print(f"\r{line_pfx:<{COL + 8}}   {fps:7.1f} fps  {ratio:>6}")
+            else:
+                print(f"\r{line_pfx:<{COL + 8}}      n/a fps     n/a")
+            parallel_results.append({
+                "variant_id": vid_id,
+                "label": label,
+                "fps": fps,
+                "n_workers": n_w,
+                # Store per-worker decode config so _extract_film_parallel can
+                # reproduce the optimal worker mix without re-running the benchmark.
+                "worker_configs": [_hw_to_worker_cfg(hw) for hw, _ in configs],
+            })
+
+        if best_single:
+            print(f"\n  Parallel variants  (N = {N} workers  —  simulates production load)")
+            print(f"  {'─' * (_W - 2)}")
+            print(f"  {'Label':<{COL + 8}}  {'total fps':>10}  {'vs 1×':>6}")
+            print(f"  {'─' * (_W - 2)}")
+
+            # ── Family A: K × best-GPU  +  (N-K) × CPU  (K = 0 … N) ──────────
+            if sorted_gpu_results:
+                bg = sorted_gpu_results[0]   # best GPU result overall
+                bg_hw, bg_fc = bg["hw_args"], bg["filter"]
+                bg_name = bg["label"]
+
+                if cpu_result:
+                    for k in range(0, N + 1):
+                        if k == 0:
+                            lbl = f"{N} × CPU-only  (GPU=0 baseline)"
+                            vid_id = f"par_A_k0"
+                            configs = [([], _cpu_fchain)] * N
+                            ref = cpu_result["fps"]
+                        elif k == N:
+                            lbl = f"{N} × {bg_name}  (GPU only)"
+                            vid_id = f"par_A_kN"
+                            configs = [(bg_hw, bg_fc)] * N
+                            ref = bg["fps"]
+                        else:
+                            lbl = (
+                                f"{k} × {bg_name}  +  {N - k} × CPU"
+                            )
+                            vid_id = f"par_A_k{k}"
+                            configs = (
+                                [(bg_hw, bg_fc)] * k
+                                + [([], _cpu_fchain)] * (N - k)
+                            )
+                            ref = bg["fps"]
+                        _run_par(vid_id, lbl, configs, ref)
+                else:
+                    # No CPU baseline — just GPU saturation sweep
+                    for k in range(1, N + 1):
+                        lbl = f"{k} × {bg_name}"
+                        vid_id = f"par_A_k{k}"
+                        _run_par(vid_id, lbl, [(bg_hw, bg_fc)] * k, bg["fps"])
+
+            elif cpu_result:
+                # CUDA unavailable — test CPU scaling only
+                for k in range(2, N + 1):
+                    lbl = f"{k} × CPU-only"
+                    _run_par(f"par_cpu_k{k}", lbl,
+                             [([], _cpu_fchain)] * k, cpu_result["fps"])
+
+            # ── Family B: K×GPU0 + K×GPU1 + (N-2K)×CPU  (if ≥2 GPUs) ─────────
+            if len(sorted_gpu_results) >= 2:
+                g0 = sorted_gpu_results[0]
+                g1 = sorted_gpu_results[1]
+                g0_hw, g0_fc = g0["hw_args"], g0["filter"]
+                g1_hw, g1_fc = g1["hw_args"], g1["filter"]
+                g0_name = g0["label"]
+                g1_name = g1["label"]
+
+                def _gpu_idx_str(r: dict) -> str:
+                    """Extract plain GPU ordinal string from a single-result dict."""
+                    return r["variant_id"].split("_")[0].replace("gpu", "")
+
+                g0_idx = _gpu_idx_str(sorted_gpu_results[0])
+                g1_idx = _gpu_idx_str(sorted_gpu_results[1])
+
+                print(f"\n  {'─' * (_W - 2)}")
+                print(f"  Dual-GPU split variants  (GPU {g0_idx} + GPU {g1_idx})")
+                print(f"  {'─' * (_W - 2)}")
+
+                for k in range(1, N // 2 + 1):
+                    rest = N - 2 * k
+                    if rest > 0 and cpu_result:
+                        lbl = (
+                            f"{k} × GPU{g0_idx}  +  {k} × GPU{g1_idx}  +  {rest} × CPU"
+                        )
+                        vid_id = f"par_B_k{k}_cpu{rest}"
+                        configs = (
+                            [(g0_hw, g0_fc)] * k
+                            + [(g1_hw, g1_fc)] * k
+                            + [([], _cpu_fchain)] * rest
+                        )
+                    else:
+                        lbl = (
+                            f"{k} × GPU{g0_idx}  +  {k} × GPU{g1_idx}  (no CPU fill)"
+                        )
+                        vid_id = f"par_B_k{k}_nogpu"
+                        configs = [(g0_hw, g0_fc)] * k + [(g1_hw, g1_fc)] * k
+                    ref = max(g0["fps"], g1["fps"])
+                    _run_par(vid_id, lbl, configs, ref)
+
+                # C) balanced split across both GPUs, no CPU
+                # Use integer arithmetic to avoid floating-point edge cases.
+                c0 = (N + 1) // 2
+                c1 = N - c0
+                lbl_c = (
+                    f"{c0} × GPU{g0_idx}  +  {c1} × GPU{g1_idx}  (balanced, no CPU)"
+                )
+                _run_par("par_C_balanced", lbl_c,
+                         [(g0_hw, g0_fc)] * c0 + [(g1_hw, g1_fc)] * c1,
+                         max(g0["fps"], g1["fps"]))
+
+        # ── Summary ───────────────────────────────────────────────────────────
+        all_valid     = [r for r in single_results if r["fps"] is not None]
+        winner        = max(all_valid, key=lambda r: r["fps"]) if all_valid else None
+        all_par_valid = [r for r in parallel_results if r["fps"] is not None]
+        par_winner    = (
+            max(all_par_valid, key=lambda r: r["fps"]) if all_par_valid else None
+        )
+
+        print(f"\n  {_SEP2}")
+        if winner:
+            print(
+                f"  🏆 Best single   : {winner['label']:<{COL - 5}}  {winner['fps']:7.1f} fps"
+            )
+        if par_winner:
+            print(
+                f"  🏆 Best parallel : {par_winner['label']:<{COL - 5}}  "
+                f"{par_winner['fps']:7.1f} fps  ({par_winner['n_workers']} workers combined)"
+            )
+
+        if not all_valid:
+            print("  ⚠️  All variants failed — keeping default decode settings.")
+            print(f"\n{_SEP}\n")
+            return
+
+        # ── Apply winner to instance ──────────────────────────────────────────
+        vid      = winner["variant_id"]
+        use_cuda = not vid.startswith("cpu")
+        cuda_device = 0
+        if use_cuda:
+            try:
+                cuda_device = int(vid.split("_")[0].replace("gpu", ""))
+            except Exception:
+                cuda_device = 0
+
+        self.use_cuda    = use_cuda
+        self.cuda_device = cuda_device
+        # Store per-worker decode configs for within-film parallel extraction.
+        if par_winner and par_winner.get("worker_configs"):
+            self._parallel_worker_configs = par_winner["worker_configs"]
+
+        # Build the UI backend label: shows active pipeline + parallel fps
+        _par_str = (
+            f"  |  {par_winner['n_workers']}w parallel: {par_winner['fps']:.0f} fps"
+            if par_winner and par_winner["fps"] else ""
+        )
+        self.ui_state["decode_backend"] = (
+            f"{winner['label']}  [{winner['fps']:.0f} fps single{_par_str}]"
+        )
+
+        print(
+            f"\n  ✅ Generator configured: use_cuda={use_cuda}, "
+            f"cuda_device={cuda_device}"
+        )
+        print(f"  Active backend : {self.ui_state['decode_backend']}")
+
+        # ── Save results to output dir ────────────────────────────────────────
+        os.makedirs(self.base_dir, exist_ok=True)
+        cache: dict = {
+            "_ts":            time.time(),
+            "_probe_version": _CACHE_VERSION,
+            "_test_video":    test_video,
+            "_is_hdr":        test_is_hdr,
+            "_n_workers":     N,
+            "_benchmark":     (
+                f"{BENCH_FRAMES} frames timed + {WARMUP_FRAMES} warmup at "
+                f"{W}×{H}, seek {SEEK_SEC:.0f}s, {N} workers"
+            ),
+            "best": {
+                "variant_id":  vid,
+                "label":       winner["label"],
+                "use_cuda":    use_cuda,
+                "cuda_device": cuda_device,
+                "fps":         winner["fps"],
+            },
+            "best_parallel": (
+                {
+                    "variant_id":    par_winner["variant_id"],
+                    "label":         par_winner["label"],
+                    "fps":           par_winner["fps"],
+                    "n_workers":     par_winner["n_workers"],
+                    "worker_configs": par_winner.get("worker_configs"),
+                }
+                if par_winner else None
+            ),
+            "single_results": [
+                {
+                    "variant_id": r["variant_id"],
+                    "label":      r["label"],
+                    "fps":        round(r["fps"], 2) if r["fps"] else None,
+                }
+                for r in single_results
+            ],
+            "parallel_results": [
+                {
+                    "variant_id": r["variant_id"],
+                    "label":      r["label"],
+                    "fps":        round(r["fps"], 2) if r["fps"] else None,
+                    "n_workers":  r["n_workers"],
+                }
+                for r in parallel_results
+            ],
+        }
+        try:
+            Path(cache_path).write_text(
+                json.dumps(cache, indent=2, ensure_ascii=False)
+            )
+            print(f"  📝 Results saved → {cache_path}")
+        except Exception as exc:
+            print(f"  ⚠️  Could not save benchmark results: {exc}")
+            self.logger.warning(f"Could not save benchmark results: {exc}")
+
+        print(f"\n{_SEP}\n")
+        self.logger.info(
+            f"Decode benchmark complete — best: {winner['label']}  "
+            f"[use_cuda={use_cuda}, cuda_device={cuda_device}, fps={winner['fps']:.1f}]"
+        )
+
+    # ── Config helpers ────────────────────────────────────────────────────────
+
+    def _build_format_config(self) -> Dict[str, Dict[str, dict]]:
+        """
+        Build the ``format_config`` dict that the streaming extractor expects.
+
+        Shape::
+
+            {
+              category_name: {
+                template_name: {
+                  "gt_size":               [W, H],
+                  "lr_size":               [W, H],
+                  "source_mode":           "resize" | "crop",
+                  "degradation_mix":       {template_name: weight, …},
+                  "degradation_templates": {template_name: {…spec…}, …},
+                }
+              }
+            }
+
+        All referenced format and degradation templates are resolved from
+        ``self.templates``.  Any missing reference raises ``SystemExit`` because
+        the config was already validated at startup; this is a safety net only.
+        """
+        fmt_tmpls = self.templates["format_templates"]
+        deg_tmpls = self.templates["degradation_templates"]
+        result: Dict[str, Dict[str, dict]] = {}
+
+        for cat_name, cat_cfg in self.categories.items():
+            result[cat_name] = {}
+            for fmt_entry in cat_cfg["formats"]:
+                tmpl_name = fmt_entry["template"]
+                if tmpl_name not in fmt_tmpls:
+                    print(f"❌ format_template '{tmpl_name}' not found (category '{cat_name}')")
+                    sys.exit(1)
+                fmt_spec = fmt_tmpls[tmpl_name]
+
+                # Resolve degradation templates referenced in this format's mix.
+                deg_mix = fmt_entry.get("degradation_mix", {})
+                resolved_deg_tmpls: Dict[str, dict] = {}
+                for dname in deg_mix:
+                    if dname not in deg_tmpls:
+                        print(f"❌ degradation_template '{dname}' not found (category '{cat_name}', format '{tmpl_name}')")
+                        sys.exit(1)
+                    resolved_deg_tmpls[dname] = deg_tmpls[dname]
+
+                result[cat_name][tmpl_name] = {
+                    "gt_size": fmt_spec["gt_size"],
+                    "lr_size": fmt_spec["lr_size"],
+                    "source_mode": fmt_entry["source_mode"],
+                    "degradation_mix": deg_mix,
+                    "degradation_templates": resolved_deg_tmpls,
+                }
+
+        return result
+
+    def _write_architecture_file(self) -> None:
+        """Write ``<base_dir>/dataset_architecture.json``.
+
+        The file contains the complete configuration block that describes how
+        the dataset was built: categories, format templates (with gt_size /
+        lr_size / scale), source_mode, degradation mixes, and per-category
+        targets.  The trainer can load this file to determine patch dimensions,
+        scale factors, category distribution, and whether patches are crops or
+        resizes without needing access to the original generator config.
+        """
+        from datetime import datetime as _dt
+
+        # Collect all format templates and degradation templates actually used.
+        used_fmt_tmpls: Dict[str, dict] = {}
+        used_deg_tmpls: Dict[str, dict] = {}
+        for cat_name, fmt_map in self.format_config.items():
+            for tmpl_name, cfg in fmt_map.items():
+                if tmpl_name not in used_fmt_tmpls:
+                    raw_tmpl = self.templates.get("format_templates", {}).get(tmpl_name, {})
+                    used_fmt_tmpls[tmpl_name] = raw_tmpl
+                for dname, dspec in cfg.get("degradation_templates", {}).items():
+                    if dname not in used_deg_tmpls:
+                        used_deg_tmpls[dname] = dspec
+
+        # Build per-category section with human-readable format entries.
+        categories_out: Dict[str, dict] = {}
+        for cat_name, cat_cfg in self.categories.items():
+            formats_out = []
+            for fmt_entry in cat_cfg.get("formats", []):
+                tmpl_name = fmt_entry["template"]
+                fc = self.format_config.get(cat_name, {}).get(tmpl_name, {})
+                formats_out.append({
+                    "template":        tmpl_name,
+                    "weight":          fmt_entry.get("weight", 1),
+                    "source_mode":     fmt_entry.get("source_mode", "resize"),
+                    "gt_size":         fc.get("gt_size", []),
+                    "lr_size":         fc.get("lr_size", []),
+                    "scale":           (
+                        used_fmt_tmpls.get(tmpl_name, {}).get("scale", 3)
+                    ),
+                    "aspect_ratio":    (
+                        used_fmt_tmpls.get(tmpl_name, {}).get("aspect_ratio", "")
+                    ),
+                    "description":     (
+                        used_fmt_tmpls.get(tmpl_name, {}).get("description", "")
+                    ),
+                    "degradation_mix": fmt_entry.get("degradation_mix", {}),
+                })
+            categories_out[cat_name] = {
+                "target_total": self.category_targets.get(cat_name, 0),
+                "formats":      formats_out,
+            }
+
+        proc = self.config.get("processing", {})
+        arch = {
+            "generated_at":      _dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "generator_version": "dataset_generator_v2",
+            "root_path":         self.base_dir,
+            "n_frames":          int(proc.get("n_frames", 7)),
+            "category_targets":  dict(self.category_targets),
+            "categories":        categories_out,
+            "format_templates":  used_fmt_tmpls,
+            "degradation_templates": used_deg_tmpls,
+        }
+
+        out_path = os.path.join(self.base_dir, "dataset_architecture.json")
+        try:
+            os.makedirs(self.base_dir, exist_ok=True)
+            with open(out_path, "w", encoding="utf-8") as fh:
+                json.dump(arch, fh, indent=2, ensure_ascii=False)
+            self.logger.info(f"📄 Architecture file written: {out_path}")
+        except Exception as exc:
+            self.logger.warning(f"Could not write architecture file: {exc}")
+
+    def _build_format_distribution_for_video(
+        self,
+        video: dict,
+        category_patch_targets: Dict[str, int],
+    ) -> Dict[str, Dict[str, int]]:
+        """
+        Build ``format_distribution = {category: {template_name: count}}``
+        for a single video.
+
+        Within each category the patch budget is split proportionally across
+        the category's format entries using their ``weight`` values.  The last
+        format entry absorbs any rounding remainder.
+
+        Args:
+            video:                  Video config dict.
+            category_patch_targets: ``{category: patch_count}`` for this video.
+
+        Returns:
+            ``{category: {template_name: count}}``
+        """
+        video_cats = get_video_categories(video)
+        distribution: Dict[str, Dict[str, int]] = {}
+
+        for cat_name in video_cats:
+            if cat_name not in category_patch_targets or cat_name not in self.categories:
+                continue
+
+            cat_total = category_patch_targets[cat_name]
+            if cat_total <= 0:
+                continue
+
+            formats = self.categories[cat_name]["formats"]
+            total_weight = sum(f["weight"] for f in formats)
+
+            distribution[cat_name] = {}
+            remaining = cat_total
+
+            for i, fmt_entry in enumerate(formats):
+                tmpl_name = fmt_entry["template"]
+                if i == len(formats) - 1:
+                    count = remaining
+                else:
+                    count = int(cat_total * fmt_entry["weight"] / total_weight)
+                    remaining -= count
+                distribution[cat_name][tmpl_name] = max(0, count)
+
+        return distribution
+
     def _setup_logger(self):
         """Setup file and console logger (console disabled when terminal UI active)"""
         log_dir = os.path.join(self.base_dir, "logs")
         os.makedirs(log_dir, exist_ok=True)
-        
-        logger = logging.getLogger('DatasetGenerator')
+
+        logger = logging.getLogger("DatasetGenerator")
         logger.setLevel(logging.DEBUG)
-        logger.handlers = []  # Clear any existing handlers
-        
-        # File handler (always enabled)
+        logger.handlers = []
+
         log_file = os.path.join(log_dir, f"generator_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
         fh = logging.FileHandler(log_file)
         fh.setLevel(logging.DEBUG)
-        fh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        fh.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
         logger.addHandler(fh)
-        
-        # Console handler (only if terminal UI is disabled)
+
         if not self.use_terminal_ui:
             ch = logging.StreamHandler(sys.stdout)
             ch.setLevel(logging.INFO)
-            ch.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+            ch.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
             logger.addHandler(ch)
             logger.info("Console logging enabled (terminal UI disabled)")
         else:
             logger.info("Console logging disabled (terminal UI active - see GUI)")
-        
+
         return logger
-    
+
     def _show_priority_distribution(self):
         """Display priority distribution in console"""
-        priority_counts = {}
+        priority_counts: Dict[int, int] = {}
         for v in self.videos:
-            p = v.get('priority', 255)
+            p = v.get("priority", 255)
             priority_counts[p] = priority_counts.get(p, 0) + 1
-        
+
         console.print("\n[bold]📋 Video Processing Order:[/bold]")
         sorted_priorities = sorted(priority_counts.keys())
-        
-        # Show first priorities and default (255)
+
         priorities_to_show = []
         if 255 in priority_counts:
-            priorities_to_show = [p for p in sorted_priorities if p != 255][:self.MAX_DISPLAYED_PRIORITIES - 1]
+            priorities_to_show = [
+                p for p in sorted_priorities if p != 255
+            ][: self.MAX_DISPLAYED_PRIORITIES - 1]
             priorities_to_show.append(255)
             priorities_to_show.sort()
         else:
-            priorities_to_show = sorted_priorities[:self.MAX_DISPLAYED_PRIORITIES]
-        
+            priorities_to_show = sorted_priorities[: self.MAX_DISPLAYED_PRIORITIES]
+
         for priority in priorities_to_show:
             count = priority_counts[priority]
             label = "(default)" if priority == 255 else ""
             console.print(f"   Priority {priority} {label}: {count} videos")
-        
+
         remaining = [p for p in sorted_priorities if p not in priorities_to_show]
         if remaining:
             count = sum(priority_counts[p] for p in remaining)
             console.print(f"   ... and {count} more videos in other priority levels")
-    
-    def _load_metadata_cache(self) -> dict:
+
+    def _load_metadata_cache(self):
         """Load video metadata cache from disk"""
         if os.path.exists(self.metadata_cache_file):
             try:
@@ -283,15 +1235,53 @@ class DatasetGeneratorV2UHD:
         # Immediate exit
         sys.exit(0)
     
+    def _start_ui_heartbeat(self) -> None:
+        """Start a background thread that refreshes the terminal UI every second.
+
+        This guarantees at least one UI redraw per second even when the main
+        thread is blocked (e.g. waiting on parallel FFmpeg workers).  The
+        thread is a daemon so it is automatically killed if the process exits.
+        """
+        if not self.use_terminal_ui:
+            return
+        self._ui_heartbeat_stop.clear()
+
+        def _beat() -> None:
+            while not self._ui_heartbeat_stop.wait(timeout=1.0):
+                # Force a redraw on the next call regardless of throttle timer
+                self.last_update_time = 0.0
+                self._update_terminal_ui()
+
+        self._ui_heartbeat_thread = threading.Thread(
+            target=_beat, daemon=True, name="ui-heartbeat"
+        )
+        self._ui_heartbeat_thread.start()
+
+    def _stop_ui_heartbeat(self) -> None:
+        """Stop the background UI heartbeat thread (idempotent)."""
+        self._ui_heartbeat_stop.set()
+        if self._ui_heartbeat_thread is not None:
+            self._ui_heartbeat_thread.join(timeout=2.0)
+            self._ui_heartbeat_thread = None
+
     def _update_terminal_ui(self):
-        """Update and redraw the terminal UI (throttled to update_interval)."""
+        """Update and redraw the terminal UI (throttled to update_interval).
+
+        Thread-safe: uses a non-blocking lock so concurrent calls from the
+        heartbeat thread and worker callbacks never produce garbled output.
+        """
         if not self.use_terminal_ui:
             return
 
         now = time.time()
         if now - self.last_update_time < self.update_interval:
             return
-        self.last_update_time = now
+
+        # Skip if another thread is already redrawing
+        if not self._ui_lock.acquire(blocking=False):
+            return
+
+        self.last_update_time = time.time()
         self.ui_update_counter += 1
 
         try:
@@ -313,25 +1303,33 @@ class DatasetGeneratorV2UHD:
                         'percent': percent,
                     }
 
-            # Patch distribution by category and format
+            # Patch distribution by category and format — derive weights from
+            # the category config instead of old format_probabilities dict.
             patch_dist = {}
-            for category in self.format_config.keys():
+            for category, fmt_map in self.format_config.items():
                 patch_dist[category] = {}
-                if category in self.format_config:
-                    for format_name in self.format_config[category].keys():
-                        if category in category_stats:
-                            total = category_stats[category].get('images_created', 0)
-                            prob = self.format_probabilities.get(category, {}).get(format_name, 0.0)
-                            current = int(total * prob)
-                            target_total = self.category_targets.get(category, 0)
-                            target = int(target_total * prob)
-                            patch_dist[category][format_name] = {
-                                'count': current,
-                                'target': target,
-                            }
-                        else:
-                            patch_dist[category][format_name] = {'count': 0, 'target': 0}
-            self.ui_state['patch_distribution'] = patch_dist
+                total_weight = sum(
+                    fe["weight"]
+                    for fe in self.categories.get(category, {}).get("formats", [])
+                )
+                for format_name in fmt_map:
+                    # Look up the weight for this template name in the category.
+                    weight = 0
+                    for fe in self.categories.get(category, {}).get("formats", []):
+                        if fe["template"] == format_name:
+                            weight = fe["weight"]
+                            break
+                    prob = (weight / total_weight) if total_weight > 0 else 0.0
+                    if category in category_stats:
+                        cat_done = category_stats[category].get("images_created", 0)
+                        cat_target = self.category_targets.get(category, 0)
+                        patch_dist[category][format_name] = {
+                            "count": int(cat_done * prob),
+                            "target": int(cat_target * prob),
+                        }
+                    else:
+                        patch_dist[category][format_name] = {"count": 0, "target": 0}
+            self.ui_state["patch_distribution"] = patch_dist
 
             # ETA calculation: use global rate (total saved / elapsed)
             elapsed = time.time() - self.start_time
@@ -355,6 +1353,8 @@ class DatasetGeneratorV2UHD:
 
         except Exception as e:
             self.logger.error(f"UI update error: {e}", exc_info=True)
+        finally:
+            self._ui_lock.release()
     
     def _log_system_resources(self, operation: str = ""):
         """Log current system resource usage"""
@@ -375,32 +1375,7 @@ class DatasetGeneratorV2UHD:
                 self.logger.warning("⚠️  WARNING: RAM usage >80%! Monitor carefully!")
         except Exception as e:
             self.logger.debug(f"Could not log system resources: {e}")
-    
-    def _extract_format_probabilities(self) -> Dict[str, Dict[str, float]]:
-        """
-        Extract format probabilities from format_config.
-        
-        Returns:
-            Dictionary mapping category -> {format_name: probability}
-            
-        Example:
-            {
-                'master': {'small_540': 0.5, 'medium_169': 0.35, 'large_720': 0.15},
-                'universal': {'small_540': 0.5, 'medium_169': 0.35, 'large_720': 0.15}
-            }
-        """
-        probabilities = {}
-        
-        for category, formats in self.format_config.items():
-            probabilities[category] = {}
-            for format_name, format_info in formats.items():
-                probabilities[category][format_name] = format_info.get('probability', 0.0)
-        
-        self.logger.debug(f"Extracted format probabilities: {probabilities}")
-        return probabilities
-    
-    # CUDA support removed - using CPU-only mode for better stability
-    
+
     def scan_video_durations(self) -> Dict[str, float]:
         """
         Scan all videos to get their durations.
@@ -705,11 +1680,9 @@ class DatasetGeneratorV2UHD:
             # Build the correct filter chain for this video's color format.
             # extract_frames_uhd uses CPU-only (no CUDA) for stability and
             # because it processes only a few frames at a time.
-            # Replace bgr24 with yuv420p so ffmpeg can write PNG files.
-            # (Both _TONEMAP_FILTER and _SDR_FILTER already contain the scale
-            # step, so only the final pixel-format needs to change.)
+            # build_vf_filter already outputs yuv420p (Opt 3) which ffmpeg
+            # can write directly to PNG files.
             vf_filter = build_vf_filter(is_hdr=is_hdr, use_cuda=False)
-            vf_filter = vf_filter.replace("format=bgr24", "format=yuv420p")
             
             # CPU-only mode (no CUDA) - more stable and reliable
             # FIXED: Added nice priority for lower system impact
@@ -728,7 +1701,7 @@ class DatasetGeneratorV2UHD:
             # LOG THE FFMPEG COMMAND (for debugging)
             self.logger.debug(f"Single frame extraction command: {' '.join(cmd)}")
             
-            timeout = self.config.get('ffmpeg_timeout', 120)
+            timeout = self.config.get("processing", {}).get("ffmpeg_timeout", 120)
             result = subprocess.run(
                 cmd,
                 stdout=subprocess.DEVNULL,
@@ -879,109 +1852,29 @@ class DatasetGeneratorV2UHD:
         success_count = len(frame_paths_dict)
         self.logger.info(f"✓ Extraction complete: {success_count}/{len(sorted_ts)} timestamps successful, {total_frames}/{len(sorted_ts)*n_frames} frames extracted")
         self.logger.info(f"💾 Memory-efficient: Frames on disk (NOT in RAM)")
-        
+
         return {
-            'frame_paths': frame_paths_dict,
-            'temp_dirs': temp_dirs  # Caller MUST clean up!
+            "frame_paths": frame_paths_dict,
+            "temp_dirs": temp_dirs  # Caller MUST clean up!
         }
-    
-    
-    def calculate_format_distribution_for_video(self, video: dict, target_patches: int) -> Dict[str, Dict[str, int]]:
-        """
-        Calculate exact format distribution for a video.
-        
-        Each video extracts ALL formats according to pre-calculated distribution.
-        
-        Example:
-        - Video needs 4000 patches total
-        - Categories: master 50%, universal 50%
-        - Formats: large 50%, small 25%, medium 25%
-        
-        Result:
-        {
-            'master': {'large_720': 1000, 'small_540': 500, 'medium_169': 500},
-            'universal': {'large_720': 1000, 'small_540': 500, 'medium_169': 500}
-        }
-        
-        Args:
-            video: Video configuration dict
-            target_patches: Total patches for this video
-        
-        Returns:
-            Dictionary of {category: {format_name: count}}
-        
-        Calculate format distribution for this video across ALL its categories.
-        
-        NEW LOGIC (NO WEIGHTS):
-        - Video is 100% in each assigned category
-        - Distribute patches evenly across assigned categories
-        - Each category gets: target_patches / num_categories
-        
-        Args:
-            video: Video dict with categories
-            target_patches: Total patches to extract from this video
-        
-        Returns:
-            Dict[category][format] = patch_count
-        """
-        distribution = {}
-        
-        # Get categories for this video (handle both dict and list formats)
-        video_cats = get_video_categories(video)
-        
-        if not video_cats:
-            return distribution
-        
-        # Calculate patches per category (equal distribution)
-        num_categories = len(video_cats)
-        patches_per_category = target_patches // num_categories
-        remainder = target_patches % num_categories
-        
-        for cat_idx, category in enumerate(video_cats):
-            if category not in self.format_config:
-                continue
-            
-            # This category gets equal share (+ 1 if remainder)
-            category_patches = patches_per_category
-            if cat_idx < remainder:
-                category_patches += 1
-            
-            # Get format probabilities for this category
-            format_probs = self.format_probabilities.get(category, {})
-            
-            # Calculate patches per format
-            distribution[category] = {}
-            remaining_patches = category_patches
-            
-            # Sort by probability (descending) for better rounding
-            sorted_formats = sorted(format_probs.items(), key=lambda x: x[1], reverse=True)
-            
-            for idx, (format_name, prob) in enumerate(sorted_formats):
-                if idx == len(sorted_formats) - 1:
-                    # Last format gets remaining patches
-                    distribution[category][format_name] = remaining_patches
-                else:
-                    count = int(category_patches * prob)
-                    distribution[category][format_name] = count
-                    remaining_patches -= count
-        
-        return distribution
-    
+
     def process_video(self, video_idx: int, category_targets: Dict[str, int] = None) -> Dict[str, int]:
         """
-        Process a single video and extract patches for ALL formats.
-        
-        NEW BEHAVIOR (per-category distribution):
-        - Each category has its own target patch count
-        - Format distribution calculated per category
-        - Ensures category targets are met
-        
+        Process a single video and extract patches for all assigned categories.
+
+        Format distribution within each category is derived from the weighted
+        ``formats`` list in ``categories[cat_name]`` via
+        :meth:`_build_format_distribution_for_video`.
+
         Args:
-            video_idx: Index of video in self.videos
-            category_targets: Dict of {category: patch_count} for this video
-        
+            video_idx:        Index in ``self.videos``.
+            category_targets: ``{category: patch_count}`` for this video.
+                              Must be provided; comes from
+                              :meth:`calculate_proportional_distribution`.
+
         Returns:
-            Statistics dict with patches created per category
+            ``{category: patches_created_count}`` or a sentinel dict with
+            ``"skipped": True`` when the video is skipped.
         """
         if video_idx >= len(self.videos):
             return {}
@@ -1000,151 +1893,220 @@ class DatasetGeneratorV2UHD:
         if not os.path.exists(video_path):
             self.logger.warning(f"Video not found: {video_path}")
             return {}
-        
+
         self.logger.info(f"Processing video {video_idx + 1}/{len(self.videos)}: {video_name}")
-        
-        # Get video metadata
+
         metadata = self._get_video_metadata(video_path)
         if not metadata:
             return {}
-        
-        duration = metadata['duration']
-        
-        # Use category targets if provided, otherwise use old method
-        if category_targets:
-            # NEW: Per-category targets
-            format_distribution = {}
-            
-            for category, patches in category_targets.items():
-                if category not in self.format_config:
-                    continue
-                
-                # Get format probabilities for this category
-                format_probs = self.format_probabilities.get(category, {})
-                
-                # Calculate patches per format
-                format_distribution[category] = {}
-                remaining_patches = patches
-                
-                # Sort by probability (descending) for better rounding
-                sorted_formats = sorted(format_probs.items(), key=lambda x: x[1], reverse=True)
-                
-                for idx, (format_name, prob) in enumerate(sorted_formats):
-                    if idx == len(sorted_formats) - 1:
-                        # Last format gets remaining patches
-                        format_distribution[category][format_name] = remaining_patches
-                    else:
-                        count = int(patches * prob)
-                        format_distribution[category][format_name] = count
-                        remaining_patches -= count
-        else:
-            # OLD: Total target (backward compatibility)
-            target_patches = getattr(self, '_current_video_target', 1000)
-            format_distribution = self.calculate_format_distribution_for_video(video, target_patches)
-        
+
+        duration = metadata["duration"]
+
+        # Build format distribution using the new weight-based method.
+        # category_targets is always the per-category patch budget dict.
+        if not category_targets:
+            self.logger.warning(f"No category targets for video: {video_name}")
+            return {}
+
+        format_distribution = self._build_format_distribution_for_video(
+            video, category_targets
+        )
+
         if not format_distribution:
             self.logger.warning(f"No valid format distribution for video: {video_name}")
             return {}
-        
-        # Calculate total target for logging
-        if category_targets:
-            target_total = sum(category_targets.values())
-        else:
-            target_total = target_patches
-        
-        # Log the distribution plan
-        self.logger.info(f"Format distribution for {video_name} (target: {target_total} total):")
+
+        target_total = sum(category_targets.values())
+        self.logger.info(
+            f"Format distribution for {video_name} (target: {target_total} total):"
+        )
         for category, formats in format_distribution.items():
             total = sum(formats.values())
             self.logger.info(f"  {category} ({total} patches): {formats}")
-        
-        # Determine frame count
-        lr_versions = self.settings.get('lr_versions', ['7frames'])
-        n_frames = 7 if '7frames' in lr_versions else 5
-        
-        # Get video FPS and color metadata for batch extraction
-        # (metadata was already fetched above; re-use it via cache — no extra ffprobe call)
-        metadata = self._get_video_metadata(video_path)
-        fps = metadata.get('fps', 25.0) if metadata else 25.0
-        is_hdr = metadata.get('is_hdr', True) if metadata else True
+
+        # n_frames from processing config (default 7)
+        proc = self.config.get("processing", {})
+        n_frames = int(proc.get("n_frames", 7))
+
+        fps = metadata.get("fps", 25.0) or 25.0
+        is_hdr = metadata.get("is_hdr", True)
+        color_trc: str = metadata.get("color_transfer") or "smpte2084"
 
         self.logger.info(
             f"  Color format: {metadata.get('color_transfer', 'unknown')!r} "
             f"→ {'HDR tonemap' if is_hdr else 'SDR pass-through'}"
         )
 
-        # Extract patches using OPTIMIZED batch mode
         patches_created = self._extract_patches_multi_format_batch(
             video_path, duration, format_distribution, n_frames, video_name, fps, video_idx,
             is_hdr=is_hdr,
+            color_trc=color_trc,
         )
         
         return patches_created
-    
-    def _extract_patches_multi_category(self, video_path: str, duration: float,
-                                       category_configs: dict, n_frames: int) -> Dict[str, int]:
-        """
-        Extract patches from video for MULTIPLE categories simultaneously.
-        This avoids opening the video file multiple times.
-        
-        NOTE: This method is legacy and replaced by _extract_patches_multi_format.
-        Kept for backward compatibility.
-        
+
+    def _extract_film_parallel(
+        self,
+        video_path: str,
+        assignments: List[Tuple[int, str, str]],
+        n_frames: int,
+        fps: float,
+        is_hdr: bool,
+        prior_total: int,
+        color_trc: str = "smpte2084",
+    ) -> Dict[str, int]:
+        """Run N parallel streaming extractors on temporal segments of the same film.
+
+        Splits *assignments* into N temporally-ordered groups and launches one
+        ``extract_and_save_streaming_distributed`` worker per group.  Each worker
+        opens its own FFmpeg process and decodes only the frames in its slice,
+        reducing per-worker decode cost from ``|film_frames|`` to
+        ``|film_frames| / N``.
+
+        The optimal N and per-worker decode configs (GPU vs CPU) come from
+        ``self._parallel_worker_configs``, which is populated from the stored
+        ``decode_benchmark.json`` when the benchmark is run.
+
         Args:
-            video_path: Path to video file
-            duration: Video duration in seconds
-            category_configs: Dict of {category: {'weight', 'format_name', 'format_config'}}
-            n_frames: Number of frames to extract (5 or 7)
-        
+            video_path:   Path to the source video file.
+            assignments:  All (center_frame, category, format_name) assignments
+                          for this film — will be split across workers.
+            n_frames:     Rolling-buffer window size (same for all workers).
+            fps:          Video frame rate.
+            is_hdr:       Whether the source uses an HDR transfer function.
+            prior_total:  Cumulative patch count before this film (for UI).
+            color_trc:    Transfer-function string from ffprobe (e.g. "smpte2084").
+
         Returns:
-            Dict of {category: patches_created_count}
+            Dict mapping category name → number of patches created.
         """
-        patches_created = {cat: 0 for cat in category_configs.keys()}
-        stride_seconds = 3.0  # Default stride
-        current_time = 0.0
-        
-        self.logger.info(f"Extracting for {len(category_configs)} categories: {list(category_configs.keys())}")
-        
-        while current_time < duration - 1.0:
-            # Extract frames ONCE
-            frames = self.extract_frames_uhd(video_path, current_time, n_frames)
-            
-            if frames is None:
-                current_time += stride_seconds
-                continue
-            
-            # Create and save patches for ALL categories from the same frames
-            for category, config in category_configs.items():
-                format_name = config['format_name']
-                format_config = config['format_config']
-                
-                # Create patch pair for this category/format
-                gt, lr = create_patch_pair(frames, format_name, format_config, logger=self.logger)
-                
-                if gt is None or lr is None:
-                    continue
-                
-                # Save patches for this category
-                saved, gt_path, lr_path = self._save_patch_pair(
-                    gt, lr, video_path, current_time,
-                    category, format_name, n_frames
+        worker_configs = self._parallel_worker_configs  # guaranteed not None
+        n = len(worker_configs)
+
+        # Split assignments into N temporally-ordered chunks.
+        # Temporal ordering ensures each worker's FFmpeg process seeks to a
+        # compact range and decodes a contiguous slice of the film, avoiding
+        # large decode ranges caused by interleaved assignments.
+        sorted_asgn = sorted(assignments, key=lambda a: a[0])
+        chunk = max(1, (len(sorted_asgn) + n - 1) // n)
+        groups: List[List[Tuple[int, str, str]]] = [
+            sorted_asgn[i * chunk : (i + 1) * chunk]
+            for i in range(n)
+        ]
+        groups = [g for g in groups if g]  # drop empty trailing groups
+
+        nice_level = self.config.get("processing", {}).get("ffmpeg_nice", 10)
+        center_snap = self.config.get("processing", {}).get("center_snap_seconds", 1.0)
+
+        patches_lock = threading.Lock()
+        patches_total: Dict[str, int] = {}
+        # Track per-category totals for UI (not accurate until workers finish,
+        # but used for the final progress bar update).
+        _tracker_updated: Dict[str, int] = {}
+
+        # Per-worker live patch counts (worker_idx → {cat: count}).
+        # Written under patches_lock by each worker's progress callback;
+        # read by _update_terminal_ui (called from the heartbeat thread).
+        _worker_live: Dict[int, Dict[str, int]] = {}
+
+        def _make_progress_fn(worker_idx: int):
+            """Return a thread-safe progress callback for one parallel worker."""
+            def _on_progress(frames_examined: int, patches_so_far: Dict[str, int],
+                             raw_frames_piped: int, timing: dict = None) -> None:
+                with patches_lock:
+                    _worker_live[worker_idx] = dict(patches_so_far)
+                    # Aggregate partial counts from all workers
+                    agg: Dict[str, int] = {}
+                    for wp in _worker_live.values():
+                        for cat, cnt in wp.items():
+                            agg[cat] = agg.get(cat, 0) + cnt
+                    self.ui_state['patches_created_total'] = prior_total + sum(agg.values())
+                    # Update per-video progress bars with live aggregated counts
+                    current_progress = self.ui_state.get('current_video_progress', {})
+                    for cat, new_total in agg.items():
+                        if cat in current_progress:
+                            target = current_progress[cat].get('target', 0)
+                            pct = (new_total / target * 100) if target > 0 else 0.0
+                            current_progress[cat]['created'] = new_total
+                            current_progress[cat]['percent'] = pct
+            return _on_progress
+
+        def _run_worker(worker_idx: int, group: List[Tuple[int, str, str]], wcfg: dict) -> None:
+            result = extract_and_save_streaming_distributed(
+                video_path=video_path,
+                assignments=group,
+                n_frames=n_frames,
+                format_config=self.format_config,
+                base_dir=self.base_dir,
+                fps=fps,
+                logger=self.logger,
+                is_interesting_fn=self.is_interesting_patch,
+                is_black_frame_fn=_streaming_is_black_frame,
+                # Live per-frame progress from every worker feeds into ui_state;
+                # the heartbeat thread picks it up every second for display.
+                progress_fn=_make_progress_fn(worker_idx),
+                use_cuda=wcfg.get("use_cuda", False),
+                cuda_device=wcfg.get("cuda_device", 0),
+                nice_level=nice_level,
+                is_hdr=is_hdr,
+                center_snap_seconds=center_snap,
+                stream_width=STREAM_OPT_WIDTH,
+                stream_height=STREAM_OPT_HEIGHT,
+                color_trc=color_trc,
+            )
+            with patches_lock:
+                for cat, count in result.items():
+                    patches_total[cat] = patches_total.get(cat, 0) + count
+                    # Update tracker once per worker completion (not per-frame).
+                    delta = count - _tracker_updated.get(cat, 0)
+                    if delta > 0:
+                        self.tracker.increment_category_images(cat, delta)
+                        _tracker_updated[cat] = count
+                # Refresh UI so the progress bars advance as workers finish.
+                self.ui_state['patches_created_total'] = (
+                    prior_total + sum(patches_total.values())
                 )
-                
-                if saved:
-                    patches_created[category] += 1
-            
-            current_time += stride_seconds
-            
-            # Check if should stop
-            if not self.running:
-                break
-        
-        return patches_created
-    
+                self.last_update_time = 0.0   # force immediate redraw
+                self._update_terminal_ui()
+
+        n_workers_configured = len(worker_configs)
+        threads = [
+            threading.Thread(
+                target=_run_worker,
+                args=(i, g, w),
+                daemon=True,
+            )
+            for i, (g, w) in enumerate(zip(groups, worker_configs))
+        ]
+        n_actual = len(threads)
+        self.logger.info(
+            f"⚡ Parallel film extraction: {n_actual} workers × "
+            f"~{len(sorted_asgn) // max(n_actual, 1)} assignments each "
+            f"(total {len(sorted_asgn)} assignments)"
+        )
+        # Signal the UI that parallel workers are running so the status line
+        # shows something informative while workers are busy.
+        self.ui_state['parallel_status'] = (
+            f"⚡ {n_actual} parallele Worker aktiv …"
+        )
+        self.last_update_time = 0.0
+        self._update_terminal_ui()
+
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # Clear the parallel-status indicator now that all workers are done
+        self.ui_state['parallel_status'] = ""
+
+        return patches_total
+
     def _extract_patches_multi_format_batch(self, video_path: str, duration: float,
-                                           format_distribution: Dict[str, Dict[str, int]], 
+                                           format_distribution: Dict[str, Dict[str, int]],
                                            n_frames: int, video_name: str, fps: float = 25.0,
-                                           video_idx: int = 0, is_hdr: bool = True) -> Dict[str, int]:
+                                           video_idx: int = 0, is_hdr: bool = True,
+                                           color_trc: str = "smpte2084") -> Dict[str, int]:
         """
         OPTIMIZED: Extract patches using BATCH frame extraction (10-50x faster).
         
@@ -1226,10 +2188,13 @@ class DatasetGeneratorV2UHD:
         # Wall-clock start for per-video FPS / SPS measurement
         video_t0: float = time.monotonic()
 
-        def _on_progress(frames_examined: int, patches_so_far: Dict[str, int], raw_frames_read: int) -> None:
+        def _on_progress(frames_examined: int, patches_so_far: Dict[str, int],
+                         raw_frames_piped: int, timing: dict = None) -> None:
             # Live UI counters
             self.ui_state['frames_processed_total'] = frames_examined
-            self.ui_state['frames_read_total'] = self._prior_raw_frames + raw_frames_read
+            # raw_frames_piped = selected_idx from the extractor: the count of
+            # BGR frames actually piped from FFmpeg to Python (not a frame index).
+            self.ui_state['frames_read_total'] = self._prior_raw_frames + raw_frames_piped
             # Cumulative patch total across all videos
             self.ui_state['patches_created_total'] = (
                 prior_total + sum(patches_so_far.values())
@@ -1237,8 +2202,11 @@ class DatasetGeneratorV2UHD:
             # Live throughput metrics
             elapsed_time = time.monotonic() - video_t0
             if elapsed_time > 0:
-                self.ui_state['live_fps'] = raw_frames_read / elapsed_time
+                self.ui_state['live_fps'] = raw_frames_piped / elapsed_time
                 self.ui_state['live_sps'] = frames_examined / elapsed_time
+            # Phase timing snapshot from extractor
+            if timing:
+                self.ui_state['timing_phases'] = timing
             # Update per-video progress bars with live per-category patch counts
             current_progress = self.ui_state.get('current_video_progress', {})
             for cat, new_total in patches_so_far.items():
@@ -1256,28 +2224,53 @@ class DatasetGeneratorV2UHD:
             # Throttled redraw (respects self.update_interval)
             self._update_terminal_ui()
 
-        streaming_result = extract_and_save_streaming_distributed(
-            video_path=video_path,
-            assignments=assignments,
-            n_frames=n_frames,
-            format_config=self.format_config,
-            base_dir=self.base_dir,
-            fps=fps,
-            logger=self.logger,
-            is_interesting_fn=self.is_interesting_patch,
-            is_black_frame_fn=_streaming_is_black_frame,
-            progress_fn=_on_progress,
-            use_cuda=self.use_cuda,
-            nice_level=self.settings.get('ffmpeg_nice', 10),
-            is_hdr=is_hdr,
-            degrade_cfg=self.config.get('quality'),
-            center_snap_seconds=self.config.get('processing', {}).get('center_snap_seconds', 1.0),
-            stream_width=STREAM_4K_WIDTH,
-            stream_height=STREAM_4K_HEIGHT,
-        )
+        streaming_result: Dict[str, int]
+        if (
+            self._parallel_worker_configs is not None
+            and len(assignments) >= len(self._parallel_worker_configs)
+        ):
+            # ── Parallel within-film extraction ─────────────────────────────
+            # Split the assignment list into N temporal segments and run N
+            # FFmpeg workers simultaneously.  Each worker decodes only its
+            # slice of the film (not the whole thing), which reduces the total
+            # frames decoded from |film| to |film|/N per worker.
+            streaming_result = self._extract_film_parallel(
+                video_path=video_path,
+                assignments=assignments,
+                n_frames=n_frames,
+                fps=fps,
+                is_hdr=is_hdr,
+                prior_total=prior_total,
+                color_trc=color_trc,
+            )
+        else:
+            # ── Single-worker extraction (original path) ─────────────────────
+            streaming_result = extract_and_save_streaming_distributed(
+                video_path=video_path,
+                assignments=assignments,
+                n_frames=n_frames,
+                format_config=self.format_config,
+                base_dir=self.base_dir,
+                fps=fps,
+                logger=self.logger,
+                is_interesting_fn=self.is_interesting_patch,
+                is_black_frame_fn=_streaming_is_black_frame,
+                progress_fn=_on_progress,
+                use_cuda=self.use_cuda,
+                nice_level=self.config.get("processing", {}).get("ffmpeg_nice", 10),
+                is_hdr=is_hdr,
+                # degrade_cfg intentionally omitted: per-format degradation templates
+                # are embedded in format_config and sampled per-patch in the extractor.
+                center_snap_seconds=self.config.get("processing", {}).get("center_snap_seconds", 1.0),
+                stream_width=STREAM_OPT_WIDTH,
+                stream_height=STREAM_OPT_HEIGHT,
+                cuda_device=self.cuda_device,
+                color_trc=color_trc,
+            )
 
         # Merge final result into patches_created.
-        # Tracker already updated incrementally in _on_progress – do NOT call
+        # Tracker already updated: incrementally via _on_progress (single-worker)
+        # or once per worker completion (parallel) — do NOT call
         # tracker.increment_category_images again here to avoid double-counting.
         for category, count in streaming_result.items():
             patches_created[category] = patches_created.get(category, 0) + count
@@ -1301,335 +2294,7 @@ class DatasetGeneratorV2UHD:
             self.logger.info(f"  {category}: {count} patches")
 
         return patches_created
-    
-    def _extract_patches_multi_format_legacy(self, video_path: str, duration: float,
-                                      format_distribution: Dict[str, Dict[str, int]], 
-                                      n_frames: int, video_name: str) -> Dict[str, int]:
-        """
-        LEGACY: Extract patches using individual FFmpeg calls (SLOW).
-        
-        This is the old method that calls FFmpeg once per extraction.
-        Kept as fallback in case batch extraction fails.
-        
-        Args:
-            video_path: Path to video file
-            duration: Video duration in seconds
-            format_distribution: Dict of {category: {format_name: target_count}}
-            n_frames: Number of frames to extract (5 or 7)
-            video_name: Video name for logging
-        
-        Returns:
-            Dict of {category: patches_created_count}
-        """
-        self.logger.warning(f"Using LEGACY extraction mode (slower)")
-        
-        # Initialize counters
-        patches_created = {}
-        patches_targets = {}
-        
-        for category, formats in format_distribution.items():
-            patches_created[category] = 0
-            patches_targets[category] = {}
-            for format_name, target_count in formats.items():
-                patches_targets[category][format_name] = {
-                    'target': target_count,
-                    'created': 0
-                }
-        
-        total_target = sum(sum(formats.values()) for formats in format_distribution.values())
-        
-        # Rest of original implementation
-        stride_seconds = 3.0
-        current_time = 0.0
-        max_retries = 5
-        retry_jump_seconds = 1.0
-        black_frame_threshold_kb = 15
-        black_frame_detection_limit_seconds = 10.0
-        
-        total_created = 0
-        black_frames_detected = 0
-        black_frames_skipped = 0
-        
-        self.logger.info(f"Extracting {total_target} patches for {len(format_distribution)} categories")
-        self.logger.info(f"Black frame detection active for first {black_frame_detection_limit_seconds:.1f} seconds only")
-        
-        # Extract frames and create patches until all targets are met
-        while current_time < duration - 1.0 and total_created < total_target:
-            # For each category-format combination that needs more patches
-            for category, formats in format_distribution.items():
-                for format_name, target_count in formats.items():
-                    # Check if this format still needs patches
-                    if patches_targets[category][format_name]['created'] >= target_count:
-                        continue
-                    
-                    # Get format config
-                    format_config = self.format_config[category][format_name]
-                    
-                    # Try extraction with retry logic for black frames
-                    retry_count = 0
-                    extraction_successful = False
-                    retry_time = current_time
-                    
-                    while retry_count <= max_retries and not extraction_successful:
-                        # Extract frames for this retry attempt
-                        frames = self.extract_frames_uhd(video_path, retry_time, n_frames)
-                        
-                        if frames is None:
-                            retry_count += 1
-                            retry_time += retry_jump_seconds
-                            if retry_time >= duration - 1.0:
-                                break
-                            continue
-                        
-                        # Create patch pair for this category/format
-                        gt, lr = create_patch_pair(frames, format_name, format_config, logger=self.logger)
-                        
-                        if gt is None or lr is None:
-                            retry_count += 1
-                            retry_time += retry_jump_seconds
-                            if retry_time >= duration - 1.0:
-                                break
-                            continue
-                        
-                        # Save patches for this category/format
-                        saved, gt_path, lr_path = self._save_patch_pair(
-                            gt, lr, video_path, retry_time,
-                            category, format_name, n_frames
-                        )
-                        
-                        if saved:
-                            # Check if GT is a black frame (< 15 KB)
-                            # Only check during first 10 seconds of video
-                            if retry_time <= black_frame_detection_limit_seconds and \
-                               self._is_black_frame(gt_path, black_frame_threshold_kb):
-                                black_frames_detected += 1
-                                self.logger.warning(
-                                    f"Black frame detected at {retry_time:.2f}s "
-                                    f"(retry {retry_count}/{max_retries}). Deleting and retrying..."
-                                )
-                                
-                                # Delete the files
-                                try:
-                                    if os.path.exists(gt_path):
-                                        os.remove(gt_path)
-                                    if os.path.exists(lr_path):
-                                        os.remove(lr_path)
-                                except Exception as e:
-                                    self.logger.error(f"Error deleting black frame files: {e}")
-                                
-                                # Jump forward 1 second and retry
-                                retry_count += 1
-                                retry_time += retry_jump_seconds
-                                
-                                if retry_count > max_retries:
-                                    # Max retries reached, count it but don't create patch
-                                    self.logger.warning(
-                                        f"Max retries ({max_retries}) reached for black frame. "
-                                        f"Counting as created but no patch saved."
-                                    )
-                                    patches_targets[category][format_name]['created'] += 1
-                                    patches_created[category] += 1
-                                    total_created += 1
-                                    extraction_successful = True
-                                
-                                if retry_time >= duration - 1.0:
-                                    # Reached end of video, count it but don't create patch
-                                    self.logger.warning(
-                                        f"Reached end of video during black frame retry. "
-                                        f"Counting as created but no patch saved."
-                                    )
-                                    patches_targets[category][format_name]['created'] += 1
-                                    patches_created[category] += 1
-                                    total_created += 1
-                                    extraction_successful = True
-                            else:
-                                # Valid frame (not black), successfully saved
-                                # Or black frame detection skipped (after 10 seconds)
-                                if retry_time > black_frame_detection_limit_seconds:
-                                    black_frames_skipped += 1
-                                    
-                                patches_targets[category][format_name]['created'] += 1
-                                patches_created[category] += 1
-                                total_created += 1
-                                extraction_successful = True
-                        else:
-                            # Save failed, retry
-                            retry_count += 1
-                            retry_time += retry_jump_seconds
-                            if retry_time >= duration - 1.0:
-                                break
-            
-            current_time += stride_seconds
-            
-            # Check if should stop
-            if not self.running:
-                break
-        
-        # Log final statistics
-        self.logger.info(f"Extraction complete for {video_name}: {total_created}/{total_target} patches")
-        if black_frames_detected > 0:
-            self.logger.info(f"  Black frames detected and handled: {black_frames_detected}")
-        if black_frames_skipped > 0:
-            self.logger.info(f"  Frames saved without black frame check (after {black_frame_detection_limit_seconds}s): {black_frames_skipped}")
-        for category, formats in patches_targets.items():
-            for format_name, stats in formats.items():
-                self.logger.info(f"  {category}/{format_name}: {stats['created']}/{stats['target']}")
-        
-        return patches_created
-        # Initialize counters for each category-format combination
-        patches_created = {}
-        patches_targets = {}
-        
-        for category, formats in format_distribution.items():
-            patches_created[category] = 0
-            patches_targets[category] = {}
-            for format_name, target_count in formats.items():
-                patches_targets[category][format_name] = {
-                    'target': target_count,
-                    'created': 0
-                }
-        
-        stride_seconds = 3.0
-        current_time = 0.0
-        max_retries = 5
-        retry_jump_seconds = 1.0
-        black_frame_threshold_kb = 15
-        black_frame_detection_limit_seconds = 10.0  # Only check first 10 seconds
-        
-        total_target = sum(sum(formats.values()) for formats in format_distribution.values())
-        total_created = 0
-        black_frames_detected = 0
-        black_frames_skipped = 0  # Count of frames where detection was skipped
-        
-        self.logger.info(f"Extracting {total_target} patches for {len(format_distribution)} categories")
-        self.logger.info(f"Black frame detection active for first {black_frame_detection_limit_seconds:.1f} seconds only")
-        
-        # Extract frames and create patches until all targets are met
-        while current_time < duration - 1.0 and total_created < total_target:
-            # For each category-format combination that needs more patches
-            for category, formats in format_distribution.items():
-                for format_name, target_count in formats.items():
-                    # Check if this format still needs patches
-                    if patches_targets[category][format_name]['created'] >= target_count:
-                        continue
-                    
-                    # Get format config
-                    format_config = self.format_config[category][format_name]
-                    
-                    # Try extraction with retry logic for black frames
-                    retry_count = 0
-                    extraction_successful = False
-                    retry_time = current_time
-                    
-                    while retry_count <= max_retries and not extraction_successful:
-                        # Extract frames for this retry attempt
-                        frames = self.extract_frames_uhd(video_path, retry_time, n_frames)
-                        
-                        if frames is None:
-                            retry_count += 1
-                            retry_time += retry_jump_seconds
-                            if retry_time >= duration - 1.0:
-                                break
-                            continue
-                        
-                        # Create patch pair for this category/format
-                        gt, lr = create_patch_pair(frames, format_name, format_config, logger=self.logger)
-                        
-                        if gt is None or lr is None:
-                            retry_count += 1
-                            retry_time += retry_jump_seconds
-                            if retry_time >= duration - 1.0:
-                                break
-                            continue
-                        
-                        # Save patches for this category/format
-                        saved, gt_path, lr_path = self._save_patch_pair(
-                            gt, lr, video_path, retry_time,
-                            category, format_name, n_frames
-                        )
-                        
-                        if saved:
-                            # Check if GT is a black frame (< 15 KB)
-                            # Only check during first 10 seconds of video
-                            if retry_time <= black_frame_detection_limit_seconds and \
-                               self._is_black_frame(gt_path, black_frame_threshold_kb):
-                                black_frames_detected += 1
-                                self.logger.warning(
-                                    f"Black frame detected at {retry_time:.2f}s "
-                                    f"(retry {retry_count}/{max_retries}). Deleting and retrying..."
-                                )
-                                
-                                # Delete the files
-                                try:
-                                    if os.path.exists(gt_path):
-                                        os.remove(gt_path)
-                                    if os.path.exists(lr_path):
-                                        os.remove(lr_path)
-                                except Exception as e:
-                                    self.logger.error(f"Error deleting black frame files: {e}")
-                                
-                                # Jump forward 1 second and retry
-                                retry_count += 1
-                                retry_time += retry_jump_seconds
-                                
-                                if retry_count > max_retries:
-                                    # Max retries reached, count it but don't create patch
-                                    self.logger.warning(
-                                        f"Max retries ({max_retries}) reached for black frame. "
-                                        f"Counting as created but no patch saved."
-                                    )
-                                    patches_targets[category][format_name]['created'] += 1
-                                    patches_created[category] += 1
-                                    total_created += 1
-                                    extraction_successful = True
-                                
-                                if retry_time >= duration - 1.0:
-                                    # Reached end of video, count it but don't create patch
-                                    self.logger.warning(
-                                        f"Reached end of video during black frame retry. "
-                                        f"Counting as created but no patch saved."
-                                    )
-                                    patches_targets[category][format_name]['created'] += 1
-                                    patches_created[category] += 1
-                                    total_created += 1
-                                    extraction_successful = True
-                            else:
-                                # Valid frame (not black), successfully saved
-                                # Or black frame detection skipped (after 10 seconds)
-                                if retry_time > black_frame_detection_limit_seconds:
-                                    black_frames_skipped += 1
-                                    
-                                patches_targets[category][format_name]['created'] += 1
-                                patches_created[category] += 1
-                                total_created += 1
-                                extraction_successful = True
-                        else:
-                            # Save failed, retry
-                            retry_count += 1
-                            retry_time += retry_jump_seconds
-                            if retry_time >= duration - 1.0:
-                                break
-            
-            current_time += stride_seconds
-            
-            # Check if should stop
-            if not self.running:
-                break
-        
-        # Log final statistics
-        self.logger.info(f"Extraction complete for {video_name}: {total_created}/{total_target} patches")
-        if black_frames_detected > 0:
-            self.logger.info(f"  Black frames detected and handled: {black_frames_detected}")
-        if black_frames_skipped > 0:
-            self.logger.info(f"  Frames saved without black frame check (after {black_frame_detection_limit_seconds}s): {black_frames_skipped}")
-        for category, formats in patches_targets.items():
-            for format_name, stats in formats.items():
-                created = stats['created']
-                target = stats['target']
-                self.logger.info(f"  {category}/{format_name}: {created}/{target} patches")
-        
-        return patches_created
-    
+
     def _get_video_metadata(self, video_path: str) -> Optional[dict]:
         """
         Get video metadata using ffprobe with caching.
@@ -1678,7 +2343,7 @@ class DatasetGeneratorV2UHD:
                 video_path
             ]
             
-            timeout = self.config.get('ffprobe_timeout', 60)
+            timeout = self.config.get("processing", {}).get("ffprobe_timeout", 60)
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
             
             if result.returncode != 0:
@@ -1818,8 +2483,8 @@ class DatasetGeneratorV2UHD:
             # Calculate Laplacian variance (measure of sharpness/detail)
             laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
             
-            # Get threshold from settings (default 80.0)
-            threshold = self.settings.get('min_detail_threshold', 80.0)
+            # Get threshold from processing settings (default 80.0)
+            threshold = self.config.get("processing", {}).get("min_detail_threshold", 80.0)
             
             # Patch is interesting if it has enough detail
             return laplacian_var >= threshold
@@ -1875,12 +2540,20 @@ class DatasetGeneratorV2UHD:
             if self.use_terminal_ui:
                 hide_cursor()
 
+            # Start background heartbeat so the UI refreshes every second
+            # regardless of where the main thread is blocked.
+            self._start_ui_heartbeat()
+
             if RICH_AVAILABLE:
                 console.print(Panel.fit(
                     "[bold cyan]Dataset Generator V2 - UHD Quality[/bold cyan]\n"
                     "UHD Preservation • Multi-Category • Priorities • Proportional Distribution",
                     border_style="cyan"
                 ))
+
+            # Write architecture file once at the start of each run so the
+            # trainer always has an up-to-date description of the dataset layout.
+            self._write_architecture_file()
             
             # Phase 1: Scan all videos to get durations
             self.logger.info("Starting Phase 1: Scanning video durations...")
@@ -2035,14 +2708,10 @@ class DatasetGeneratorV2UHD:
                         'target': video_cat_targets[category],
                         'percent': 0.0  # Added: display expects this
                     }
-                
-                # Update UI to show video info before processing starts
-                if self.use_terminal_ui:
-                    print(f"\n{'='*80}")
-                    print(f"🎬 STARTING VIDEO: {video_name} ({idx+1}/{len(self.videos)})")
-                    print(f"   Category targets: {video_cat_targets}")
-                    print(f"{'='*80}\n")
-                    self._update_terminal_ui()
+
+                # Force immediate UI redraw with the new video info
+                self.last_update_time = 0.0
+                self._update_terminal_ui()
                 
                 # Mark this video as "in progress" BEFORE we start work so
                 # that a crash or pipeline failure causes a retry on the next
@@ -2114,6 +2783,8 @@ class DatasetGeneratorV2UHD:
             traceback.print_exc()
             raise
         finally:
+            # Stop the background UI heartbeat before touching the terminal
+            self._stop_ui_heartbeat()
             # Restore cursor and clean terminal on exit
             if self.use_terminal_ui:
                 show_cursor()
@@ -2121,32 +2792,83 @@ class DatasetGeneratorV2UHD:
 
 
 def main():
-    """Main entry point"""
+    """
+    Main entry point.
+
+    Usage::
+
+        python make_dataset_v2_uhd.py [config_dir] [--benchmark]
+
+    Arguments
+    ---------
+    config_dir   (optional) Directory that contains both ``templates.json``
+                 and ``generator_config.json``.  Defaults to the directory
+                 where this script resides.
+
+    --benchmark  Force a fresh decode-pipeline benchmark at startup even when a
+                 cached result already exists in ``<output_dir>/decode_benchmark.json``.
+                 Use this after installing a new GPU driver, replacing a GPU, or
+                 whenever you want to re-measure decode throughput.
+
+    The active config and templates are loaded, validated, and then the
+    generator is started.  Run ``video_manager.py`` first to create or edit
+    the config files.
+    """
+    import argparse
+
     script_dir = Path(__file__).parent
     os.chdir(script_dir)
 
-    if len(sys.argv) > 1:
-        config_path = sys.argv[1]
-    else:
-        v2_config = script_dir / 'generator_config_v2.json'
-        if v2_config.exists():
-            config_path = str(v2_config)
-        else:
-            print(
-                "❌ No config file found. "
-                "Please run from dataset_generator_v2 directory "
-                "(expected generator_config_v2.json)."
-            )
-            sys.exit(1)
+    parser = argparse.ArgumentParser(
+        prog="make_dataset_v2_uhd.py",
+        description="Dataset Generator V2 – UHD Quality",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "config_dir",
+        nargs="?",
+        default=str(script_dir),
+        help=(
+            "Directory containing templates.json and generator_config.json "
+            "(default: same directory as this script)"
+        ),
+    )
+    parser.add_argument(
+        "--benchmark",
+        action="store_true",
+        default=False,
+        help=(
+            "Force re-run of the FFmpeg decode pipeline benchmark at startup. "
+            "Results are normally cached in <output_dir>/decode_benchmark.json "
+            "and reused for 7 days."
+        ),
+    )
+    args = parser.parse_args()
 
-    print(f"📂 Using config: {Path(config_path).name}")
+    config_dir     = args.config_dir
+    force_benchmark = args.benchmark
 
-    if not os.path.exists(config_path):
-        print(f"Error: Config file not found: {config_path}")
+    active_cfg = Path(config_dir) / _ACTIVE_CONFIG_FILENAME
+    if not active_cfg.exists():
+        print(
+            f"❌ Active config not found: {active_cfg}\n"
+            "   Please create it first with video_manager.py:\n"
+            "       python video_manager.py\n"
+            "   Then edit the generated generator_config.json."
+        )
         sys.exit(1)
-    
+
+    print(f"📂 Config directory : {config_dir}")
+    print(f"   templates        : {Path(config_dir) / _TEMPLATES_FILENAME}")
+    print(f"   active cfg       : {active_cfg.name}")
+    if force_benchmark:
+        print(f"   --benchmark      : decode pipeline benchmark will be re-run")
+
     try:
-        generator = DatasetGeneratorV2UHD(config_path)
+        generator = DatasetGeneratorV2UHD(
+            config_dir=config_dir,
+            force_benchmark=force_benchmark,
+        )
         generator.run()
     except KeyboardInterrupt:
         show_cursor()

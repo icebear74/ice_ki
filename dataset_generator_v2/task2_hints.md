@@ -1,7 +1,7 @@
 # Task 2 Handover Notes
 
-This document is for whoever implements **Task 2** (generator rework).
-Task 1 has completely replaced the config model and management UI.
+> **Status: COMPLETED** – Task 2 has been implemented.
+> This document is retained as reference for the design decisions made.
 
 ---
 
@@ -18,7 +18,7 @@ from utils.config_io import (
 )
 
 templates = ensure_templates_file("templates.json")
-config    = load_active_config("generator_config_v2.active.json")
+config    = load_active_config("generator_config.json")
 ```
 
 Never hardcode paths – derive them relative to `__file__`.
@@ -118,7 +118,7 @@ deg_spec = templates["degradation_templates"][chosen_degradation_name]
 
 ## Old Paths / Logic No Longer Valid
 
-- `generator_config_v2.json` – **deleted**. Use `generator_config_v2.active.json`
+- `generator_config_v2.json` – **deleted**. Use `generator_config.json`
 - `create_default_config.py` – **deleted**. Use `config_io.create_default_active_config()`
 - `create_full_config.py` – **deleted**
 - `utils/ui_display.py`, `utils/ui_terminal.py` – **deleted**
@@ -147,7 +147,7 @@ deg_spec = templates["degradation_templates"][chosen_degradation_name]
 
 ```python
 from utils.config_io import (
-    load_active_config,        # load generator_config_v2.active.json
+    load_active_config,        # load generator_config.json
     load_templates,            # load templates.json
     ensure_templates_file,     # create default if missing, then load
     validate_templates,        # returns list[str] of errors

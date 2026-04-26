@@ -288,6 +288,28 @@ def compute_category_detail(manager: VideoManager, cat_name: str) -> List[str]:
     return lines
 
 
+# ── Validation guidance ────────────────────────────────────────────────────────
+
+def _guidance_for_error(err: str) -> str:
+    """Return a short navigation hint for a validation error string."""
+    e = err.lower()
+    if "degradation_mix" in e and "non-empty" in e:
+        return "→  Categories & Formats → Manage category formats → Manage degradation mix"
+    if "degradation_mix" in e and "not found in degradation_templates" in e:
+        return "→  Templates → Add / edit degradation template"
+    if "degradation_mix" in e and "weight" in e:
+        return "→  Categories & Formats → Manage degradation mix (set a positive weight)"
+    if ".template:" in e and "not found" in e:
+        return "→  Templates → Add format template  –or–  remove the format entry and re-add"
+    if "target_total" in e:
+        return "→  Categories & Formats → Edit target total (must be a positive integer)"
+    if "source_mode" in e:
+        return "→  Categories & Formats → Edit weight / source_mode"
+    if "weight" in e:
+        return "→  Categories & Formats → Edit weight / source_mode"
+    return ""
+
+
 # ── TUI Application ────────────────────────────────────────────────────────────
 
 class _App:
@@ -391,13 +413,22 @@ class _App:
             action = self._menu("ice_ki  Video Manager  v2", items)
 
             if action is None or action == "quit":
+                do_quit = True
                 if self.m.modified or self.m.templates_modified:
                     if self._confirm("Save changes before quitting?"):
                         if self.m.modified:
-                            self.m.save()
-                        if self.m.templates_modified:
+                            if self._pre_save_check():
+                                self.m.save()
+                            elif not self._confirm(
+                                "Config not saved (errors found). Quit anyway?",
+                                title="Quit",
+                                default=False,
+                            ):
+                                do_quit = False
+                        if do_quit and self.m.templates_modified:
                             self.m.save_templates()
-                break
+                if do_quit:
+                    break
 
             try:
                 if action == "videos":
@@ -412,8 +443,9 @@ class _App:
                     self._section_config()
                 elif action == "save_config":
                     if self.m.modified:
-                        self.m.save()
-                        self._ok(f"Config saved → {Path(self.m.config_path).name}")
+                        if self._pre_save_check():
+                            self.m.save()
+                            self._ok(f"Config saved → {Path(self.m.config_path).name}")
                     else:
                         self._ok("No config changes to save.")
                 elif action == "save_templates":
@@ -790,7 +822,8 @@ class _App:
                  f.get("source_mode", "?"),
                  str(f.get("weight", 0)),
                  f"{f.get('weight',0)/total_w*100:.1f}%",
-                 ", ".join(f"{k}={v}" for k, v in f.get("degradation_mix", {}).items())]
+                 ", ".join(f"{k}={v}" for k, v in f.get("degradation_mix", {}).items())
+                 or "⚠ empty"]
                 for i, f in enumerate(formats)
             ]
 
@@ -845,6 +878,19 @@ class _App:
         self.m.modified = True
         idx = len(self.m.categories[cat_name]["formats"]) - 1
         self._ok(f"Added [{idx}]: {tmpl} / {mode} / weight={weight}")
+        # Immediately open the degradation mix editor so the new entry is never left empty.
+        self._show(
+            [
+                f"Format [{idx}] was added with an empty degradation mix.",
+                "",
+                "At least one degradation template must be assigned",
+                "before the generator will accept this config.",
+                "",
+                "Opening the degradation mix editor now…",
+            ],
+            "⚠  Degradation Mix Required",
+        )
+        self._manage_degradation_mix(cat_name, preselect_idx=idx)
 
     def _remove_format_entry(self, cat_name: str):
         formats = self.m.categories[cat_name].get("formats", [])
@@ -887,16 +933,22 @@ class _App:
             self.m.modified = True
         self._ok(f"Format entry [{idx}] updated")
 
-    def _manage_degradation_mix(self, cat_name: str):
+    def _manage_degradation_mix(self, cat_name: str, preselect_idx: Optional[int] = None):
         formats = self.m.categories[cat_name].get("formats", [])
         if not formats:
             self._warn("No format entries.")
             return
-        items = [(f"[{i}] {f.get('template','?')} / {f.get('source_mode','?')}", i)
-                 for i, f in enumerate(formats)] + [("───", None), ("← Cancel", None)]
-        idx = self._menu("Select format entry to edit degradation mix", items)
-        if idx is None:
-            return
+        if preselect_idx is not None and 0 <= preselect_idx < len(formats):
+            idx = preselect_idx
+        else:
+            items = [
+                (f"[{i}] {f.get('template','?')} / {f.get('source_mode','?')}"
+                 + ("  ⚠ empty mix" if not f.get("degradation_mix") else ""), i)
+                for i, f in enumerate(formats)
+            ] + [("───", None), ("← Cancel", None)]
+            idx = self._menu("Select format entry to edit degradation mix", items)
+            if idx is None:
+                return
         deg_tmpls = self.m.templates.get("degradation_templates", {})
         entry     = formats[idx]
         tmpl_name = entry.get("template", "?")
@@ -1336,9 +1388,42 @@ class _App:
                 lines.append(f"  • {e}")
             self._show(lines, "Validation Report — ERRORS")
 
+    def _pre_save_check(self) -> bool:
+        """Validate config before saving.
+
+        Shows a detailed error report with navigation hints if there are errors,
+        then asks for explicit confirmation.  Returns True if the save should proceed.
+        """
+        errors = self.m.validation_report()
+        if not errors:
+            return True
+
+        lines: List[str] = [
+            f"⚠  {len(errors)} validation error(s) in config:",
+            "",
+        ]
+        for err in errors:
+            lines.append(f"  • {err}")
+            hint = _guidance_for_error(err)
+            if hint:
+                lines.append(f"      {hint}")
+            lines.append("")
+        lines += [
+            "─" * 64,
+            "",
+            "  The generator will refuse to run with these errors.",
+            "  Fix them before running make_dataset_v2_uhd.py.",
+        ]
+        self._show(lines, "⚠  Validation Errors — Pre-Save Check")
+        return self._confirm(
+            f"{len(errors)} error(s) found.  Save anyway?",
+            title="Save with errors?",
+            default=False,
+        )
+
     def _create_config(self):
         ts           = datetime.now().strftime("%Y%m%d_%H%M%S")
-        default_name = f"generator_config_new_{ts}.active.json"
+        default_name = f"generator_config_{ts}.json"
         name         = self._input("Output filename:", default=default_name,
                                    title="Create Config File")
         if not name:
@@ -1361,7 +1446,7 @@ class _App:
 
 def main():
     script_dir         = Path(__file__).parent
-    active_config_path = script_dir / "generator_config_v2.active.json"
+    active_config_path = script_dir / "generator_config.json"
     templates_path     = script_dir / "templates.json"
 
     if not active_config_path.exists():

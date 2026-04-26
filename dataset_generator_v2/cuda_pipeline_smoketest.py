@@ -56,6 +56,8 @@ _CONFIG_PATH = _REPO_ROOT / "generator_config.json"
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from streaming_extractor import (
+    STREAM_OPT_WIDTH,
+    STREAM_OPT_HEIGHT,
     STREAM_WIDTH,
     STREAM_HEIGHT,
     _TONEMAP_FILTER,
@@ -64,6 +66,7 @@ from streaming_extractor import (
     cuda_available,
     scale_cuda_available,
     tonemap_cuda_available,
+    libplacebo_available,
 )
 
 # ---------------------------------------------------------------------------
@@ -72,8 +75,8 @@ from streaming_extractor import (
 # Probe only the first N seconds of the video so the test is fast.
 _PROBE_SECONDS: int = 3
 
-# Raw frame size for 1920×1080 BGR24 (used to count frames from BGR24 pipelines).
-_FRAME_BYTES_BGR24: int = STREAM_WIDTH * STREAM_HEIGHT * 3
+# Raw frame size for optimised resolution yuv420p (1.5 bytes/pixel).
+_FRAME_BYTES_YUV420P: int = STREAM_OPT_WIDTH * STREAM_OPT_HEIGHT * 3 // 2
 
 # Explicit CUDA device initialisation flag.
 # Passed before -hwaccel so FFmpeg always initialises the CUDA context up
@@ -83,15 +86,16 @@ _CUDA_HW_INIT_ARGS: List[str] = ["-init_hw_device", "cuda=hw"]
 
 # SDR-safe filter chains (no zscale/tonemap).  Used when the source is not HDR
 # so the CUDA decode/transfer/scale mechanics can still be validated.
+# Opt 2: flags=bilinear  |  Opt 3: format=yuv420p
 _SDR_CPU: str = (
-    f"scale={STREAM_WIDTH}:{STREAM_HEIGHT}:flags=lanczos,format=bgr24"
+    f"scale={STREAM_OPT_WIDTH}:{STREAM_OPT_HEIGHT}:flags=bilinear,format=yuv420p"
 )
 # SDR fallback for the p010 pipeline: scale on GPU, bare download,
-# then CPU format conversion to bgr24.
+# then CPU format conversion to yuv420p.
 _SDR_SCALE_CUDA: str = (
-    f"scale_cuda={STREAM_WIDTH}:{STREAM_HEIGHT},"
+    f"scale_cuda={STREAM_OPT_WIDTH}:{STREAM_OPT_HEIGHT},"
     "hwdownload,"
-    "format=bgr24"
+    "format=yuv420p"
 )
 # tonemap_cuda requires HDR input; SDR fallback uses GPU scale + download only.
 _SDR_TONEMAP_CUDA: str = _SDR_SCALE_CUDA
@@ -99,8 +103,8 @@ _SDR_TONEMAP_CUDA: str = _SDR_SCALE_CUDA
 _SDR_TONEMAP_ONLY_CUDA: str = (
     "hwdownload,"
     "scale=iw:ih,"
-    f"scale={STREAM_WIDTH}:{STREAM_HEIGHT}:flags=lanczos,"
-    "format=bgr24"
+    f"scale={STREAM_OPT_WIDTH}:{STREAM_OPT_HEIGHT}:flags=bilinear,"
+    "format=yuv420p"
 )
 
 # ---------------------------------------------------------------------------
@@ -260,19 +264,20 @@ def _run_pipeline(
 
 # HDR-only tonemap_cuda pipeline: GPU tonemap, CPU scale.
 # tonemap_cuda outputs NV12 CUDA frames; hwdownload + scale=iw:ih brings them
-# to CPU as NV12->YUV420P, then a CPU scale step resizes to 1920x1080.
+# to CPU as NV12->YUV420P, then a CPU scale step resizes to target resolution.
+# Opt 2: flags=bilinear  |  Opt 3: format=yuv420p
 _TONEMAP_ONLY_CUDA_FILTER: str = (
     "tonemap_cuda=tonemap=mobius:desat=0:peak=100,"
     "hwdownload,"
     "scale=iw:ih,"
     "format=yuv420p,"
-    f"scale={STREAM_WIDTH}:{STREAM_HEIGHT}:flags=lanczos,"
-    "format=bgr24"
+    f"scale={STREAM_OPT_WIDTH}:{STREAM_OPT_HEIGHT}:flags=bilinear,"
+    "format=yuv420p"
 )
 
-# NV12 1080p GPU scale + download (no tonemap, works for SDR and HDR alike).
+# NV12 native-res GPU scale + download (no tonemap, works for SDR and HDR alike).
 _SCALE_CUDA_NV12_FILTER: str = (
-    f"scale_cuda={STREAM_WIDTH}:{STREAM_HEIGHT}:interp_algo=bicubic:format=nv12,"
+    f"scale_cuda={STREAM_OPT_WIDTH}:{STREAM_OPT_HEIGHT}:interp_algo=bicubic:format=nv12,"
     "hwdownload,"
     "scale=iw:ih,"
     "format=nv12"
@@ -330,8 +335,22 @@ def _build_pipelines(src_w: int, src_h: int, is_hdr: bool) -> List[dict]:
             "requires": _always,
             "hw_args": [],
             "vf_filter": cpu_filter,
-            "pix_fmt": "bgr24",
-            "frame_bytes": _FRAME_BYTES_BGR24,
+            "pix_fmt": "yuv420p",
+            "frame_bytes": _FRAME_BYTES_YUV420P,
+        },
+        # ── 0b. CPU-only + libplacebo (HDR only) ─────────────────────────
+        {
+            "label": f"0b CPU-only + libplacebo  (single-pass HDR→SDR tonemap){hdr_note}",
+            "requires": lambda: is_hdr and libplacebo_available(),
+            "hw_args": [],
+            "vf_filter": (
+                f"libplacebo=w={STREAM_OPT_WIDTH}:h={STREAM_OPT_HEIGHT}"
+                ":colorspace=bt709:color_trc=bt709:color_primaries=bt709"
+                ":tonemapping=mobius:range=pc:downscaler=bilinear,"
+                "format=yuv420p"
+            ),
+            "pix_fmt": "yuv420p",
+            "frame_bytes": _FRAME_BYTES_YUV420P,
         },
         # ── 1. CUDA decode + CPU tonemap ─────────────────────────────────
         {
@@ -339,12 +358,12 @@ def _build_pipelines(src_w: int, src_h: int, is_hdr: bool) -> List[dict]:
             "requires": _need_cuda,
             "hw_args": _hw_decode_only,
             "vf_filter": cpu_filter,
-            "pix_fmt": "bgr24",
-            "frame_bytes": _FRAME_BYTES_BGR24,
+            "pix_fmt": "yuv420p",
+            "frame_bytes": _FRAME_BYTES_YUV420P,
         },
         # ── 2. CUDA decode + scale_cuda + p010 + single-step zscale ──────
         # The PROVEN production pipeline (~12 fps on a mid-range GPU).
-        # scale_cuda scales 4K→1080p on the GPU keeping the 10-bit surface;
+        # scale_cuda scales 4K→target on the GPU keeping the 10-bit surface;
         # hwdownload transfers as p010; one zscale call with explicit HDR
         # colour-space params converts to BT.709 SDR in a single step.
         # This is the chain used by extract_and_save_streaming_distributed.
@@ -353,8 +372,8 @@ def _build_pipelines(src_w: int, src_h: int, is_hdr: bool) -> List[dict]:
             "requires": _need_scale_cuda,
             "hw_args": _hw_decode_scale,
             "vf_filter": scale_cuda_filt,
-            "pix_fmt": "bgr24",
-            "frame_bytes": _FRAME_BYTES_BGR24,
+            "pix_fmt": "yuv420p",
+            "frame_bytes": _FRAME_BYTES_YUV420P,
         },
         # ── 3. CUDA full-GPU (tonemap_cuda + scale_cuda) ─────────────────
         {
@@ -362,19 +381,19 @@ def _build_pipelines(src_w: int, src_h: int, is_hdr: bool) -> List[dict]:
             "requires": _need_tonemap_cuda,
             "hw_args": _hw_decode_scale,
             "vf_filter": tonemap_cuda_filt,
-            "pix_fmt": "bgr24",
-            "frame_bytes": _FRAME_BYTES_BGR24,
+            "pix_fmt": "yuv420p",
+            "frame_bytes": _FRAME_BYTES_YUV420P,
         },
         # ── 4. CUDA decode + tonemap_cuda (no GPU scale) ─────────────────
         # tonemap_cuda outputs NV12 CUDA frames; hwdownload + scale=iw:ih
-        # brings them to CPU as NV12->YUV420P, then CPU scale to 1080p.
+        # brings them to CPU as NV12->YUV420P, then CPU scale to target res.
         {
             "label": f"4  CUDA decode + tonemap_cuda  (GPU tonemap, CPU scale){hdr_note}",
             "requires": _need_tonemap_cuda,
             "hw_args": _hw_decode_scale,
             "vf_filter": tonemap_only_filt,
-            "pix_fmt": "bgr24",
-            "frame_bytes": _FRAME_BYTES_BGR24,
+            "pix_fmt": "yuv420p",
+            "frame_bytes": _FRAME_BYTES_YUV420P,
         },
         # ── 5. CUDA bare download (GPU decode -> hwdownload, no tonemap) ──
         # Validates that hwdownload itself works on this driver/FFmpeg combo.
@@ -387,16 +406,16 @@ def _build_pipelines(src_w: int, src_h: int, is_hdr: bool) -> List[dict]:
             "pix_fmt": "nv12",
             "frame_bytes": bare_frame_bytes,
         },
-        # ── 6. CUDA decode + scale_cuda + hwdownload (no tonemap, 1080p) ─
+        # ── 6. CUDA decode + scale_cuda + hwdownload (no tonemap, target res) ─
         # Checks the full GPU->CPU transfer path without any colour-science.
         # Works for both SDR and HDR sources.
         {
-            "label": "6  CUDA decode + scale_cuda + hwdownload  (NV12 1080p, no tonemap)",
+            "label": "6  CUDA decode + scale_cuda + hwdownload  (NV12 target res, no tonemap)",
             "requires": _need_scale_cuda,
             "hw_args": _hw_decode_scale,
             "vf_filter": _SCALE_CUDA_NV12_FILTER,
             "pix_fmt": "nv12",
-            "frame_bytes": STREAM_WIDTH * STREAM_HEIGHT * 3 // 2,
+            "frame_bytes": STREAM_OPT_WIDTH * STREAM_OPT_HEIGHT * 3 // 2,
         },
     ]
 
@@ -433,7 +452,7 @@ def main(argv: List[str]) -> int:
     print(f"  Video            : {video_path}")
     print(f"  Source resolution: {src_w}×{src_h}  @  {src_fps:.3f} fps")
     print(f"  Probe duration   : {_PROBE_SECONDS} s  →  ~{int(src_fps * _PROBE_SECONDS)} frames expected")
-    print(f"  Output resolution: {STREAM_WIDTH}×{STREAM_HEIGHT} (BGR24 pipelines)")
+    print(f"  Output resolution: {STREAM_OPT_WIDTH}×{STREAM_OPT_HEIGHT} (yuv420p — Opt 1+3)")
     print()
 
     # ── HDR detection ─────────────────────────────────────────────────────
@@ -444,9 +463,10 @@ def main(argv: List[str]) -> int:
         print("     Run with a real HDR (PQ/BT.2020) file for a full production test.")
     print()
     print("  FFmpeg CUDA support detected at startup:")
-    print(f"    cuda_available()         = {cuda_available()}")
-    print(f"    scale_cuda_available()   = {scale_cuda_available()}")
-    print(f"    tonemap_cuda_available() = {tonemap_cuda_available()}")
+    print(f"    cuda_available()           = {cuda_available()}")
+    print(f"    scale_cuda_available()     = {scale_cuda_available()}")
+    print(f"    tonemap_cuda_available()   = {tonemap_cuda_available()}")
+    print(f"    libplacebo_available()     = {libplacebo_available()}")
     print()
 
     # ── Run pipelines ──────────────────────────────────────────────────────
