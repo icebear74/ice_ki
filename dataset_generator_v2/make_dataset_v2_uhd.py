@@ -3204,69 +3204,77 @@ class DatasetGeneratorV2UHD:
         self.ui_state["n_active_streams"] = 0
 
     def run(self):
-        """Main generation loop with proportional distribution"""
+        """
+        Main generation loop.
+
+        Execution phases
+        ----------------
+        1. Scan video durations   (plain text progress – no GUI yet)
+        2. Proportional distribution calculation  (plain text)
+        3. Create full execution plan and persist it  (plain text)
+           ── full plan now exists on disk ──
+        4. Start execution GUI + heartbeat, then run multi-stream extraction
+
+        The main execution dashboard (draw_dataset_ui) is only activated after
+        Phase 3 because before that the plan does not yet exist and the GUI
+        cannot truthfully show planned-vs-completed data.
+        """
         try:
-            # Hide cursor for clean terminal UI — inside try so finally always restores it
+            # Hide cursor early so the terminal is clean even during scanning.
+            # The full GUI only starts after planning (Phase 3).
             if self.use_terminal_ui:
                 hide_cursor()
 
-            # Start background heartbeat so the UI refreshes every second
-            # regardless of where the main thread is blocked.
-            self._start_ui_heartbeat()
+            # ── Plain-text pre-run banner (before GUI) ───────────────────────
+            _sep = "─" * 72
+            print(_sep)
+            print("  🎬  Dataset Generator V2 – UHD  |  plan-centric architecture")
+            print(_sep)
 
-            if RICH_AVAILABLE:
-                console.print(Panel.fit(
-                    "[bold cyan]Dataset Generator V2 - UHD Quality[/bold cyan]\n"
-                    "UHD Preservation • Multi-Category • Priorities • Proportional Distribution",
-                    border_style="cyan"
-                ))
-
-            # Write architecture file once at the start of each run so the
-            # trainer always has an up-to-date description of the dataset layout.
+            # Write architecture file once at the start of each run.
             self._write_architecture_file()
-            
-            # Phase 1: Scan all videos to get durations
+
+            # ── Phase 1: Scan all videos to get durations ────────────────────
+            print("  Phase 1 / 3  –  Scanning video durations …")
             self.logger.info("Starting Phase 1: Scanning video durations...")
             try:
                 durations = self.scan_video_durations()
             except Exception as e:
                 self.logger.error(f"FATAL: Error during video duration scanning: {e}")
-                self.logger.error(f"This often indicates: out of memory, file access issues, or corrupted videos")
+                self.logger.error("This often indicates: out of memory, file access issues, or corrupted videos")
                 import traceback
                 traceback.print_exc()
                 return
-            
+
             if not durations:
                 self.logger.error("No video durations found, cannot proceed")
                 return
-            
-            # Phase 2: Calculate proportional distribution
+
+            print(f"         ✔  {len(durations)} video(s) scanned")
+
+            # ── Phase 2: Calculate proportional distribution ─────────────────
+            print("  Phase 2 / 3  –  Calculating proportional distribution …")
             self.logger.info("Starting Phase 2: Calculating proportional distribution...")
             try:
                 distribution = self.calculate_proportional_distribution(durations)
-                
-                # Count only videos that have at least one category assigned
-                videos_with_categories = sum(1 for v in self.videos 
-                                            if distribution.get(v['path'], {}))
-                self.logger.info(f"Videos with categories: {videos_with_categories} / {len(self.videos)}")
-                
-                # Store for UI display
+
+                videos_with_categories = sum(
+                    1 for v in self.videos if distribution.get(v['path'], {})
+                )
+                self.logger.info(
+                    f"Videos with categories: {videos_with_categories} / {len(self.videos)}"
+                )
                 self.total_videos_with_categories = videos_with_categories
-                
-                # Initialize UI with starting state
-                if self.use_terminal_ui:
-                    clear_screen()
-                    draw_dataset_ui(self.ui_state)
-                    time.sleep(1)  # Give user a moment to see initial state
-                    
+
             except Exception as e:
                 self.logger.error(f"FATAL: Error during distribution calculation: {e}")
                 import traceback
                 traceback.print_exc()
                 return
 
+            print(f"         ✔  {videos_with_categories}/{len(self.videos)} video(s) have category assignments")
+
             # Sort videos so that any video with forced_frames is processed first.
-            # Stable sort preserves the relative order within each group.
             forced_count = sum(1 for v in self.videos if v.get('forced_frames'))
             self.videos.sort(key=lambda v: 0 if v.get('forced_frames') else 1)
             if forced_count:
@@ -3275,11 +3283,10 @@ class DatasetGeneratorV2UHD:
                 )
 
             # ── Phase 3: Create the full execution plan BEFORE extraction ────
-            # This is the core "first plan, then execute" requirement.
-            # The complete intended work for every video — including per-format
-            # and per-degradation breakdowns — is written to disk before a
-            # single FFmpeg frame is decoded.  A crash during extraction can
-            # then be resumed from this persisted plan.
+            # "First plan, then execute."  The complete intended work for every
+            # video — including per-format and per-degradation breakdowns — is
+            # written to disk before a single FFmpeg frame is decoded.
+            print("  Phase 3 / 3  –  Building full execution plan …")
             self.logger.info("Starting Phase 3: Creating full execution plan...")
             try:
                 self._create_full_execution_plan(distribution)
@@ -3290,15 +3297,19 @@ class DatasetGeneratorV2UHD:
                 return
 
             done_count = self.plan.count_done()
+            total_count = self.plan.count_total()
+            pending_count = total_count - done_count
+            print(
+                f"         ✔  Plan persisted: {total_count} items  "
+                f"({done_count} done, {pending_count} pending)"
+            )
             if done_count > 0:
                 self.logger.info(
-                    f"▶️  Resuming: {done_count}/{self.plan.count_total()} video(s) "
+                    f"▶️  Resuming: {done_count}/{total_count} video(s) "
                     f"already done (skipped via plan)"
                 )
 
             # ── Find resume start index from the plan ────────────────────────
-            # Walk the sorted video list to find the first video not yet done.
-            # This is O(N) but avoids re-processing any leading done-prefix.
             start_idx = 0
             if done_count > 0:
                 for _i, _v in enumerate(self.videos):
@@ -3306,28 +3317,43 @@ class DatasetGeneratorV2UHD:
                         start_idx = _i
                         break
                 else:
-                    # All videos are done — start past the end to exit immediately.
                     start_idx = len(self.videos)
             else:
-                # No previous progress — use the tracker's saved index as a
-                # secondary fast-forward hint (legacy fallback).
                 start_idx = self.tracker.status['progress']['current_video_index']
 
             if 0 < start_idx < len(self.videos):
                 self.logger.info(f"Resuming from video {start_idx + 1}/{len(self.videos)}")
 
-            # ── Phase 4: Execute against the plan ───────────────────────────
-            # N concurrent stream workers, each assigned to a specific Vulkan device.
-            # Multiple FFmpeg processes run simultaneously across different videos.
-            self.logger.info("=" * 80)
+            # ── Phase 4: Activate execution GUI, then run ────────────────────
+            # The plan now exists and the GUI can show accurate planned-vs-
+            # completed data from the very first frame.
             n_vk_slots = len(self._vulkan_device_pool) if self._vulkan_device_pool else 1
             streams_per_gpu = self.config.get("processing", {}).get("streams_per_gpu", 1)
             n_streams = max(1, n_vk_slots * streams_per_gpu)
+
+            print(_sep)
+            print(
+                f"  🚀  MULTI-STREAM MODE: {n_streams} stream(s) "
+                f"· {n_vk_slots} Vulkan device slot(s)"
+            )
+            print(_sep)
+            self.logger.info("=" * 80)
             self.logger.info(
                 f"🚀 MULTI-STREAM MODE: {n_streams} concurrent stream(s) "
                 f"across {n_vk_slots} Vulkan device slot(s)"
             )
             self.logger.info("=" * 80)
+
+            # Populate plan summary in ui_state so the first GUI draw is accurate.
+            self.ui_state["plan_summary"] = self.plan.get_global_stats()
+
+            # Draw the initial dashboard, then start the heartbeat so it keeps
+            # refreshing while workers are running.
+            if self.use_terminal_ui:
+                clear_screen()
+                draw_dataset_ui(self.ui_state)
+
+            self._start_ui_heartbeat()
 
             self._run_multi_stream(start_idx, distribution)
 
