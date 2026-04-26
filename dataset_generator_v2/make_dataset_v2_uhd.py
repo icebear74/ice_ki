@@ -248,6 +248,14 @@ class DatasetGeneratorV2UHD:
         self.update_interval = 0.5
         self.logger.info(f"⚡ Using {self.workers} threads for FFmpeg extraction")
 
+        # ── UI heartbeat ──────────────────────────────────────────────────────
+        # A background thread refreshes the terminal UI every second so the
+        # display stays live even when the main thread is blocked (e.g. waiting
+        # for parallel FFmpeg workers to finish).
+        self._ui_lock = threading.Lock()          # prevents concurrent redraws
+        self._ui_heartbeat_stop = threading.Event()
+        self._ui_heartbeat_thread: Optional[threading.Thread] = None
+
         # Statistics
         self.start_time = time.time()
         self.extractions_count = 0
@@ -286,6 +294,7 @@ class DatasetGeneratorV2UHD:
             "format_sizes": list(next(iter(self.format_config.values()), {}).keys()),
             "format_labels": _format_labels,  # template_name → "WxH" string
             "timing_phases": {},              # phase timings from streaming extractor
+            "parallel_status": "",            # e.g. "⚡ 16 workers active"
         }
         self.ui_update_counter = 0
 
@@ -1226,15 +1235,53 @@ class DatasetGeneratorV2UHD:
         # Immediate exit
         sys.exit(0)
     
+    def _start_ui_heartbeat(self) -> None:
+        """Start a background thread that refreshes the terminal UI every second.
+
+        This guarantees at least one UI redraw per second even when the main
+        thread is blocked (e.g. waiting on parallel FFmpeg workers).  The
+        thread is a daemon so it is automatically killed if the process exits.
+        """
+        if not self.use_terminal_ui:
+            return
+        self._ui_heartbeat_stop.clear()
+
+        def _beat() -> None:
+            while not self._ui_heartbeat_stop.wait(timeout=1.0):
+                # Force a redraw on the next call regardless of throttle timer
+                self.last_update_time = 0.0
+                self._update_terminal_ui()
+
+        self._ui_heartbeat_thread = threading.Thread(
+            target=_beat, daemon=True, name="ui-heartbeat"
+        )
+        self._ui_heartbeat_thread.start()
+
+    def _stop_ui_heartbeat(self) -> None:
+        """Stop the background UI heartbeat thread (idempotent)."""
+        self._ui_heartbeat_stop.set()
+        if self._ui_heartbeat_thread is not None:
+            self._ui_heartbeat_thread.join(timeout=2.0)
+            self._ui_heartbeat_thread = None
+
     def _update_terminal_ui(self):
-        """Update and redraw the terminal UI (throttled to update_interval)."""
+        """Update and redraw the terminal UI (throttled to update_interval).
+
+        Thread-safe: uses a non-blocking lock so concurrent calls from the
+        heartbeat thread and worker callbacks never produce garbled output.
+        """
         if not self.use_terminal_ui:
             return
 
         now = time.time()
         if now - self.last_update_time < self.update_interval:
             return
-        self.last_update_time = now
+
+        # Skip if another thread is already redrawing
+        if not self._ui_lock.acquire(blocking=False):
+            return
+
+        self.last_update_time = time.time()
         self.ui_update_counter += 1
 
         try:
@@ -1306,6 +1353,8 @@ class DatasetGeneratorV2UHD:
 
         except Exception as e:
             self.logger.error(f"UI update error: {e}", exc_info=True)
+        finally:
+            self._ui_lock.release()
     
     def _log_system_resources(self, operation: str = ""):
         """Log current system resource usage"""
@@ -1955,7 +2004,34 @@ class DatasetGeneratorV2UHD:
         # but used for the final progress bar update).
         _tracker_updated: Dict[str, int] = {}
 
-        def _run_worker(group: List[Tuple[int, str, str]], wcfg: dict) -> None:
+        # Per-worker live patch counts (worker_idx → {cat: count}).
+        # Written under patches_lock by each worker's progress callback;
+        # read by _update_terminal_ui (called from the heartbeat thread).
+        _worker_live: Dict[int, Dict[str, int]] = {}
+
+        def _make_progress_fn(worker_idx: int):
+            """Return a thread-safe progress callback for one parallel worker."""
+            def _on_progress(frames_examined: int, patches_so_far: Dict[str, int],
+                             raw_frames_piped: int, timing: dict = None) -> None:
+                with patches_lock:
+                    _worker_live[worker_idx] = dict(patches_so_far)
+                    # Aggregate partial counts from all workers
+                    agg: Dict[str, int] = {}
+                    for wp in _worker_live.values():
+                        for cat, cnt in wp.items():
+                            agg[cat] = agg.get(cat, 0) + cnt
+                    self.ui_state['patches_created_total'] = prior_total + sum(agg.values())
+                    # Update per-video progress bars with live aggregated counts
+                    current_progress = self.ui_state.get('current_video_progress', {})
+                    for cat, new_total in agg.items():
+                        if cat in current_progress:
+                            target = current_progress[cat].get('target', 0)
+                            pct = (new_total / target * 100) if target > 0 else 0.0
+                            current_progress[cat]['created'] = new_total
+                            current_progress[cat]['percent'] = pct
+            return _on_progress
+
+        def _run_worker(worker_idx: int, group: List[Tuple[int, str, str]], wcfg: dict) -> None:
             result = extract_and_save_streaming_distributed(
                 video_path=video_path,
                 assignments=group,
@@ -1966,10 +2042,9 @@ class DatasetGeneratorV2UHD:
                 logger=self.logger,
                 is_interesting_fn=self.is_interesting_patch,
                 is_black_frame_fn=_streaming_is_black_frame,
-                # No per-frame progress callback in parallel mode — workers
-                # share the UI state and would conflict; UI is refreshed after
-                # each worker finishes instead.
-                progress_fn=None,
+                # Live per-frame progress from every worker feeds into ui_state;
+                # the heartbeat thread picks it up every second for display.
+                progress_fn=_make_progress_fn(worker_idx),
                 use_cuda=wcfg.get("use_cuda", False),
                 cuda_device=wcfg.get("cuda_device", 0),
                 nice_level=nice_level,
@@ -1994,9 +2069,14 @@ class DatasetGeneratorV2UHD:
                 self.last_update_time = 0.0   # force immediate redraw
                 self._update_terminal_ui()
 
+        n_workers_configured = len(worker_configs)
         threads = [
-            threading.Thread(target=_run_worker, args=(g, w), daemon=True)
-            for g, w in zip(groups, worker_configs)
+            threading.Thread(
+                target=_run_worker,
+                args=(i, g, w),
+                daemon=True,
+            )
+            for i, (g, w) in enumerate(zip(groups, worker_configs))
         ]
         n_actual = len(threads)
         self.logger.info(
@@ -2004,10 +2084,21 @@ class DatasetGeneratorV2UHD:
             f"~{len(sorted_asgn) // max(n_actual, 1)} assignments each "
             f"(total {len(sorted_asgn)} assignments)"
         )
+        # Signal the UI that parallel workers are running so the status line
+        # shows something informative while workers are busy.
+        self.ui_state['parallel_status'] = (
+            f"⚡ {n_actual} parallele Worker aktiv …"
+        )
+        self.last_update_time = 0.0
+        self._update_terminal_ui()
+
         for t in threads:
             t.start()
         for t in threads:
             t.join()
+
+        # Clear the parallel-status indicator now that all workers are done
+        self.ui_state['parallel_status'] = ""
 
         return patches_total
 
@@ -2449,6 +2540,10 @@ class DatasetGeneratorV2UHD:
             if self.use_terminal_ui:
                 hide_cursor()
 
+            # Start background heartbeat so the UI refreshes every second
+            # regardless of where the main thread is blocked.
+            self._start_ui_heartbeat()
+
             if RICH_AVAILABLE:
                 console.print(Panel.fit(
                     "[bold cyan]Dataset Generator V2 - UHD Quality[/bold cyan]\n"
@@ -2613,14 +2708,10 @@ class DatasetGeneratorV2UHD:
                         'target': video_cat_targets[category],
                         'percent': 0.0  # Added: display expects this
                     }
-                
-                # Update UI to show video info before processing starts
-                if self.use_terminal_ui:
-                    print(f"\n{'='*80}")
-                    print(f"🎬 STARTING VIDEO: {video_name} ({idx+1}/{len(self.videos)})")
-                    print(f"   Category targets: {video_cat_targets}")
-                    print(f"{'='*80}\n")
-                    self._update_terminal_ui()
+
+                # Force immediate UI redraw with the new video info
+                self.last_update_time = 0.0
+                self._update_terminal_ui()
                 
                 # Mark this video as "in progress" BEFORE we start work so
                 # that a crash or pipeline failure causes a retry on the next
@@ -2692,6 +2783,8 @@ class DatasetGeneratorV2UHD:
             traceback.print_exc()
             raise
         finally:
+            # Stop the background UI heartbeat before touching the terminal
+            self._stop_ui_heartbeat()
             # Restore cursor and clean terminal on exit
             if self.use_terminal_ui:
                 show_cursor()

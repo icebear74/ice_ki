@@ -208,6 +208,12 @@ def _draw_statistics_and_eta(state, width):
     """Draw statistics and ETA section"""
     print_section_header("STATISTIKEN & GESCHÄTZTE RESTZEIT")
 
+    # Parallel-worker status line (only shown while workers are running)
+    parallel_status = state.get('parallel_status', '')
+    if parallel_status:
+        print(f"  {C_YELLOW}{parallel_status}{C_RESET}")
+        print()
+
     frames_read   = state.get('frames_read_total', 0)       # frames actually piped from FFmpeg to Python
     frames_total  = state.get('frames_processed_total', 0)  # center-frame assignments evaluated
     gt_total      = state.get('patches_created_total', 0)   # GT-Bilder saved (= Szenen, cross-category sum)
