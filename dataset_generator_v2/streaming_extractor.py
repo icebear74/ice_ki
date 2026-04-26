@@ -232,6 +232,19 @@ _libplacebo_avail: Optional[bool] = None
 _qsv_avail: Optional[bool] = None
 _qsv_decoders: Optional[Set[str]] = None
 
+# Strings that indicate a Vulkan / libplacebo initialisation failure.
+# Used both in the libplacebo_available() probe and in the runtime stderr
+# scanner that invalidates the cache when the real FFmpeg run fails.
+_VULKAN_FAIL_STRINGS: tuple = (
+    "VK_ERROR_",
+    "Failed creating Vulkan device",
+    "Failed initializing vulkan device",
+    "Failed creating logical device",
+    "Query format failed",
+    "Error reinitializing filters",
+    "Generic error in an external library",
+)
+
 # Cached output of `ffmpeg -filters` (shared by all filter probes).
 _ffmpeg_filters_output: Optional[str] = None
 
@@ -338,14 +351,6 @@ def libplacebo_available() -> bool:
             # Vulkan failure strings.  Without HDR metadata libplacebo may silently
             # fall back to software (exit 0, no errors) — a false positive that
             # causes the real video run to crash with "Query format failed".
-            _VULKAN_FAIL_STRINGS = (
-                "VK_ERROR_",
-                "Failed creating Vulkan device",
-                "Failed initializing vulkan device",
-                "Failed creating logical device",
-                "Query format failed",
-                "Error reinitializing filters",
-            )
             try:
                 probe = subprocess.run(
                     [
@@ -2576,15 +2581,32 @@ def extract_and_save_streaming_distributed(
             except Exception:
                 pass
 
-    # GPU pipeline produced zero frames — most likely a runtime hw-accel failure
-    # (e.g. CUDA driver mismatch, scale_cuda format-negotiation bug, or FFmpeg
-    # silently falling back to software decode while the filtergraph still
-    # contains scale_cuda / hwdownload GPU filters).
-    # Retry transparently with the CPU-only pipeline so extraction still
-    # completes, rather than silently returning 0 patches.
-    if selected_idx == 0 and (_full_gpu or _scale_gpu):
+    # Detect Vulkan / libplacebo failure in the stderr collected during the run.
+    # If any failure keyword is present while we were using the libplacebo
+    # pipeline, invalidate the in-process cache so that subsequent videos in
+    # the same run automatically fall back to CPU zscale without repeating
+    # the painful probe/fail cycle.
+    global _libplacebo_avail
+    _stderr_text = "\n".join(stderr_lines)
+    _placebo_failed = _placebo and any(
+        kw in _stderr_text for kw in _VULKAN_FAIL_STRINGS
+    )
+    if _placebo_failed:
+        _libplacebo_avail = False
         _log(
-            "⚠️  GPU pipeline produced no frames — retrying with CPU-only pipeline"
+            "⚠️  libplacebo Vulkan failure detected in FFmpeg stderr — "
+            "disabling libplacebo for the remainder of this run"
+        )
+
+    # GPU pipeline (or libplacebo) produced zero frames — most likely a runtime
+    # hw-accel failure (e.g. CUDA driver mismatch, scale_cuda format-negotiation
+    # bug, FFmpeg silently falling back to software while GPU filters are still
+    # in the chain, or Vulkan device creation failure for libplacebo).
+    # Retry transparently with the CPU-only (zscale) pipeline so extraction
+    # still completes, rather than silently returning 0 patches.
+    if selected_idx == 0 and (_full_gpu or _scale_gpu or _placebo_failed):
+        _log(
+            "⚠️  GPU/libplacebo pipeline produced no frames — retrying with CPU-only pipeline"
         )
         return extract_and_save_streaming_distributed(
             video_path=video_path,
