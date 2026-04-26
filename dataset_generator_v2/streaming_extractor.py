@@ -355,7 +355,12 @@ def libplacebo_available() -> bool:
                 probe = subprocess.run(
                     [
                         "ffmpeg", "-hide_banner", "-loglevel", "verbose",
-                        "-f", "lavfi", "-i", "color=c=black:size=64x64:duration=0.04",
+                        "-f", "lavfi",
+                        "-i", (
+                            f"color=c=black"
+                            f":size={STREAM_WIDTH}x{STREAM_HEIGHT}"
+                            f":duration=0.04"
+                        ),
                         "-vf", (
                             # Step 1: convert to 10-bit to mimic a UHD source.
                             "format=yuv420p10le,"
@@ -368,10 +373,13 @@ def libplacebo_available() -> bool:
                             # Setting smpte2084 forces libplacebo to enter the
                             # same HDR→SDR Vulkan tonemapping code path it uses
                             # for real UHD/HDR video files.
+                            # Using STREAM_WIDTH x STREAM_HEIGHT (instead of
+                            # 64x64) ensures the same memory allocation and
+                            # Vulkan device-init code path as real HDR content.
                             "setparams=color_trc=smpte2084"
                             ":color_primaries=bt2020"
                             ":colorspace=bt2020nc,"
-                            "libplacebo=w=64:h=64"
+                            f"libplacebo=w={STREAM_WIDTH}:h={STREAM_HEIGHT}"
                             ":colorspace=bt709:color_trc=bt709:color_primaries=bt709"
                             ":tonemapping=mobius:range=pc:downscaler=bilinear,"
                             "format=yuv420p"
