@@ -1194,9 +1194,10 @@ def apply_degradation_template_params(
     The application order is:
       1. Blur        – applied first so JPEG artifacts are not blurred away.
       2. Noise       – independent per-frame noise at the sampled sigma.
-      3. JPEG        – blocking / ringing artefacts.
-      4. Saturation  – chroma scaling in HSV space.
-      5. Color       – contrast, brightness, gamma, black-lift in floating point.
+      3. JPEG        – blocking / ringing artefacts (JPEG quality round-trip).
+      4. Chroma bleed – horizontal Cr/Cb smearing simulating analog bandwidth.
+      5. Saturation  – chroma scaling in HSV space.
+      6. Color       – contrast, brightness, gamma, black-lift in floating point.
 
     GT frames are never passed through this function; only LR frames are degraded.
 
@@ -1237,14 +1238,31 @@ def apply_degradation_template_params(
         if ok:
             result = cv2.imdecode(buf, cv2.IMREAD_COLOR)
 
-    # ── 4. Saturation ────────────────────────────────────────────────────────
+    # ── 4. Chroma bleed (analog horizontal chroma smearing) ──────────────────
+    # Sampled from templates["degradation_templates"][*].chroma.chroma_bleed_*.
+    # Simulates the lower chroma bandwidth of analog / early digital TV:
+    # Cb and Cr channels are blurred horizontally proportional to the strength.
+    bleed = float(params.get("chroma_bleed", 0.0))
+    if bleed > 0.0:
+        ycrcb = cv2.cvtColor(result, cv2.COLOR_BGR2YCrCb).astype(np.float32)
+        # kernel width scales with strength: bleed=0.08 → kw=3, bleed=0.3 → kw=7
+        kw = max(3, int(bleed * 24 + 1) | 1)   # must be odd
+        for ch in (1, 2):  # Cr (ch=1), Cb (ch=2)
+            ycrcb[:, :, ch] = cv2.GaussianBlur(
+                ycrcb[:, :, ch], (kw, 1), sigmaX=0
+            )
+        result = cv2.cvtColor(
+            np.clip(ycrcb, 0, 255).astype(np.uint8), cv2.COLOR_YCrCb2BGR
+        )
+
+    # ── 5. Saturation ────────────────────────────────────────────────────────
     sat = params.get("saturation", 1.0)
     if sat != 1.0:
         hsv = cv2.cvtColor(result, cv2.COLOR_BGR2HSV).astype(np.float32)
         hsv[:, :, 1] = np.clip(hsv[:, :, 1] * sat, 0, 255)
         result = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
 
-    # ── 5. Color: contrast / brightness / gamma / black-lift ─────────────────
+    # ── 6. Color: contrast / brightness / gamma / black-lift ─────────────────
     has_color = any(k in params for k in ("contrast", "brightness", "gamma", "black_lift"))
     if has_color:
         result_f = result.astype(np.float32) / 255.0
@@ -1557,11 +1575,12 @@ def create_patch_pair(
     center_idx = n // 2
 
     # ── Determine source_mode ─────────────────────────────────────────────────
-    # Prefer explicit source_mode from format_cfg; fall back to legacy name check.
-    source_mode = format_cfg.get("source_mode")
+    # source_mode is always present after config validation (see config_io.py).
+    # The format name itself is never used to decide the pipeline — the config
+    # is the single source of truth.
+    source_mode = format_cfg.get("source_mode", "crop")
     if source_mode not in ("resize", "crop"):
-        # Legacy fallback: the old hardcoded whitelist
-        source_mode = "resize" if format_name in ("medium_169", "720_169") else "crop"
+        source_mode = "crop"
 
     # ── Degradation: resolve which sampler to use ─────────────────────────────
     # deg_spec (new template) takes priority over degrade_cfg (legacy flat cfg).
