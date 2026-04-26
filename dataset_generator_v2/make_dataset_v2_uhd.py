@@ -20,6 +20,7 @@ generator_config_active.json → a read-only snapshot given to AI agents for rev
                               It is NEVER loaded by any code; only humans/agents read it.
 """
 
+import hashlib
 import os
 import sys
 import json
@@ -378,6 +379,15 @@ class DatasetGeneratorV2UHD:
             # Degradation-template breakdown: {category: {tmpl_name: count}}
             # Aggregated from active_streams[*].degrade_counts by the UI layer.
             "degrade_counts_global": {},
+            # ── Plan-driven fields (populated in _create_full_execution_plan) ──
+            # Global stats from the persisted plan (planned vs completed at all
+            # levels).  Updated after each video completes.
+            "plan_summary": {},
+            # Info about the video currently being processed by each stream:
+            # list of {plan_item_id, video_name, queue_position,
+            #          planned_total, completed_total, planned_per_format,
+            #          planned_per_degradation}
+            "current_plan_items": [],
         }
         self.ui_update_counter = 0
 
@@ -1225,6 +1235,110 @@ class DatasetGeneratorV2UHD:
 
         return distribution
 
+    def _create_full_execution_plan(
+        self,
+        distribution: Dict[str, Dict[str, int]],
+    ) -> None:
+        """
+        Phase 3 – Create the **complete** execution plan for all videos and
+        persist it to disk before extraction starts.
+
+        For every video the method computes planned patch counts at three
+        levels:
+
+        * per-category          (from *distribution*)
+        * per-format-template   (weighted split within each category)
+        * per-degradation-template  (weighted split within each format,
+                                     using ``degradation_mix`` weights)
+
+        The resulting plan items are passed to :meth:`GenerationPlan.create_full_plan`
+        which persists them atomically and preserves the ``"done"`` status of
+        any video that was already completed in a previous run.
+
+        This method **must** be called after ``calculate_proportional_distribution``
+        and after the video list has been sorted (forced-frame videos first),
+        but **before** ``_run_multi_stream`` is invoked.
+
+        Args:
+            distribution: ``{video_path: {category: patch_count}}`` as
+                          returned by :meth:`calculate_proportional_distribution`.
+        """
+        from generation_plan import _stable_id  # avoid circular if ever moved
+
+        plan_items: List[dict] = []
+
+        for queue_pos, video in enumerate(self.videos, start=1):
+            video_path = video.get("path", "")
+            video_name = video.get("name", os.path.basename(video_path))
+
+            video_cat_targets: Dict[str, int] = distribution.get(video_path, {})
+            if not video_cat_targets or sum(video_cat_targets.values()) == 0:
+                continue
+
+            # Per-format distribution inside each category.
+            format_distribution: Dict[str, Dict[str, int]] = (
+                self._build_format_distribution_for_video(video, video_cat_targets)
+            )
+
+            planned_per_format: Dict[str, int] = {}
+            planned_per_degradation: Dict[str, int] = {}
+            cat_fmt_deg: Dict[str, Dict[str, Dict[str, int]]] = {}
+
+            for cat, fmt_counts in format_distribution.items():
+                cat_fmt_deg[cat] = {}
+                for tmpl_name, planned_fmt_count in fmt_counts.items():
+                    # Accumulate per-format totals (across categories).
+                    planned_per_format[tmpl_name] = (
+                        planned_per_format.get(tmpl_name, 0) + planned_fmt_count
+                    )
+
+                    # Expected degradation counts = planned_fmt_count × weight.
+                    deg_mix: Dict[str, float] = (
+                        self.format_config.get(cat, {})
+                        .get(tmpl_name, {})
+                        .get("degradation_mix", {})
+                    )
+                    total_deg_weight = sum(deg_mix.values()) if deg_mix else 0.0
+
+                    cat_fmt_deg[cat][tmpl_name] = {}
+                    for deg_name, deg_weight in deg_mix.items():
+                        if total_deg_weight > 0:
+                            deg_count = int(
+                                planned_fmt_count * deg_weight / total_deg_weight
+                            )
+                        else:
+                            deg_count = 0
+                        planned_per_degradation[deg_name] = (
+                            planned_per_degradation.get(deg_name, 0) + deg_count
+                        )
+                        cat_fmt_deg[cat][tmpl_name][deg_name] = deg_count
+
+            plan_items.append({
+                "plan_item_id":   hashlib.sha256(video_path.encode()).hexdigest()[:16],
+                "queue_position": queue_pos,
+                "video_path":     video_path,
+                "video_name":     video_name,
+                "planned": {
+                    "total":                      sum(video_cat_targets.values()),
+                    "per_category":               dict(video_cat_targets),
+                    "per_format_template":        planned_per_format,
+                    "per_degradation_template":   planned_per_degradation,
+                    "category_format_degradation": cat_fmt_deg,
+                },
+            })
+
+        self.plan.create_full_plan(plan_items)
+
+        g = self.plan.get_global_stats()
+        self.logger.info(
+            f"✅ Full execution plan persisted: {g['n_items_total']} videos, "
+            f"planned total = {g['planned_total']:,} patches  "
+            f"({g['n_items_done']} already done from previous run)"
+        )
+
+        # Push plan summary into ui_state so the GUI can display it immediately.
+        self.ui_state["plan_summary"] = g
+
     def _setup_logger(self):
         """Setup file and console logger (console disabled when terminal UI active)"""
         log_dir = os.path.join(self.base_dir, "logs")
@@ -1375,9 +1489,8 @@ class DatasetGeneratorV2UHD:
                 if category in category_stats:
                     stats = category_stats[category]
                     # Use the user-configured target (category_targets), not the
-                    # rounded distribution sum (distribution_totals), so the progress
-                    # bar reflects exactly what the user asked for (30 000 GT images
-                    # means 30 000 GT images, not 29 850 due to per-video rounding).
+                    # rounded distribution sum, so the progress bar reflects
+                    # exactly what the user asked for.
                     target = self.category_targets.get(category, 0)
                     current = stats.get('images_created', 0)
                     percent = (current / target * 100) if target > 0 else 0.0
@@ -1387,9 +1500,19 @@ class DatasetGeneratorV2UHD:
                         'percent': percent,
                     }
 
-            # Patch distribution by category and format — derive weights from
-            # the category config instead of old format_probabilities dict.
-            patch_dist = {}
+            # ── Plan-driven format/degradation breakdown ──────────────────
+            # Build patch_distribution from the persisted plan's global stats
+            # so the GUI shows planned vs completed at format-template and
+            # degradation-template level (not just estimated from weights).
+            g = self.ui_state.get("plan_summary") or self.plan.get_global_stats()
+            if g:
+                self.ui_state["plan_summary"] = g
+
+            plan_global_planned_fmt   = g.get("planned_per_format_template", {}) if g else {}
+            plan_global_completed_fmt = g.get("completed_per_format_template", {}) if g else {}
+            plan_cfd                  = g.get("category_format_degradation", {}) if g else {}
+
+            patch_dist: Dict[str, Dict] = {}
             for category, fmt_map in self.format_config.items():
                 patch_dist[category] = {}
                 total_weight = sum(
@@ -1397,31 +1520,50 @@ class DatasetGeneratorV2UHD:
                     for fe in self.categories.get(category, {}).get("formats", [])
                 )
                 for format_name in fmt_map:
-                    # Look up the weight for this template name in the category.
-                    weight = 0
-                    for fe in self.categories.get(category, {}).get("formats", []):
-                        if fe["template"] == format_name:
-                            weight = fe["weight"]
-                            break
-                    prob = (weight / total_weight) if total_weight > 0 else 0.0
-                    if category in category_stats:
-                        cat_done = category_stats[category].get("images_created", 0)
+                    planned_fmt   = plan_global_planned_fmt.get(format_name, 0)
+                    completed_fmt = plan_global_completed_fmt.get(format_name, 0)
+
+                    if planned_fmt == 0:
+                        # Fallback: estimate from weight × category target
+                        weight = 0
+                        for fe in self.categories.get(category, {}).get("formats", []):
+                            if fe["template"] == format_name:
+                                weight = fe["weight"]
+                                break
+                        prob = (weight / total_weight) if total_weight > 0 else 0.0
                         cat_target = self.category_targets.get(category, 0)
-                        patch_dist[category][format_name] = {
-                            "count": int(cat_done * prob),
-                            "target": int(cat_target * prob),
-                        }
-                    else:
-                        patch_dist[category][format_name] = {"count": 0, "target": 0}
+                        cat_done = category_stats.get(category, {}).get("images_created", 0)
+                        planned_fmt   = int(cat_target * prob)
+                        completed_fmt = int(cat_done   * prob)
+
+                    # Per-degradation counts for this format (from plan CFD).
+                    deg_planned: Dict[str, int] = {}
+                    for _fmt_key, _deg_map in plan_cfd.get(category, {}).items():
+                        if _fmt_key == format_name:
+                            deg_planned = dict(_deg_map)
+                            break
+
+                    patch_dist[category][format_name] = {
+                        "count":          completed_fmt,
+                        "target":         planned_fmt,
+                        "deg_planned":    deg_planned,
+                        "deg_completed":  (
+                            g.get("completed_per_degradation_template", {}) if g else {}
+                        ),
+                    }
             self.ui_state["patch_distribution"] = patch_dist
 
-            # ETA calculation: use global rate (total saved / elapsed)
+            # ── ETA from plan (planned remaining / current throughput) ─────
             elapsed = time.time() - self.start_time
             patches_done = self.ui_state.get('patches_created_total', 0)
             if patches_done > 0 and elapsed > 0:
                 rate = patches_done / elapsed
-                eta_by_category = {}
-                max_eta = 0
+                planned_total = (g.get("planned_total", 0) if g else 0)
+                remaining_total = max(0, planned_total - patches_done) if planned_total > 0 else 0
+                eta_total = (remaining_total / rate) if rate > 0 and remaining_total > 0 else 0.0
+
+                eta_by_category: Dict[str, float] = {}
+                max_eta = 0.0
                 for category in self.ui_state['overall_progress']:
                     cat_data = self.ui_state['overall_progress'][category]
                     remaining = cat_data['target'] - cat_data['created']
@@ -1429,8 +1571,23 @@ class DatasetGeneratorV2UHD:
                         eta_s = remaining / rate
                         eta_by_category[category] = eta_s
                         max_eta = max(max_eta, eta_s)
+                eta_by_category['total'] = eta_total if eta_total > 0 else max_eta
                 self.ui_state['eta'] = eta_by_category
-                self.ui_state['eta']['total'] = max_eta
+
+            # ── Populate current_plan_items for GPU panel display ─────────
+            current_items = []
+            for ss in self.ui_state.get("active_streams", []):
+                if ss.get("state") == "running":
+                    current_items.append({
+                        "plan_item_id":           ss.get("plan_item_id", ""),
+                        "video_name":             ss.get("video_name", ""),
+                        "queue_position":         ss.get("queue_position", 0),
+                        "planned_total":          ss.get("planned_total", 0),
+                        "completed_total":        ss.get("patches_created", 0),
+                        "planned_per_format":     ss.get("planned_per_format", {}),
+                        "planned_per_degradation": ss.get("planned_per_degradation", {}),
+                    })
+            self.ui_state["current_plan_items"] = current_items
 
             clear_screen()
             draw_dataset_ui(self.ui_state)
@@ -2803,6 +2960,10 @@ class DatasetGeneratorV2UHD:
                 short_name = video_name[-40:]
 
                 # ── Mark stream running ──────────────────────────────────
+                # Derive the stable plan_item_id for this video.
+                _plan_item_id = hashlib.sha256(video_path.encode()).hexdigest()[:16]
+                _plan_item = self.plan.get_item_by_path(video_path)
+
                 with streams_lock:
                     stream_states[stream_id].update({
                         "video_name":       short_name,
@@ -2812,11 +2973,29 @@ class DatasetGeneratorV2UHD:
                         "live_fps":         0.0,
                         "degrade_counts":   {},
                         "current_video_idx": idx,
+                        # Expose plan metadata to the GUI.
+                        "plan_item_id": _plan_item_id,
+                        "queue_position": (
+                            _plan_item["queue_position"] if _plan_item else idx + 1
+                        ),
+                        "planned_total": (
+                            _plan_item["planned"]["total"] if _plan_item else 0
+                        ),
+                        "planned_per_category": (
+                            _plan_item["planned"]["per_category"] if _plan_item else {}
+                        ),
+                        "planned_per_format": (
+                            _plan_item["planned"]["per_format_template"] if _plan_item else {}
+                        ),
+                        "planned_per_degradation": (
+                            _plan_item["planned"]["per_degradation_template"] if _plan_item else {}
+                        ),
                     })
                     self.ui_state["n_active_streams"] = sum(
                         1 for s in stream_states if s["state"] == "running"
                     )
-                    # Mark in-progress BEFORE work so a crash causes retry.
+                    # Mark in-progress in the plan BEFORE work so a crash causes retry.
+                    self.plan.update_item_started(_plan_item_id)
                     self.tracker.update_progress(current_video_index=idx)
 
                 try:
@@ -2920,6 +3099,36 @@ class DatasetGeneratorV2UHD:
                     patches_created = sum(
                         v for v in result.values() if isinstance(v, int)
                     )
+
+                    # Collect the final accumulated degradation counts for this
+                    # video from the stream state (updated per-frame by _on_progress).
+                    final_degrade_per_cat: Dict[str, Dict[str, int]] = (
+                        stream_states[stream_id].get("degrade_counts", {})
+                    )
+                    # Flatten to {template_name: count} across all categories.
+                    flat_degrade: Dict[str, int] = {}
+                    for _cat_dc in final_degrade_per_cat.values():
+                        for _dn, _dc in _cat_dc.items():
+                            flat_degrade[_dn] = flat_degrade.get(_dn, 0) + _dc
+
+                    # Estimate per-format completion proportionally from the
+                    # planned distribution (actual per-format counts are not
+                    # returned by the extractor).
+                    _plan_it = self.plan.get_item_by_path(video_path)
+                    if _plan_it:
+                        _planned_fmt = _plan_it["planned"].get("per_format_template", {})
+                        _planned_ttl = _plan_it["planned"].get("total", 0)
+                        if _planned_ttl > 0 and patches_created > 0:
+                            _rate = patches_created / _planned_ttl
+                            _comp_fmt = {
+                                fmt: int(cnt * _rate)
+                                for fmt, cnt in _planned_fmt.items()
+                            }
+                        else:
+                            _comp_fmt = {}
+                    else:
+                        _comp_fmt = {}
+
                     with streams_lock:
                         for cat, count in result.items():
                             if count > 0:
@@ -2929,7 +3138,15 @@ class DatasetGeneratorV2UHD:
                                 current_video_index=idx + 1,
                                 patches_created=patches_created,
                             )
-                            self.plan.mark_video_done(video_path, result)
+                            # Update plan with full completion data.
+                            self.plan.update_item_completed(
+                                plan_item_id=_plan_item_id,
+                                completed_per_category=result,
+                                completed_per_format_template=_comp_fmt,
+                                completed_per_degradation_template=flat_degrade,
+                            )
+                            # Refresh the global plan summary in ui_state.
+                            self.ui_state["plan_summary"] = self.plan.get_global_stats()
                         else:
                             self.tracker.update_progress(patches_created=0)
                             self.plan.mark_video_pending(video_path)
@@ -2953,6 +3170,11 @@ class DatasetGeneratorV2UHD:
                     import traceback
                     traceback.print_exc()
                     with streams_lock:
+                        # Mark the plan item as failed so it can be retried.
+                        self.plan.update_item_failed(
+                            _plan_item_id, reason=str(exc)[:200]
+                        )
+                        self.ui_state["plan_summary"] = self.plan.get_global_stats()
                         self.tracker.save()
 
                 finally:
@@ -3042,9 +3264,6 @@ class DatasetGeneratorV2UHD:
                 import traceback
                 traceback.print_exc()
                 return
-            
-            # Console output removed - all info shown in terminal GUI
-            # No need to print here, user sees progress in the GUI
 
             # Sort videos so that any video with forced_frames is processed first.
             # Stable sort preserves the relative order within each group.
@@ -3055,10 +3274,21 @@ class DatasetGeneratorV2UHD:
                     f"⚡ Forced-frame videos promoted to front of queue: {forced_count} / {len(self.videos)}"
                 )
 
-            # Populate the plan with all videos in the (possibly re-sorted)
-            # order.  Videos already tracked — including those marked "done" —
-            # are left untouched so that previous progress is preserved.
-            self.plan.initialize(self.videos)
+            # ── Phase 3: Create the full execution plan BEFORE extraction ────
+            # This is the core "first plan, then execute" requirement.
+            # The complete intended work for every video — including per-format
+            # and per-degradation breakdowns — is written to disk before a
+            # single FFmpeg frame is decoded.  A crash during extraction can
+            # then be resumed from this persisted plan.
+            self.logger.info("Starting Phase 3: Creating full execution plan...")
+            try:
+                self._create_full_execution_plan(distribution)
+            except Exception as e:
+                self.logger.error(f"FATAL: Error creating execution plan: {e}")
+                import traceback
+                traceback.print_exc()
+                return
+
             done_count = self.plan.count_done()
             if done_count > 0:
                 self.logger.info(
@@ -3066,14 +3296,11 @@ class DatasetGeneratorV2UHD:
                     f"already done (skipped via plan)"
                 )
 
-            # Get resume point (index-based, for a fast forward through the list).
-            # When the plan already has done videos, find the index of the first
-            # video that has NOT been done yet — this skips the leading done-prefix
-            # in O(N) rather than re-checking every video from 0 each restart.
-            raw_start_idx = self.tracker.status['progress']['current_video_index']
+            # ── Find resume start index from the plan ────────────────────────
+            # Walk the sorted video list to find the first video not yet done.
+            # This is O(N) but avoids re-processing any leading done-prefix.
+            start_idx = 0
             if done_count > 0:
-                # Locate the first video not yet done in the plan.
-                start_idx = 0
                 for _i, _v in enumerate(self.videos):
                     if not self.plan.is_video_done(_v['path']):
                         start_idx = _i
@@ -3082,13 +3309,14 @@ class DatasetGeneratorV2UHD:
                     # All videos are done — start past the end to exit immediately.
                     start_idx = len(self.videos)
             else:
-                # Index-based resume (no plan progress yet): fast-forward.
-                start_idx = raw_start_idx
+                # No previous progress — use the tracker's saved index as a
+                # secondary fast-forward hint (legacy fallback).
+                start_idx = self.tracker.status['progress']['current_video_index']
 
             if 0 < start_idx < len(self.videos):
                 self.logger.info(f"Resuming from video {start_idx + 1}/{len(self.videos)}")
 
-            # --- Multi-stream parallel extraction ---
+            # ── Phase 4: Execute against the plan ───────────────────────────
             # N concurrent stream workers, each assigned to a specific Vulkan device.
             # Multiple FFmpeg processes run simultaneously across different videos.
             self.logger.info("=" * 80)
