@@ -2403,8 +2403,9 @@ def extract_and_save_streaming_distributed(
     # Processing workers: image work (crop, degradation, PNG encode) is
     # CPU-bound.  Scale with available CPU cores, capped at 8 to avoid
     # excessive memory pressure from concurrent 7-frame window copies.
+    # Computed here so it can be stored in _t_phases (defined below) without
+    # a forward-reference.
     _n_processing_workers = min(8, os.cpu_count() or 4)
-    _t_phases["n_workers_total"] = _n_processing_workers
     _processing_threads = [
         threading.Thread(target=_processing_worker, daemon=True)
         for _ in range(_n_processing_workers)
@@ -2567,7 +2568,7 @@ def extract_and_save_streaming_distributed(
         "q_size_last":       0,   # last observed write-queue depth
         "proc_queue_size":   0,   # last observed processing-queue depth
         "n_workers_active":  0,   # processing workers currently busy
-        "n_workers_total":   0,   # total processing-worker count
+        "n_workers_total":   _n_processing_workers,  # total processing-worker count
         # Degradation-template counters: {category: {template_name: count}}
         # Written every time a patch is enqueued so the GUI can show live
         # per-degradation-template statistics without post-processing.
