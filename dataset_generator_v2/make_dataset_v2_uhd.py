@@ -3158,13 +3158,13 @@ class DatasetGeneratorV2UHD:
                         stream_states[stream_id]["n_videos_done"] += 1
 
                     self.logger.info(
-                        f"✅ Stream {stream_id} [GPU {gpu_idx}]: "
+                        f"✅ Stream {stream_id} [GPU {_vk}]: "
                         f"{video_name} → {patches_created} patches"
                     )
 
                 except Exception as exc:
                     self.logger.error(
-                        f"❌ Stream {stream_id} [GPU {gpu_idx}]: "
+                        f"❌ Stream {stream_id} [GPU {_vk}]: "
                         f"Error processing {video_name}: {exc}"
                     )
                     import traceback
