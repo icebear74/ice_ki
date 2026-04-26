@@ -311,20 +311,16 @@ def libplacebo_available() -> bool:
     1. Verify that ``libplacebo`` is listed by ``ffmpeg -filters`` (compiled-in
        with ``--enable-libplacebo``).
     2. Perform a functional Vulkan probe by running a single libplacebo frame
-       through a 64×64 dummy source rendered as 10-bit (``yuv420p10le``).
+       through a 64×64 dummy source that carries HDR10 stream metadata.
 
-    The 10-bit pixel format is critical: libplacebo only initialises a Vulkan
-    device when the input is ≥10-bit (i.e. HDR-like).  An 8-bit ``lavfi color``
-    source takes a lightweight software path that never touches Vulkan, so the
-    probe would always succeed even when Vulkan is broken.  Using
-    ``format=yuv420p10le`` before the filter mirrors exactly what a real UHD/HDR
-    video file delivers, triggering the same Vulkan init code path.
-
-    This step fails with a non-zero exit code when the Vulkan device cannot be
-    initialised (``VK_ERROR_INITIALIZATION_FAILED`` or similar) — even if the
-    filter is compiled in.  Without this probe, machines where Vulkan fails at
-    runtime would still select the libplacebo path, causing the entire FFmpeg
-    filter chain to crash and decode 0 frames.
+    Injecting ``smpte2084`` / BT.2020 metadata via ``setparams`` is critical:
+    without real HDR metadata libplacebo detects a plain SDR signal and silently
+    takes a lightweight software path that never initialises Vulkan, so the
+    probe would exit 0 with no error strings even on a machine where Vulkan
+    device creation fails.  Setting ``color_trc=smpte2084`` forces libplacebo
+    into the same HDR→SDR Vulkan tonemapping code path used for real UHD/HDR
+    video files, ensuring any Vulkan initialisation failure surfaces in stderr
+    as ``VK_ERROR_*`` strings.
 
     The result is cached after the first call so repeated checks are free.
     """
@@ -333,19 +329,15 @@ def libplacebo_available() -> bool:
         if "libplacebo" not in _get_ffmpeg_filters():
             _libplacebo_avail = False
         else:
-            # Stage 2: functional Vulkan probe — attempt a real libplacebo pass
-            # using a 10-bit source so the same Vulkan code path as real HDR
-            # video is exercised.
+            # Stage 2: functional Vulkan probe — run libplacebo on a synthetic
+            # HDR10 source so the same Vulkan init code path as a real UHD file
+            # is exercised.
             #
-            # IMPORTANT: we must capture stderr and scan it for Vulkan failure
-            # strings, not just check the exit code.  When Vulkan device
-            # creation fails, libplacebo falls back to a software path for the
-            # simple lavfi source used here, so FFmpeg may still exit 0 even
-            # though Vulkan is broken.  With a real UHD/HDR video, however, the
-            # filter reinitialises for the actual pixel format and fails with
-            # "Query format failed" — producing 0 frames.  Scanning stderr lets
-            # us detect the silent Vulkan failure before committing to the
-            # libplacebo pipeline.
+            # IMPORTANT: we must (a) set HDR metadata via setparams so libplacebo
+            # enters its Vulkan-based tonemapping path, and (b) scan stderr for
+            # Vulkan failure strings.  Without HDR metadata libplacebo may silently
+            # fall back to software (exit 0, no errors) — a false positive that
+            # causes the real video run to crash with "Query format failed".
             _VULKAN_FAIL_STRINGS = (
                 "VK_ERROR_",
                 "Failed creating Vulkan device",
@@ -360,11 +352,20 @@ def libplacebo_available() -> bool:
                         "ffmpeg", "-hide_banner", "-loglevel", "verbose",
                         "-f", "lavfi", "-i", "color=c=black:size=64x64:duration=0.04",
                         "-vf", (
-                            # Convert to 10-bit first so libplacebo takes the
-                            # same Vulkan-accelerated HDR code path as a real
-                            # UHD source (8-bit input uses a SW-only path that
-                            # never tests Vulkan device creation).
+                            # Step 1: convert to 10-bit to mimic a UHD source.
                             "format=yuv420p10le,"
+                            # Step 2: inject HDR10 stream metadata (PQ transfer,
+                            # BT.2020 primaries).  Without this, libplacebo sees
+                            # a plain 10-bit SDR signal and silently takes a
+                            # software path that *never* initialises Vulkan —
+                            # the probe would exit 0 with no error strings even
+                            # on a machine where Vulkan device creation fails.
+                            # Setting smpte2084 forces libplacebo to enter the
+                            # same HDR→SDR Vulkan tonemapping code path it uses
+                            # for real UHD/HDR video files.
+                            "setparams=color_trc=smpte2084"
+                            ":color_primaries=bt2020"
+                            ":colorspace=bt2020nc,"
                             "libplacebo=w=64:h=64"
                             ":colorspace=bt709:color_trc=bt709:color_primaries=bt709"
                             ":tonemapping=mobius:range=pc:downscaler=bilinear,"
@@ -374,7 +375,7 @@ def libplacebo_available() -> bool:
                     ],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.PIPE,
-                    timeout=15,
+                    timeout=20,
                 )
                 stderr_txt = probe.stderr.decode(errors="replace")
                 vulkan_ok = probe.returncode == 0 and not any(
