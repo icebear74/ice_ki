@@ -71,6 +71,7 @@ from streaming_extractor import (
     libplacebo_available,
     _discover_vulkan_devices,
     map_cuda_to_vulkan_device,
+    is_software_vulkan_device,
     _get_ffmpeg_major_version,
     OutputFormat,
 )
@@ -219,13 +220,24 @@ class DatasetGeneratorV2UHD:
         # the libplacebo pipeline.  CUDA indices from nvidia-smi are NOT
         # guaranteed to match Vulkan indices; we map them explicitly.
         _vulkan_devs = _discover_vulkan_devices()  # [(vk_idx, desc), …]
-        if _vulkan_devs:
+        # Separate hardware from software (llvmpipe/lavapipe/SwiftShader) devices.
+        _hw_vulkan_devs  = [(i, d) for i, d in _vulkan_devs if not is_software_vulkan_device(d)]
+        _sw_vulkan_devs  = [(i, d) for i, d in _vulkan_devs if is_software_vulkan_device(d)]
+        if _hw_vulkan_devs:
             self.logger.info(
-                f"🖥️  Vulkan devices reported by FFmpeg: "
-                + ", ".join(f"{i}: {d}" for i, d in _vulkan_devs)
+                f"🖥️  Hardware Vulkan devices: "
+                + ", ".join(f"{i}: {d}" for i, d in _hw_vulkan_devs)
             )
-        else:
-            self.logger.info("🖥️  No Vulkan devices found via FFmpeg (CPU/software fallback)")
+        if _sw_vulkan_devs:
+            self.logger.warning(
+                f"⚠️  Software Vulkan devices (llvmpipe/lavapipe – no hardware acceleration): "
+                + ", ".join(f"{i}: {d}" for i, d in _sw_vulkan_devs)
+            )
+        if not _vulkan_devs:
+            self.logger.warning("⚠️  No Vulkan devices found via FFmpeg — libplacebo will use CPU/software fallback")
+
+        # Build the Vulkan device description map for display labels.
+        self._vulkan_dev_desc: Dict[int, str] = {i: d for i, d in _vulkan_devs}
 
         # Build the list of Vulkan device indices to use for round-robin
         # assignment.  Each CUDA GPU is mapped to its Vulkan counterpart.
@@ -238,9 +250,11 @@ class DatasetGeneratorV2UHD:
             ]
             for c_idx, v_idx in zip(_cuda_indices, _mapped):
                 if v_idx is not None:
+                    _desc = self._vulkan_dev_desc.get(v_idx, "")
+                    _sw_warn = " ⚠️ software renderer!" if is_software_vulkan_device(_desc) else ""
                     self.logger.info(
                         f"  CUDA {c_idx} ({self._available_gpu_names.get(c_idx, '?')}) "
-                        f"→ Vulkan {v_idx}"
+                        f"→ Vulkan {v_idx}{_sw_warn}"
                     )
                 else:
                     self.logger.warning(
@@ -255,13 +269,17 @@ class DatasetGeneratorV2UHD:
             # unknown.  _run_multi_stream / _extract_film_parallel both handle
             # vulkan_device=None safely (FFmpeg picks any available device).
             self._vulkan_device_pool: List[Optional[int]] = _mapped
-        elif _vulkan_devs:
-            # No CUDA but Vulkan devices exist — use them directly.
-            self._available_gpu_indices = [i for i, _ in _vulkan_devs]
+        elif _hw_vulkan_devs:
+            # No CUDA but hardware Vulkan devices exist — use them directly.
+            self._available_gpu_indices = [i for i, _ in _hw_vulkan_devs]
+            self._vulkan_device_pool = self._available_gpu_indices[:]
+        elif _sw_vulkan_devs:
+            # Only software Vulkan available — use indices but label them clearly.
+            self._available_gpu_indices = [i for i, _ in _sw_vulkan_devs]
             self._vulkan_device_pool = self._available_gpu_indices[:]
         else:
             self._available_gpu_indices = []
-            self._vulkan_device_pool = [None]  # CPU/software Vulkan
+            self._vulkan_device_pool = [None]  # no Vulkan at all
 
         if self.use_cuda:
             self.logger.info("🚀 CUDA/GPU mode enabled (hardware-accelerated decoding & scaling)")
@@ -364,7 +382,7 @@ class DatasetGeneratorV2UHD:
                 f"libplacebo [Vulkan HDR→SDR] — "
                 f"{len(self._vulkan_device_pool)} Vulkan device slot(s) round-robin"
                 if self._vulkan_device_pool and self._vulkan_device_pool[0] is not None
-                else "libplacebo [Vulkan HDR→SDR — CPU/software fallback]"
+                else "libplacebo [Vulkan HDR→SDR — no explicit device (FFmpeg auto-select)]"
             ),
             "categories": list(self.category_targets.keys()),
             "format_sizes": list(next(iter(self.format_config.values()), {}).keys()),
@@ -2266,19 +2284,25 @@ class DatasetGeneratorV2UHD:
             # For display: find a human-readable GPU name.  We look up by Vulkan
             # index in _available_gpu_names (which is keyed by Vulkan index after
             # the mapping in __init__).  Fall back to generic label when unknown.
-            _gpu_display_name = (
-                self._available_gpu_names.get(_vk_idx, f"Vulkan {_vk_idx}")
-                if _vk_idx is not None else "CPU (software Vulkan)"
-            )
+            _vk_desc_str = getattr(self, "_vulkan_dev_desc", {}).get(_vk_idx, "")
+            _is_sw = is_software_vulkan_device(_vk_desc_str) if _vk_desc_str else False
+            if _vk_idx is not None:
+                _gpu_display_name = self._available_gpu_names.get(_vk_idx, f"Vulkan {_vk_idx}")
+            else:
+                _gpu_display_name = "libplacebo (auto)"
             _stream_states.append({
-                "stream_id": _wi,
-                "video_name": _video_stem,
-                "gpu_index": _vk_idx if _vk_idx is not None else -1,
-                "gpu_name": _gpu_display_name,
-                "state": "queued",
-                "frames_processed": 0,
-                "patches_created": 0,
-                "write_queue_depth": 0,
+                "stream_id":          _wi,
+                "video_name":         _video_stem,
+                "gpu_index":          _vk_idx if _vk_idx is not None else -1,
+                "gpu_name":           _gpu_display_name,
+                "state":              "queued",
+                "frames_processed":   0,
+                "patches_created":    0,
+                "write_queue_depth":  0,
+                "proc_queue_size":    0,
+                "n_workers_active":   0,
+                "n_workers_total":    0,
+                "is_software_vulkan": _is_sw,
             })
         with patches_lock:
             self.ui_state["active_streams"] = _stream_states
@@ -2312,6 +2336,9 @@ class DatasetGeneratorV2UHD:
                         _s["patches_created"] = sum(patches_so_far.values())
                         if timing:
                             _s["write_queue_depth"] = timing.get("q_size_last", 0)
+                            _s["proc_queue_size"]   = timing.get("proc_queue_size", 0)
+                            _s["n_workers_active"]  = timing.get("n_workers_active", 0)
+                            _s["n_workers_total"]   = timing.get("n_workers_total", 0)
                         self.ui_state["n_active_streams"] = sum(
                             1 for s in self.ui_state["active_streams"]
                             if s["state"] == "running"
@@ -2921,28 +2948,34 @@ class DatasetGeneratorV2UHD:
                 self._vulkan_device_pool[sid % n_vk_slots]
                 if self._vulkan_device_pool else None
             )
-            gpu_name = (
-                self._available_gpu_names.get(_vk_idx, f"Vulkan {_vk_idx}")
-                if _vk_idx is not None else "CPU / software Vulkan"
-            )
+            # Resolve display name and detect software renderers.
+            _vk_desc = getattr(self, "_vulkan_dev_desc", {}).get(_vk_idx, "")
+            _is_sw_vk = is_software_vulkan_device(_vk_desc) if _vk_desc else False
+            if _vk_idx is not None:
+                gpu_name = self._available_gpu_names.get(_vk_idx, f"Vulkan {_vk_idx}")
+                _pipeline_label = "libplacebo/SW" if _is_sw_vk else "libplacebo"
+            else:
+                gpu_name = "libplacebo (auto)"
+                _pipeline_label = "libplacebo"
             stream_states.append({
-                "stream_id":        sid,
-                "video_name":       "—",
-                "gpu_index":        _vk_idx if _vk_idx is not None else -1,
-                "gpu_name":         gpu_name,
-                "state":            "idle",
-                "frames_processed": 0,
-                "patches_created":  0,
-                "write_queue_depth": 0,
-                "live_fps":         0.0,
-                "pipeline":         (
-                    "libplacebo" if self._vulkan_device_pool and self._vulkan_device_pool[0] is not None
-                    else "CPU/Vulkan-SW"
-                ),
-                "degrade_counts":       {},   # {cat: {template_name: count}}
-                "patches_per_category": {},   # {cat: count} live in-flight
-                "current_video_idx":    -1,
-                "n_videos_done":        0,
+                "stream_id":          sid,
+                "video_name":         "—",
+                "gpu_index":          _vk_idx if _vk_idx is not None else -1,
+                "gpu_name":           gpu_name,
+                "state":              "idle",
+                "frames_processed":   0,
+                "patches_created":    0,
+                "write_queue_depth":  0,
+                "proc_queue_size":    0,
+                "n_workers_active":   0,
+                "n_workers_total":    0,
+                "live_fps":           0.0,
+                "pipeline":           _pipeline_label,
+                "is_software_vulkan": _is_sw_vk,
+                "degrade_counts":         {},   # {cat: {template_name: count}}
+                "patches_per_category":   {},   # {cat: count} live in-flight
+                "current_video_idx":      -1,
+                "n_videos_done":          0,
             })
 
         streams_lock = threading.Lock()
@@ -3068,6 +3101,9 @@ class DatasetGeneratorV2UHD:
                                 ss["live_sps"] = live_sps
                                 if timing:
                                     ss["write_queue_depth"] = timing.get("q_size_last", 0)
+                                    ss["proc_queue_size"]   = timing.get("proc_queue_size", 0)
+                                    ss["n_workers_active"]  = timing.get("n_workers_active", 0)
+                                    ss["n_workers_total"]   = timing.get("n_workers_total", 0)
                                     dc = timing.get("degrade_counts")
                                     if dc:
                                         # Deep-copy so the dict is not mutated externally.

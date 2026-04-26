@@ -187,19 +187,23 @@ def _gpu_panel_lines(stream, inner_w):
     """
     Content lines for one GPU/stream panel – every line truncated to inner_w.
     """
-    gpu_idx  = stream.get("gpu_index", -1)
-    gpu_name = stream.get("gpu_name", "GPU")
-    state    = stream.get("state", "idle")
-    video    = stream.get("video_name", "—")
-    fps      = stream.get("live_fps", 0.0)
-    sps      = stream.get("live_sps", 0.0)
-    patches  = stream.get("patches_created", 0)
-    wq       = stream.get("write_queue_depth", 0)
-    pipeline = stream.get("pipeline", "libplacebo")
-    n_done   = stream.get("n_videos_done", 0)
-    plan_id  = stream.get("plan_item_id", "")
-    queue_pos = stream.get("queue_position", 0)
-    planned_total = stream.get("planned_total", 0)
+    gpu_idx         = stream.get("gpu_index", -1)
+    gpu_name        = stream.get("gpu_name", "GPU")
+    state           = stream.get("state", "idle")
+    video           = stream.get("video_name", "—")
+    fps             = stream.get("live_fps", 0.0)
+    sps             = stream.get("live_sps", 0.0)
+    patches         = stream.get("patches_created", 0)
+    wq              = stream.get("write_queue_depth", 0)
+    pq              = stream.get("proc_queue_size", 0)
+    n_w_active      = stream.get("n_workers_active", 0)
+    n_w_total       = stream.get("n_workers_total", 0)
+    pipeline        = stream.get("pipeline", "libplacebo")
+    is_sw_vk        = stream.get("is_software_vulkan", False)
+    n_done          = stream.get("n_videos_done", 0)
+    plan_id         = stream.get("plan_item_id", "")
+    queue_pos       = stream.get("queue_position", 0)
+    planned_total   = stream.get("planned_total", 0)
 
     if state == "running":
         sc, sl = C_GREEN, "▶ running"
@@ -208,13 +212,21 @@ def _gpu_panel_lines(stream, inner_w):
     else:
         sc, sl = C_SILVER, "· idle"
 
-    gpu_label = f"GPU {gpu_idx}" if gpu_idx >= 0 else "CPU"
+    # GPU label: show Vulkan index, or "auto" when FFmpeg picks any device.
+    if gpu_idx >= 0:
+        gpu_label = f"GPU {gpu_idx}"
+    else:
+        gpu_label = "GPU auto"
+
+    # Software-Vulkan warning badge.
+    _sw_badge = f"  {C_YELLOW}⚠SW{C_RESET}" if is_sw_vk else ""
 
     def _t(s):
         return _trunc(s, inner_w)
 
     rows = [
-        _t(f"{C_BOLD}{C_CYAN}{gpu_label}{C_RESET}  {C_SILVER}{gpu_name}{C_RESET}  {sc}{sl}{C_RESET}"),
+        _t(f"{C_BOLD}{C_CYAN}{gpu_label}{C_RESET}  {C_SILVER}{gpu_name}{C_RESET}"
+           f"{_sw_badge}  {sc}{sl}{C_RESET}"),
         _t(f"{C_SILVER}Film :{C_RESET} {C_WHITE}{_trunc(video, inner_w - 8)}{C_RESET}"),
     ]
 
@@ -232,14 +244,27 @@ def _gpu_panel_lines(stream, inner_w):
     fps_str = f"{fps:6.1f}" if state == "running" else "     —"
     sps_str = f"{sps:6.1f}" if sps > 0 else "     —"
     rows.append(_t(
-        f"{C_SILVER}FPS  :{C_RESET} {C_GREEN if fps > 0 else C_SILVER}{fps_str}{C_RESET}"
+        f"{C_SILVER}Input:{C_RESET} {C_GREEN if fps > 0 else C_SILVER}{fps_str}{C_RESET} fps"
         f"  {C_SILVER}SPS:{C_RESET} {C_GREEN if sps > 0 else C_SILVER}{sps_str}{C_RESET}"
         f"  {C_SILVER}{pipeline}{C_RESET}"
     ))
-    rows.append(_t(
-        f"{C_SILVER}Patch:{C_RESET} {C_BOLD}{_abbrev_num(patches):>7}{C_RESET} this film"
-        f"  {C_SILVER}WQ:{C_RESET}{wq}"
-    ))
+
+    # Processing queue + worker utilisation row.
+    if n_w_total > 0:
+        _wu_pct = int(n_w_active / n_w_total * 100)
+        _wu_col = C_RED if _wu_pct >= 90 else (C_GREEN if _wu_pct >= 20 else C_YELLOW)
+        rows.append(_t(
+            f"{C_SILVER}ProcQ:{C_RESET} {C_CYAN}{pq:>3}{C_RESET}/32"
+            f"  {C_SILVER}Workers:{C_RESET} {_wu_col}{n_w_active}/{n_w_total}{C_RESET}"
+            f"  {C_SILVER}WQ:{C_RESET}{wq}"
+        ))
+    else:
+        rows.append(_t(
+            f"{C_SILVER}Patch:{C_RESET} {C_BOLD}{_abbrev_num(patches):>7}{C_RESET} this film"
+            f"  {C_SILVER}ProcQ:{C_RESET}{pq}"
+            f"  {C_SILVER}WQ:{C_RESET}{wq}"
+        ))
+
     rows.append(_t(f"{C_SILVER}Done :{C_RESET} {n_done} film(s) this session"))
     return rows
 
@@ -258,17 +283,20 @@ def _render_gpu_panels(streams, term_width):
 
     use_side_by_side = (term_width >= _MIN_SIDE_BY_SIDE) and (len(streams) >= 2)
 
+    def _panel_title(s):
+        idx = s.get("gpu_index", -1)
+        label = f"GPU {idx}" if idx >= 0 else "GPU auto"
+        sw_tag = " ⚠SW" if s.get("is_software_vulkan") else ""
+        return f"{label}{sw_tag} · {_trunc(s.get('gpu_name',''), 20)}"
+
     if use_side_by_side:
         pw = (term_width - 1) // 2
         for pair_start in range(0, len(streams), 2):
             left  = streams[pair_start]
             right = streams[pair_start + 1] if pair_start + 1 < len(streams) else None
 
-            lt = f"GPU {left.get('gpu_index','?')} · {_trunc(left.get('gpu_name',''), 20)}"
-            rt = (
-                f"GPU {right.get('gpu_index','?')} · {_trunc(right.get('gpu_name',''), 20)}"
-                if right else ""
-            )
+            lt = _panel_title(left)
+            rt = _panel_title(right) if right else ""
             lines_out.append(_box_top(pw, lt) + " " + (_box_top(pw, rt) if right else ""))
 
             inner_w = pw - 4
@@ -284,9 +312,7 @@ def _render_gpu_panels(streams, term_width):
     else:
         pw = min(term_width, 100)
         for stream in streams:
-            idx   = stream.get("gpu_index", -1)
-            title = f"GPU {idx} · {_trunc(stream.get('gpu_name',''), 30)}"
-            lines_out.append(_box_top(pw, title))
+            lines_out.append(_box_top(pw, _panel_title(stream)))
             for row in _gpu_panel_lines(stream, pw - 4):
                 lines_out.append(_box_row(row, pw))
             lines_out.append(_box_bot(pw))
@@ -380,14 +406,10 @@ def _render_current_film_panel(state, term_width):
 
 def _render_write_queue_panel(state, term_width):
     """
-    Write-queue and writer-status panel.
+    Pipeline diagnostics panel: processing queue, workers, write queue.
 
-    Shows:
-    - Queue depth with a visual fill bar
-    - Queue capacity and percentage fill
-    - Active vs idle writers
-    - Backpressure state
-    - Global SPS (patches per second)
+    Shows the full pipeline state in one place so bottlenecks are visible:
+      FFmpeg → [proc_queue] → processing workers → [write_queue] → disk
     """
     pw = min(term_width, 100)
     inner_w = pw - 4
@@ -402,7 +424,12 @@ def _render_write_queue_panel(state, term_width):
     live_sps  = state.get("live_sps", 0.0)
     fc = C_GREEN if fmt == "BMP" else C_YELLOW
 
-    # Backpressure colour and label
+    # Aggregated processing-queue and worker stats across all active streams.
+    pq_total       = sum(s.get("proc_queue_size", 0) for s in streams)
+    nwa_total      = sum(s.get("n_workers_active", 0) for s in streams)
+    nwt_total      = sum(s.get("n_workers_total",  0) for s in streams)
+
+    # Backpressure colour and label for write queue
     if wq_pct >= 80:
         bp_color, bp_label = C_RED,    "HIGH"
     elif wq_pct >= 40:
@@ -410,10 +437,38 @@ def _render_write_queue_panel(state, term_width):
     else:
         bp_color, bp_label = C_GREEN,  "ok"
 
-    lines = [_box_top(pw, "WRITE QUEUE & WRITERS")]
+    lines = [_box_top(pw, "PIPELINE: FFmpeg → ProcQ → Workers → WriteQ → Disk")]
 
-    # Row 1: queue bar
-    bar_label = f"Queue {wq_total}/{wq_cap}"
+    # Row 1: processing queue
+    pq_pct = min(100.0, 100.0 * pq_total / 32) if 32 > 0 else 0.0
+    pq_color = C_RED if pq_pct >= 90 else (C_YELLOW if pq_pct >= 50 else C_GREEN)
+    pq_bar_w = max(8, inner_w - 30)
+    lines.append(_box_row(
+        f"{C_SILVER}ProcQ:{C_RESET} {pq_total:>3}/32"
+        f"  {make_bar(pq_pct, pq_bar_w, pq_color)}"
+        f"  {pq_color}{pq_pct:4.0f}%{C_RESET}",
+        pw,
+    ))
+
+    # Row 2: processing workers
+    if nwt_total > 0:
+        wu_pct = int(nwa_total / nwt_total * 100)
+        wu_col = C_RED if wu_pct >= 90 else (C_GREEN if wu_pct >= 20 else C_YELLOW)
+        wu_bar_w = max(8, inner_w - 35)
+        lines.append(_box_row(
+            f"{C_SILVER}Workers:{C_RESET} {wu_col}{nwa_total}/{nwt_total}{C_RESET}"
+            f"  {make_bar(wu_pct, wu_bar_w, wu_col)}"
+            f"  {wu_col}{wu_pct:3d}%{C_RESET}",
+            pw,
+        ))
+    else:
+        lines.append(_box_row(
+            f"{C_SILVER}Workers:{C_RESET} {C_SILVER}not yet started{C_RESET}",
+            pw,
+        ))
+
+    # Row 3: write queue
+    bar_label = f"WriteQ {wq_total}/{wq_cap}"
     queue_bar_w = max(8, inner_w - len(bar_label) - 14)
     lines.append(_box_row(
         f"{C_SILVER}{bar_label}{C_RESET}"
@@ -423,10 +478,10 @@ def _render_write_queue_panel(state, term_width):
         pw,
     ))
 
-    # Row 2: writer status + SPS
+    # Row 4: stream activity + SPS
     sps_str = f"{live_sps:6.1f}" if live_sps > 0 else "     —"
     lines.append(_box_row(
-        f"{C_SILVER}Writers:{C_RESET}"
+        f"{C_SILVER}Streams:{C_RESET}"
         f"  {C_GREEN}▶ {n_active} active{C_RESET}"
         f"  {C_SILVER}· {n_idle} idle{C_RESET}"
         f"  {C_SILVER}Format:{C_RESET} {fc}{C_BOLD}{fmt}{C_RESET}"

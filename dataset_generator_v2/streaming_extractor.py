@@ -372,6 +372,33 @@ def _get_ffmpeg_filters() -> str:
     return _ffmpeg_filters_output
 
 
+# Strings found in Vulkan device descriptions that identify software renderers.
+# Used by is_software_vulkan_device() to warn when no real GPU is available.
+_SOFTWARE_VULKAN_KEYWORDS: tuple = (
+    "llvmpipe",
+    "lavapipe",
+    "swiftshader",
+    "swrast",
+    "softpipe",
+)
+
+
+def is_software_vulkan_device(description: str) -> bool:
+    """Return True when *description* looks like a software Vulkan renderer.
+
+    Checks for well-known software-renderer names (llvmpipe, lavapipe,
+    SwiftShader, swrast, softpipe) in the device description string that
+    FFmpeg reports during Vulkan device enumeration.  A ``True`` result means
+    the device is not a real GPU and HDR→SDR tone-mapping will run on the CPU.
+
+    Note: deliberately does not match "mesa" or "software" on their own because
+    Mesa is also used for real hardware drivers (e.g. RADV for AMD GPUs) and
+    "software" appears legitimately in many GPU feature descriptions.
+    """
+    desc_lower = description.lower()
+    return any(kw in desc_lower for kw in _SOFTWARE_VULKAN_KEYWORDS)
+
+
 def _discover_vulkan_devices() -> List[Tuple[int, str]]:
     """Return ``[(vulkan_index, description), …]`` by asking FFmpeg directly.
 
@@ -426,18 +453,27 @@ def map_cuda_to_vulkan_device(cuda_index: int) -> Optional[int]:
 
     Searches the FFmpeg Vulkan device list for a description that contains the
     GPU name reported by nvidia-smi for *cuda_index*.  Returns the Vulkan index
-    when a unique match is found, or ``None`` when:
+    when a unique match is found.
 
-    * FFmpeg reports no Vulkan devices.
-    * The CUDA GPU name cannot be resolved.
-    * The name does not match any Vulkan device (different drivers / ordering).
+    When name-based matching fails (no Vulkan devices found, GPU name not in
+    any Vulkan description, or multiple ambiguous matches), the function falls
+    back to a **positional best-effort**: CUDA device *N* is assumed to
+    correspond to Vulkan device *N*.  The caller should validate the result via
+    :func:`libplacebo_available` before use — if the device does not actually
+    support Vulkan/libplacebo that probe will return ``False`` and the stream
+    will fall back to CPU mode automatically.
 
-    Callers should treat ``None`` as "let FFmpeg pick any device" rather than
-    as a hard failure.
+    ``None`` is returned only when there is genuinely a single Vulkan device
+    already covered by the ``len == 1`` shortcut and an unexpected code path is
+    reached, or when all other strategies have been exhausted.
     """
     vulkan_devices = _discover_vulkan_devices()
     if not vulkan_devices:
-        return None
+        # Vulkan enumeration was empty or failed (e.g. FFmpeg output format did
+        # not match the parser).  Use the CUDA index as a positional best-effort
+        # so that different streams target different GPU ordinals.  The
+        # libplacebo_available() per-device probe will validate before first use.
+        return cuda_index
 
     # If there is only one Vulkan device, that is the only possible mapping
     # regardless of the CUDA index.
@@ -463,8 +499,8 @@ def map_cuda_to_vulkan_device(cuda_index: int) -> Optional[int]:
         pass
 
     if not cuda_name:
-        # Cannot resolve name — return None (caller will use None = FFmpeg choice).
-        return None
+        # Cannot resolve name — fall back to positional mapping.
+        return cuda_index
 
     # Match by checking whether the CUDA GPU name is a substring of the Vulkan
     # device description (both report e.g. "NVIDIA GeForce RTX 4090").
@@ -481,11 +517,10 @@ def map_cuda_to_vulkan_device(cuda_index: int) -> Optional[int]:
     # Multiple or no matches — fall back to positional mapping as last resort.
     # This is only reached when the Vulkan description does not contain the
     # nvidia-smi GPU name (unusual driver / vendor combination).
-    # Log a warning so it is visible during debugging.
-    _max_vk = vulkan_devices[-1][0] if vulkan_devices else 0
-    if cuda_index <= _max_vk:
-        return cuda_index  # positional best-effort
-    return None
+    # Unconditionally use cuda_index so that each CUDA device targets a
+    # distinct Vulkan ordinal even when the Vulkan list is shorter than the
+    # CUDA device count.
+    return cuda_index
 
 
 def cuda_available() -> bool:
@@ -2276,6 +2311,10 @@ def extract_and_save_streaming_distributed(
             if item is None:
                 _process_queue.task_done()
                 break
+            # Track how many workers are currently busy.
+            with _patches_lock:
+                _active_workers_ctr[0] += 1
+                _t_phases["n_workers_active"] = _active_workers_ctr[0]
             try:
                 center, window_frames, cat_fmt_list = item
                 ts = center / fps
@@ -2364,11 +2403,16 @@ def extract_and_save_streaming_distributed(
                 if logger:
                     logger.warning(f"[processing_worker] Error: {_exc!r}")
             finally:
+                with _patches_lock:
+                    _active_workers_ctr[0] = max(0, _active_workers_ctr[0] - 1)
+                    _t_phases["n_workers_active"] = _active_workers_ctr[0]
                 _process_queue.task_done()
 
     # Processing workers: image work (crop, degradation, PNG encode) is
     # CPU-bound.  Scale with available CPU cores, capped at 8 to avoid
     # excessive memory pressure from concurrent 7-frame window copies.
+    # Computed here so it can be stored in _t_phases (defined below) without
+    # a forward-reference.
     _n_processing_workers = min(8, os.cpu_count() or 4)
     _processing_threads = [
         threading.Thread(target=_processing_worker, daemon=True)
@@ -2516,16 +2560,23 @@ def extract_and_save_streaming_distributed(
     # written by processing worker threads and read by the main thread.
     _patches_lock = threading.Lock()
 
+    # Active-worker counter: how many processing workers are currently busy.
+    # Updated inside _processing_worker under _patches_lock.
+    _active_workers_ctr: List[int] = [0]
+
     # --- Per-video timing accumulators (mutated inside _consume_raw_frame) ---
     _t_phases: dict = {
-        "n_frames_buf": 0,   # total raw frames processed through buffer
-        "n_centers":    0,   # centers fully evaluated (= frames_examined, incl. black)
-        "t_buf_s":      0.0, # total time: yuv→bgr convert + copy + buffer insert/evict
-        "t_black_s":    0.0, # total time: black-frame check (per center)
-        "t_patch_s":    0.0, # total time: create_patch_pair calls (per center×format)
-        "t_write_s":    0.0, # total time: write_queue.put (per patch)
-        "n_patches":    0,   # patches enqueued for writing
-        "q_size_last":  0,   # last observed write-queue depth
+        "n_frames_buf":      0,   # total raw frames processed through buffer
+        "n_centers":         0,   # centers fully evaluated (= frames_examined, incl. black)
+        "t_buf_s":           0.0, # total time: yuv→bgr convert + copy + buffer insert/evict
+        "t_black_s":         0.0, # total time: black-frame check (per center)
+        "t_patch_s":         0.0, # total time: create_patch_pair calls (per center×format)
+        "t_write_s":         0.0, # total time: write_queue.put (per patch)
+        "n_patches":         0,   # patches enqueued for writing
+        "q_size_last":       0,   # last observed write-queue depth
+        "proc_queue_size":   0,   # last observed processing-queue depth
+        "n_workers_active":  0,   # processing workers currently busy
+        "n_workers_total":   _n_processing_workers,  # total processing-worker count
         # Degradation-template counters: {category: {template_name: count}}
         # Written every time a patch is enqueued so the GUI can show live
         # per-degradation-template statistics without post-processing.
@@ -2668,6 +2719,7 @@ def extract_and_save_streaming_distributed(
                     _process_queue.put((center, window, center_map[center]))
                     frames_examined += 1
                     _t_phases["n_centers"] += 1
+                    _t_phases["proc_queue_size"] = _process_queue.qsize()
 
                     # Periodic timing debug log (every 50 centres enqueued).
                     if _t_phases["n_centers"] >= _next_timing_log[0]:
@@ -2752,10 +2804,13 @@ def extract_and_save_streaming_distributed(
                 if _elapsed > 0:
                     _fps = _actual_frame / _elapsed
                     _sps_actual = frames_examined / _elapsed
+                    _pq_size = _process_queue.qsize()
+                    _t_phases["proc_queue_size"] = _pq_size
                     _log(
                         f"  📊 raw {_actual_frame:>5}/{last_needed + 1}  "
                         f"fps {_fps:>6.1f}  SPS {_sps_actual:>6.2f}  "
-                        f"(scenes: {frames_examined}  pq:{_process_queue.qsize()})"
+                        f"(scenes: {frames_examined}  pq:{_pq_size}"
+                        f"  workers:{_active_workers_ctr[0]}/{_n_processing_workers})"
                     )
 
     finally:
