@@ -20,6 +20,8 @@ generator_config_active.json → a read-only snapshot given to AI agents for rev
                               It is NEVER loaded by any code; only humans/agents read it.
 """
 
+import hashlib
+import copy
 import os
 import sys
 import json
@@ -67,6 +69,8 @@ from streaming_extractor import (
     scale_cuda_available,
     tonemap_cuda_available,
     libplacebo_available,
+    _discover_vulkan_devices,
+    map_cuda_to_vulkan_device,
     _get_ffmpeg_major_version,
     OutputFormat,
 )
@@ -197,14 +201,12 @@ class DatasetGeneratorV2UHD:
         self.logger = self._setup_logger()
         sys.logger = self.logger
 
-        # ── CUDA ──────────────────────────────────────────────────────────────
+        # ── GPU / Vulkan device discovery ────────────────────────────────────
         self.use_cuda: bool = cuda_available()
-        # GPU index lists for round-robin assignment across parallel workers.
-        # Falls back to [0] only when CUDA is available but detection fails,
-        # so that at least one GPU slot is attempted.  If CUDA is unavailable,
-        # the list stays empty and vulkan_device will be left as None downstream.
+
+        # Discover CUDA GPUs via nvidia-smi (for display names).
         _detected_gpus = _detect_nvidia_gpus()
-        self._available_gpu_indices: List[int] = (
+        _cuda_indices: List[int] = (
             [idx for idx, _ in _detected_gpus]
             if _detected_gpus
             else ([0] if self.use_cuda else [])
@@ -212,13 +214,63 @@ class DatasetGeneratorV2UHD:
         self._available_gpu_names: Dict[int, str] = {
             idx: name for idx, name in _detected_gpus
         }
-        # Placeholder — overwritten in the "Parallel worker configs" block
-        # below, once self.workers has been set.  Do not use before that point.
-        self._parallel_worker_configs: Optional[List[dict]] = None
+
+        # Discover Vulkan devices from FFmpeg — these are the indices used by
+        # the libplacebo pipeline.  CUDA indices from nvidia-smi are NOT
+        # guaranteed to match Vulkan indices; we map them explicitly.
+        _vulkan_devs = _discover_vulkan_devices()  # [(vk_idx, desc), …]
+        if _vulkan_devs:
+            self.logger.info(
+                f"🖥️  Vulkan devices reported by FFmpeg: "
+                + ", ".join(f"{i}: {d}" for i, d in _vulkan_devs)
+            )
+        else:
+            self.logger.info("🖥️  No Vulkan devices found via FFmpeg (CPU/software fallback)")
+
+        # Build the list of Vulkan device indices to use for round-robin
+        # assignment.  Each CUDA GPU is mapped to its Vulkan counterpart.
+        # When map_cuda_to_vulkan_device() returns None the entry is still
+        # included as None so that FFmpeg picks any available Vulkan device
+        # for that worker slot (better than skipping the GPU entirely).
+        if _cuda_indices:
+            _mapped: List[Optional[int]] = [
+                map_cuda_to_vulkan_device(c) for c in _cuda_indices
+            ]
+            for c_idx, v_idx in zip(_cuda_indices, _mapped):
+                if v_idx is not None:
+                    self.logger.info(
+                        f"  CUDA {c_idx} ({self._available_gpu_names.get(c_idx, '?')}) "
+                        f"→ Vulkan {v_idx}"
+                    )
+                else:
+                    self.logger.warning(
+                        f"  CUDA {c_idx} ({self._available_gpu_names.get(c_idx, '?')}) "
+                        f"→ Vulkan mapping not found; FFmpeg will choose device automatically"
+                    )
+            self._available_gpu_indices: List[int] = [
+                v for v in _mapped if v is not None
+            ]
+            # Keep None-mapped slots in the full worker list so we still attempt
+            # round-robin across all detected GPUs even if the Vulkan index is
+            # unknown.  _run_multi_stream / _extract_film_parallel both handle
+            # vulkan_device=None safely (FFmpeg picks any available device).
+            self._vulkan_device_pool: List[Optional[int]] = _mapped
+        elif _vulkan_devs:
+            # No CUDA but Vulkan devices exist — use them directly.
+            self._available_gpu_indices = [i for i, _ in _vulkan_devs]
+            self._vulkan_device_pool = self._available_gpu_indices[:]
+        else:
+            self._available_gpu_indices = []
+            self._vulkan_device_pool = [None]  # CPU/software Vulkan
+
         if self.use_cuda:
             self.logger.info("🚀 CUDA/GPU mode enabled (hardware-accelerated decoding & scaling)")
         else:
             self.logger.info("🖥️  CPU-only mode enabled (CUDA not available in this FFmpeg build)")
+
+        # Placeholder — overwritten in the "Parallel worker configs" block
+        # below, once self.workers is known.  Do not use before that point.
+        self._parallel_worker_configs: Optional[List[dict]] = None
 
         self.logger.info(f"Loaded {len(self.videos)} videos from active config")
         self.logger.info(f"Categories: {list(self.category_targets.keys())}")
@@ -247,15 +299,13 @@ class DatasetGeneratorV2UHD:
         self.logger.info(f"⚡ Using {self.workers} threads for FFmpeg extraction")
 
         # ── Parallel worker configs ───────────────────────────────────────────
-        # Initialise here (after self.workers is known) so that the parallel
-        # dispatch path in _extract_patches_multi_format_batch is always active.
-        # Worker count: max(config workers, one worker per GPU) — at least 1.
+        # Worker count: max(config workers, number of GPU slots) — at least 1.
         # Each entry uses use_cuda=False; the libplacebo/Vulkan pipeline does
-        # not need CUDA hardware decode.  Actual Vulkan device (GPU) assignment
-        # is handled round-robin in _extract_film_parallel.
+        # not need CUDA hardware decode.  Vulkan device assignment is handled
+        # round-robin in _extract_film_parallel using _vulkan_device_pool.
         _n_workers = max(
             self.workers,
-            len(self._available_gpu_indices) if self._available_gpu_indices else 1,
+            len(self._vulkan_device_pool) if self._vulkan_device_pool else 1,
         )
         self._parallel_worker_configs = [
             {"use_cuda": False, "cuda_device": 0}
@@ -263,7 +313,7 @@ class DatasetGeneratorV2UHD:
         ]
         self.logger.info(
             f"🔀 Parallel extraction: {_n_workers} workers, "
-            f"{len(self._available_gpu_indices)} GPU(s) available for round-robin Vulkan assignment"
+            f"{len(self._vulkan_device_pool)} Vulkan device slot(s) for round-robin assignment"
         )
 
         # ── UI heartbeat ──────────────────────────────────────────────────────
@@ -307,13 +357,13 @@ class DatasetGeneratorV2UHD:
             "eta": {},
             "live_fps": 0.0,
             "live_sps": 0.0,
-            # Decode-backend label: reflect whether GPUs are available for Vulkan.
-            # libplacebo is the primary HDR path regardless of CUDA availability;
-            # GPU assignment uses round-robin across detected Vulkan devices.
+            # Decode-backend label: reflects Vulkan device availability.
+            # libplacebo is the primary HDR path; device assignment uses
+            # round-robin across the mapped Vulkan device pool.
             "decode_backend": (
                 f"libplacebo [Vulkan HDR→SDR] — "
-                f"{len(self._available_gpu_indices)} GPU(s) round-robin"
-                if self._available_gpu_indices
+                f"{len(self._vulkan_device_pool)} Vulkan device slot(s) round-robin"
+                if self._vulkan_device_pool and self._vulkan_device_pool[0] is not None
                 else "libplacebo [Vulkan HDR→SDR — CPU/software fallback]"
             ),
             "categories": list(self.category_targets.keys()),
@@ -321,8 +371,24 @@ class DatasetGeneratorV2UHD:
             "format_labels": _format_labels,  # template_name → "WxH" string
             "timing_phases": {},              # phase timings from streaming extractor
             "parallel_status": "",            # e.g. "⚡ 16 workers active"
-            "active_streams": [],             # per-worker stream state dicts
-            "n_active_streams": 0,            # len(active_streams) for quick reads
+            "active_streams": [],             # per-stream state dicts for GUI panels
+            "n_active_streams": 0,            # active stream count for quick reads
+            "n_gpus_available": len(self._vulkan_device_pool),
+            # Output format (BMP by default, configurable).
+            # Updated at runtime in _run_multi_stream().
+            "output_format": self.config.get("output_format", "bmp").upper(),
+            # Degradation-template breakdown: {category: {tmpl_name: count}}
+            # Aggregated from active_streams[*].degrade_counts by the UI layer.
+            "degrade_counts_global": {},
+            # ── Plan-driven fields (populated in _create_full_execution_plan) ──
+            # Global stats from the persisted plan (planned vs completed at all
+            # levels).  Updated after each video completes.
+            "plan_summary": {},
+            # Info about the video currently being processed by each stream:
+            # list of {plan_item_id, video_name, queue_position,
+            #          planned_total, completed_total, planned_per_format,
+            #          planned_per_degradation}
+            "current_plan_items": [],
         }
         self.ui_update_counter = 0
 
@@ -1100,11 +1166,13 @@ class DatasetGeneratorV2UHD:
             }
 
         proc = self.config.get("processing", {})
+        _fmt_str = self.config.get("output_format", "bmp").lower()
         arch = {
             "generated_at":      _dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
             "generator_version": "dataset_generator_v2",
             "root_path":         self.base_dir,
             "n_frames":          int(proc.get("n_frames", 7)),
+            "output_format":     _fmt_str,
             "category_targets":  dict(self.category_targets),
             "categories":        categories_out,
             "format_templates":  used_fmt_tmpls,
@@ -1167,6 +1235,110 @@ class DatasetGeneratorV2UHD:
                 distribution[cat_name][tmpl_name] = max(0, count)
 
         return distribution
+
+    def _create_full_execution_plan(
+        self,
+        distribution: Dict[str, Dict[str, int]],
+    ) -> None:
+        """
+        Phase 3 – Create the **complete** execution plan for all videos and
+        persist it to disk before extraction starts.
+
+        For every video the method computes planned patch counts at three
+        levels:
+
+        * per-category          (from *distribution*)
+        * per-format-template   (weighted split within each category)
+        * per-degradation-template  (weighted split within each format,
+                                     using ``degradation_mix`` weights)
+
+        The resulting plan items are passed to :meth:`GenerationPlan.create_full_plan`
+        which persists them atomically and preserves the ``"done"`` status of
+        any video that was already completed in a previous run.
+
+        This method **must** be called after ``calculate_proportional_distribution``
+        and after the video list has been sorted (forced-frame videos first),
+        but **before** ``_run_multi_stream`` is invoked.
+
+        Args:
+            distribution: ``{video_path: {category: patch_count}}`` as
+                          returned by :meth:`calculate_proportional_distribution`.
+        """
+        from generation_plan import _stable_id  # avoid circular if ever moved
+
+        plan_items: List[dict] = []
+
+        for queue_pos, video in enumerate(self.videos, start=1):
+            video_path = video.get("path", "")
+            video_name = video.get("name", os.path.basename(video_path))
+
+            video_cat_targets: Dict[str, int] = distribution.get(video_path, {})
+            if not video_cat_targets or sum(video_cat_targets.values()) == 0:
+                continue
+
+            # Per-format distribution inside each category.
+            format_distribution: Dict[str, Dict[str, int]] = (
+                self._build_format_distribution_for_video(video, video_cat_targets)
+            )
+
+            planned_per_format: Dict[str, int] = {}
+            planned_per_degradation: Dict[str, int] = {}
+            cat_fmt_deg: Dict[str, Dict[str, Dict[str, int]]] = {}
+
+            for cat, fmt_counts in format_distribution.items():
+                cat_fmt_deg[cat] = {}
+                for tmpl_name, planned_fmt_count in fmt_counts.items():
+                    # Accumulate per-format totals (across categories).
+                    planned_per_format[tmpl_name] = (
+                        planned_per_format.get(tmpl_name, 0) + planned_fmt_count
+                    )
+
+                    # Expected degradation counts = planned_fmt_count × weight.
+                    deg_mix: Dict[str, float] = (
+                        self.format_config.get(cat, {})
+                        .get(tmpl_name, {})
+                        .get("degradation_mix", {})
+                    )
+                    total_deg_weight = sum(deg_mix.values()) if deg_mix else 0.0
+
+                    cat_fmt_deg[cat][tmpl_name] = {}
+                    for deg_name, deg_weight in deg_mix.items():
+                        if total_deg_weight > 0:
+                            deg_count = int(
+                                planned_fmt_count * deg_weight / total_deg_weight
+                            )
+                        else:
+                            deg_count = 0
+                        planned_per_degradation[deg_name] = (
+                            planned_per_degradation.get(deg_name, 0) + deg_count
+                        )
+                        cat_fmt_deg[cat][tmpl_name][deg_name] = deg_count
+
+            plan_items.append({
+                "plan_item_id":   hashlib.sha256(video_path.encode()).hexdigest()[:16],
+                "queue_position": queue_pos,
+                "video_path":     video_path,
+                "video_name":     video_name,
+                "planned": {
+                    "total":                      sum(video_cat_targets.values()),
+                    "per_category":               dict(video_cat_targets),
+                    "per_format_template":        planned_per_format,
+                    "per_degradation_template":   planned_per_degradation,
+                    "category_format_degradation": cat_fmt_deg,
+                },
+            })
+
+        self.plan.create_full_plan(plan_items)
+
+        g = self.plan.get_global_stats()
+        self.logger.info(
+            f"✅ Full execution plan persisted: {g['n_items_total']} videos, "
+            f"planned total = {g['planned_total']:,} patches  "
+            f"({g['n_items_done']} already done from previous run)"
+        )
+
+        # Push plan summary into ui_state so the GUI can display it immediately.
+        self.ui_state["plan_summary"] = g
 
     def _setup_logger(self):
         """Setup file and console logger (console disabled when terminal UI active)"""
@@ -1318,9 +1490,8 @@ class DatasetGeneratorV2UHD:
                 if category in category_stats:
                     stats = category_stats[category]
                     # Use the user-configured target (category_targets), not the
-                    # rounded distribution sum (distribution_totals), so the progress
-                    # bar reflects exactly what the user asked for (30 000 GT images
-                    # means 30 000 GT images, not 29 850 due to per-video rounding).
+                    # rounded distribution sum, so the progress bar reflects
+                    # exactly what the user asked for.
                     target = self.category_targets.get(category, 0)
                     current = stats.get('images_created', 0)
                     percent = (current / target * 100) if target > 0 else 0.0
@@ -1330,9 +1501,19 @@ class DatasetGeneratorV2UHD:
                         'percent': percent,
                     }
 
-            # Patch distribution by category and format — derive weights from
-            # the category config instead of old format_probabilities dict.
-            patch_dist = {}
+            # ── Plan-driven format/degradation breakdown ──────────────────
+            # Build patch_distribution from the persisted plan's global stats
+            # so the GUI shows planned vs completed at format-template and
+            # degradation-template level (not just estimated from weights).
+            g = self.ui_state.get("plan_summary") or self.plan.get_global_stats()
+            if g:
+                self.ui_state["plan_summary"] = g
+
+            plan_global_planned_fmt   = g.get("planned_per_format_template", {}) if g else {}
+            plan_global_completed_fmt = g.get("completed_per_format_template", {}) if g else {}
+            plan_cfd                  = g.get("category_format_degradation", {}) if g else {}
+
+            patch_dist: Dict[str, Dict] = {}
             for category, fmt_map in self.format_config.items():
                 patch_dist[category] = {}
                 total_weight = sum(
@@ -1340,31 +1521,50 @@ class DatasetGeneratorV2UHD:
                     for fe in self.categories.get(category, {}).get("formats", [])
                 )
                 for format_name in fmt_map:
-                    # Look up the weight for this template name in the category.
-                    weight = 0
-                    for fe in self.categories.get(category, {}).get("formats", []):
-                        if fe["template"] == format_name:
-                            weight = fe["weight"]
-                            break
-                    prob = (weight / total_weight) if total_weight > 0 else 0.0
-                    if category in category_stats:
-                        cat_done = category_stats[category].get("images_created", 0)
+                    planned_fmt   = plan_global_planned_fmt.get(format_name, 0)
+                    completed_fmt = plan_global_completed_fmt.get(format_name, 0)
+
+                    if planned_fmt == 0:
+                        # Fallback: estimate from weight × category target
+                        weight = 0
+                        for fe in self.categories.get(category, {}).get("formats", []):
+                            if fe["template"] == format_name:
+                                weight = fe["weight"]
+                                break
+                        prob = (weight / total_weight) if total_weight > 0 else 0.0
                         cat_target = self.category_targets.get(category, 0)
-                        patch_dist[category][format_name] = {
-                            "count": int(cat_done * prob),
-                            "target": int(cat_target * prob),
-                        }
-                    else:
-                        patch_dist[category][format_name] = {"count": 0, "target": 0}
+                        cat_done = category_stats.get(category, {}).get("images_created", 0)
+                        planned_fmt   = int(cat_target * prob)
+                        completed_fmt = int(cat_done   * prob)
+
+                    # Per-degradation counts for this format (from plan CFD).
+                    deg_planned: Dict[str, int] = {}
+                    for _fmt_key, _deg_map in plan_cfd.get(category, {}).items():
+                        if _fmt_key == format_name:
+                            deg_planned = dict(_deg_map)
+                            break
+
+                    patch_dist[category][format_name] = {
+                        "count":          completed_fmt,
+                        "target":         planned_fmt,
+                        "deg_planned":    deg_planned,
+                        "deg_completed":  (
+                            g.get("completed_per_degradation_template", {}) if g else {}
+                        ),
+                    }
             self.ui_state["patch_distribution"] = patch_dist
 
-            # ETA calculation: use global rate (total saved / elapsed)
+            # ── ETA from plan (planned remaining / current throughput) ─────
             elapsed = time.time() - self.start_time
             patches_done = self.ui_state.get('patches_created_total', 0)
             if patches_done > 0 and elapsed > 0:
                 rate = patches_done / elapsed
-                eta_by_category = {}
-                max_eta = 0
+                planned_total = (g.get("planned_total", 0) if g else 0)
+                remaining_total = max(0, planned_total - patches_done) if planned_total > 0 else 0
+                eta_total = (remaining_total / rate) if rate > 0 and remaining_total > 0 else 0.0
+
+                eta_by_category: Dict[str, float] = {}
+                max_eta = 0.0
                 for category in self.ui_state['overall_progress']:
                     cat_data = self.ui_state['overall_progress'][category]
                     remaining = cat_data['target'] - cat_data['created']
@@ -1372,10 +1572,30 @@ class DatasetGeneratorV2UHD:
                         eta_s = remaining / rate
                         eta_by_category[category] = eta_s
                         max_eta = max(max_eta, eta_s)
+                eta_by_category['total'] = eta_total if eta_total > 0 else max_eta
                 self.ui_state['eta'] = eta_by_category
-                self.ui_state['eta']['total'] = max_eta
 
-            clear_screen()
+            # ── Populate current_plan_items for GPU panel display ─────────
+            current_items = []
+            for ss in self.ui_state.get("active_streams", []):
+                if ss.get("state") == "running":
+                    current_items.append({
+                        "plan_item_id":           ss.get("plan_item_id", ""),
+                        "video_name":             ss.get("video_name", ""),
+                        "queue_position":         ss.get("queue_position", 0),
+                        "planned_total":          ss.get("planned_total", 0),
+                        "completed_total":        ss.get("patches_created", 0),
+                        "planned_per_format":     ss.get("planned_per_format", {}),
+                        "planned_per_degradation": ss.get("planned_per_degradation", {}),
+                    })
+            self.ui_state["current_plan_items"] = current_items
+
+            # ── Global live SPS (patches per second) ─────────────────────
+            elapsed = time.time() - self.start_time
+            patches_done = self.ui_state.get('patches_created_total', 0)
+            self.ui_state['live_sps'] = (patches_done / elapsed) if elapsed > 0 else 0.0
+
+            # Draw without full-screen clear to avoid flicker (ANSI_HOME only).
             draw_dataset_ui(self.ui_state)
 
         except Exception as e:
@@ -1671,52 +1891,48 @@ class DatasetGeneratorV2UHD:
     def extract_frames_uhd(self, video_path: str, start_time: float, n_frames: int = 7,
                            is_hdr: Optional[bool] = None) -> Optional[Dict]:
         """
-        Extract frames to DISK (memory-efficient).
+        LEGACY helper — not part of the production extraction path.
 
-        Applies the HDR→SDR tonemap chain when the source is HDR, or a
-        lightweight scale-only chain when it is SDR.  When *is_hdr* is
-        ``None`` (default) the color format is determined automatically by
-        calling ``_get_video_metadata``.
+        The production path is:
+            run() → _run_multi_stream() → _extract_film_parallel()
+                  → extract_and_save_streaming_distributed()
 
-        MEMORY OPTIMIZATION: Returns PATHS to frames (NOT loaded into memory).
-        Caller must load frames when needed and clean up temp_dir when done.
-        
+        This method is retained only because ``extract_frames_single_mode``
+        calls it for diagnostic / fallback purposes.  It should **not** be
+        called from any hot path.
+
+        Output format is BMP (lossless, no compression) written to a temp
+        directory.  Callers must clean up the returned ``temp_dir``.
+
         Args:
             video_path: Path to video
             start_time: Start timestamp
             n_frames: Number of frames (7 or 5)
-            is_hdr: Override for HDR detection.  Pass ``True``/``False`` to
-                    skip the metadata look-up (useful when the caller already
-                    has the value from ``_get_video_metadata``).
-        
+            is_hdr: Override HDR detection; ``None`` → auto-detect.
+
         Returns:
-            Dict with 'frame_paths' (list of paths) and 'temp_dir' (must be cleaned up)
-            or None on failure
+            Dict with ``'frame_paths'`` (list) and ``'temp_dir'`` (must be
+            cleaned up by caller), or ``None`` on failure.
         """
         temp_dir = None
+        # Use BMP as temp format — lossless, no compression overhead, no
+        # external dependency.  PNG would impose unnecessary CPU cost here.
+        _ext = "bmp"
         try:
-            # Determine HDR/SDR if not supplied by caller
             if is_hdr is None:
                 meta = self._get_video_metadata(video_path)
                 is_hdr = meta.get('is_hdr', True) if meta else True
 
-            # Use configured temp directory
             temp_dir = self._create_temp_dir("extract_single")
-            output_pattern = os.path.join(temp_dir, "frame_%04d.png")
+            output_pattern = os.path.join(temp_dir, f"frame_%04d.{_ext}")
 
-            # Build the correct filter chain for this video's color format.
-            # extract_frames_uhd uses CPU-only (no CUDA) for stability and
-            # because it processes only a few frames at a time.
-            # build_vf_filter already outputs yuv420p (Opt 3) which ffmpeg
-            # can write directly to PNG files.
+            # CPU-only; this path is used only for diagnostics / small jobs.
             vf_filter = build_vf_filter(is_hdr=is_hdr, use_cuda=False)
-            
-            # CPU-only mode (no CUDA) - more stable and reliable
-            # FIXED: Added nice priority for lower system impact
+
             cmd = [
-                'nice', '-n', '19',  # Lowest priority
+                'nice', '-n', '19',
                 'ffmpeg',
-                '-threads', str(self.workers),  # 6 threads for faster extraction
+                '-threads', str(self.workers),
                 '-ss', str(start_time),
                 '-i', video_path,
                 '-vf', vf_filter,
@@ -1724,10 +1940,9 @@ class DatasetGeneratorV2UHD:
                 '-y',
                 output_pattern
             ]
-            
-            # LOG THE FFMPEG COMMAND (for debugging)
-            self.logger.debug(f"Single frame extraction command: {' '.join(cmd)}")
-            
+
+            self.logger.debug(f"[LEGACY extract_frames_uhd] command: {' '.join(cmd)}")
+
             timeout = self.config.get("processing", {}).get("ffmpeg_timeout", 120)
             result = subprocess.run(
                 cmd,
@@ -1735,33 +1950,28 @@ class DatasetGeneratorV2UHD:
                 stderr=subprocess.DEVNULL,
                 timeout=timeout
             )
-            
+
             if result.returncode != 0:
-                # Clean up on failure
                 if temp_dir and os.path.exists(temp_dir):
                     shutil.rmtree(temp_dir, ignore_errors=True)
                 return None
-            
-            # Build list of frame paths (do NOT load into memory!)
+
             frame_paths = []
             for i in range(1, n_frames + 1):
-                frame_path = os.path.join(temp_dir, f"frame_{i:04d}.png")
+                frame_path = os.path.join(temp_dir, f"frame_{i:04d}.{_ext}")
                 if not os.path.exists(frame_path):
-                    # Clean up on failure
                     if temp_dir and os.path.exists(temp_dir):
                         shutil.rmtree(temp_dir, ignore_errors=True)
                     return None
                 frame_paths.append(frame_path)
-            
-            # Return paths (NOT frames!) - memory efficient!
+
             return {
                 'frame_paths': frame_paths,
-                'temp_dir': temp_dir  # Caller MUST clean up!
+                'temp_dir': temp_dir,
             }
-        
+
         except Exception as e:
-            self.logger.error(f"Error extracting frames: {e}")
-            # Clean up on exception
+            self.logger.error(f"[LEGACY extract_frames_uhd] Error: {e}")
             if temp_dir and os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir, ignore_errors=True)
             return None
@@ -2010,15 +2220,16 @@ class DatasetGeneratorV2UHD:
         worker_configs = self._parallel_worker_configs  # guaranteed not None
         n = len(worker_configs)
 
-        # Resolve output format from config (default: PNG).
-        _fmt_str = self.config.get("output_format", "png").lower()
+        # Resolve output format from config (default: BMP for write throughput).
+        _fmt_str = self.config.get("output_format", "bmp").lower()
         output_format = OutputFormat.BMP if _fmt_str == "bmp" else OutputFormat.PNG
 
-        # GPU pool for round-robin Vulkan device assignment (libplacebo path).
-        # When no GPUs are detected (CPU-only mode) the pool is empty and
-        # vulkan_device will be None, letting FFmpeg pick any Vulkan device.
-        _gpu_pool = self._available_gpu_indices  # may be empty for CPU-only
-        _n_gpus = len(_gpu_pool)  # 0 → CPU-only, no explicit Vulkan device
+        # Vulkan device pool for round-robin assignment (libplacebo path).
+        # Uses _vulkan_device_pool (FFmpeg Vulkan indices, not CUDA indices).
+        # Entries may be None when a CUDA GPU could not be mapped to a Vulkan
+        # device; FFmpeg will then pick any available Vulkan device for that slot.
+        _vk_pool = self._vulkan_device_pool  # [(vk_idx | None), …]
+        _n_vk = len(_vk_pool)  # 0 is handled below as CPU-only
 
         # Split assignments into N temporally-ordered chunks.
         # Temporal ordering ensures each worker's FFmpeg process seeks to a
@@ -2051,15 +2262,19 @@ class DatasetGeneratorV2UHD:
         _video_stem = Path(video_path).stem[-40:]
         _stream_states: List[dict] = []
         for _wi in range(len(groups)):
-            _gpu_idx = _gpu_pool[_wi % _n_gpus] if _n_gpus > 0 else None
+            _vk_idx = _vk_pool[_wi % _n_vk] if _n_vk > 0 else None
+            # For display: find a human-readable GPU name.  We look up by Vulkan
+            # index in _available_gpu_names (which is keyed by Vulkan index after
+            # the mapping in __init__).  Fall back to generic label when unknown.
+            _gpu_display_name = (
+                self._available_gpu_names.get(_vk_idx, f"Vulkan {_vk_idx}")
+                if _vk_idx is not None else "CPU (software Vulkan)"
+            )
             _stream_states.append({
                 "stream_id": _wi,
                 "video_name": _video_stem,
-                "gpu_index": _gpu_idx if _gpu_idx is not None else -1,
-                "gpu_name": (
-                    self._available_gpu_names.get(_gpu_idx, f"GPU {_gpu_idx}")
-                    if _gpu_idx is not None else "CPU (no GPU)"
-                ),
+                "gpu_index": _vk_idx if _vk_idx is not None else -1,
+                "gpu_name": _gpu_display_name,
                 "state": "queued",
                 "frames_processed": 0,
                 "patches_created": 0,
@@ -2104,9 +2319,10 @@ class DatasetGeneratorV2UHD:
             return _on_progress
 
         def _run_worker(worker_idx: int, group: List[Tuple[int, str, str]], wcfg: dict) -> None:
-            # Round-robin GPU assignment for vulkan_device (libplacebo path).
-            # None when running in CPU-only mode (no GPUs detected).
-            _gpu_idx = _gpu_pool[worker_idx % _n_gpus] if _n_gpus > 0 else None
+            # Round-robin Vulkan device assignment (libplacebo path).
+            # Uses _vulkan_device_pool (FFmpeg Vulkan indices, already mapped
+            # from CUDA indices in __init__).  None means "FFmpeg picks any".
+            _vk_idx = _vk_pool[worker_idx % _n_vk] if _n_vk > 0 else None
             # Mark this stream as running.
             with patches_lock:
                 if worker_idx < len(self.ui_state["active_streams"]):
@@ -2132,7 +2348,7 @@ class DatasetGeneratorV2UHD:
                 stream_width=STREAM_OPT_WIDTH,
                 stream_height=STREAM_OPT_HEIGHT,
                 color_trc=color_trc,
-                vulkan_device=_gpu_idx,
+                vulkan_device=_vk_idx,
                 output_format=output_format,
             )
             with patches_lock:
@@ -2336,7 +2552,7 @@ class DatasetGeneratorV2UHD:
             )
         else:
             # ── Single-worker extraction (original path) ─────────────────────
-            _fmt_str = self.config.get("output_format", "png").lower()
+            _fmt_str = self.config.get("output_format", "bmp").lower()
             output_format = OutputFormat.BMP if _fmt_str == "bmp" else OutputFormat.PNG
             streaming_result = extract_and_save_streaming_distributed(
                 video_path=video_path,
@@ -2357,16 +2573,15 @@ class DatasetGeneratorV2UHD:
                 center_snap_seconds=self.config.get("processing", {}).get("center_snap_seconds", 1.0),
                 stream_width=STREAM_OPT_WIDTH,
                 stream_height=STREAM_OPT_HEIGHT,
-                # Only pass cuda_device when CUDA is actually in use; passing 0
-                # in CPU-only mode would not cause harm but is misleading.
+                # Only pass cuda_device when CUDA is actually in use.
                 cuda_device=(
                     self._available_gpu_indices[0] if self.use_cuda and self._available_gpu_indices else 0
                 ),
                 color_trc=color_trc,
-                # vulkan_device drives the explicit Vulkan device selection for
-                # libplacebo.  None = FFmpeg picks any available Vulkan device.
+                # vulkan_device: use the first mapped Vulkan index from the pool.
+                # None means FFmpeg picks any available Vulkan device.
                 vulkan_device=(
-                    self._available_gpu_indices[0] if self._available_gpu_indices else None
+                    self._vulkan_device_pool[0] if self._vulkan_device_pool else None
                 ),
                 output_format=output_format,
             )
@@ -2601,108 +2816,478 @@ class DatasetGeneratorV2UHD:
                         category: str, format_name: str, n_frames: int) -> tuple:
         """
         Save GT and LR patches to appropriate directories.
-        
+
+        Uses the output format from config (default: BMP).
+
         Returns:
             Tuple of (success: bool, gt_path: str or None, lr_path: str or None)
         """
         try:
-            lr_version = f"{n_frames}frames"
-            
             # Get output directories (returns a dictionary)
             output_dirs = get_output_dirs_for_format(
                 self.base_dir, category, format_name, n_frames
             )
             gt_dir = output_dirs['gt']
             lr_dir = output_dirs['lr']
-            
+
             # Create directories
             os.makedirs(gt_dir, exist_ok=True)
             os.makedirs(lr_dir, exist_ok=True)
-            
-            # Generate filename
+
+            # Resolve output format from config (default: BMP for write throughput)
+            _fmt_str = self.config.get("output_format", "bmp").lower()
+            _use_bmp = _fmt_str == "bmp"
+            _ext = "bmp" if _use_bmp else "png"
+
+            # Generate filename using the configured extension
             video_name = Path(video_path).stem
-            patch_name = f"{video_name}_{int(timestamp*1000):08d}.png"
-            
-            # Save
+            patch_name = f"{video_name}_{int(timestamp*1000):08d}.{_ext}"
+
             gt_path = os.path.join(gt_dir, patch_name)
             lr_path = os.path.join(lr_dir, patch_name)
-            
-            cv2.imwrite(gt_path, gt, [cv2.IMWRITE_PNG_COMPRESSION, 1])
-            cv2.imwrite(lr_path, lr, [cv2.IMWRITE_PNG_COMPRESSION, 1])
-            
+
+            if _use_bmp:
+                cv2.imwrite(gt_path, gt)
+                cv2.imwrite(lr_path, lr)
+            else:
+                cv2.imwrite(gt_path, gt, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+                cv2.imwrite(lr_path, lr, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+
             return (True, gt_path, lr_path)
-        
+
         except Exception as e:
             self.logger.error(f"Error saving patches: {e}")
             return (False, None, None)
-    
+
+    def _run_multi_stream(self, start_idx: int, distribution: dict) -> None:
+        """
+        Multi-stream video extraction: N concurrent stream workers.
+
+        Each worker is bound to a specific GPU (via Vulkan device index for
+        libplacebo) and processes videos from a shared queue.  Multiple FFmpeg
+        processes run concurrently across different films — this is the
+        production extraction loop, not the old sequential per-video loop.
+
+        Concurrency is controlled by ``processing.streams_per_gpu`` in the
+        active config (default: 1).  With 2 GPUs and streams_per_gpu=1 this
+        gives 2 concurrent FFmpeg processes; streams_per_gpu=2 gives 4.
+
+        Each stream maintains its own runtime state entry in
+        ``ui_state["active_streams"]`` so the GUI can display per-GPU status,
+        current film, live FPS, write-queue depth, and degradation counts.
+        """
+        proc = self.config.get("processing", {})
+        # Use _vulkan_device_pool length to determine GPU slot count.
+        n_vk_slots = len(self._vulkan_device_pool) if self._vulkan_device_pool else 1
+        streams_per_gpu = int(proc.get("streams_per_gpu", 1))
+        n_streams = max(1, n_vk_slots * streams_per_gpu)
+        n_frames = int(proc.get("n_frames", 7))
+        nice_level = int(proc.get("ffmpeg_nice", 10))
+        center_snap = float(proc.get("center_snap_seconds", 1.0))
+
+        _fmt_str = self.config.get("output_format", "bmp").lower()
+        output_format = OutputFormat.BMP if _fmt_str == "bmp" else OutputFormat.PNG
+
+        # Propagate output format to UI state so the GUI can display it.
+        self.ui_state["output_format"] = _fmt_str.upper()
+
+        # Build the pending-video queue (skip done / zero-target videos).
+        pending: list = []
+        for idx in range(start_idx, len(self.videos)):
+            video = self.videos[idx]
+            video_path = video['path']
+            if self.plan.is_video_done(video_path):
+                self.tracker.update_progress(current_video_index=idx + 1)
+                continue
+            video_cat_targets = distribution.get(video_path, {})
+            total = sum(video_cat_targets.values()) if video_cat_targets else 0
+            if total == 0 or not video.get('categories', {}):
+                continue
+            pending.append((idx, video, video_cat_targets))
+
+        if not pending:
+            self.logger.info("No pending videos to process.")
+            return
+
+        video_queue: queue.Queue = queue.Queue()
+        for item in pending:
+            video_queue.put(item)
+
+        # ── Initialise per-stream state for the GUI ──────────────────────────
+        stream_states: list = []
+        for sid in range(n_streams):
+            # Assign each stream a Vulkan device index from the mapped pool.
+            _vk_idx = (
+                self._vulkan_device_pool[sid % n_vk_slots]
+                if self._vulkan_device_pool else None
+            )
+            gpu_name = (
+                self._available_gpu_names.get(_vk_idx, f"Vulkan {_vk_idx}")
+                if _vk_idx is not None else "CPU / software Vulkan"
+            )
+            stream_states.append({
+                "stream_id":        sid,
+                "video_name":       "—",
+                "gpu_index":        _vk_idx if _vk_idx is not None else -1,
+                "gpu_name":         gpu_name,
+                "state":            "idle",
+                "frames_processed": 0,
+                "patches_created":  0,
+                "write_queue_depth": 0,
+                "live_fps":         0.0,
+                "pipeline":         (
+                    "libplacebo" if self._vulkan_device_pool and self._vulkan_device_pool[0] is not None
+                    else "CPU/Vulkan-SW"
+                ),
+                "degrade_counts":       {},   # {cat: {template_name: count}}
+                "patches_per_category": {},   # {cat: count} live in-flight
+                "current_video_idx":    -1,
+                "n_videos_done":        0,
+            })
+
+        streams_lock = threading.Lock()
+        # Queue capacity: a reasonable upper bound for the async write queue.
+        _wq_cap = int(self.config.get("processing", {}).get("write_queue_max", 500))
+        self.ui_state["active_streams"] = stream_states
+        self.ui_state["n_active_streams"] = 0
+        self.ui_state["n_gpus_available"] = n_vk_slots
+        self.ui_state["total_streams"]    = n_streams
+        self.ui_state["wq_capacity"]      = _wq_cap
+
+        # ── Stream worker ────────────────────────────────────────────────────
+        def stream_worker(stream_id: int) -> None:
+            # vulkan_device comes from the pre-mapped Vulkan pool (not CUDA indices).
+            _vk = stream_states[stream_id]["gpu_index"]
+            vulkan_device = _vk if _vk >= 0 else None
+
+            while self.running:
+                try:
+                    idx, video, video_cat_targets = video_queue.get(block=True, timeout=0.5)
+                except queue.Empty:
+                    break
+
+                video_path = video['path']
+                video_name = video.get('name', os.path.basename(video_path))
+                short_name = video_name[-40:]
+
+                # ── Mark stream running ──────────────────────────────────
+                # Derive the stable plan_item_id for this video.
+                _plan_item_id = hashlib.sha256(video_path.encode()).hexdigest()[:16]
+                _plan_item = self.plan.get_item_by_path(video_path)
+
+                with streams_lock:
+                    stream_states[stream_id].update({
+                        "video_name":       short_name,
+                        "state":            "running",
+                        "frames_processed": 0,
+                        "patches_created":  0,
+                        "live_fps":         0.0,
+                        "degrade_counts":   {},
+                        "current_video_idx": idx,
+                        # Expose plan metadata to the GUI.
+                        "plan_item_id": _plan_item_id,
+                        "queue_position": (
+                            _plan_item["queue_position"] if _plan_item else idx + 1
+                        ),
+                        "planned_total": (
+                            _plan_item["planned"]["total"] if _plan_item else 0
+                        ),
+                        "planned_per_category": (
+                            _plan_item["planned"]["per_category"] if _plan_item else {}
+                        ),
+                        "planned_per_format": (
+                            _plan_item["planned"]["per_format_template"] if _plan_item else {}
+                        ),
+                        "planned_per_degradation": (
+                            _plan_item["planned"]["per_degradation_template"] if _plan_item else {}
+                        ),
+                    })
+                    self.ui_state["n_active_streams"] = sum(
+                        1 for s in stream_states if s["state"] == "running"
+                    )
+                    # Mark in-progress in the plan BEFORE work so a crash causes retry.
+                    self.plan.update_item_started(_plan_item_id)
+                    self.tracker.update_progress(current_video_index=idx)
+
+                try:
+                    # ── Get video metadata ───────────────────────────────
+                    metadata = self._get_video_metadata(video_path)
+                    if not metadata:
+                        self.logger.warning(
+                            f"Stream {stream_id}: Cannot get metadata for "
+                            f"{video_name} — skipping"
+                        )
+                        video_queue.task_done()
+                        with streams_lock:
+                            stream_states[stream_id]["state"] = "idle"
+                        continue
+
+                    duration = float(metadata.get("duration") or 0.0)
+                    fps = float(metadata.get("fps") or 25.0) or 25.0
+                    is_hdr = bool(metadata.get("is_hdr", True))
+                    color_trc = metadata.get("color_transfer") or "smpte2084"
+
+                    # ── Build format distribution and assignments ────────
+                    format_distribution = self._build_format_distribution_for_video(
+                        video, video_cat_targets
+                    )
+                    if not format_distribution:
+                        video_queue.task_done()
+                        with streams_lock:
+                            stream_states[stream_id]["state"] = "idle"
+                        continue
+
+                    assignments = build_assignments_per_category(
+                        format_distribution=format_distribution,
+                        duration=duration,
+                        fps=fps,
+                        n_frames=n_frames,
+                    )
+                    if not assignments:
+                        video_queue.task_done()
+                        with streams_lock:
+                            stream_states[stream_id]["state"] = "idle"
+                        continue
+
+                    # ── Progress callback ────────────────────────────────
+                    prior_total = self.ui_state.get("patches_created_total", 0)
+                    _t0 = time.monotonic()
+
+                    def _make_progress_fn(sid=stream_id):
+                        def _on_progress(frames_examined, patches_so_far,
+                                         raw_frames_piped, timing=None):
+                            elapsed = time.monotonic() - _t0
+                            live_fps = raw_frames_piped / elapsed if elapsed > 0 else 0.0
+                            live_sps = sum(patches_so_far.values()) / elapsed if elapsed > 0 else 0.0
+                            with streams_lock:
+                                ss = stream_states[sid]
+                                ss["frames_processed"] = raw_frames_piped
+                                ss["patches_created"] = sum(patches_so_far.values())
+                                ss["patches_per_category"] = dict(patches_so_far)
+                                ss["live_fps"] = live_fps
+                                ss["live_sps"] = live_sps
+                                if timing:
+                                    ss["write_queue_depth"] = timing.get("q_size_last", 0)
+                                    dc = timing.get("degrade_counts")
+                                    if dc:
+                                        # Deep-copy so the dict is not mutated externally.
+                                        ss["degrade_counts"] = copy.deepcopy(dc)
+                                # Aggregate cross-stream patch total for global display.
+                                agg = prior_total + sum(
+                                    s.get("patches_created", 0) for s in stream_states
+                                )
+                                self.ui_state["patches_created_total"] = agg
+                            self._update_terminal_ui()
+                        return _on_progress
+
+                    _on_progress = _make_progress_fn()
+
+                    # ── Run extraction via libplacebo ────────────────────
+                    # use_cuda=False forces the libplacebo path (Vulkan-based).
+                    # vulkan_device selects the specific GPU for this stream.
+                    result = extract_and_save_streaming_distributed(
+                        video_path=video_path,
+                        assignments=assignments,
+                        n_frames=n_frames,
+                        format_config=self.format_config,
+                        base_dir=self.base_dir,
+                        fps=fps,
+                        logger=self.logger,
+                        is_interesting_fn=self.is_interesting_patch,
+                        is_black_frame_fn=_streaming_is_black_frame,
+                        progress_fn=_on_progress,
+                        use_cuda=False,     # libplacebo path
+                        cuda_device=0,
+                        nice_level=nice_level,
+                        is_hdr=is_hdr,
+                        center_snap_seconds=center_snap,
+                        stream_width=STREAM_OPT_WIDTH,
+                        stream_height=STREAM_OPT_HEIGHT,
+                        color_trc=color_trc,
+                        vulkan_device=vulkan_device,
+                        output_format=output_format,
+                    )
+
+                    # ── Update progress tracking ─────────────────────────
+                    patches_created = sum(
+                        v for v in result.values() if isinstance(v, int)
+                    )
+
+                    # Collect the final accumulated degradation counts for this
+                    # video from the stream state (updated per-frame by _on_progress).
+                    final_degrade_per_cat: Dict[str, Dict[str, int]] = (
+                        stream_states[stream_id].get("degrade_counts", {})
+                    )
+                    # Flatten to {template_name: count} across all categories.
+                    flat_degrade: Dict[str, int] = {}
+                    for _cat_dc in final_degrade_per_cat.values():
+                        for _dn, _dc in _cat_dc.items():
+                            flat_degrade[_dn] = flat_degrade.get(_dn, 0) + _dc
+
+                    # Estimate per-format completion proportionally from the
+                    # planned distribution (actual per-format counts are not
+                    # returned by the extractor).
+                    _plan_it = self.plan.get_item_by_path(video_path)
+                    if _plan_it:
+                        _planned_fmt = _plan_it["planned"].get("per_format_template", {})
+                        _planned_ttl = _plan_it["planned"].get("total", 0)
+                        if _planned_ttl > 0 and patches_created > 0:
+                            _rate = patches_created / _planned_ttl
+                            _comp_fmt = {
+                                fmt: int(cnt * _rate)
+                                for fmt, cnt in _planned_fmt.items()
+                            }
+                        else:
+                            _comp_fmt = {}
+                    else:
+                        _comp_fmt = {}
+
+                    with streams_lock:
+                        for cat, count in result.items():
+                            if count > 0:
+                                self.tracker.increment_category_images(cat, count)
+                        if patches_created > 0:
+                            self.tracker.update_progress(
+                                current_video_index=idx + 1,
+                                patches_created=patches_created,
+                            )
+                            # Update plan with full completion data.
+                            self.plan.update_item_completed(
+                                plan_item_id=_plan_item_id,
+                                completed_per_category=result,
+                                completed_per_format_template=_comp_fmt,
+                                completed_per_degradation_template=flat_degrade,
+                            )
+                            # Refresh the global plan summary in ui_state.
+                            self.ui_state["plan_summary"] = self.plan.get_global_stats()
+                        else:
+                            self.tracker.update_progress(patches_created=0)
+                            self.plan.mark_video_pending(video_path)
+                            self.logger.warning(
+                                f"⚠️  Stream {stream_id}: {video_name} → 0 patches "
+                                f"— will retry on next run"
+                            )
+                        self.tracker.save()
+                        stream_states[stream_id]["n_videos_done"] += 1
+
+                    self.logger.info(
+                        f"✅ Stream {stream_id} [GPU {_vk}]: "
+                        f"{video_name} → {patches_created} patches"
+                    )
+
+                except Exception as exc:
+                    self.logger.error(
+                        f"❌ Stream {stream_id} [GPU {_vk}]: "
+                        f"Error processing {video_name}: {exc}"
+                    )
+                    import traceback
+                    traceback.print_exc()
+                    with streams_lock:
+                        # Mark the plan item as failed so it can be retried.
+                        self.plan.update_item_failed(
+                            _plan_item_id, reason=str(exc)[:200]
+                        )
+                        self.ui_state["plan_summary"] = self.plan.get_global_stats()
+                        self.tracker.save()
+
+                finally:
+                    with streams_lock:
+                        stream_states[stream_id]["state"] = "idle"
+                        self.ui_state["n_active_streams"] = sum(
+                            1 for s in stream_states if s["state"] == "running"
+                        )
+                    video_queue.task_done()
+
+        # ── Launch stream workers ────────────────────────────────────────────
+        self.logger.info(
+            f"🚀 Launching {n_streams} stream worker(s) — "
+            f"{len(pending)} videos in queue"
+        )
+        threads = [
+            threading.Thread(target=stream_worker, args=(i,), daemon=True)
+            for i in range(n_streams)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # Clear stream display on completion.
+        self.ui_state["active_streams"] = []
+        self.ui_state["n_active_streams"] = 0
+
     def run(self):
-        """Main generation loop with proportional distribution"""
+        """
+        Main generation loop.
+
+        Execution phases
+        ----------------
+        1. Scan video durations   (plain text progress – no GUI yet)
+        2. Proportional distribution calculation  (plain text)
+        3. Create full execution plan and persist it  (plain text)
+           ── full plan now exists on disk ──
+        4. Start execution GUI + heartbeat, then run multi-stream extraction
+
+        The main execution dashboard (draw_dataset_ui) is only activated after
+        Phase 3 because before that the plan does not yet exist and the GUI
+        cannot truthfully show planned-vs-completed data.
+        """
         try:
-            # Hide cursor for clean terminal UI — inside try so finally always restores it
+            # Hide cursor early so the terminal is clean even during scanning.
+            # The full GUI only starts after planning (Phase 3).
             if self.use_terminal_ui:
                 hide_cursor()
 
-            # Start background heartbeat so the UI refreshes every second
-            # regardless of where the main thread is blocked.
-            self._start_ui_heartbeat()
+            # ── Plain-text pre-run banner (before GUI) ───────────────────────
+            _sep = "─" * 72
+            print(_sep)
+            print("  🎬  Dataset Generator V2 – UHD  |  plan-centric architecture")
+            print(_sep)
 
-            if RICH_AVAILABLE:
-                console.print(Panel.fit(
-                    "[bold cyan]Dataset Generator V2 - UHD Quality[/bold cyan]\n"
-                    "UHD Preservation • Multi-Category • Priorities • Proportional Distribution",
-                    border_style="cyan"
-                ))
-
-            # Write architecture file once at the start of each run so the
-            # trainer always has an up-to-date description of the dataset layout.
+            # Write architecture file once at the start of each run.
             self._write_architecture_file()
-            
-            # Phase 1: Scan all videos to get durations
+
+            # ── Phase 1: Scan all videos to get durations ────────────────────
+            print("  Phase 1 / 3  –  Scanning video durations …")
             self.logger.info("Starting Phase 1: Scanning video durations...")
             try:
                 durations = self.scan_video_durations()
             except Exception as e:
                 self.logger.error(f"FATAL: Error during video duration scanning: {e}")
-                self.logger.error(f"This often indicates: out of memory, file access issues, or corrupted videos")
+                self.logger.error("This often indicates: out of memory, file access issues, or corrupted videos")
                 import traceback
                 traceback.print_exc()
                 return
-            
+
             if not durations:
                 self.logger.error("No video durations found, cannot proceed")
                 return
-            
-            # Phase 2: Calculate proportional distribution
+
+            print(f"         ✔  {len(durations)} video(s) scanned")
+
+            # ── Phase 2: Calculate proportional distribution ─────────────────
+            print("  Phase 2 / 3  –  Calculating proportional distribution …")
             self.logger.info("Starting Phase 2: Calculating proportional distribution...")
             try:
                 distribution = self.calculate_proportional_distribution(durations)
-                
-                # Count only videos that have at least one category assigned
-                videos_with_categories = sum(1 for v in self.videos 
-                                            if distribution.get(v['path'], {}))
-                self.logger.info(f"Videos with categories: {videos_with_categories} / {len(self.videos)}")
-                
-                # Store for UI display
+
+                videos_with_categories = sum(
+                    1 for v in self.videos if distribution.get(v['path'], {})
+                )
+                self.logger.info(
+                    f"Videos with categories: {videos_with_categories} / {len(self.videos)}"
+                )
                 self.total_videos_with_categories = videos_with_categories
-                
-                # Initialize UI with starting state
-                if self.use_terminal_ui:
-                    clear_screen()
-                    draw_dataset_ui(self.ui_state)
-                    time.sleep(1)  # Give user a moment to see initial state
-                    
+
             except Exception as e:
                 self.logger.error(f"FATAL: Error during distribution calculation: {e}")
                 import traceback
                 traceback.print_exc()
                 return
-            
-            # Console output removed - all info shown in terminal GUI
-            # No need to print here, user sees progress in the GUI
+
+            print(f"         ✔  {videos_with_categories}/{len(self.videos)} video(s) have category assignments")
 
             # Sort videos so that any video with forced_frames is processed first.
-            # Stable sort preserves the relative order within each group.
             forced_count = sum(1 for v in self.videos if v.get('forced_frames'))
             self.videos.sort(key=lambda v: 0 if v.get('forced_frames') else 1)
             if forced_count:
@@ -2710,174 +3295,84 @@ class DatasetGeneratorV2UHD:
                     f"⚡ Forced-frame videos promoted to front of queue: {forced_count} / {len(self.videos)}"
                 )
 
-            # Populate the plan with all videos in the (possibly re-sorted)
-            # order.  Videos already tracked — including those marked "done" —
-            # are left untouched so that previous progress is preserved.
-            self.plan.initialize(self.videos)
+            # ── Phase 3: Create the full execution plan BEFORE extraction ────
+            # "First plan, then execute."  The complete intended work for every
+            # video — including per-format and per-degradation breakdowns — is
+            # written to disk before a single FFmpeg frame is decoded.
+            print("  Phase 3 / 3  –  Building full execution plan …")
+            self.logger.info("Starting Phase 3: Creating full execution plan...")
+            try:
+                self._create_full_execution_plan(distribution)
+            except Exception as e:
+                self.logger.error(f"FATAL: Error creating execution plan: {e}")
+                import traceback
+                traceback.print_exc()
+                return
+
             done_count = self.plan.count_done()
+            total_count = self.plan.count_total()
+            pending_count = total_count - done_count
+            print(
+                f"         ✔  Plan persisted: {total_count} items  "
+                f"({done_count} done, {pending_count} pending)"
+            )
             if done_count > 0:
                 self.logger.info(
-                    f"▶️  Resuming: {done_count}/{self.plan.count_total()} video(s) "
+                    f"▶️  Resuming: {done_count}/{total_count} video(s) "
                     f"already done (skipped via plan)"
                 )
 
-            # Get resume point (index-based, for a fast forward through the list).
-            # When the plan already has done videos, find the index of the first
-            # video that has NOT been done yet — this skips the leading done-prefix
-            # in O(N) rather than re-checking every video from 0 each restart.
-            raw_start_idx = self.tracker.status['progress']['current_video_index']
+            # ── Find resume start index from the plan ────────────────────────
+            start_idx = 0
             if done_count > 0:
-                # Locate the first video not yet done in the plan.
-                start_idx = 0
                 for _i, _v in enumerate(self.videos):
                     if not self.plan.is_video_done(_v['path']):
                         start_idx = _i
                         break
                 else:
-                    # All videos are done — start past the end to exit immediately.
                     start_idx = len(self.videos)
             else:
-                # Index-based resume (no plan progress yet): fast-forward.
-                start_idx = raw_start_idx
-            
+                start_idx = self.tracker.status['progress']['current_video_index']
+
             if 0 < start_idx < len(self.videos):
                 self.logger.info(f"Resuming from video {start_idx + 1}/{len(self.videos)}")
-            
-            # Sequential processing: One video at a time, fully complete before moving to next
-            self.logger.info("\n" + "=" * 80)
-            self.logger.info("SEQUENTIAL MODE: Processing one video completely before moving to next")
+
+            # ── Phase 4: Activate execution GUI, then run ────────────────────
+            # The plan now exists and the GUI can show accurate planned-vs-
+            # completed data from the very first frame.
+            n_vk_slots = len(self._vulkan_device_pool) if self._vulkan_device_pool else 1
+            streams_per_gpu = self.config.get("processing", {}).get("streams_per_gpu", 1)
+            n_streams = max(1, n_vk_slots * streams_per_gpu)
+
+            print(_sep)
+            print(
+                f"  🚀  MULTI-STREAM MODE: {n_streams} stream(s) "
+                f"· {n_vk_slots} Vulkan device slot(s)"
+            )
+            print(_sep)
             self.logger.info("=" * 80)
-            
-            # Process videos sequentially
-            for idx in range(start_idx, len(self.videos)):
-                if not self.running:
-                    break
-                
-                video = self.videos[idx]
-                video_path = video['path']
-                video_name = video.get('name', os.path.basename(video_path))
+            self.logger.info(
+                f"🚀 MULTI-STREAM MODE: {n_streams} concurrent stream(s) "
+                f"across {n_vk_slots} Vulkan device slot(s)"
+            )
+            self.logger.info("=" * 80)
 
-                # Skip videos already marked done in the generation plan.
-                # This check uses the video's *path* as the identifier which
-                # makes it robust against reordering, additions, or removals
-                # in the video list between runs.
-                if self.plan.is_video_done(video_path):
-                    self.logger.info(
-                        f"\n⏭️  Skipping video {idx + 1}/{len(self.videos)}: "
-                        f"{video_name} (already done)"
-                    )
-                    # Keep the index-based tracker in sync so a fresh restart
-                    # can still fast-forward through the done prefix.
-                    self.tracker.update_progress(current_video_index=idx + 1)
-                    continue
+            # Populate plan summary in ui_state so the first GUI draw is accurate.
+            self.ui_state["plan_summary"] = self.plan.get_global_stats()
 
-                video_cat_targets = distribution.get(video_path, {})
-                
-                # Calculate total patches for this video (sum across all categories)
-                total_patches = sum(video_cat_targets.values()) if video_cat_targets else 0
-                
-                # Skip if no patches allocated
-                if total_patches == 0:
-                    self.logger.info(f"\n⏭️  Skipping video {idx + 1}/{len(self.videos)}: {video_name} (no patches allocated)")
-                    continue
-                
-                # Also skip if video has no categories
-                if not video.get('categories', {}):
-                    self.logger.info(f"\n⏭️  Skipping video {idx + 1}/{len(self.videos)}: {video_name} (no categories assigned)")
-                    continue
-                
-                # Log start
-                self.logger.info(f"\n{'='*80}")
-                self.logger.info(f"📹 Processing video {idx + 1}/{len(self.videos)}: {video_name}")
-                self.logger.info(f"   Target: {total_patches} patches across {len(video_cat_targets)} categories")
-                if video_cat_targets:
-                    cat_summary = ", ".join([f"{cat}: {cnt}" for cat, cnt in video_cat_targets.items()])
-                    self.logger.info(f"   Per-category: {cat_summary}")
-                self.logger.info(f"{'='*80}")
-                
-                # Set target for this video
-                self._current_video_target = total_patches
-                
-                # Set current video info in UI state BEFORE processing starts
-                self.ui_state['current_video_name'] = video_name
-                self.ui_state['current_video_index'] = idx + 1  # 1-based for display
-                self.ui_state['total_videos'] = self.total_videos_with_categories  # Only count videos with categories!
-                
-                # Initialize current video progress with targets (0 created so far)
-                self.ui_state['current_video_progress'] = {}
-                for category in video_cat_targets.keys():
-                    self.ui_state['current_video_progress'][category] = {
-                        'created': 0,  # Fixed: was 'current', display expects 'created'
-                        'target': video_cat_targets[category],
-                        'percent': 0.0  # Added: display expects this
-                    }
+            # Draw the initial dashboard, then start the heartbeat so it keeps
+            # refreshing while workers are running.
+            if self.use_terminal_ui:
+                clear_screen()
+                draw_dataset_ui(self.ui_state)
 
-                # Force immediate UI redraw with the new video info
-                self.last_update_time = 0.0
-                self._update_terminal_ui()
-                
-                # Mark this video as "in progress" BEFORE we start work so
-                # that a crash or pipeline failure causes a retry on the next
-                # run rather than silently skipping it (the old code wrote
-                # idx+1 AFTER completion, meaning a video that produced 0
-                # patches was treated as done and never retried).
-                self.tracker.update_progress(current_video_index=idx)
-                self.tracker.save()
+            self._start_ui_heartbeat()
 
-                try:
-                    # Process this video completely (extraction + processing)
-                    stats = self.process_video(idx, video_cat_targets)
-                    
-                    # Check if video was skipped
-                    if stats.get('skipped'):
-                        self.logger.info(f"⏭️  Skipped: {video_name} - {stats.get('reason', 'unknown')}")
-                        # Advance past this video only after a deliberate skip
-                        self.tracker.update_progress(
-                            current_video_index=idx + 1,
-                            patches_created=0
-                        )
-                        # A skipped video won't be retried — treat as done in plan
-                        self.plan.mark_video_done(video_path, {})
-                    else:
-                        # process_video() returns {category: count, …}.
-                        # Sum all integer values to get the total patch count.
-                        patches_created = sum(
-                            v for v in stats.values() if isinstance(v, int)
-                        )
-                        if patches_created > 0:
-                            self.tracker.update_progress(
-                                current_video_index=idx + 1,
-                                patches_created=patches_created
-                            )
-                            # Mark as done in the plan so a restart skips it
-                            self.plan.mark_video_done(video_path, stats)
-                        else:
-                            self.tracker.update_progress(patches_created=0)
-                            # Leave as pending in the plan — will be retried
-                            self.plan.mark_video_pending(video_path)
-                            self.logger.warning(
-                                f"⚠️  {video_name}: 0 patches created — "
-                                f"video will be retried on next run"
-                            )
-                        self.logger.info(f"✅ Complete: {video_name} - {patches_created} patches created")
-                    
-                    # Log category progress after each video
-                    progress_info = self.tracker.get_all_category_progress()
-                    self.logger.info(f"\n{progress_info}\n")
-                    
-                    # Save progress after each video
-                    self.tracker.save()
-                    
-                except Exception as e:
-                    self.logger.error(f"❌ Error processing {video_name}: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    # Save progress even on error
-                    self.tracker.save()
-            
+            self._run_multi_stream(start_idx, distribution)
+
             if RICH_AVAILABLE:
                 console.print("\n[bold green]✅ Generation Complete![/bold green]")
-            
+
             self.logger.info("Generation completed")
             
         except Exception as e:

@@ -326,6 +326,14 @@ _cuda_available: Optional[bool] = None
 _scale_cuda_available: Optional[bool] = None
 _tonemap_cuda_available: Optional[bool] = None
 _libplacebo_avail: Optional[bool] = None
+# Per-Vulkan-device probe cache: {vulkan_device_index: True/False}
+# Populated by libplacebo_available() when called with a specific device index.
+_libplacebo_avail_per_device: Dict[Optional[int], Optional[bool]] = {}
+
+# Cached Vulkan device list from FFmpeg.
+# Format: [(vulkan_index, description_string), …]  – populated on first call to
+# _discover_vulkan_devices() and reused for all subsequent queries.
+_vulkan_device_list: Optional[List[Tuple[int, str]]] = None
 _qsv_avail: Optional[bool] = None
 _qsv_decoders: Optional[Set[str]] = None
 
@@ -362,6 +370,122 @@ def _get_ffmpeg_filters() -> str:
         except Exception:
             _ffmpeg_filters_output = ""
     return _ffmpeg_filters_output
+
+
+def _discover_vulkan_devices() -> List[Tuple[int, str]]:
+    """Return ``[(vulkan_index, description), …]`` by asking FFmpeg directly.
+
+    Uses ``ffmpeg -init_hw_device vulkan=probe_list:list`` to enumerate all
+    Vulkan-capable devices in the order FFmpeg numbers them.  This is the only
+    reliable source of Vulkan device indices — CUDA/nvidia-smi ordinals are
+    **not** guaranteed to match.
+
+    The result is cached after the first call.  Returns an empty list when
+    libplacebo is not compiled in, no Vulkan devices exist, or FFmpeg fails.
+    """
+    global _vulkan_device_list
+    if _vulkan_device_list is not None:
+        return _vulkan_device_list
+
+    # Quick compiled-in check before running FFmpeg.
+    if "libplacebo" not in _get_ffmpeg_filters():
+        _vulkan_device_list = []
+        return _vulkan_device_list
+
+    devices: List[Tuple[int, str]] = []
+    try:
+        # FFmpeg prints a list of Vulkan devices to stderr when initialising
+        # the dummy device "list".  Lines look like:
+        #   [AVHWDeviceContext @ 0x…]  0: NVIDIA GeForce RTX 4090 (…)
+        #   [AVHWDeviceContext @ 0x…]  1: NVIDIA GeForce RTX 3080 (…)
+        out = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "verbose",
+             "-init_hw_device", "vulkan=probe_list:list",
+             "-f", "null", "-"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=15,
+        )
+        text = out.stderr.decode(errors="replace")
+        # Parse lines matching the "  <N>: <description>" pattern from the
+        # Vulkan device enumeration block that FFmpeg writes to stderr.
+        import re as _re
+        for m in _re.finditer(r"^\s*(\d+)\s*:\s*(.+)$", text, _re.MULTILINE):
+            idx = int(m.group(1))
+            desc = m.group(2).strip()
+            devices.append((idx, desc))
+    except Exception:
+        devices = []
+
+    _vulkan_device_list = devices
+    return _vulkan_device_list
+
+
+def map_cuda_to_vulkan_device(cuda_index: int) -> Optional[int]:
+    """Map a CUDA device index to the matching Vulkan device index.
+
+    Searches the FFmpeg Vulkan device list for a description that contains the
+    GPU name reported by nvidia-smi for *cuda_index*.  Returns the Vulkan index
+    when a unique match is found, or ``None`` when:
+
+    * FFmpeg reports no Vulkan devices.
+    * The CUDA GPU name cannot be resolved.
+    * The name does not match any Vulkan device (different drivers / ordering).
+
+    Callers should treat ``None`` as "let FFmpeg pick any device" rather than
+    as a hard failure.
+    """
+    vulkan_devices = _discover_vulkan_devices()
+    if not vulkan_devices:
+        return None
+
+    # If there is only one Vulkan device, that is the only possible mapping
+    # regardless of the CUDA index.
+    if len(vulkan_devices) == 1:
+        return vulkan_devices[0][0]
+
+    # Try to get the CUDA GPU name via nvidia-smi.
+    cuda_name: Optional[str] = None
+    try:
+        out = subprocess.check_output(
+            [
+                "nvidia-smi",
+                f"--query-gpu=name",
+                f"--format=csv,noheader",
+                f"--id={cuda_index}",
+            ],
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        ).decode(errors="replace").strip()
+        if out:
+            cuda_name = out.splitlines()[0].strip()
+    except Exception:
+        pass
+
+    if not cuda_name:
+        # Cannot resolve name — return None (caller will use None = FFmpeg choice).
+        return None
+
+    # Match by checking whether the CUDA GPU name is a substring of the Vulkan
+    # device description (both report e.g. "NVIDIA GeForce RTX 4090").
+    # Strip common prefix noise like "NVIDIA " so partial matches still work.
+    _cuda_key = cuda_name.lower().replace("nvidia ", "").strip()
+    matches = [
+        vk_idx
+        for vk_idx, vk_desc in vulkan_devices
+        if _cuda_key in vk_desc.lower()
+    ]
+    if len(matches) == 1:
+        return matches[0]
+
+    # Multiple or no matches — fall back to positional mapping as last resort.
+    # This is only reached when the Vulkan description does not contain the
+    # nvidia-smi GPU name (unusual driver / vendor combination).
+    # Log a warning so it is visible during debugging.
+    _max_vk = vulkan_devices[-1][0] if vulkan_devices else 0
+    if cuda_index <= _max_vk:
+        return cuda_index  # positional best-effort
+    return None
 
 
 def cuda_available() -> bool:
@@ -414,48 +538,67 @@ def tonemap_cuda_available() -> bool:
     return _tonemap_cuda_available
 
 
-def libplacebo_available(video_path: Optional[str] = None) -> bool:
-    """Return True when libplacebo is usable at runtime (Vulkan device opens).
+def libplacebo_available(
+    video_path: Optional[str] = None,
+    vulkan_device: Optional[int] = None,
+) -> bool:
+    """Return True when libplacebo is usable for the given Vulkan device.
 
     Two-stage check:
+
     1. Verify that ``libplacebo`` is listed by ``ffmpeg -filters`` (compiled-in
        with ``--enable-libplacebo``).
-    2. When *video_path* is provided and no cached result exists yet, decode one
-       frame from that real HDR video through the libplacebo filter.  Using an
-       actual file exercises exactly the same Vulkan device-init code path that
-       the extractor will use, so any hardware or driver incompatibility
-       (``VK_ERROR_INITIALIZATION_FAILED``, etc.) surfaces here rather than
-       mid-extraction.  The probe is therefore reliable on every system without
-       requiring synthetic HDR metadata tricks.
+    2. When *video_path* is provided, decode one frame from that real HDR video
+       through the libplacebo filter, optionally targeting a specific Vulkan
+       device via ``-init_hw_device vulkan=vk:<vulkan_device>``.  This exercises
+       exactly the same device-init code path that the extractor will use, so
+       any per-device hardware or driver incompatibility surfaces here rather
+       than mid-extraction.
 
-    When called without *video_path* (e.g. from ``build_vf_filter``) and the
-    result is already cached from a prior real-file probe, the cached value is
-    returned instantly.  If no probe has run yet, False is returned
-    conservatively so that callers without video context do not accidentally
-    pick libplacebo before it has been verified.
+    Results are cached per *vulkan_device* so that each stream worker's GPU is
+    individually validated on first use.  Subsequent calls for the same device
+    index are free.
 
-    The result is cached after the first successful probe so repeated checks
-    are free and libplacebo is never re-evaluated within the same process.
+    Args:
+        video_path:    Path to a real HDR video for the Stage-2 probe.  When
+                       ``None`` and no cached result exists yet, ``False`` is
+                       returned conservatively.
+        vulkan_device: The Vulkan device index (from :func:`_discover_vulkan_devices`
+                       or :func:`map_cuda_to_vulkan_device`) that this stream
+                       will use.  ``None`` means "let FFmpeg choose" and is
+                       cached as a separate entry from any specific device index.
     """
-    global _libplacebo_avail
-    if _libplacebo_avail is not None:
-        return _libplacebo_avail
+    global _libplacebo_avail, _libplacebo_avail_per_device
 
-    # Stage 1: compiled-in check.
+    # Per-device cache lookup.
+    cached = _libplacebo_avail_per_device.get(vulkan_device, _SENTINEL)
+    if cached is not _SENTINEL:
+        return cached  # type: ignore[return-value]
+
+    # Stage 1: compiled-in check (same for all devices).
     if "libplacebo" not in _get_ffmpeg_filters():
+        # Store False for all devices so Stage 1 is not repeated.
         _libplacebo_avail = False
+        _libplacebo_avail_per_device[vulkan_device] = False
         return False
 
-    # Stage 2: real-file probe.  Without a concrete video we cannot confirm
-    # that Vulkan works, so report False conservatively.  The extraction
-    # function always passes a video_path, so the probe runs on first use.
+    # Stage 2: real-file probe.  Without a video we cannot confirm Vulkan works.
     if video_path is None:
         return False
+
+    # Build the optional device-selection prefix for the probe command.
+    _vk_init: List[str] = []
+    if vulkan_device is not None:
+        _vk_init = [
+            "-init_hw_device", f"vulkan=vk:{vulkan_device}",
+            "-filter_hw_device", "vk",
+        ]
 
     try:
         probe = subprocess.run(
             [
                 "ffmpeg", "-hide_banner", "-loglevel", "verbose",
+                *_vk_init,
                 "-probesize", "100M", "-analyzeduration", "100M",
                 "-i", video_path,
                 "-frames:v", "1",
@@ -472,10 +615,22 @@ def libplacebo_available(video_path: Optional[str] = None) -> bool:
         vulkan_ok = probe.returncode == 0 and not any(
             kw in stderr_txt for kw in _VULKAN_FAIL_STRINGS
         )
-        _libplacebo_avail = vulkan_ok
     except Exception:
+        vulkan_ok = False
+
+    _libplacebo_avail_per_device[vulkan_device] = vulkan_ok
+    # Also update the legacy global so callers that do not pass vulkan_device
+    # get a usable answer once at least one device has been probed.
+    if vulkan_ok and _libplacebo_avail is None:
+        _libplacebo_avail = True
+    elif not vulkan_ok and _libplacebo_avail is None:
         _libplacebo_avail = False
-    return _libplacebo_avail
+
+    return vulkan_ok
+
+
+# Sentinel used by the per-device cache to distinguish "not probed yet" from False.
+_SENTINEL = object()
 
 
 def qsv_available() -> bool:
@@ -694,14 +849,15 @@ def is_hdr_transfer(color_transfer: Optional[str]) -> bool:
 
 def build_vf_filter(is_hdr: bool, use_cuda: bool = True,
                     width: int = STREAM_WIDTH, height: int = STREAM_HEIGHT,
-                    color_trc: str = "smpte2084") -> str:
+                    color_trc: str = "smpte2084",
+                    vulkan_device: Optional[int] = None) -> str:
     """Return the FFmpeg ``-vf`` filter string for the given video type.
 
     Selects the best available pipeline tier at call time.  **Priority order
     for HDR sources:**
 
     1. libplacebo (primary production path) — single-pass Vulkan shader,
-       validated filter, most reliable HDR→SDR output.
+       validated on the specific *vulkan_device* index, most reliable HDR→SDR.
     2. full-GPU CUDA (optional fallback) — tonemap_cuda + scale_cuda.
     3. scale-GPU CUDA (optional fallback) — scale_cuda + CPU zscale/tonemap.
     4. CPU-only zscale + tonemap (final fallback).
@@ -709,24 +865,26 @@ def build_vf_filter(is_hdr: bool, use_cuda: bool = True,
     SDR sources:
 
     * scale-GPU → scale_cuda pipeline
-    * CPU-only  → bilinear scale pipeline (Opt 2)
+    * CPU-only  → bilinear scale pipeline
 
-    All paths output ``yuv420p`` (Opt 3) — ~33 % less pipe bandwidth
-    compared to ``bgr24``.  Python converts with
-    ``cv2.cvtColor(yuv, COLOR_YUV2BGR_I420)``.
+    All paths output ``yuv420p`` — ~33 % less pipe bandwidth compared to
+    ``bgr24``.  Python converts with ``cv2.cvtColor(yuv, COLOR_YUV2BGR_I420)``.
 
     Args:
-        is_hdr:    Whether the source video is HDR (PQ or HLG transfer).
-        use_cuda:  Whether CUDA acceleration is requested.  Still falls back
-                   to CPU-only when the local FFmpeg has no CUDA support.
-        width:     Output width in pixels (default ``STREAM_WIDTH`` = 1920).
-        height:    Output height in pixels (default ``STREAM_HEIGHT`` = 1080).
-        color_trc: Transfer function string from ffprobe (e.g. ``"smpte2084"``
-                   for HDR10/PQ, ``"arib-std-b67"`` for HLG).  Used to
-                   annotate the explicit ``tin=`` parameter of ``zscale`` in
-                   the scale-GPU path so that the correct HDR→linear
-                   conversion is applied even when CUDA pipeline stages do not
-                   reliably propagate frame colour metadata through to CPU.
+        is_hdr:        Whether the source video is HDR (PQ or HLG transfer).
+        use_cuda:      Whether CUDA acceleration is requested.  Still falls back
+                       to CPU-only when the local FFmpeg has no CUDA support.
+        width:         Output width in pixels (default ``STREAM_WIDTH`` = 1920).
+        height:        Output height in pixels (default ``STREAM_HEIGHT`` = 1080).
+        color_trc:     Transfer function string from ffprobe (e.g. ``"smpte2084"``
+                       for HDR10/PQ, ``"arib-std-b67"`` for HLG).  Used to
+                       annotate the explicit ``tin=`` parameter of ``zscale`` in
+                       the scale-GPU path so that the correct HDR→linear
+                       conversion is applied even when CUDA pipeline stages do not
+                       reliably propagate frame colour metadata through to CPU.
+        vulkan_device: Vulkan device index (from :func:`_discover_vulkan_devices`)
+                       to validate when probing libplacebo availability.  ``None``
+                       lets FFmpeg choose any available Vulkan device.
 
     Returns:
         FFmpeg filter string ready for ``-vf`` (or for wrapping in
@@ -745,7 +903,9 @@ def build_vf_filter(is_hdr: bool, use_cuda: bool = True,
 
     if is_hdr:
         # Primary: libplacebo — validated production filter, single shader pass.
-        if libplacebo_available():
+        # The per-device check ensures the specific Vulkan device is usable;
+        # passing vulkan_device=None falls back to the global (any-device) probe.
+        if libplacebo_available(vulkan_device=vulkan_device):
             return (
                 f"libplacebo=w={width}:h={height}"
                 ":colorspace=bt709:color_primaries=bt709:color_trc=bt709"
@@ -797,7 +957,7 @@ def build_vf_filter(is_hdr: bool, use_cuda: bool = True,
                 "hwdownload,"
                 "format=yuv420p"
             )
-        # Opt 2: bilinear is adequate for the intermediate scale step —
+        # Bilinear is adequate for the intermediate scale step —
         # Python applies Lanczos4 on the actual patch crops.
         return (
             f"scale={width}:{height}:flags=bilinear,"
@@ -1194,9 +1354,10 @@ def apply_degradation_template_params(
     The application order is:
       1. Blur        – applied first so JPEG artifacts are not blurred away.
       2. Noise       – independent per-frame noise at the sampled sigma.
-      3. JPEG        – blocking / ringing artefacts.
-      4. Saturation  – chroma scaling in HSV space.
-      5. Color       – contrast, brightness, gamma, black-lift in floating point.
+      3. JPEG        – blocking / ringing artefacts (JPEG quality round-trip).
+      4. Chroma bleed – horizontal Cr/Cb smearing simulating analog bandwidth.
+      5. Saturation  – chroma scaling in HSV space.
+      6. Color       – contrast, brightness, gamma, black-lift in floating point.
 
     GT frames are never passed through this function; only LR frames are degraded.
 
@@ -1237,14 +1398,31 @@ def apply_degradation_template_params(
         if ok:
             result = cv2.imdecode(buf, cv2.IMREAD_COLOR)
 
-    # ── 4. Saturation ────────────────────────────────────────────────────────
+    # ── 4. Chroma bleed (analog horizontal chroma smearing) ──────────────────
+    # Sampled from templates["degradation_templates"][*].chroma.chroma_bleed_*.
+    # Simulates the lower chroma bandwidth of analog / early digital TV:
+    # Cb and Cr channels are blurred horizontally proportional to the strength.
+    bleed = float(params.get("chroma_bleed", 0.0))
+    if bleed > 0.0:
+        ycrcb = cv2.cvtColor(result, cv2.COLOR_BGR2YCrCb).astype(np.float32)
+        # kernel width scales with strength: bleed=0.08 → kw=3, bleed=0.3 → kw=7
+        kw = max(3, int(bleed * 24 + 1) | 1)   # must be odd
+        for ch in (1, 2):  # Cr (ch=1), Cb (ch=2)
+            ycrcb[:, :, ch] = cv2.GaussianBlur(
+                ycrcb[:, :, ch], (kw, 1), sigmaX=0
+            )
+        result = cv2.cvtColor(
+            np.clip(ycrcb, 0, 255).astype(np.uint8), cv2.COLOR_YCrCb2BGR
+        )
+
+    # ── 5. Saturation ────────────────────────────────────────────────────────
     sat = params.get("saturation", 1.0)
     if sat != 1.0:
         hsv = cv2.cvtColor(result, cv2.COLOR_BGR2HSV).astype(np.float32)
         hsv[:, :, 1] = np.clip(hsv[:, :, 1] * sat, 0, 255)
         result = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
 
-    # ── 5. Color: contrast / brightness / gamma / black-lift ─────────────────
+    # ── 6. Color: contrast / brightness / gamma / black-lift ─────────────────
     has_color = any(k in params for k in ("contrast", "brightness", "gamma", "black_lift"))
     if has_color:
         result_f = result.astype(np.float32) / 255.0
@@ -1473,8 +1651,7 @@ def create_patch_pair(
     """
     Create a ``(GT, LR)`` patch pair from a sequence of frames.
 
-    **Resize mode** (``source_mode == "resize"`` in format_cfg, or legacy
-    format names ``medium_169`` / ``720_169``):
+    **Resize mode** (``source_mode == "resize"`` in format_cfg):
       * GT – full-frame resize to ``gt_size`` with ``INTER_LANCZOS4``
         (best quality, preserves full frame content).
       * LR – full-frame resize to ``lr_size`` with ``INTER_AREA``
@@ -1483,25 +1660,24 @@ def create_patch_pair(
         source and target aspect ratios are compatible and no spatial crop is
         desired.
 
-    **Crop mode** (``source_mode == "crop"`` in format_cfg, all other
-    legacy format names):
+    **Crop mode** (``source_mode == "crop"`` in format_cfg):
       * GT – centre frame.  When the source frame is large enough for 2×
         oversampling (``frame_h ≥ 2*gt_h`` **and** ``frame_w ≥ 2*gt_w``,
-        e.g. native 4K for the 720/720_169 formats), a ``2*gt_size`` crop
-        is taken from the source and Lanczos4-downsampled to ``gt_size``.
+        e.g. native 4K for 1152×648 or 960×720 GT targets), a ``2*gt_size``
+        crop is taken from the source and Lanczos4-downsampled to ``gt_size``.
         The 2× Lanczos4 step averages H.265 in-loop deblocking softness
         and produces a clean GT comparable to the full-frame resize path.
         For smaller sources a direct 1:1 crop is used instead.
       * LR – all frames, same crop region, downscaled to ``lr_size`` with
         ``INTER_AREA`` (stacked vertically on axis 0).
-      * Works correctly for both 16:9 and 4:3 crop targets – no aspect-
-        ratio name check is performed.
+      * Works correctly for any crop target aspect ratio — decisions are
+        purely dimension-driven, not format-name-driven.
 
     **Source-mode resolution**:
-    The ``source_mode`` field in *format_cfg* takes precedence.  When it is
-    absent (legacy callers that do not populate it), the function falls back
-    to the old format-name test (``"medium_169"`` / ``"720_169"``).  New code
-    should always populate ``source_mode`` in the format config.
+    The ``source_mode`` field in *format_cfg* is **required** and is the sole
+    source of truth.  It is validated by ``config_io.validate_active_config``
+    at startup.  If it is absent or invalid a ``ValueError`` is raised
+    immediately so the misconfiguration is never silently hidden.
 
     **Degradation**:
     Two degradation paths are supported, applied in this priority order:
@@ -1509,7 +1685,7 @@ def create_patch_pair(
     1. *New template-based* (``deg_spec`` arg): parameters are sampled via
        :func:`sample_degradation_template_params` and applied via
        :func:`apply_degradation_template_params`.  Supports blur,
-       compression, noise, chroma, and colour stages.
+       compression, noise, chroma bleed, and colour stages.
 
     2. *Legacy flat* (``degrade_cfg`` arg): used when ``deg_spec`` is
        ``None``; forwards to :func:`_sample_degrade_params` /
@@ -1519,31 +1695,31 @@ def create_patch_pair(
     frames in the window share the same settings — consistent with real
     MPEG-2 encoder behaviour.  GT is always kept lossless.
 
-    In both cases a near-uniform GT (plain black, white, or flat colour) is
-    silently discarded (``(None, None)``).  If the source frame is too small
-    for the requested resize target a warning is logged.
+    A near-uniform GT (plain black, white, or flat colour) is silently
+    discarded (``(None, None)``).  If the source frame is too small for the
+    requested resize target a warning is logged.
 
     Args:
         frames:       BGR numpy arrays, length 5 or 7.
-        format_name:  Format key string (used for logging and legacy
-                      source-mode fallback only — all functional decisions are
-                      now driven by *format_cfg*).
-        format_cfg:   Dict with at minimum ``'gt_size': [W, H]`` and
-                      ``'lr_size': [W, H]``.  Optionally:
-                      * ``'source_mode'``: ``"resize"`` or ``"crop"``
-                        (overrides the legacy format-name test).
+        format_name:  Format key string (used for logging only — all functional
+                      decisions are driven by *format_cfg*).
+        format_cfg:   Dict with at minimum ``'gt_size': [W, H]``,
+                      ``'lr_size': [W, H]``, and ``'source_mode': "resize"|"crop"``.
         force_center: Crop mode only – use the geometric centre of the frame
                       instead of a random crop location.
         logger:       Optional logger instance for warning messages.
         degrade_cfg:  Legacy degradation config dict.  Ignored when *deg_spec*
                       is provided.  When ``None`` no legacy degradation is
                       applied.
-        deg_spec:     New-style degradation template dict (from
+        deg_spec:     Template-based degradation dict (from
                       ``templates["degradation_templates"]``).  When
                       provided, *degrade_cfg* is ignored.
 
     Returns:
         ``(gt, lr_stacked)`` or ``(None, None)`` on failure.
+
+    Raises:
+        ValueError: When ``format_cfg["source_mode"]`` is missing or invalid.
     """
     n = len(frames)
     if n not in (5, 7):
@@ -1557,11 +1733,18 @@ def create_patch_pair(
     center_idx = n // 2
 
     # ── Determine source_mode ─────────────────────────────────────────────────
-    # Prefer explicit source_mode from format_cfg; fall back to legacy name check.
+    # source_mode is always present and already validated by config_io.py at
+    # startup.  If it is missing or invalid here, the config–runtime contract
+    # has been broken: raise immediately rather than hiding the error with a
+    # silent default.
     source_mode = format_cfg.get("source_mode")
     if source_mode not in ("resize", "crop"):
-        # Legacy fallback: the old hardcoded whitelist
-        source_mode = "resize" if format_name in ("medium_169", "720_169") else "crop"
+        raise ValueError(
+            f"create_patch_pair: format_cfg is missing a valid 'source_mode' "
+            f"(got {source_mode!r}).  Expected 'resize' or 'crop'.  "
+            f"Ensure the format config is built via _build_format_config() "
+            f"and that config_io.validate_active_config() has passed."
+        )
 
     # ── Degradation: resolve which sampler to use ─────────────────────────────
     # deg_spec (new template) takes priority over degrade_cfg (legacy flat cfg).
@@ -1940,9 +2123,7 @@ def extract_and_save_streaming_distributed(
                              decoding (default 0 = first GPU).  Passed to FFmpeg
                              as ``-init_hw_device cuda=hw:<cuda_device>``.  Has no
                              effect when ``use_cuda`` is ``False`` or CUDA is not
-                             available in the local FFmpeg build.  Use the index
-                             reported by ``nvidia-smi`` to target a specific GPU
-                             when multiple are present.
+                             available in the local FFmpeg build.
         color_trc:           Transfer-function string from ffprobe for the source
                              video (e.g. ``"smpte2084"`` for HDR10/PQ,
                              ``"arib-std-b67"`` for HLG).  Forwarded to
@@ -1952,12 +2133,16 @@ def extract_and_save_streaming_distributed(
                              source transfer function when HDR frame metadata is
                              not reliably propagated through the CUDA pipeline.
                              Defaults to ``"smpte2084"`` (HDR10/PQ).
-        vulkan_device:       Vulkan device index to pass to FFmpeg as
-                             ``-init_hw_device vulkan=vk:<n>`` when the
-                             libplacebo (CPU path, no CUDA) pipeline is active.
-                             Used for per-stream GPU assignment in multi-stream
-                             parallel extraction.  Pass ``None`` (default) to
-                             let FFmpeg choose the Vulkan device automatically.
+        vulkan_device:       Vulkan device index obtained from
+                             :func:`_discover_vulkan_devices` / :func:`map_cuda_to_vulkan_device`
+                             to pass to FFmpeg as ``-init_hw_device vulkan=vk:<n>``
+                             when the libplacebo pipeline is active.
+                             **Important**: this is the FFmpeg Vulkan device index,
+                             which may differ from the CUDA / nvidia-smi index.
+                             Use :func:`map_cuda_to_vulkan_device` to translate
+                             between the two numbering schemes.
+                             Pass ``None`` (default) to let FFmpeg choose any
+                             available Vulkan device automatically.
         output_format:       Disk format for saved patch images.
                              :attr:`OutputFormat.PNG` (default) writes PNG at
                              compression level 1.  :attr:`OutputFormat.BMP`
@@ -2167,20 +2352,20 @@ def extract_and_save_streaming_distributed(
         else None
     )
 
-    # Pre-warm the libplacebo runtime probe so that build_vf_filter() can
-    # correctly select libplacebo vs. zscale for the CPU tier.  Without this
-    # call the cache is empty and libplacebo_available() (called without a
-    # video_path inside build_vf_filter) returns False conservatively, causing
-    # the CPU-only filter to fall back to the zscale chain even when libplacebo
-    # is actually available.  The probe result is cached after this first call,
-    # so all subsequent calls within this process are free.
+    # Pre-warm the libplacebo runtime probe for the specific Vulkan device
+    # this stream will use.  Without this call the per-device cache is empty
+    # and libplacebo_available(vulkan_device=…) inside build_vf_filter returns
+    # False conservatively, causing the filter to fall back to the zscale chain
+    # even when libplacebo is actually available.  The probe result is cached
+    # per device after this first call, so all subsequent calls are free.
     if is_hdr:
-        libplacebo_available(video_path)
+        libplacebo_available(video_path, vulkan_device=vulkan_device)
 
     vf_filter = build_vf_filter(
         is_hdr=is_hdr, use_cuda=use_cuda,
         width=stream_width, height=stream_height,
         color_trc=color_trc,
+        vulkan_device=vulkan_device,
     )
 
     # --- Inject select filter to skip unused frames in the filter chain ---
@@ -2238,7 +2423,10 @@ def extract_and_save_streaming_distributed(
     _CUDA_HW_INIT = ["-init_hw_device", f"cuda=hw:{cuda_device}"]
 
     hdr_label = "HDR" if is_hdr else "SDR"
-    _placebo = is_hdr and (not _full_gpu) and (not _scale_gpu) and libplacebo_available(video_path)
+    # Use the per-device cached result (already populated by the pre-warm call above).
+    _placebo = is_hdr and (not _full_gpu) and (not _scale_gpu) and libplacebo_available(
+        video_path, vulkan_device=vulkan_device
+    )
     if _full_gpu:
         hw_args        = [*_CUDA_HW_INIT, "-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
         pipeline_label = f"full-GPU tonemap_cuda+scale_cuda [{hdr_label}] yuv420p {stream_width}×{stream_height}"
@@ -2335,6 +2523,10 @@ def extract_and_save_streaming_distributed(
         "t_write_s":    0.0, # total time: write_queue.put (per patch)
         "n_patches":    0,   # patches enqueued for writing
         "q_size_last":  0,   # last observed write-queue depth
+        # Degradation-template counters: {category: {template_name: count}}
+        # Written every time a patch is enqueued so the GUI can show live
+        # per-degradation-template statistics without post-processing.
+        "degrade_counts": {},
     }
     _next_timing_log: List[int] = [50]  # mutable box: write debug log at this n_centers
 
@@ -2484,16 +2676,13 @@ def extract_and_save_streaming_distributed(
                             if not cfg:
                                 continue
 
-                            # Determine source_mode from cfg; fall back to legacy name
-                            # check so existing callers that don't populate source_mode
-                            # still work correctly.
-                            _source_mode = cfg.get("source_mode")
+                            # source_mode is ALWAYS set by the template config
+                            # (validated at startup by config_io.validate_active_config).
+                            # No hardcoded fallback on old format names — the config
+                            # is the single source of truth.
+                            _source_mode = cfg.get("source_mode", "crop")
                             if _source_mode not in ("resize", "crop"):
-                                _source_mode = (
-                                    "resize"
-                                    if fmt_name in ("medium_169", "720_169")
-                                    else "crop"
-                                )
+                                _source_mode = "crop"
                             # Resize mode produces the same output on every attempt —
                             # no benefit in retrying a random crop.
                             max_attempts = 1 if _source_mode == "resize" else 6
@@ -2502,6 +2691,7 @@ def extract_and_save_streaming_distributed(
                             # format's degradation_mix if available; fall back to the
                             # global degrade_cfg for legacy callers.
                             _deg_spec: Optional[dict] = None
+                            _chosen: Optional[str] = None
                             _deg_mix = cfg.get("degradation_mix")
                             _deg_tmpls = cfg.get("degradation_templates")
                             if _deg_mix and _deg_tmpls:
@@ -2547,6 +2737,14 @@ def extract_and_save_streaming_distributed(
                                 patches_created[category] = (
                                     patches_created.get(category, 0) + 1
                                 )
+                                # Track which degradation template was used so the
+                                # GUI can display live per-template statistics.
+                                if _chosen is not None:
+                                    _dc = _t_phases["degrade_counts"]
+                                    _dc.setdefault(category, {})
+                                    _dc[category][_chosen] = (
+                                        _dc[category].get(_chosen, 0) + 1
+                                    )
 
                         if not _any_patch_saved:
                             _n_quality_fail += 1

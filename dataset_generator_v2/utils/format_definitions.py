@@ -1,4 +1,8 @@
-"""Format definitions for multi-category dataset generator."""
+"""Format definitions for multi-category dataset generator.
+
+Fully dynamic — no hardcoded format names or category names.
+All paths are derived from the active template config at runtime.
+"""
 
 import os as _os
 
@@ -9,8 +13,8 @@ import os as _os
 # files in a single directory, patches are stored in 4-digit zero-padded
 # subdirectories ("buckets"):
 #
-#   master/patches/720/GT/0000/   ← up to BUCKET_SIZE PNG files
-#   master/patches/720/GT/0001/   ← next bucket, created when 0000 is full
+#   master/patches/1152_169/GT/0000/   ← up to BUCKET_SIZE image files
+#   master/patches/1152_169/GT/0001/   ← next bucket, created when 0000 is full
 #   …
 #
 # GT and LR buckets always share the same bucket name so filenames match
@@ -19,6 +23,12 @@ import os as _os
 # split across two different buckets.
 BUCKET_SIZE: int = 10_000
 
+# All image extensions that count toward bucket fullness.
+# Supports BMP (default), PNG, and common alternatives.
+_IMAGE_EXTS: frozenset = frozenset({
+    '.png', '.bmp', '.jpg', '.jpeg', '.tif', '.tiff', '.webp'
+})
+
 
 def get_synced_bucket_dirs(gt_base: str, lr_base: str,
                             bucket_size: int = BUCKET_SIZE) -> tuple:
@@ -26,8 +36,12 @@ def get_synced_bucket_dirs(gt_base: str, lr_base: str,
 
     Buckets are 4-digit zero-padded subdirectories (``0000``, ``0001``, …).
     The current bucket is identified by looking at the highest-numbered GT
-    bucket and counting the PNG files it already contains.  Both GT and LR
+    bucket and counting the image files it already contains.  Both GT and LR
     receive the **same** bucket name so filenames stay aligned.
+
+    Supports any output image format (BMP, PNG, JPEG, …) — counts all image
+    files regardless of extension so that mixed-format datasets are handled
+    correctly.
 
     Call this function **once per video** before any patch from that video is
     written.  That guarantees that all patches from a single video land in the
@@ -37,9 +51,9 @@ def get_synced_bucket_dirs(gt_base: str, lr_base: str,
     ``os.makedirs(path, exist_ok=True)`` them.
 
     Args:
-        gt_base:     Base GT directory  (e.g. ``.../master/patches/720/GT``).
-        lr_base:     Base LR directory  (e.g. ``.../master/patches/720/LR_7frames``).
-        bucket_size: Maximum PNG files per bucket (default :data:`BUCKET_SIZE`).
+        gt_base:     Base GT directory  (e.g. ``.../master/patches/1152_169/GT``).
+        lr_base:     Base LR directory  (e.g. ``.../master/patches/1152_169/LR_7frames``).
+        bucket_size: Maximum image files per bucket (default :data:`BUCKET_SIZE`).
 
     Returns:
         ``(gt_bucket_dir, lr_bucket_dir)``
@@ -57,7 +71,8 @@ def get_synced_bucket_dirs(gt_base: str, lr_base: str,
         last_gt = _os.path.join(gt_base, last)
         try:
             count = sum(
-                1 for f in _os.listdir(last_gt) if f.lower().endswith('.png')
+                1 for f in _os.listdir(last_gt)
+                if _os.path.splitext(f)[1].lower() in _IMAGE_EXTS
             )
         except OSError:
             count = 0
@@ -68,62 +83,27 @@ def get_synced_bucket_dirs(gt_base: str, lr_base: str,
     return _os.path.join(gt_base, bucket_name), _os.path.join(lr_base, bucket_name)
 
 
-# Format specifications for different patch sizes
-FORMATS = {
-    '540': {
-        'gt_size': (540, 540),
-        'scale': 3,
-        'output_dir': '540',
-        'suffix': '',
-        'aspect_ratio': '1:1'
-    },
-    '720_169': {
-        'gt_size': (720, 405),
-        'scale': 3,
-        'output_dir': '720_169',
-        'suffix': '',
-        'aspect_ratio': '16:9'
-    },
-    '720': {
-        'gt_size': (720, 720),
-        'scale': 3,
-        'output_dir': '720',
-        'suffix': '',
-        'aspect_ratio': '1:1'
-    },
-}
-
-# Base paths for each category – flat V2 structure
-CATEGORY_PATHS = {
-    'master': 'master',
-    'universal': 'universal',
-    'space': 'space',
-    'toon': 'toon'
-}
-
-
 def get_output_dirs_for_format(base_path, category, format_name, lr_frames=5):
     """
     Get output directory paths for a specific format.
 
+    Fully dynamic: category and format_name are used as-is from the active
+    template config.  No hardcoded format or category lookups.
+
     Args:
-        base_path: Base dataset directory
-        category: Category name
-        format_name: Format key in FORMATS (or any template name)
-        lr_frames: 5 = VSR++ compatible LR dir, 7 = extended LR_7frames dir
+        base_path:   Base dataset directory
+        category:    Category name (from config, e.g. 'master', 'space')
+        format_name: Template name (from config, e.g. '1152_169', '960_43')
+        lr_frames:   Number of LR frames — controls the LR subdirectory name
 
     Returns:
         Dictionary with 'gt', 'lr', 'val_gt', 'val_lr' paths
     """
-    category_path = CATEGORY_PATHS.get(category, category)
-    format_spec = FORMATS.get(format_name, {'output_dir': format_name, 'aspect_ratio': '1:1'})
-    base_format_dir = format_spec['output_dir']
-
-    lr_dir_name = 'LR' if lr_frames == 5 else 'LR_7frames'
+    lr_dir_name = 'LR' if lr_frames == 5 else f'LR_{lr_frames}frames'
 
     return {
-        'gt': f"{base_path}/{category_path}/patches/{base_format_dir}/GT",
-        'lr': f"{base_path}/{category_path}/patches/{base_format_dir}/{lr_dir_name}",
-        'val_gt': f"{base_path}/{category_path}/val/{base_format_dir}/GT",
-        'val_lr': f"{base_path}/{category_path}/val/{base_format_dir}/{lr_dir_name}"
+        'gt':     f"{base_path}/{category}/patches/{format_name}/GT",
+        'lr':     f"{base_path}/{category}/patches/{format_name}/{lr_dir_name}",
+        'val_gt': f"{base_path}/{category}/val/{format_name}/GT",
+        'val_lr': f"{base_path}/{category}/val/{format_name}/{lr_dir_name}",
     }

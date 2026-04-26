@@ -158,12 +158,29 @@ class ProgressTracker:
         """Update overall status."""
         self.status["status"] = status
     
-    def calculate_disk_usage(self, base_path: str):
-        """Calculate disk usage for each category."""
-        from .format_definitions import CATEGORY_PATHS
-        
-        for category, rel_path in CATEGORY_PATHS.items():
-            category_path = os.path.join(base_path, rel_path)
+    def calculate_disk_usage(self, base_path: str, categories: list = None):
+        """Calculate disk usage for each active category.
+
+        Args:
+            base_path:  Dataset root directory.
+            categories: Optional explicit list of category names.  When
+                        omitted the method inspects ``base_path`` for
+                        first-level directories that look like categories
+                        (i.e. contain a ``patches`` subdirectory).
+        """
+        if categories is None:
+            # Auto-discover: any direct child of base_path that has a
+            # ``patches`` subdirectory is treated as a category.
+            categories = []
+            if os.path.isdir(base_path):
+                for entry in os.scandir(base_path):
+                    if entry.is_dir() and os.path.isdir(
+                        os.path.join(entry.path, "patches")
+                    ):
+                        categories.append(entry.name)
+
+        for category in categories:
+            category_path = os.path.join(base_path, category)
             if os.path.exists(category_path):
                 total_size = 0
                 for dirpath, dirnames, filenames in os.walk(category_path):
@@ -171,10 +188,10 @@ class ProgressTracker:
                         filepath = os.path.join(dirpath, filename)
                         try:
                             total_size += os.path.getsize(filepath)
-                        except:
+                        except OSError:
                             pass
-                
-                size_gb = total_size / (1024**3)
+
+                size_gb = total_size / (1024 ** 3)
                 self.update_category_stats(category, disk_usage_gb=round(size_gb, 2))
     
     def get_category_progress_percent(self, category: str) -> float:
