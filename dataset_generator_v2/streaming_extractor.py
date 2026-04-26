@@ -638,10 +638,11 @@ def build_vf_filter(is_hdr: bool, use_cuda: bool = True,
     _scale_gpu = _use_cuda and (not _full_gpu) and scale_cuda_available()
 
     # Normalise color_trc to the vocabulary understood by zscale/zimg.
-    # "hlg" is an alias used by some encoders; zscale expects "arib-std-b67".
+    # "hlg" is a common shorthand used by some encoders; zscale's canonical
+    # name for the HLG transfer is "arib-std-b67" (ARIB STD-B67).
     _zscale_trc = (color_trc or "smpte2084").strip().lower()
     if _zscale_trc == "hlg":
-        _zscale_trc = "arib-std-b67"
+        _zscale_trc = "arib-std-b67"  # map shorthand to zscale's expected identifier
 
     if is_hdr:
         if _full_gpu:
