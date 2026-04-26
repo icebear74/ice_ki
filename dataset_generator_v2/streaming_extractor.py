@@ -379,8 +379,7 @@ _SOFTWARE_VULKAN_KEYWORDS: tuple = (
     "lavapipe",
     "swiftshader",
     "swrast",
-    "software",
-    "mesa",
+    "softpipe",
 )
 
 
@@ -388,15 +387,19 @@ def is_software_vulkan_device(description: str) -> bool:
     """Return True when *description* looks like a software Vulkan renderer.
 
     Checks for well-known software-renderer names (llvmpipe, lavapipe,
-    SwiftShader, swrast, Mesa) in the device description string that FFmpeg
-    reports during Vulkan device enumeration.  A ``True`` result means the
-    device is not a real GPU and HDR→SDR tone-mapping will run on the CPU.
+    SwiftShader, swrast, softpipe) in the device description string that
+    FFmpeg reports during Vulkan device enumeration.  A ``True`` result means
+    the device is not a real GPU and HDR→SDR tone-mapping will run on the CPU.
+
+    Note: deliberately does not match "mesa" or "software" on their own because
+    Mesa is also used for real hardware drivers (e.g. RADV for AMD GPUs) and
+    "software" appears legitimately in many GPU feature descriptions.
     """
     desc_lower = description.lower()
     return any(kw in desc_lower for kw in _SOFTWARE_VULKAN_KEYWORDS)
 
 
-
+def _discover_vulkan_devices() -> List[Tuple[int, str]]:
     """Return ``[(vulkan_index, description), …]`` by asking FFmpeg directly.
 
     Uses ``ffmpeg -init_hw_device vulkan=probe_list:list`` to enumerate all

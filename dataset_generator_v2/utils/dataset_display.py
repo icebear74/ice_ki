@@ -244,14 +244,14 @@ def _gpu_panel_lines(stream, inner_w):
     fps_str = f"{fps:6.1f}" if state == "running" else "     —"
     sps_str = f"{sps:6.1f}" if sps > 0 else "     —"
     rows.append(_t(
-        f"{C_SILVER}FFmpeg:{C_RESET} {C_GREEN if fps > 0 else C_SILVER}{fps_str}{C_RESET} fps"
+        f"{C_SILVER}Input:{C_RESET} {C_GREEN if fps > 0 else C_SILVER}{fps_str}{C_RESET} fps"
         f"  {C_SILVER}SPS:{C_RESET} {C_GREEN if sps > 0 else C_SILVER}{sps_str}{C_RESET}"
         f"  {C_SILVER}{pipeline}{C_RESET}"
     ))
 
     # Processing queue + worker utilisation row.
     if n_w_total > 0:
-        _wu_pct = int(n_w_active / n_w_total * 100) if n_w_total > 0 else 0
+        _wu_pct = int(n_w_active / n_w_total * 100)
         _wu_col = C_RED if _wu_pct >= 90 else (C_GREEN if _wu_pct >= 20 else C_YELLOW)
         rows.append(_t(
             f"{C_SILVER}ProcQ:{C_RESET} {C_CYAN}{pq:>3}{C_RESET}/32"
