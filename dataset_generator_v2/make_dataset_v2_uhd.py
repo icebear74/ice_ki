@@ -77,7 +77,7 @@ from streaming_extractor import (
 )
 from utils.progress_tracker import ProgressTracker
 from generation_plan import GenerationPlan
-from utils.dataset_display import draw_dataset_ui
+from utils.dataset_display import draw_dataset_ui, register_resize_handler
 from utils.terminal_ui import hide_cursor, show_cursor, clear_screen
 from category_utils import get_video_categories, normalize_categories
 
@@ -416,6 +416,7 @@ class DatasetGeneratorV2UHD:
         # Signal handlers
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
+        register_resize_handler()  # SIGWINCH → full clear before next UI redraw
 
     # ── Decode pipeline benchmark ─────────────────────────────────────────────
 

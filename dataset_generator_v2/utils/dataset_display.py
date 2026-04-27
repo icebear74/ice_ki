@@ -4,12 +4,10 @@ Dataset Generator Terminal Display  –  Midnight Commander-style boxed TUI.
 Layout (top → bottom)
 ─────────────────────
   Title bar
-  GPU stream panels  (side-by-side when both fit in terminal, else stacked)
-  Current film panel (plan item detail for each running stream)
-  Write-queue & writer diagnostics
-  Plan summary       (item counts + global bar + per-category bars)
-  Production progress (category → format → degradation, vertical hierarchy)
-  Performance & ETA  (FPS + SPS + remaining)
+  GPU stream panels        (side-by-side when both fit in terminal, else stacked)
+  Current film panel       (plan item detail for each running stream)
+  Pipeline  │  Plan Summary     (side-by-side when terminal is wide enough)
+  Production Progress  │  Performance & ETA   (side-by-side when wide enough)
 
 Width-safety rules
 ──────────────────
@@ -28,6 +26,16 @@ Flicker-free rendering
   previous content at that position.
 * After all rendered lines, \033[J erases any stale lines from a previous
   taller render without causing a visible full-screen flash.
+* On terminal resize (SIGWINCH or detected size change) a full ANSI clear is
+  issued before the next redraw to eliminate leftover artefacts.
+
+Resize handling
+───────────────
+* register_resize_handler() installs a SIGWINCH handler (Unix only) that sets
+  a flag causing the next draw_dataset_ui() call to do a full clear.  Call it
+  from the main thread alongside other signal.signal() registrations.
+* draw_dataset_ui() also compares terminal dimensions between renders; any
+  change triggers the same full-clear path.
 
 Plan-driven fields (from ``ui_state``)
 ───────────────────────────────────────
@@ -39,13 +47,14 @@ Plan-driven fields (from ``ui_state``)
   total_streams       – total configured stream count
 """
 
+import signal as _signal_mod
 import sys
 import shutil
 
 from .terminal_ui import (
     ANSI_ESCAPE, C_RESET, C_BOLD, C_CYAN, C_GRAY, C_SILVER, C_GREEN, C_RED,
     C_YELLOW, C_MAGENTA, C_BLUE, C_WHITE,
-    ANSI_HOME,
+    ANSI_HOME, ANSI_CLEAR,
     get_visible_len, make_bar, format_time, format_number,
 )
 
@@ -63,11 +72,35 @@ _FMT_COLORS = [C_CYAN, C_GREEN, C_YELLOW, C_MAGENTA, C_WHITE, C_BLUE]
 
 # Minimum usable inner width for one column in side-by-side mode.
 _MIN_SIDE_INNER = 34
-# Minimum terminal width for side-by-side GPU panels.
+# Minimum terminal width for side-by-side GPU panels and two-column layouts.
 _MIN_SIDE_BY_SIDE = 2 * (_MIN_SIDE_INNER + 4) + 2
 
 # Track how many lines the previous render used so we can erase stale lines.
 _prev_line_count: int = 0
+
+# Resize-tracking state
+_prev_term_size: tuple = (0, 0)
+_needs_clear: bool = False
+_sigwinch_registered: bool = False
+
+
+def _sigwinch_handler(signum, frame):
+    """SIGWINCH handler – mark that a full screen clear is needed."""
+    global _needs_clear
+    _needs_clear = True
+
+
+def register_resize_handler():
+    """
+    Install a SIGWINCH handler (Unix only) so terminal resizes trigger a full
+    clear before the next redraw.  Must be called from the **main thread**
+    alongside other ``signal.signal()`` registrations.
+    """
+    global _sigwinch_registered
+    if not _sigwinch_registered:
+        if hasattr(_signal_mod, 'SIGWINCH'):
+            _signal_mod.signal(_signal_mod.SIGWINCH, _sigwinch_handler)
+        _sigwinch_registered = True
 
 
 def _category_color(cat_key, index=0):
@@ -179,6 +212,25 @@ def _bar_row(label, pct, done, target, inner_w, color, label_w=10):
         plain = ANSI_ESCAPE.sub('', row)
         row = plain[:max(1, inner_w - 1)] + '…'
     return row
+
+
+# ── Two-column layout helper ──────────────────────────────────────────────────
+
+def _render_panels_side_by_side(left_lines, right_lines, pw):
+    """
+    Interleave two lists of pre-rendered panel lines into a side-by-side view.
+
+    Both panels should have been rendered with width *pw*.  Missing rows on the
+    shorter side are replaced by blank lines of length *pw*.
+    """
+    height = max(len(left_lines), len(right_lines))
+    empty = ' ' * pw
+    result = []
+    for i in range(height):
+        l = left_lines[i] if i < len(left_lines) else empty
+        r = right_lines[i] if i < len(right_lines) else empty
+        result.append(l + ' ' + r)
+    return result
 
 
 # ── GPU stream panel ──────────────────────────────────────────────────────────
@@ -326,8 +378,10 @@ def _render_current_film_panel(state, term_width):
     """
     Dedicated sub-panel for the currently running film(s).
 
-    Shows per-stream: plan item ID, position in plan, planned / completed /
-    remaining patches, and a breakdown by category / format / degradation.
+    Shows per-stream: plan item ID, overall progress bar, and a breakdown
+    by category / format / degradation.  Basic stats (pos, planned, done,
+    remaining) are already visible in the GPU panel above so they are not
+    repeated here.
     """
     pw = min(term_width, 100)
     inner_w = pw - 4
@@ -344,22 +398,13 @@ def _render_current_film_panel(state, term_width):
 
         plan_id   = ss.get("plan_item_id", "")
         video     = _trunc(ss.get("video_name", "—"), inner_w - 10)
-        pos       = ss.get("queue_position", 0)
         planned   = ss.get("planned_total", 0)
         done      = ss.get("patches_created", 0)
-        remaining = max(0, planned - done)
         pct       = min(100.0, 100.0 * done / planned) if planned > 0 else 0.0
 
         lines.append(_box_row(
             f"{C_BOLD}{C_WHITE}{video}{C_RESET}"
             + (f"  {C_SILVER}#{plan_id[:12]}{C_RESET}" if plan_id else ""),
-            pw,
-        ))
-        lines.append(_box_row(
-            f"{C_SILVER}Pos:{C_RESET} {pos}"
-            f"   {C_SILVER}Planned:{C_RESET} {C_BOLD}{_abbrev_num(planned)}{C_RESET}"
-            f"   {C_GREEN}Done:{C_RESET} {C_BOLD}{_abbrev_num(done)}{C_RESET}"
-            f"   {C_YELLOW}Remaining:{C_RESET} {C_BOLD}{_abbrev_num(remaining)}{C_RESET}",
             pw,
         ))
         # Overall bar for this film
@@ -775,25 +820,63 @@ def draw_dataset_ui(state):
     overwrite the previous content at that position.  After the last rendered
     line, \033[J erases any stale rows from a taller previous render.
 
+    On terminal resize (detected by comparing terminal dimensions between
+    renders, or by the SIGWINCH handler set via register_resize_handler()) a
+    full ANSI_CLEAR is issued first so that leftover artefacts disappear.
+
+    Layout:
+      Title bar
+      GPU stream panels  (side-by-side when wide enough)
+      Current film status
+      Pipeline  |  Plan Summary   (side-by-side when wide enough)
+      Production Progress  |  Performance & ETA  (side-by-side when wide enough)
+
     Must only be called AFTER Phase 3 (plan creation), because before that
     the plan does not exist and the panels cannot show accurate data.
 
     Args:
         state: ``ui_state`` dict from DatasetGeneratorV2UHD.
     """
-    global _prev_line_count
+    global _prev_line_count, _needs_clear, _prev_term_size
 
-    term_width, _term_height = shutil.get_terminal_size((100, 50))
+    term_width, term_height = shutil.get_terminal_size((100, 50))
     term_width = max(40, term_width)
+    current_size = (term_width, term_height)
+
+    # Full clear if the terminal was resized or SIGWINCH fired.
+    if _needs_clear or (_prev_term_size != (0, 0) and _prev_term_size != current_size):
+        sys.stdout.write(ANSI_CLEAR + ANSI_HOME)
+        sys.stdout.flush()
+        _prev_line_count = 0
+        _needs_clear = False
+    _prev_term_size = current_size
+
+    # Decide whether to use two-column layout for the lower panels.
+    use_two_col = term_width >= _MIN_SIDE_BY_SIDE
+    pw_half = (term_width - 1) // 2
 
     out = []
     out.extend(_render_title(term_width))
     out.extend(_render_gpu_panels(state.get("active_streams", []), term_width))
     out.extend(_render_current_film_panel(state, term_width))
-    out.extend(_render_write_queue_panel(state, term_width))
-    out.extend(_render_plan_summary_panel(state, term_width))
-    out.extend(_render_production_panel(state, term_width))
-    out.extend(_render_eta_panel(state, term_width))
+
+    # Pipeline + Plan Summary (side-by-side when wide enough)
+    if use_two_col:
+        pipeline_lines = _render_write_queue_panel(state, pw_half)
+        plan_lines     = _render_plan_summary_panel(state, pw_half)
+        out.extend(_render_panels_side_by_side(pipeline_lines, plan_lines, pw_half))
+    else:
+        out.extend(_render_write_queue_panel(state, term_width))
+        out.extend(_render_plan_summary_panel(state, term_width))
+
+    # Production Progress + Performance & ETA (side-by-side when wide enough)
+    if use_two_col:
+        prod_lines = _render_production_panel(state, pw_half)
+        eta_lines  = _render_eta_panel(state, pw_half)
+        out.extend(_render_panels_side_by_side(prod_lines, eta_lines, pw_half))
+    else:
+        out.extend(_render_production_panel(state, term_width))
+        out.extend(_render_eta_panel(state, term_width))
 
     # ── Flicker-free write ────────────────────────────────────────────────
     # Move cursor to top-left (no clear).  Each line is padded to term_width
