@@ -56,7 +56,7 @@ C_YELLOW = "\033[93m"
 C_BOLD = "\033[1m"
 C_RESET = "\033[0m"
 
-# Canonical list of all supported training/validation size keys
+# Canonical fallback list of size keys used when no dataset_architecture.json is found.
 KNOWN_SIZE_KEYS = ['540', '720', '720_169']
 
 # Default per-size batch and gradient accumulation configuration.
@@ -395,27 +395,63 @@ def main():
     # Create datasets
     print("Loading datasets...")
 
-    # All paths come from config.py — no runtime_config.json
-    data_root        = DATASET_ROOT
-    train_gt_pattern = 'patches/{size_key}/GT'
-    train_lr_pattern = 'patches/{size_key}/LR_7frames'
+    # All paths come from config.py
+    data_root    = DATASET_ROOT
 
-    # Detect which size directories exist and have GT files
+    # ------------------------------------------------------------------
+    # Load dataset_architecture.json to discover format keys, n_frames,
+    # and output image format.  Falls back gracefully when not present.
+    # ------------------------------------------------------------------
+    from vsr_plusplus_NEU.utils.dataset_architecture import load_dataset_architecture
+    arch = load_dataset_architecture(data_root)
+    if arch is not None:
+        print(f"{C_GREEN}✓ Loaded dataset_architecture.json: {arch}{C_RESET}")
+        arch_n_frames = arch.n_frames
+        arch_img_ext  = arch.img_ext          # e.g. ".bmp" or ".png"
+        arch_lr_dir_name = arch.get_lr_dir_name()   # e.g. "LR_7frames"
+        # Size keys from the architecture JSON take priority over KNOWN_SIZE_KEYS
+        arch_size_keys = arch.get_templates_for_category(dataset_name)
+        if arch_size_keys:
+            print(f"{C_CYAN}  Templates for category '{dataset_name}': {', '.join(arch_size_keys)}{C_RESET}")
+        else:
+            print(f"{C_YELLOW}  ⚠ No templates found for category '{dataset_name}' in architecture file{C_RESET}")
+            arch_size_keys = []
+    else:
+        print(f"{C_YELLOW}⚠ dataset_architecture.json not found at {data_root} — using defaults{C_RESET}")
+        arch_n_frames    = 7
+        arch_img_ext     = ".png"             # legacy default
+        arch_lr_dir_name = "LR_7frames"
+        arch_size_keys   = []
+
+    train_gt_pattern = 'patches/{size_key}/GT'
+    train_lr_pattern = f'patches/{{size_key}}/{arch_lr_dir_name}'
+
+    # Size keys to probe: architecture JSON first, then KNOWN_SIZE_KEYS as fallback
+    probe_size_keys = arch_size_keys if arch_size_keys else KNOWN_SIZE_KEYS
+
+    # Detect which size directories exist and have image files
     available_sizes = []
     print(f"{C_CYAN}Checking for dataset sizes in: {os.path.join(data_root, dataset_name)}{C_RESET}")
-    print(f"{C_CYAN}  Using path pattern: {train_gt_pattern}{C_RESET}")
+    print(f"{C_CYAN}  Using path pattern: {train_gt_pattern}  (ext: {arch_img_ext}){C_RESET}")
 
-    for size_key in KNOWN_SIZE_KEYS:
+    from vsr_plusplus_NEU.core.dataset import _collect_image_files
+    for size_key in probe_size_keys:
         train_dir = os.path.join(data_root, dataset_name,
                                  train_gt_pattern.replace('{size_key}', size_key))
         print(f"{C_CYAN}  Checking {size_key}: {train_dir}{C_RESET}")
         if os.path.exists(train_dir):
-            files = [f for f in os.listdir(train_dir) if f.lower().endswith('.png')]
+            files = _collect_image_files(train_dir, arch_img_ext)
             if files:
                 available_sizes.append(size_key)
                 print(f"{C_GREEN}    ✓ Found {len(files)} files{C_RESET}")
             else:
-                print(f"{C_YELLOW}    ⚠ Directory exists but no .png files found{C_RESET}")
+                # Also try without extension filter (auto-detect any supported format)
+                files_any = _collect_image_files(train_dir, "")
+                if files_any:
+                    available_sizes.append(size_key)
+                    print(f"{C_GREEN}    ✓ Found {len(files_any)} files (format auto-detected){C_RESET}")
+                else:
+                    print(f"{C_YELLOW}    ⚠ Directory exists but no image files found{C_RESET}")
         else:
             print(f"{C_YELLOW}    ⚠ Directory does not exist{C_RESET}")
 
@@ -441,8 +477,9 @@ def main():
             for size_key in available_sizes:
                 batch_cfg = FIXED_BATCH_CONFIG.get(size_key)
                 if batch_cfg is None:
-                    print(f"{C_RED}❌ size_key '{size_key}' not in FIXED_BATCH_CONFIG — add it to train.py!{C_RESET}")
-                    raise ValueError(f"Unknown size_key '{size_key}'")
+                    # Dynamic size keys from V2 architecture use a safe default
+                    print(f"{C_YELLOW}⚠ size_key '{size_key}' not in FIXED_BATCH_CONFIG — using safe defaults (batch=1, accum=4){C_RESET}")
+                    batch_cfg = {'batch': 1, 'accum': 4}
                 sizes_config[size_key] = {
                     'enabled':    True,
                     'distribution': 1.0 / len(available_sizes),
@@ -450,7 +487,7 @@ def main():
                     'accum':      batch_cfg['accum'],
                 }
 
-            # Startup diagnostic: file counts per size
+            # Startup diagnostic: file counts per size (bucket-aware, ext-aware)
             import time as _time
             print(f"\n{C_CYAN}{'━'*56}")
             print(f"  📋  DATASET FILE COUNTS (pre-load diagnostic)")
@@ -460,15 +497,16 @@ def main():
                                       train_gt_pattern.replace('{size_key}', sk))
                 lr_dir = os.path.join(data_root, dataset_name,
                                       train_lr_pattern.replace('{size_key}', sk))
-                gt_files = sorted([f for f in os.listdir(gt_dir)
-                                   if f.lower().endswith('.png')]) if os.path.isdir(gt_dir) else []
-                lr_files = sorted([f for f in os.listdir(lr_dir)
-                                   if f.lower().endswith('.png')]) if os.path.isdir(lr_dir) else []
-                match_count = len(set(gt_files) & set(lr_files))
+                gt_files = _collect_image_files(gt_dir, arch_img_ext) if os.path.isdir(gt_dir) else []
+                lr_files = _collect_image_files(lr_dir, arch_img_ext) if os.path.isdir(lr_dir) else []
+                # Match by basename only (bucket paths differ between GT and LR)
+                gt_bases = {os.path.basename(f) for f in gt_files}
+                lr_bases = {os.path.basename(f) for f in lr_files}
+                match_count = len(gt_bases & lr_bases)
                 ok = len(gt_files) > 0 and len(lr_files) > 0 and match_count > 0
                 status = f"{C_GREEN}✓" if ok else f"{C_RED}✗"
-                cfg_info = FIXED_BATCH_CONFIG.get(sk, {})
-                print(f"  {status}  {sk:8s}{C_RESET}  GT={len(gt_files):6,}  LR={len(lr_files):6,}  "
+                cfg_info = FIXED_BATCH_CONFIG.get(sk, {'batch': 1, 'accum': 4})
+                print(f"  {status}  {sk:12s}{C_RESET}  GT={len(gt_files):6,}  LR={len(lr_files):6,}  "
                       f"matched={match_count:6,}  BS={cfg_info.get('batch','?')} accum={cfg_info.get('accum','?')}")
                 if not os.path.isdir(lr_dir):
                     print(f"           {C_RED}⚠  LR directory NOT FOUND: {lr_dir}{C_RESET}")
@@ -491,6 +529,8 @@ def main():
                 'augment':          True,
                 'shuffle':          True,
                 'paths':            None,  # use default path patterns
+                'n_frames':         arch_n_frames,
+                'img_ext':          arch_img_ext,
                 'prefetch_count':   config.get('PREFETCH_BATCHES',     10),
                 'prefetch_workers': config.get('PREFETCH_WORKERS',      1),
                 'pin_workers':      config.get('PREFETCH_PIN_WORKERS',  1),
@@ -541,6 +581,8 @@ def main():
                 size_key=size_key,
                 mode='train',
                 augment=True,
+                n_frames=arch_n_frames,
+                img_ext=arch_img_ext,
                 paths_config=None,
             )
             print(f"✅ Training samples: {len(train_dataset):,}\n")
@@ -560,18 +602,23 @@ def main():
     val_loaders = []  # List of (size_key, loader) tuples
     val_gt_pattern = 'val/{size_key}/GT'
 
-    # Ensure validation GT subdirs exist so the user can copy images into them
-    for size_key in KNOWN_SIZE_KEYS:
+    # Ensure validation GT subdirs exist for all known template keys.
+    # Use arch_size_keys when available, otherwise KNOWN_SIZE_KEYS.
+    val_template_keys = arch_size_keys if arch_size_keys else KNOWN_SIZE_KEYS
+    for size_key in val_template_keys:
         os.makedirs(os.path.join(data_root, dataset_name, 'val', size_key, 'GT'), exist_ok=True)
-    print(f"{C_GREEN}✅ Validation GT directories ready: "
-          f"{os.path.join(data_root, dataset_name, 'val', '{size_key}', 'GT')}{C_RESET}")
+    print(f"{C_GREEN}✅ Validation GT directories ready under "
+          f"{os.path.join(data_root, dataset_name, 'val')}{C_RESET}")
 
-    # Auto-detect validation sizes
+    # Auto-detect validation sizes (check for any image files, BMP or PNG)
     val_sizes = []
-    for sk in KNOWN_SIZE_KEYS:
+    for sk in val_template_keys:
         val_dir = os.path.join(data_root, dataset_name, val_gt_pattern.replace('{size_key}', sk))
         if os.path.isdir(val_dir):
-            files = [f for f in os.listdir(val_dir) if f.lower().endswith('.png')]
+            files = _collect_image_files(val_dir, arch_img_ext)
+            if not files:
+                # Try any supported format (handles mixed or auto-detected layouts)
+                files = _collect_image_files(val_dir, "")
             if files:
                 val_sizes.append(sk)
     if not val_sizes:
@@ -588,6 +635,8 @@ def main():
                 size_key=size_key,
                 mode='val',
                 augment=False,
+                n_frames=arch_n_frames,
+                img_ext=arch_img_ext,
                 paths_config=None,
             )
             val_loader = DataLoader(

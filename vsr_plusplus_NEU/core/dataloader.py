@@ -552,6 +552,9 @@ def create_train_loader(config):
             - 'sizes': Dict with size configs
             - 'augment': Ignored – augmentation is permanently disabled.
             - 'shuffle': Whether to shuffle batches (default: True)
+            - 'n_frames': Number of LR frames per sample (default: 7).
+            - 'img_ext': Image file extension, e.g. '.bmp' or '.png' (default: '').
+                         Empty string means auto-detect from first file found.
             - 'prefetch_count':  Raw-queue capacity in batches (default: 10).
                                  0 = synchronous / no prefetch.
             - 'prefetch_workers': Parallel disk-loading threads (default: 1).
@@ -569,6 +572,8 @@ def create_train_loader(config):
     augment          = config.get('augment', True)
     shuffle          = config.get('shuffle', True)
     paths_config     = config.get('paths', None)
+    n_frames         = int(config.get('n_frames', 7))
+    img_ext          = config.get('img_ext', '')
     prefetch_count   = int(config.get('prefetch_count',   10))
     prefetch_workers = int(config.get('prefetch_workers',  1))
     pin_workers      = int(config.get('pin_workers',       1))
@@ -598,6 +603,8 @@ def create_train_loader(config):
                 size_key=size_key,
                 mode='train',
                 augment=augment,
+                n_frames=n_frames,
+                img_ext=img_ext,
                 paths_config=paths_config,
             )
         except Exception as e:
