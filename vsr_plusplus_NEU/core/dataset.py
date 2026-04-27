@@ -102,8 +102,8 @@ def _collect_image_files(base_dir: str, img_ext: str = "") -> list:
                 for f in sorted(os.listdir(bucket_path)):
                     if _matches(f):
                         files.append(os.path.join(bucket, f))  # "0000/foo.bmp"
-            except OSError:
-                pass
+            except OSError as exc:
+                print(f"⚠️  Could not list bucket directory {bucket_path}: {exc}")
     else:
         # Legacy flat layout
         for f in sorted(entries):
@@ -288,9 +288,12 @@ class VSRDataset(Dataset):
                 basename = os.path.basename(rel_path)
                 lr_bucket_dir = _lr_bucket_dir_for(rel_path, self.patch_lr_dir)
                 if basename in patch_lr_basename_index:
-                    # Duplicate basenames across buckets are unexpected — warn once.
-                    print(f"⚠️  Duplicate LR basename '{basename}' found in multiple buckets; "
-                          f"using first occurrence: {patch_lr_basename_index[basename]}")
+                    # Duplicate basenames across buckets are unexpected.
+                    # Log which buckets collide to help diagnose dataset issues.
+                    existing = patch_lr_basename_index[basename]
+                    print(f"⚠️  Duplicate LR basename '{basename}' found in multiple buckets "
+                          f"('{existing}' vs '{lr_bucket_dir}'); "
+                          f"using first occurrence.")
                 else:
                     patch_lr_basename_index[basename] = lr_bucket_dir
         

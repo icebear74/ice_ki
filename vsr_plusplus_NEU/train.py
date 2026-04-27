@@ -440,18 +440,16 @@ def main():
                                  train_gt_pattern.replace('{size_key}', size_key))
         print(f"{C_CYAN}  Checking {size_key}: {train_dir}{C_RESET}")
         if os.path.exists(train_dir):
+            # Single scan: use arch_img_ext as hint but accept any supported ext
+            # to handle datasets where the format differs from the architecture file.
             files = _collect_image_files(train_dir, arch_img_ext)
+            if not files:
+                files = _collect_image_files(train_dir, "")  # fallback: any supported ext
             if files:
                 available_sizes.append(size_key)
                 print(f"{C_GREEN}    ✓ Found {len(files)} files{C_RESET}")
             else:
-                # Also try without extension filter (auto-detect any supported format)
-                files_any = _collect_image_files(train_dir, "")
-                if files_any:
-                    available_sizes.append(size_key)
-                    print(f"{C_GREEN}    ✓ Found {len(files_any)} files (format auto-detected){C_RESET}")
-                else:
-                    print(f"{C_YELLOW}    ⚠ Directory exists but no image files found{C_RESET}")
+                print(f"{C_YELLOW}    ⚠ Directory exists but no image files found{C_RESET}")
         else:
             print(f"{C_YELLOW}    ⚠ Directory does not exist{C_RESET}")
 

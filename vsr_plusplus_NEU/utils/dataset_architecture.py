@@ -162,7 +162,7 @@ def load_dataset_architecture(dataset_root: str) -> Optional[DatasetArchitecture
         with open(arch_path, "r", encoding="utf-8") as fh:
             data = json.load(fh)
         return DatasetArchitecture(data, arch_path)
-    except Exception as exc:
+    except (json.JSONDecodeError, OSError, ValueError) as exc:
         print(f"⚠️  Could not parse {arch_path}: {exc}")
         return None
 
