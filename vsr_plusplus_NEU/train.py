@@ -506,6 +506,7 @@ def main():
                 ok = len(gt_files) > 0 and len(lr_files) > 0 and match_count > 0
                 status = f"{C_GREEN}✓" if ok else f"{C_RED}✗"
                 cfg_info = FIXED_BATCH_CONFIG.get(sk, {'batch': 1, 'accum': 4})
+                # Width 12 accommodates long V2 template names like "1152_169"
                 print(f"  {status}  {sk:12s}{C_RESET}  GT={len(gt_files):6,}  LR={len(lr_files):6,}  "
                       f"matched={match_count:6,}  BS={cfg_info.get('batch','?')} accum={cfg_info.get('accum','?')}")
                 if not os.path.isdir(lr_dir):

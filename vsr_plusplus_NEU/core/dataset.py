@@ -142,6 +142,26 @@ def _auto_detect_ext(base_dir: str) -> str:
     return ".bmp"
 
 
+def _lr_bucket_dir_for(gt_file: str, lr_base_dir: str) -> str:
+    """Return the full LR bucket directory for *gt_file*.
+
+    GT and LR buckets always share the same name, so the LR path is
+    constructed by joining *lr_base_dir* with the bucket prefix embedded in
+    *gt_file* (the dirname component, e.g. ``"0000"``).  For flat layouts
+    the dirname is empty and *lr_base_dir* is returned unchanged.
+
+    Args:
+        gt_file:     Relative path from the GT tree (e.g. ``"0000/foo.bmp"``
+                     for bucket layout or ``"foo.bmp"`` for flat layout).
+        lr_base_dir: Base LR directory (e.g. ``".../LR_7frames"``).
+
+    Returns:
+        Full directory path that directly contains the LR image.
+    """
+    bucket = os.path.dirname(gt_file)
+    return os.path.join(lr_base_dir, bucket) if bucket else lr_base_dir
+
+
 class VSRDataset(Dataset):
     """
     VSR Dataset for training and validation
@@ -266,9 +286,13 @@ class VSRDataset(Dataset):
             patch_lr_files = _collect_image_files(self.patch_lr_dir, self.img_ext)
             for rel_path in patch_lr_files:
                 basename = os.path.basename(rel_path)
-                lr_bucket_dir = os.path.join(self.patch_lr_dir, os.path.dirname(rel_path)) if os.path.dirname(rel_path) else self.patch_lr_dir
-                # Store first occurrence only (multiple buckets may have same stem — very unlikely)
-                patch_lr_basename_index.setdefault(basename, lr_bucket_dir)
+                lr_bucket_dir = _lr_bucket_dir_for(rel_path, self.patch_lr_dir)
+                if basename in patch_lr_basename_index:
+                    # Duplicate basenames across buckets are unexpected — warn once.
+                    print(f"⚠️  Duplicate LR basename '{basename}' found in multiple buckets; "
+                          f"using first occurrence: {patch_lr_basename_index[basename]}")
+                else:
+                    patch_lr_basename_index[basename] = lr_bucket_dir
         
         # Expected shapes for validation (well-known legacy size_keys)
         expected_gt_shapes = {
@@ -298,7 +322,7 @@ class VSRDataset(Dataset):
             if mode == 'train':
                 # Training: LR file must exist under lr_dir with same relative path
                 # (bucket prefix is shared between GT and LR)
-                lr_bucket_dir = os.path.join(self.lr_dir, os.path.dirname(gt_file)) if os.path.dirname(gt_file) else self.lr_dir
+                lr_bucket_dir = _lr_bucket_dir_for(gt_file, self.lr_dir)
                 lr_path = os.path.join(lr_bucket_dir, basename)
                 if os.path.exists(lr_path):
                     if self.validate_upfront and not self._validate_file_dimensions(
@@ -459,7 +483,10 @@ class VSRDataset(Dataset):
         
         expected_gt_shape = expected_gt_shapes.get(self.size_key)
         if not expected_gt_shape:
-            # V2 dynamic template — skip fixed-shape validation
+            # Unknown / V2 dynamic template — the expected shape is not in the
+            # hard-coded table above.  We skip fixed-shape validation rather than
+            # raising an error; data integrity is still enforced at runtime in
+            # __getitem__ (LR height divisibility check).
             return
         
         # LR should be height*n_frames, same width (n_frames stacked vertically)
@@ -519,11 +546,17 @@ class VSRDataset(Dataset):
         The cache filename includes the image extension so that regenerating
         a dataset with a different format (BMP vs PNG) automatically
         invalidates the old cache.
+
+        ``size_key`` and ``dataset_name`` may contain characters that are
+        unsafe in filenames on some filesystems (e.g. ``/``, ``:``, ``\\``).
+        We replace any such characters with ``_`` before constructing the path.
         """
         cache_dir = os.path.join(self.root, self.dataset_name, '.vsr_index')
         os.makedirs(cache_dir, exist_ok=True)
         ext_tag = self.img_ext.lstrip(".")  # e.g. "bmp" or "png"
-        return os.path.join(cache_dir, f'{self.mode}_{self.size_key}_{ext_tag}.json')
+        # Sanitize size_key: replace filesystem-unsafe characters with '_'
+        safe_size_key = self.size_key.replace('/', '_').replace('\\', '_').replace(':', '_')
+        return os.path.join(cache_dir, f'{self.mode}_{safe_size_key}_{ext_tag}.json')
 
     def _load_index(self):
         """
@@ -735,10 +768,7 @@ class VSRDataset(Dataset):
                     patch_lr_files = _collect_image_files(self.patch_lr_dir, self.img_ext)
                     for rel_path in patch_lr_files:
                         bn = os.path.basename(rel_path)
-                        lr_bucket = (
-                            os.path.join(self.patch_lr_dir, os.path.dirname(rel_path))
-                            if os.path.dirname(rel_path) else self.patch_lr_dir
-                        )
+                        lr_bucket = _lr_bucket_dir_for(rel_path, self.patch_lr_dir)
                         patch_lr_basename_index.setdefault(bn, lr_bucket)
                 
                 # Build new file lists - only check LR file existence (fast reload)
@@ -749,10 +779,7 @@ class VSRDataset(Dataset):
                 for gt_file in all_gt_files:
                     basename = os.path.basename(gt_file)
                     if self.mode == 'train' and self.lr_dir:
-                        lr_bucket_dir = (
-                            os.path.join(self.lr_dir, os.path.dirname(gt_file))
-                            if os.path.dirname(gt_file) else self.lr_dir
-                        )
+                        lr_bucket_dir = _lr_bucket_dir_for(gt_file, self.lr_dir)
                         lr_path = os.path.join(lr_bucket_dir, basename)
                         if os.path.exists(lr_path):
                             new_gt_files.append(gt_file)

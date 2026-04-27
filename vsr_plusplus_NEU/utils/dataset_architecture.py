@@ -111,7 +111,13 @@ class DatasetArchitecture:
         return None
 
     def get_lr_dir_name(self) -> str:
-        """Return the LR subdirectory name, e.g. ``LR_7frames``."""
+        """Return the LR subdirectory name for the configured frame count.
+
+        The Dataset Generator V2 uses ``LR_{n}frames`` for all frame counts
+        **except** the original 5-frame legacy mode, which used the bare
+        name ``LR`` (no frame count suffix) for historical reasons.
+        All other counts (7, 9, …) use ``LR_{n}frames``.
+        """
         n = self.n_frames
         return "LR" if n == 5 else f"LR_{n}frames"
 
