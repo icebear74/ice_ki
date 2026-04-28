@@ -587,16 +587,15 @@ def main():
             _arch_weights = {}
             if arch is not None:
                 try:
-                    _tmpl_info = arch.get_template_info(dataset_name)
-                    for _sk, _ti in (_tmpl_info or {}).items():
-                        if _sk in train_loader.datasets_dict:
-                            _w = _ti.get('width', 0)
-                            _h = _ti.get('height', 0)
-                            if _w and _h:
-                                _template_areas[_sk] = _w * _h
-                            _wt = _ti.get('weight', 0.0)
+                    for _sk in list(train_loader.datasets_dict.keys()):
+                        _entry = arch.get_format_entry(dataset_name, _sk)
+                        if _entry:
+                            _gt = _entry.get('gt_size')  # [width, height]
+                            if _gt and len(_gt) == 2:
+                                _template_areas[_sk] = _gt[0] * _gt[1]
+                            _wt = _entry.get('weight', 0.0)
                             if _wt:
-                                _arch_weights[_sk] = _wt
+                                _arch_weights[_sk] = float(_wt)
                 except Exception:
                     pass  # Fallback: equal shares (handled by DataStrategyScheduler)
 

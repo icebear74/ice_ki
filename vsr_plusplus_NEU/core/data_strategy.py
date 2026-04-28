@@ -170,18 +170,6 @@ class DataStrategyScheduler:
         """Return True when combined non-warmup GT images >= MIN_CROP_FILES_TRAINING."""
         return self.get_crop_total_count(crop_file_counts) >= self.MIN_CROP_FILES_TRAINING
 
-    # Backward-compatible class-method aliases used by VSRTrainer
-    @classmethod
-    def _static_can_introduce_crops(cls, crop_file_counts):  # noqa: no public use
-        raise NotImplementedError("Use the instance method instead.")
-
-    @classmethod
-    def _static_get_crop_total_count(cls, crop_file_counts):  # noqa: no public use
-        raise NotImplementedError("Use the instance method instead.")
-
-    @classmethod
-    def _static_has_enough_training_crops(cls, crop_file_counts):  # noqa: no public use
-        raise NotImplementedError("Use the instance method instead.")
 
     # ------------------------------------------------------------------
     # Phase helpers
