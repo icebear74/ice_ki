@@ -65,20 +65,22 @@ DEFAULT_CONFIG = {
     "model": {
         "n_frames": 7,
         "n_feats": 72,
-        "n_blocks": 26,
+        "n_blocks": 24,  # benchmark-validated default (was 26)
         "precision": "float32"
     },
     "training": {
         "effective_batch_size": 6,
+        # adaptive_batch entries are populated dynamically from the architecture;
+        # the static legacy keys below remain for backward compatibility only.
         "adaptive_batch": {
             "540":     {"batch": 2, "accum": 3},   # eff=6 | ~5.15 GB
             "720_169": {"batch": 2, "accum": 4},   # eff=8 | ~5.14 GB
-            "720":     {"batch": 1, "accum": 4}    # eff=4 | ~6.14 GB (BS=1 pflicht!)
+            "720":     {"batch": 1, "accum": 4}    # eff=4 | ~6.14 GB (BS=1 required!)
         }
     },
-    "validation": {
-        "sizes": ["540", "720_169"]
-    }
+    # validation.sizes is no longer pre-defined; templates are discovered
+    # dynamically from dataset_architecture.json at startup.
+    "validation": {}
 }
 
 
@@ -216,13 +218,16 @@ class EnhancedRuntimeConfigManager:
             # Validate model config
             if 'model' in config:
                 model = config['model']
-                
+
+                # n_frames is fixed to 7 (only 7-frame model is supported).
+                # The train.py startup already enforces this via arch validation;
+                # runtime_config validation is an additional safety net.
                 if model.get('n_frames', 0) != 7:
                     errors.append(f"n_frames must be 7 (only 7-frame model supported), got {model.get('n_frames')}")
-                
+
                 if model.get('n_feats', 0) < 32 or model.get('n_feats', 0) > 128:
                     errors.append(f"n_feats should be 32-128, got {model.get('n_feats')}")
-                
+
                 if model.get('n_blocks', 0) < 8 or model.get('n_blocks', 0) > 50:
                     errors.append(f"n_blocks should be 8-50, got {model.get('n_blocks')}")
         

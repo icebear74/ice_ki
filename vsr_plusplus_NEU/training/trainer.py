@@ -389,11 +389,17 @@ class VSRTrainer:
         # Updated only when current_window_batches reaches current_accum_steps,
         # so the display always shows a full set of same-resolution files.
         display_files = []   # list[str]: file paths from the last complete window
-        display_fps = {'720': 0, '540': 0, '720_169': 0}
+        # Dynamic per-size counters: initialised from the active size keys so
+        # they work correctly with V2 templates (not just the legacy 3 keys).
+        _active_keys = list(
+            getattr(getattr(self.train_loader, 'sampler', None), 'active_sizes', None)
+            or []
+        ) or ['default']
+        display_fps = {sk: 0 for sk in _active_keys}
 
         # Cumulative per-size file counter for the current epoch (used by WebUI).
         # This is a local variable – reset automatically on each call to train_epoch.
-        epoch_files_per_size = {'720': 0, '540': 0, '720_169': 0}
+        epoch_files_per_size = {sk: 0 for sk in _active_keys}
 
         # AdamW momentum value (updated at every optimizer step).  Initialized
         # here so _update_gui() can always read a defined value even before the
@@ -518,7 +524,7 @@ class VSRTrainer:
                     accum_counter = 0
                 current_window_batches = []
                 display_files = []
-                display_fps = {'720': 0, '540': 0, '720_169': 0}
+                display_fps = {sk: 0 for sk in _active_keys}
             prev_size_key = size_key
             # ── End size-key transition ───────────────────────────────────────
             
@@ -557,7 +563,7 @@ class VSRTrainer:
                         display_files = [
                             f for item in current_window_batches for f in item['files']
                         ]
-                        display_fps = {'720': 0, '540': 0, '720_169': 0}
+                        display_fps = {sk: 0 for sk in _active_keys}
                         for item in current_window_batches:
                             sk = item['size_key']
                             display_fps[sk] = display_fps.get(sk, 0) + len(item['files'])
@@ -573,7 +579,7 @@ class VSRTrainer:
                 ]
                 # Build per-size counts in a single pass (O(n)) instead of
                 # re-scanning the list once per size key (O(n·m)).
-                live_fps = {'720': 0, '540': 0, '720_169': 0}
+                live_fps = {sk: 0 for sk in _active_keys}
                 for f in display_files:
                     sk_prefix = f.split('/', 1)[0]
                     if sk_prefix in live_fps:
@@ -1448,10 +1454,10 @@ class VSRTrainer:
             self._check_dataset_files()
 
         crop_counts = self._get_crop_file_counts()
-        total = DataStrategyScheduler.get_crop_total_count(crop_counts)
+        total = self.data_strategy_scheduler.get_crop_total_count(crop_counts)
         self._crop_wait_current_count = total
 
-        if DataStrategyScheduler.has_enough_training_crops(crop_counts):
+        if self.data_strategy_scheduler.has_enough_training_crops(crop_counts):
             if self.waiting_for_crops:
                 self.train_logger.log_event(
                     f"✅ Crop-Wait beendet: {total:,} Crop-Bilder vorhanden "

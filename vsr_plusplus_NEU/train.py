@@ -36,6 +36,7 @@ from vsr_plusplus_NEU.training.lr_scheduler import AdaptiveLRScheduler
 from vsr_plusplus_NEU.systems.checkpoint_manager import CheckpointManager
 from vsr_plusplus_NEU.systems.logger import TrainingLogger, TensorBoardLogger
 from vsr_plusplus_NEU.systems.adaptive_system import AdaptiveSystem
+from vsr_plusplus_NEU.systems.run_lock import save_run_lock, load_and_verify_run_lock
 
 # NOTE: config.py is a LOCAL configuration file that exists on each developer's machine.
 # It is listed in .gitignore (line 58) and should NEVER be pushed to the repository!
@@ -200,6 +201,7 @@ def main():
     
     start_step = 0
     selected_checkpoint_path = None
+    is_fresh_start = False
     checkpoint_mgr = CheckpointManager(DATASET_SPECIFIC_ROOT)
     
     if choice == 'l':
@@ -224,7 +226,14 @@ def main():
             if backed_up > 0:
                 print(f"{C_GREEN}✓ {backed_up} .pth Dateien als .BAK gesichert{C_RESET}")
             
+            # Remove old lock file so a new one is written below
+            _old_lock = os.path.join(DATASET_SPECIFIC_ROOT, "training_run_locked.json")
+            if os.path.exists(_old_lock):
+                os.remove(_old_lock)
+                print(f"{C_CYAN}🔓 Old run lock removed (fresh start){C_RESET}")
+            
             print(f"{C_GREEN}✅ All checkpoints, logs, and TensorBoard events cleaned up{C_RESET}\n")
+            is_fresh_start = True
     
     if choice != 'l' or choice == 'f':
         # Resume mode (either selected 'f' or canceled 'l')
@@ -244,6 +253,7 @@ def main():
             selected_checkpoint_path = selected_ckpt['path']
         else:
             print("⚠️  No checkpoint found, starting fresh")
+            is_fresh_start = True
     
     # Start TensorBoard with dataset-specific log directory
     log_dir = os.path.join(DATASET_SPECIFIC_ROOT, "logs")
@@ -423,6 +433,29 @@ def main():
         arch_lr_dir_name = "LR_7frames"
         arch_size_keys   = []
 
+    # ------------------------------------------------------------------
+    # Model constraint validation (early abort on architecture mismatch).
+    #
+    # The training model is fixed to 7 frames and 3× scale.  If the
+    # architecture file says something different, training must not start
+    # so checkpoints remain compatible.
+    # ------------------------------------------------------------------
+    FIXED_N_FRAMES = 7
+    FIXED_SCALE    = 3
+
+    if arch_n_frames != FIXED_N_FRAMES:
+        print(f"\n{C_RED}{'='*72}{C_RESET}")
+        print(f"{C_RED}❌  MODEL ARCHITECTURE MISMATCH{C_RESET}")
+        print(f"{C_RED}    dataset_architecture.json says n_frames={arch_n_frames}{C_RESET}")
+        print(f"{C_RED}    but the training model is fixed to n_frames={FIXED_N_FRAMES}.{C_RESET}")
+        print(f"{C_RED}    Training aborted — update the model or the architecture file.{C_RESET}")
+        print(f"{C_RED}{'='*72}{C_RESET}\n")
+        return
+
+    # scale is not stored in the architecture file but is implicit in the LR
+    # directory dimensions; we simply document the expectation here.
+    print(f"{C_GREEN}✅ Architecture validated: n_frames={arch_n_frames}, scale={FIXED_SCALE} (fixed){C_RESET}")
+
     train_gt_pattern = 'patches/{size_key}/GT'
     train_lr_pattern = f'patches/{{size_key}}/{arch_lr_dir_name}'
 
@@ -548,13 +581,35 @@ def main():
             print(f"{C_CYAN}{'━'*47}{C_RESET}\n")
 
             # Graduated data/loss strategy scheduler
+            # Build template_areas from arch metadata (needed to choose warmup template
+            # dynamically as the one with the largest GT area).
+            _template_areas = {}
+            _arch_weights = {}
+            if arch is not None:
+                try:
+                    _tmpl_info = arch.get_template_info(dataset_name)
+                    for _sk, _ti in (_tmpl_info or {}).items():
+                        if _sk in train_loader.datasets_dict:
+                            _w = _ti.get('width', 0)
+                            _h = _ti.get('height', 0)
+                            if _w and _h:
+                                _template_areas[_sk] = _w * _h
+                            _wt = _ti.get('weight', 0.0)
+                            if _wt:
+                                _arch_weights[_sk] = _wt
+                except Exception:
+                    pass  # Fallback: equal shares (handled by DataStrategyScheduler)
+
             from vsr_plusplus_NEU.core.dataloader import DataStrategyScheduler
             data_strategy_scheduler = DataStrategyScheduler(
-                all_size_keys=list(train_loader.datasets_dict.keys())
+                all_size_keys=list(train_loader.datasets_dict.keys()),
+                template_areas=_template_areas or None,
+                arch_weights=_arch_weights or None,
             )
+            _warmup_tmpl = data_strategy_scheduler.warmup_template or 'unknown'
             print(f"{C_CYAN}📅 DataStrategyScheduler enabled:{C_RESET}")
             print(f"  • Phase 1 (steps 0–{DataStrategyScheduler.WARMUP_END}): "
-                  f"100% 720_169 only, perceptual=0.0")
+                  f"100% {_warmup_tmpl} (largest GT area), perceptual=0.0")
             print(f"  • Phase 2 (steps {DataStrategyScheduler.WARMUP_END}–"
                   f"{DataStrategyScheduler.CROP_INTRO_END}): "
                   f"linear mix-in, perceptual 0.0→{DataStrategyScheduler.TARGET_PERCEPTUAL_WEIGHT}")
@@ -660,6 +715,53 @@ def main():
     # First loader is used as the primary validator target
     val_loader = val_loaders[0][1]
 
+    # ------------------------------------------------------------------
+    # Locked run config — checkpoint compatibility guard
+    #
+    # On fresh start: writes training_run_locked.json with the key model
+    # and dataset parameters.  On resume: loads the locked file and aborts
+    # with a clear error if any critical parameter has changed.
+    # ------------------------------------------------------------------
+    _run_templates = sorted(available_sizes)
+    if is_fresh_start:
+        _lock_path = save_run_lock(
+            run_dir=DATASET_SPECIFIC_ROOT,
+            n_feats=n_feats,
+            n_blocks=n_blocks,
+            n_frames=arch_n_frames,
+            scale=FIXED_SCALE,
+            dataset_root=data_root,
+            category=dataset_name,
+            templates=_run_templates,
+        )
+        print(f"{C_GREEN}🔒 Run lock created: {_lock_path}{C_RESET}")
+    else:
+        # On resume: verify the lock is compatible with the current config.
+        # load_and_verify_run_lock() calls sys.exit(1) on mismatch.
+        load_and_verify_run_lock(
+            run_dir=DATASET_SPECIFIC_ROOT,
+            n_feats=n_feats,
+            n_blocks=n_blocks,
+            n_frames=arch_n_frames,
+            scale=FIXED_SCALE,
+            dataset_root=data_root,
+            category=dataset_name,
+            templates=_run_templates,
+        )
+        # If we reach here, the lock either didn't exist (first run after upgrade)
+        # or verification passed.  In the former case, create the lock now.
+        save_run_lock(
+            run_dir=DATASET_SPECIFIC_ROOT,
+            n_feats=n_feats,
+            n_blocks=n_blocks,
+            n_frames=arch_n_frames,
+            scale=FIXED_SCALE,
+            dataset_root=data_root,
+            category=dataset_name,
+            templates=_run_templates,
+        )
+    # ------------------------------------------------------------------
+
     # Create checkpoint manager
     checkpoint_mgr = CheckpointManager(DATASET_SPECIFIC_ROOT)
     
@@ -748,7 +850,7 @@ def main():
         config_json_path = os.path.join(DATASET_SPECIFIC_ROOT, 'async_val_config.json')
         config_snapshot = {
             'N_FEATS':           config.get('N_FEATS', 72),
-            'N_BLOCKS':          config.get('N_BLOCKS', 28),
+            'N_BLOCKS':          config.get('N_BLOCKS', 24),
             'USE_CHECKPOINTING': config.get('USE_CHECKPOINTING', False),
             'L1_WEIGHT':         config.get('L1_WEIGHT', 0.60),
             'MS_WEIGHT':         config.get('MS_WEIGHT', 0.20),

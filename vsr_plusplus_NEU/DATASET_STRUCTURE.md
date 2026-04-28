@@ -1,236 +1,198 @@
-# Dataset Struktur - Generator V2 und Training System
+# Dataset Struktur — Generator V2 und Training System
 
-## Problem gelöst: Dataset Pfade korrigiert ✅
+> **Status**: Vollständig auf Generator V2 mit dynamischen Templates migriert.
+> Templates werden dynamisch aus `dataset_architecture.json` geladen — keine festen
+> Size-Keys wie `540`, `720`, `720_169` mehr im Code.
 
-### Dataset Generator V2 Ausgabe-Struktur
+---
 
-Der `dataset_generator_v2` erstellt folgende Struktur (nur 7-frame Version):
+## Verzeichnisstruktur (Generator V2)
+
+Der `dataset_generator_v2` verwendet `dataset_architecture.json` um Templates pro Kategorie zu
+definieren.  Die Templates können sich je nach Konfiguration unterscheiden.  Typische Ausgabe:
 
 ```
-/mnt/data/training/datasetNeu/          ← output_base_dir (generator_config.json)
-└── master/                              ← Kategorie (flat lowercase)
-    ├── patches/540/                     ← small_540 Format (size_key: 540)
-    │   ├── GT/                          ← 540×540 Ground Truth
-    │   └── LR_7frames/                  ← 1260×180 (7 frames gestackt vertikal)
+/mnt/data/training/Dataset/                  ← DATASET_ROOT (config.py)
+├── dataset_architecture.json                ← Architekturbeschreibung (templates, n_frames, ...)
+│
+└── master/                                  ← Kategorie (z.B. master, space, toon)
+    ├── patches/
+    │   ├── 720_169/                         ← Template-Key (dynamisch, aus dataset_architecture.json)
+    │   │   ├── GT/                          ← Ground Truth (z.B. 405×720 BMP/PNG)
+    │   │   │   ├── 0000/                    ← Bucket-Verzeichnis (V2 bucket layout)
+    │   │   │   └── 0001/
+    │   │   └── LR_7frames/                  ← LR gestackt (7 frames vertikal)
+    │   │       ├── 0000/
+    │   │       └── 0001/
+    │   ├── 540/
+    │   │   ├── GT/
+    │   │   └── LR_7frames/
+    │   └── 720/
+    │       ├── GT/
+    │       └── LR_7frames/
     │
-    ├── patches/720_169/                 ← medium_169 Format (size_key: 720_169)
-    │   ├── GT/                          ← 405×720 Ground Truth (16:9)
-    │   └── LR_7frames/                  ← 945×240 (7 frames gestackt vertikal)
+    ├── val/
+    │   ├── 720_169/
+    │   │   └── GT/                          ← NUR GT hier — kein LR!
+    │   ├── 540/
+    │   │   └── GT/
+    │   └── 720/
+    │       └── GT/
     │
-    ├── patches/720/                     ← large_720 Format (size_key: 720)
-    │   ├── GT/                          ← 720×720 Ground Truth
-    │   └── LR_7frames/                  ← 1680×240 (7 frames gestackt vertikal)
-    │
-    └── Val/                             ← Validation (flat, vom Generator erstellt)
-        └── GT/                          ← Mixed sizes (nicht genutzt)
+    └── training_run_locked.json             ← Gesperrt bei erstem Start (Checkpoint-Kompatibilität)
 ```
 
-**Wichtig**: 
-- Alle LR-Daten sind 7-frame Versionen (vertikal gestackt: Höhe = einzelne_Höhe × 7)
-- 540×540 GT → 1260×180 LR_7frames (Höhe: (540/3)×7=180×7=1260, Breite: 540/3=180)
-- 720×720 GT → 1680×240 LR_7frames (Höhe: (720/3)×7=240×7=1680, Breite: 720/3=240)
-- 405×720 GT → 945×240 LR_7frames (Höhe: (405/3)×7=135×7=945, Breite: 720/3=240)
-- Der Generator erstellt `val/GT/` (mit großem V), aber das Training erwartet `val/{size_key}/GT/` (lowercase)
-- Validation-Dateien werden **manuell** in die korrekte Struktur kopiert (siehe unten)
+**V2 Bucket Layout**: GT und LR Dateien können in nummerierten Unterverzeichnissen (z.B. `0000/`, `0001/`)
+liegen.  Der Loader erkennt beides automatisch (bucket und flat Layout).
 
-### Andere Kategorien
+---
 
-Generator V2 unterstützt mehrere Kategorien (siehe `utils/format_definitions.py`):
+## dataset_architecture.json
 
-- **master**: `master/` (flat, lowercase)
-- **universal**: `universal/` (flat, lowercase)
-- **space**: `space/` (flat, lowercase)
-- **toon**: `toon/` (flat, lowercase)
-
-### VSR Training System Erwartung
-
-Das `VSRDataset` (in `vsr_plus_plus/core/dataset.py`) erwartet:
-
-```python
-dataset_root/              # = root Parameter in VSRDataset
-└── master/                # = dataset_name Parameter (lowercase)
-    ├── patches/540/       # = size_key Parameter (z.B. '540', '720', '720_169')
-    │   ├── GT/            # Training Ground Truth
-    │   └── LR_7frames/    # Training Low Resolution (7-frame stack)
-    │
-    └── val/               # Validation (lowercase)
-        └── GT/            # Validation Ground Truth (organisiert nach size)
-            ├── 540/       # GT für 540×540 Patches
-            ├── 720/       # GT für 720×720 Patches
-            └── 720_169/   # GT für 720×405 (16:9) Patches
-```
-
-**Wichtig**: Die Validation-Struktur organisiert GT-Bilder unter `val/{size_key}/GT/` (lowercase val):
-- `val/540/GT/` für 540×540 Validation Patches
-- `val/720/GT/` für 720×720 Validation Patches
-- `val/720_169/GT/` für 720×405 (16:9) Validation Patches
-- LR-Bilder werden **immer** aus `patches/{size_key}/LR_7frames/` geladen
-
-### Richtige Konfiguration
-
-In `runtime_config.json` oder beim Initialisieren von VSRDataset:
-
-```python
-# RICHTIG ✅
-dataset = VSRDataset(
-    root="/mnt/data/training/datasetNeu",
-    dataset_name="master",      # lowercase
-    size_key="540",             # oder '720', '720_169'
-    mode="train"
-)
-
-val_dataset = VSRDataset(
-    root="/mnt/data/training/datasetNeu",
-    dataset_name="master",
-    size_key="540",
-    mode="val"
-)
-
-# Dies erwartet folgende Struktur:
-# /mnt/data/training/datasetNeu/master/patches/540/GT/
-# /mnt/data/training/datasetNeu/master/patches/540/LR_7frames/
-# /mnt/data/training/datasetNeu/master/val/540/GT/
-# (LR wird automatisch aus patches/540/LR_7frames/ geladen)
-```
-
-### VAL Datenstruktur Übersicht
-
-Die **Validation (VAL)** Daten müssen wie folgt strukturiert sein:
-
-```
-/mnt/data/training/datasetNeu/master/Val/
-└── GT/                    ← Validation Ground Truth Verzeichnis
-    ├── 540/               ← Hier Ground Truth Bilder für 540×540 reinlegen
-    ├── 720/               ← Hier Ground Truth Bilder für 720×720 reinlegen
-    └── 720_169/           ← Hier Ground Truth Bilder für 720×405 (16:9) reinlegen
-```
-
-**Workflow für Validation-Daten:**
-1. **GT kopieren**: Validation Ground Truth Bilder manuell nach `val/{size_key}/GT/` kopieren
-2. **LR automatisch**: Das Training findet automatisch die entsprechenden LR Bilder in `patches/{size_key}/LR_7frames/`
-
-**Beispiel:**
-```bash
-# Sie kopieren nur GT:
-cp some_image.png /mnt/data/training/datasetNeu/master/val/540/GT/
-
-# Training findet automatisch das LR hier:
-# /mnt/data/training/datasetNeu/master/patches/540/LR_7frames/some_image.png
-```
-
-**Wichtig:**
-- Sie müssen **nur GT-Bilder** nach `val/{size_key}/GT/` kopieren (capital V)
-- LR-Bilder werden automatisch aus `patches/{size_key}/LR_7frames/` geladen
-- Die GT- und LR-Dateinamen müssen **identisch** sein (z.B. beide `image001.png`)
-- Alle size_keys sind unter `val/GT/` organisiert
-
-### Warum dieser Pfad?
-
-1. **Generator V2** erstellt: `datasetNeu/master/patches/540/GT/` und `datasetNeu/master/val/GT/` (flat)
-2. **VSRDataset** erwartet: `root/dataset_name/patches/size_key/GT/` und `root/dataset_name/val/GT/size_key/`
-3. **Lösung**: Validation-Dateien müssen manuell in die size-spezifischen Verzeichnisse kopiert werden
-
-### Verifikation
-
-Überprüfen Sie die Struktur:
-
-```bash
-# Training-Daten (vom Generator erstellt):
-ls /mnt/data/training/datasetNeu/master/patches/540/GT/
-ls /mnt/data/training/datasetNeu/master/patches/540/LR_7frames/
-
-# Validation-Daten (manuell erstellt):
-ls /mnt/data/training/datasetNeu/master/val/540/GT/
-```
-
-### Generator Konfiguration
-
-In `dataset_generator_v2/generator_config.json`:
+Dieses File beschreibt die verfügbaren Templates, n_frames, Bildformat und Format-Gewichte.
+Beispiel:
 
 ```json
 {
-  "base_settings": {
-    "output_base_dir": "/mnt/data/training/datasetNeu",
-    "lr_versions": ["7frames"]
-  },
-  "category_targets": {
-    "master": 300000
+  "n_frames": 7,
+  "img_format": "bmp",
+  "categories": {
+    "master": {
+      "templates": {
+        "720_169": { "width": 720, "height": 405, "weight": 0.40 },
+        "540":     { "width": 540, "height": 540, "weight": 0.20 },
+        "720":     { "width": 720, "height": 720, "weight": 0.40 }
+      }
+    }
   }
 }
 ```
 
-**Hinweis**: Der Generator erstellt nur `val/GT/` (flat), aber das Training benötigt `val/{size_key}/GT/`.
+Das Training-System liest dieses File beim Start und:
+- entdeckt alle Templates für die gewählte Kategorie dynamisch
+- benutzt `n_frames` zur Validierung (muss 7 sein, sonst Abbruch)
+- wählt das LR-Verzeichnis automatisch (`LR_7frames` für n_frames=7)
+- leitet die Phase-2 Endverteilung aus den Template-Gewichten ab
 
-**Validation Setup (Beispiel):**
-```bash
-# 1. Erstellen Sie die Verzeichnisse
-mkdir -p /mnt/data/training/datasetNeu/master/val/540/GT
-mkdir -p /mnt/data/training/datasetNeu/master/val/720/GT
-mkdir -p /mnt/data/training/datasetNeu/master/val/720_169/GT
+---
 
-# 2. Kopieren Sie Validation GT-Bilder aus den Training-Patches
-# (wählen Sie gute, repräsentative Bilder aus)
-cp /mnt/data/training/datasetNeu/master/patches/540/GT/some_good_image.png \
-   /mnt/data/training/datasetNeu/master/val/540/GT/
+## Modell-Constraints (fixiert)
 
-# 3. LR-Bilder werden automatisch gefunden!
-# Training findet automatisch:
-# /mnt/data/training/datasetNeu/master/patches/540/LR_7frames/some_good_image.png
+Das Training-Modell ist auf **7 Frames** und **3× Scale** fixiert.  Beim Start wird
+`dataset_architecture.json` dagegen geprüft:
+
+- `n_frames != 7` → Abbruch mit Fehlermeldung
+- Scale ist implizit durch LR-Dimensionen (GT / 3 = LR)
+
+---
+
+## Konfiguration (config.py)
+
+```python
+# Neue Standard-Defaults (benchmark-validiert)
+N_FEATS  = 72   # Feature-Kanäle
+N_BLOCKS = 24   # Residual Blocks (26/28 sind teurer ohne ausreichend Gewinn)
+
+# Dataset Root — neuer Standard-Pfad
+DATASET_ROOT = "/mnt/data/training/Dataset"
+
+# Kategorie
+DEFAULT_DATASET_NAME = "master"  # muss mit dataset_architecture.json übereinstimmen
 ```
 
-### Format-Verteilung
+Leichtere Alternative: `N_BLOCKS = 20` (weniger VRAM, etwas geringere Qualität).
 
-Für die **master** Kategorie (siehe `utils/format_definitions.py`):
+**Workflow**:
+```bash
+cp config.py.example config.py   # Vorlage kopieren
+# config.py editieren (Pfad, Kategorie, VRAM-Einstellungen)
+python3 train.py
+```
 
-- **small_540**: 50% (540×540 Patches)
-- **medium_169**: 35% (720×405 Patches)
-- **large_720**: 15% (720×720 Patches)
+---
 
-### Training Workflow
+## Validation Workflow (GT-only)
 
-1. **Generator ausführen**:
-   ```bash
-   cd dataset_generator_v2
-   python3 make_dataset_multi.py
-   ```
+Validation-Daten werden **nur als GT-Bilder** bereitgestellt.  LR wird nie ins `val/`-Verzeichnis
+kopiert — das Training findet LR automatisch über den Basename-Index in `patches/{template}/LR_{n}frames/`.
 
-2. **Config kopieren** (falls noch nicht vorhanden):
-   ```bash
-   cd vsr_plusplus_NEU
-   cp config_p4_optimized.py config.py
-   ```
+```bash
+# Nur GT ins Validation-Verzeichnis kopieren:
+cp repräsentatives_bild.bmp /mnt/data/training/Dataset/master/val/720_169/GT/
 
-3. **Training starten**:
-   ```bash
-   cd vsr_plusplus_NEU
-   python3 train.py
-   ```
+# Das Training findet automatisch:
+# /mnt/data/training/Dataset/master/patches/720_169/LR_7frames/repräsentatives_bild.bmp
+```
 
-### Wichtige Hinweise
+**Wichtig**:
+- Dateipfade (Basenames) müssen in GT und LR identisch sein
+- Kein rekursiver Scan pro Sample — das System baut einen Basename-Index einmalig beim Start
+- LR kommt **immer** aus `patches/{template}/LR_{n}frames/`, nie aus `val/`
 
-- **5-frame vs 7-frame**: Standard Training nutzt 5-frame (`LR/`), 7-frame ist optional (`LR_7frames/`)
-- **Validation**: Generator erstellt Validation-Daten in `val/GT/` und `Val/LR/`
-- **Mehrere Formate**: Generator kann gleichzeitig verschiedene Patch-Größen erstellen
+---
 
-### Fehlersuche
+## Locked Run Config
 
-**Problem**: `No PNG files found in .../Patches/GT`
+Beim ersten Trainingsstart wird `training_run_locked.json` im Kategorie-Verzeichnis erstellt:
 
-**Lösung**: 
-1. Prüfen Sie, ob Generator gelaufen ist
-2. Überprüfen Sie `DATA_ROOT` Pfad in config.py
-3. Stellen Sie sicher, dass der Pfad `Master/MasterModel/Learn` enthält
+```json
+{
+  "n_feats": 72,
+  "n_blocks": 24,
+  "n_frames": 7,
+  "scale": 3,
+  "dataset_root": "/mnt/data/training/Dataset",
+  "category": "master",
+  "templates": ["540", "720", "720_169"]
+}
+```
 
-**Problem**: `No valid GT-LR pairs found`
+Bei **Resume** wird diese Datei geladen und gegen die aktuelle Konfiguration geprüft.
+Bei Abweichung bricht das Training mit einer klaren Fehlermeldung ab — Checkpoints werden
+nie mit einer inkompatiblen Konfiguration fortgesetzt.
 
-**Lösung**:
-1. Prüfen Sie, ob sowohl GT als auch LR Verzeichnisse Dateien enthalten
-2. Dateien müssen gleichen Namen haben (z.B. `frame_0001.png`)
-3. LR-Dateien müssen gestackte Frames sein (180×900 für small_540)
+Um neu zu starten: `L` beim Startprompt wählen (löscht/sichert Checkpoints und entfernt die Lock-Datei).
 
-## Referenzen
+---
 
-- Generator Konfiguration: `dataset_generator_v2/generator_config.json`
-- Format Definitionen: `dataset_generator_v2/utils/format_definitions.py`
-- Dataset Loader: `vsr_plus_plus/core/dataset.py`
-- Training Config: `vsr_plusplus_NEU/config_p4_optimized.py`
+## DataStrategy Phasen
+
+Die Datenstrategie ist vollständig dynamisch und leitet Warmup-Template und Phase-2 Verteilung
+aus `dataset_architecture.json` ab:
+
+| Phase | Schritte | Daten | Perceptual Loss |
+|-------|----------|-------|-----------------|
+| **Warmup** | 0–3000 | 100 % Warmup-Template (größte GT-Fläche) | 0.0 → 0.03 |
+| **Crop Introduction** | 3000–8000 | Linearer Übergang → Arch-Gewichte | 0.03 → 0.08 |
+| **Stable** | 8000+ | Natürliche Dateizählung (kein Override) | AdaptiveSystem |
+
+Phase 2 startet erst wenn genug nicht-Warmup-Dateien auf der Disk vorhanden sind
+(`MIN_CROP_FILES_TRAINING = 10000`).
+
+---
+
+## Adaptive Batch Config
+
+Für unbekannte V2 Templates wird eine Pixel-Count-Regel angewandt:
+- GT-Pixel ≤ 291.600 (405×720): batch=2, accum=4 → eff=8
+- GT-Pixel > 291.600:           batch=1, accum=4 → eff=4
+
+Bekannte Werte können in `config.py` unter `ADAPTIVE_BATCH_CONFIG` eingetragen werden
+(Einträge überschreiben die automatische Regel).
+
+---
+
+## Fehlersuche
+
+**Problem**: `CHECKPOINT COMPATIBILITY ERROR`
+→ Config (`N_FEATS`, `N_BLOCKS`, `N_FRAMES`, Templates) stimmt nicht mit `training_run_locked.json` überein.
+→ Entweder Config zurücksetzen oder neu mit `L` starten.
+
+**Problem**: `MODEL ARCHITECTURE MISMATCH`
+→ `dataset_architecture.json` sagt `n_frames != 7`.
+→ Korrektes Architecture-File verwenden oder Modell verallgemeinern.
+
+**Problem**: Keine GT/LR Matches
+→ Sicherstellen dass Basenames in `patches/{template}/GT/` und `patches/{template}/LR_{n}frames/` identisch sind.
+→ `DATASET_ROOT` und `DEFAULT_DATASET_NAME` in `config.py` prüfen.
+

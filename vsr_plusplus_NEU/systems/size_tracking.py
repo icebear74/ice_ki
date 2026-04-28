@@ -37,9 +37,11 @@ class SizeTracker:
         self.auto_save_interval = auto_save_interval
         self.lock = threading.Lock()
         
-        # Default size categories
+        # Accept whatever categories the caller provides.
+        # No hardcoded default — the caller must pass the actual template keys
+        # from dataset_architecture.json so this tracker works for any dataset.
         if size_categories is None:
-            size_categories = ['540', '720_169', '720']
+            size_categories = []
         
         self.size_categories = size_categories
         
@@ -310,17 +312,20 @@ class SizeTracker:
 
 
 if __name__ == "__main__":
-    # Demo usage
+    # Demo usage (uses example V2 template names)
     print("Size Tracker Demo\n")
     
     # Create tracker (use temp path for demo)
-    tracker = SizeTracker(save_path="/tmp/size_tracking_demo.json")
+    tracker = SizeTracker(
+        save_path="/tmp/size_tracking_demo.json",
+        size_categories=['720_169', '540', '720'],
+    )
     
-    # Set targets based on distribution
+    # Set targets based on distribution (example: equal shares)
     distribution = {
-        '540': 0.65,
-        '720_169': 0.35,
-        '720': 0.00,
+        '720_169': 0.40,
+        '540':     0.20,
+        '720':     0.40,
     }
     tracker.update_targets(distribution, total_target=10000)
     
