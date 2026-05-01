@@ -546,12 +546,6 @@ def main():
                     print(f"           {C_YELLOW}⚠  LR directory is empty{C_RESET}")
                 elif match_count == 0:
                     print(f"           {C_RED}⚠  No GT/LR filename matches!{C_RESET}")
-            print(f"{C_CYAN}{'━'*56}{C_RESET}")
-            print(f"{C_YELLOW}  ⏳  Starting in 10 seconds — press Ctrl+C to abort …{C_RESET}")
-            for _i in range(10, 0, -1):
-                print(f"      {_i} …", end='\r', flush=True)
-                _time.sleep(1)
-            print(f"  {C_GREEN}▶  Continuing …{C_RESET}                    ")
             print(f"{C_CYAN}{'━'*56}{C_RESET}\n")
 
             loader_config = {
@@ -953,6 +947,30 @@ def main():
                 log_path=_async_val_log_path,
             )
     # ── End async validation setup ────────────────────────────────────────────
+
+    # ── Final setup summary + countdown ──────────────────────────────────────
+    # All setup steps are complete.  Print a summary so the user can verify
+    # everything before the terminal UI takes over the screen.
+    print(f"\n{C_CYAN}{'═'*60}{C_RESET}")
+    print(f"{C_CYAN}  ✅  SETUP COMPLETE – ready to start training{C_RESET}")
+    print(f"{C_CYAN}{'─'*60}{C_RESET}")
+    print(f"  Training GPU : {device}")
+    print(f"  SR model     : {'loaded ✅' if _sync_sr_model is not None else 'not loaded ⚠ (torch.hub required)'}")
+    if async_val_proc is not None:
+        print(f"  Async val    : {C_GREEN}✅ running on GPU {async_val_gpu} (PID {async_val_proc.pid}){C_RESET}")
+    elif config.get('ASYNC_VAL_GPU') is not None:
+        print(f"  Async val    : {C_YELLOW}⚠ subprocess failed – using synchronous validation{C_RESET}")
+    else:
+        print(f"  Async val    : disabled (ASYNC_VAL_GPU=None)")
+    print(f"  Steps        : {start_step:,} → {config.get('MAX_STEPS', 150000):,}")
+    print(f"{C_CYAN}{'─'*60}{C_RESET}")
+    print(f"{C_YELLOW}  ⏳  Starting in 10 seconds — press Ctrl+C to abort …{C_RESET}")
+    for _i in range(10, 0, -1):
+        print(f"      {_i} …", end='\r', flush=True)
+        time.sleep(1)
+    print(f"  {C_GREEN}▶  Starting …{C_RESET}                    ")
+    print(f"{C_CYAN}{'═'*60}{C_RESET}\n")
+    # ─────────────────────────────────────────────────────────────────────────
 
     # Start training
     print("="*80)
