@@ -1311,6 +1311,7 @@ class VSRTrainer:
                 quality_lr_value=quality_metrics.get('lr_quality', 0.0) / 100.0 if quality_metrics else 0.0,
                 quality_bicubic_value=quality_metrics.get('bicubic_quality', 0.0) / 100.0 if quality_metrics else 0.0,
                 quality_sr_value=quality_metrics.get('sr_quality', 0.0) / 100.0 if quality_metrics else 0.0,
+                quality_sr_enabled=(self.last_metrics is not None and 'sr_quality' in self.last_metrics),
                 quality_ki_value=quality_metrics.get('ki_quality', 0.0) / 100.0 if quality_metrics else 0.0,
                 quality_improvement_value=quality_metrics.get('improvement', 0.0) / 100.0 if quality_metrics else 0.0,
                 quality_ki_to_gt_value=quality_metrics.get('ki_to_gt', 0.0) / 100.0 if quality_metrics else 0.0,
@@ -2060,6 +2061,7 @@ class VSRTrainer:
             quality_lr_value=metrics.get('lr_quality', 0.0),
             quality_bicubic_value=metrics.get('bicubic_quality', 0.0),
             quality_sr_value=metrics.get('sr_quality', 0.0),
+            quality_sr_enabled='sr_quality' in metrics,
             quality_ki_value=metrics.get('ki_quality', 0.0),
             # Per-sample average deltas
             quality_improvement_value=metrics.get('improvement', 0.0),

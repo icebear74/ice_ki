@@ -185,7 +185,7 @@ class VSRValidator:
                         cv2.putText(img, text, (10, 40), font, font_scale, color_fg, thickness - 1)
 
                     _label(lr_img,  f"LR {lr_qual*100:.1f}%",      (0, 255, 0))
-                    _label(bic_img, f"Bic {bic_qual*100:.1f}%",    (0, 200, 255))
+                    _label(bic_img, f"Bicubic {bic_qual*100:.1f}%", (0, 200, 255))
                     _label(ki_img,  f"VSR {ki_qual*100:.1f}%",     (0, 255, 255))
                     _label(gt_img,  "GT 100.0%",                    (255, 0, 0))
                     

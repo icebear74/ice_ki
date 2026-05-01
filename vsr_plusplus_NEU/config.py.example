@@ -199,9 +199,11 @@ USE_CHECKPOINTING = True
 # ASYNC VALIDATION (optional – requires a second GPU)
 # ============================================================================
 
-# GPU index for the async validation process.
 # Set to 'auto' (recommended) to automatically use the GPU not used for
-# training. Set to None to disable (synchronous validation only).
+# training. **Designed for dual-GPU systems** (e.g., two Tesla P100/P4).
+# On a single-GPU system 'auto' gracefully disables async validation
+# (the training process will print a warning and fall back to sync mode).
+# Set to None to disable (synchronous validation only).
 ASYNC_VAL_GPU = 'auto'  # 'auto' | None | explicit int (e.g. 1)
 
 # Optional SR reference model path.

@@ -112,6 +112,7 @@ class CompleteTrainingDataStore:
             'quality_lr_value': 0.0,
             'quality_bicubic_value': 0.0,
             'quality_sr_value': 0.0,
+            'quality_sr_enabled': False,   # True sobald ein SR-Modell aktiv ist
             'quality_ki_value': 0.0,
             'quality_improvement_value': 0.0,
             'quality_ki_to_gt_value': 0.0,
@@ -1852,7 +1853,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             document.getElementById('bicubicQuality').textContent = (data.quality_bicubic_value * 100).toFixed(1) + '%';
             // SR tile: show dash when no SR model is active (value === 0 and never updated)
             const srEl = document.getElementById('srQuality');
-            if (data.quality_sr_value > 0) {
+            if (data.quality_sr_enabled) {
                 srEl.textContent = (data.quality_sr_value * 100).toFixed(1) + '%';
             } else {
                 srEl.textContent = '–';

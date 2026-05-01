@@ -246,7 +246,7 @@ def _run_validation_on_device(model, val_loaders, loss_fn, device, global_step,
                     gt_img  = np.clip(gt[i].cpu().permute(1, 2, 0).numpy()             * 255, 0, 255).astype(np.uint8).copy()
 
                     _label(lr_img,  f"LR {lr_qual*100:.1f}%",      (0, 255, 0))
-                    _label(bic_img, f"Bic {bic_qual*100:.1f}%",    (0, 200, 255))
+                    _label(bic_img, f"Bicubic {bic_qual*100:.1f}%", (0, 200, 255))
                     _label(ki_img,  f"VSR {ki_qual*100:.1f}%",     (0, 255, 255))
                     _label(gt_img,  "GT 100.0%",                    (255, 0, 0))
 
