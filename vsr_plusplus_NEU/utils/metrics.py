@@ -68,20 +68,17 @@ def calculate_ssim(img1: torch.Tensor, img2: torch.Tensor) -> float:
 
 def quality_to_percent(psnr: float, ssim: float) -> float:
     """
-    Convert PSNR/SSIM to quality percentage (0-1)
-    
+    Convert SSIM to quality percentage (0-1).
+
+    SSIM is used directly because SSIM(GT, GT) = 1.0 by definition, giving a
+    physically correct 100 % upper bound without arbitrary normalisation.
+    The ``psnr`` argument is kept for API compatibility but is not used.
+
     Args:
-        psnr: PSNR value in dB
+        psnr: PSNR value in dB (unused, kept for API compatibility)
         ssim: SSIM value (0-1)
-        
+
     Returns:
-        Quality score (0-1)
+        Quality score (0-1), equal to clipped SSIM
     """
-    # Normalize PSNR to 0-1 (assume 20-50 dB range)
-    psnr_score = (psnr - 20) / 30
-    psnr_score = max(0, min(1, psnr_score))
-    
-    # Combine PSNR and SSIM (70% PSNR, 30% SSIM)
-    combined = 0.7 * psnr_score + 0.3 * ssim
-    
-    return max(0, min(1, combined))
+    return max(0.0, min(1.0, ssim))

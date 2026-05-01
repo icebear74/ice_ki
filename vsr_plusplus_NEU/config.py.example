@@ -196,6 +196,20 @@ USE_CHECKPOINTING = True
 
 
 # ============================================================================
+# ASYNC VALIDATION (optional – requires a second GPU)
+# ============================================================================
+
+# GPU index for the async validation process.
+# Set to 'auto' (recommended) to automatically use the GPU not used for
+# training. Set to None to disable (synchronous validation only).
+ASYNC_VAL_GPU = 'auto'  # 'auto' | None | explicit int (e.g. 1)
+
+# Optional SR reference model path.
+# See config.active.py for full documentation.
+SR_MODEL_PATH = None  # e.g. '/mnt/data/models/sr_baseline.pth'
+
+
+# ============================================================================
 # HELPER FUNCTION
 # ============================================================================
 
@@ -251,6 +265,10 @@ def get_config():
     # Add AMP setting (always include so training code can rely on its presence)
     config['USE_AMP'] = USE_AMP
     config['USE_CHECKPOINTING'] = USE_CHECKPOINTING
+    # Async validation GPU (None = synchronous mode, 'auto' = other GPU)
+    config['ASYNC_VAL_GPU'] = ASYNC_VAL_GPU
+    # Optional SR reference model path (None = disabled)
+    config['SR_MODEL_PATH'] = SR_MODEL_PATH
     
     return config
 

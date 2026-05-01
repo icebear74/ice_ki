@@ -212,8 +212,32 @@ USE_CHECKPOINTING = True
 #   - Manual validation (key 'v' or WebUI button) still runs synchronously on
 #     demand and is not affected by this setting.
 #
+# Set to 'auto' (recommended for dual-GPU systems) to let the system
+# automatically pick the GPU that is NOT used for training:
+#   - If training runs on GPU 0  → validation uses GPU 1 (and vice versa).
+#   - If only one GPU is present, 'auto' disables async validation gracefully.
+#
 # Set to None to disable async validation (default synchronous behaviour):
-ASYNC_VAL_GPU = None   # e.g. set to 1 for Tesla P4 on a dual-GPU machine
+ASYNC_VAL_GPU = 'auto'  # 'auto' | None | explicit int (e.g. 1)
+
+
+# ============================================================================
+# OPTIONAL SR REFERENCE MODEL
+# ============================================================================
+
+# Path to a pre-trained BasicSRModel checkpoint (.pth) for single-image SR.
+# When set, the async validator loads this model alongside the VSR model and
+# produces an additional "SR" reference in every TensorBoard image comparison
+# panel (LR | Bicubic | SR | VSR | GT).  Quality metrics sr_quality,
+# sr_psnr, sr_ssim are added to every validation result.
+#
+# The file must be a torch.save() of either:
+#   a) a plain state_dict, or
+#   b) a dict with key 'model_state_dict'.
+# Architecture: BasicSRModel(scale=3, n_feats=64, n_mid=32) — see core/sr_model.py.
+#
+# Leave as None to run without SR comparison (4-panel instead of 5-panel):
+SR_MODEL_PATH = None  # e.g. '/mnt/data/models/sr_baseline.pth'
 
 
 # ============================================================================
@@ -275,8 +299,10 @@ def get_config():
     config['USE_AMP'] = USE_AMP
     config['USE_CHECKPOINTING'] = USE_CHECKPOINTING
 
-    # Async validation GPU (None = synchronous mode)
+    # Async validation GPU (None = synchronous mode, 'auto' = other GPU)
     config['ASYNC_VAL_GPU'] = ASYNC_VAL_GPU
+    # Optional SR reference model path (None = disabled)
+    config['SR_MODEL_PATH'] = SR_MODEL_PATH
     
     return config
 

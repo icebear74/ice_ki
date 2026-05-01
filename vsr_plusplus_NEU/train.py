@@ -836,9 +836,24 @@ def main():
     
     # ── Async validation setup ────────────────────────────────────────────────
     # Set ASYNC_VAL_GPU in your config.py to the GPU index that should run
-    # validation (e.g. ASYNC_VAL_GPU = 1).  Leave unset (or set to None) to
+    # validation (e.g. ASYNC_VAL_GPU = 1).  Use 'auto' to automatically pick
+    # the GPU that is NOT used for training.  Leave unset (or set to None) to
     # use the default synchronous validation that runs inline on the training GPU.
     async_val_gpu = config.get('ASYNC_VAL_GPU', None)
+
+    # Resolve 'auto': pick the GPU that is NOT used by training
+    if async_val_gpu == 'auto':
+        training_gpu_idx = device.index if device.type == 'cuda' else None
+        gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        if gpu_count >= 2 and training_gpu_idx is not None:
+            async_val_gpu = 1 - training_gpu_idx  # works for 2-GPU setups
+            print(f"{C_GREEN}✓ ASYNC_VAL_GPU='auto' → training GPU {training_gpu_idx}, "
+                  f"validation GPU {async_val_gpu}{C_RESET}")
+        else:
+            print(f"{C_YELLOW}⚠ ASYNC_VAL_GPU='auto': only {gpu_count} GPU(s) found – "
+                  f"disabling async validation (synchronous mode){C_RESET}")
+            async_val_gpu = None
+
     async_val_proc = None
 
     if async_val_gpu is not None:
@@ -855,6 +870,8 @@ def main():
             'MS_WEIGHT':         config.get('MS_WEIGHT', 0.20),
             'GRAD_WEIGHT':       config.get('GRAD_WEIGHT', 0.20),
             'PERCEPTUAL_WEIGHT': config.get('PERCEPTUAL_WEIGHT', 0.0),
+            # SR reference model (None = disabled)
+            'SR_MODEL_PATH':     config.get('SR_MODEL_PATH', None),
         }
         try:
             with open(config_json_path, 'w') as f:
