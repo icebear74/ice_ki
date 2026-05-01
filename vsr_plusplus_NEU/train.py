@@ -171,7 +171,31 @@ def main():
     """Main training entry point"""
     
     # Load configuration from config.py
+    # ► ALWAYS config.py — NO fallback to config.active.py (see import block above)
     config = cfg.get_config()
+
+    # ── Stale-config safety net ───────────────────────────────────────────────
+    # If the user's local config.py was copied from an older version of
+    # config.active.py its get_config() may not include newer parameters
+    # (e.g. ASYNC_VAL_GPU, USE_SR_MODEL).  Rather than silently using the
+    # default (None / False), we detect missing keys and inject them from the
+    # module-level attributes that the user DID set in their config.py.
+    # A prominent warning is printed so the user knows to re-copy.
+    _REQUIRED_KEYS = ['ASYNC_VAL_GPU', 'USE_SR_MODEL', 'SR_MODEL_PATH']
+    _stale_keys = [k for k in _REQUIRED_KEYS if k not in config and hasattr(cfg, k)]
+    if _stale_keys:
+        print(f"\n{C_YELLOW}{'═'*60}{C_RESET}")
+        print(f"{C_YELLOW}  ⚠  STALE config.py DETECTED{C_RESET}")
+        print(f"{C_YELLOW}{'─'*60}{C_RESET}")
+        print(f"  The following keys are set in config.py but missing from")
+        print(f"  get_config() — your config.py needs to be updated:")
+        for k in _stale_keys:
+            injected = getattr(cfg, k)
+            config[k] = injected
+            print(f"    {k} = {injected!r}  ← injected from module attribute")
+        print(f"{C_YELLOW}  Fix: cp vsr_plusplus_NEU/config.active.py config.py{C_RESET}")
+        print(f"{C_YELLOW}{'═'*60}{C_RESET}\n")
+    # ─────────────────────────────────────────────────────────────────────────
 
     # Resolve batch config: prefer ADAPTIVE_BATCH_CONFIG from config.py over the
     # module-level default so users can change batch/accum in config.py and have
@@ -853,6 +877,7 @@ def main():
     # the GPU that is NOT used for training.  Leave unset (or set to None) to
     # use the default synchronous validation that runs inline on the training GPU.
     async_val_gpu = config.get('ASYNC_VAL_GPU', None)
+    _async_val_cfg_value = async_val_gpu  # keep original config value for summary display
 
     # Resolve 'auto': pick the GPU that is NOT used by training
     if async_val_gpu == 'auto':
@@ -871,6 +896,7 @@ def main():
             async_val_gpu = None
 
     async_val_proc = None
+    _async_val_disable_reason = None  # set below when async val cannot start
 
     if async_val_gpu is not None:
         # Determine which size keys have validation data
@@ -939,12 +965,14 @@ def main():
                 print(f"{C_YELLOW}⚠ Async validator crashed immediately (exit code {_exit_code}){C_RESET}")
                 print(f"{C_YELLOW}  Check {_async_val_log_path} for details{C_RESET}")
                 print(f"{C_YELLOW}  Falling back to synchronous validation.{C_RESET}\n")
+                _async_val_disable_reason = f"subprocess crashed (exit {_exit_code}) – see async_val.log"
                 async_val_proc = None
             else:
                 print(f"{C_GREEN}✓ Async validator running\n{C_RESET}")
         except Exception as e:
             print(f"{C_YELLOW}⚠ Failed to start async validator: {e}{C_RESET}")
             print(f"{C_YELLOW}  Falling back to synchronous validation.{C_RESET}\n")
+            _async_val_disable_reason = f"subprocess failed to start: {e}"
             async_val_proc = None
 
         if async_val_proc is not None:
@@ -961,19 +989,72 @@ def main():
     # ── Final setup summary + countdown ──────────────────────────────────────
     # All setup steps are complete.  Print a summary so the user can verify
     # everything before the terminal UI takes over the screen.
+    # The same summary is written to training_startup.log for post-hoc debugging.
+
+    # Build async val status line
+    if async_val_proc is not None:
+        _async_status = f"✅ running on GPU {async_val_gpu} (PID {async_val_proc.pid})"
+    elif _async_val_disable_reason:
+        _async_status = f"⚠ {_async_val_disable_reason}"
+    elif _async_val_cfg_value == 'auto':
+        gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        _async_status = f"disabled (auto: only {gpu_count} GPU found – synchronous mode)"
+    elif _async_val_cfg_value is None:
+        _async_status = "disabled (ASYNC_VAL_GPU=None in config.py)"
+    else:
+        _async_status = f"disabled (config value: {_async_val_cfg_value!r})"
+
+    # Build SR model status line
+    # NOTE: torch.hub is built into PyTorch — no separate pip install needed.
+    #       It downloads EDSR from GitHub on first use (~550 MB); internet required.
+    if _sync_sr_model is not None:
+        _sr_status = "loaded ✅"
+    elif config.get('USE_SR_MODEL', False):
+        _sr_status = "⚠ failed to load (needs internet; torch.hub downloads EDSR from GitHub)"
+    else:
+        _sr_status = "disabled (USE_SR_MODEL=False in config.py)"
+
+    _summary_lines = [
+        f"{'═'*60}",
+        f"  ✅  SETUP COMPLETE – ready to start training",
+        f"{'─'*60}",
+        f"  Training GPU : {device}",
+        f"  SR model     : {_sr_status}",
+        f"  Async val    : {_async_status}",
+        f"  Steps        : {start_step:,} → {config.get('MAX_STEPS', 150000):,}",
+        f"  Config file  : config.py (ASYNC_VAL_GPU={_async_val_cfg_value!r}, USE_SR_MODEL={config.get('USE_SR_MODEL', False)!r})",
+        f"{'─'*60}",
+    ]
+
+    # Print to console (with ANSI colours)
     print(f"\n{C_CYAN}{'═'*60}{C_RESET}")
     print(f"{C_CYAN}  ✅  SETUP COMPLETE – ready to start training{C_RESET}")
     print(f"{C_CYAN}{'─'*60}{C_RESET}")
     print(f"  Training GPU : {device}")
-    print(f"  SR model     : {'loaded ✅' if _sync_sr_model is not None else 'not loaded ⚠ (torch.hub required)'}")
+    print(f"  SR model     : {_sr_status}")
     if async_val_proc is not None:
-        print(f"  Async val    : {C_GREEN}✅ running on GPU {async_val_gpu} (PID {async_val_proc.pid}){C_RESET}")
-    elif config.get('ASYNC_VAL_GPU') is not None:
-        print(f"  Async val    : {C_YELLOW}⚠ subprocess failed – using synchronous validation{C_RESET}")
+        print(f"  Async val    : {C_GREEN}{_async_status}{C_RESET}")
+    elif _async_val_disable_reason or _async_val_cfg_value is not None:
+        print(f"  Async val    : {C_YELLOW}{_async_status}{C_RESET}")
     else:
-        print(f"  Async val    : disabled (ASYNC_VAL_GPU=None)")
+        print(f"  Async val    : {_async_status}")
     print(f"  Steps        : {start_step:,} → {config.get('MAX_STEPS', 150000):,}")
+    print(f"  Config file  : config.py  (ASYNC_VAL_GPU={_async_val_cfg_value!r}, USE_SR_MODEL={config.get('USE_SR_MODEL', False)!r})")
     print(f"{C_CYAN}{'─'*60}{C_RESET}")
+
+    # Write the same summary (no ANSI) to training_startup.log for debugging
+    import datetime as _dt
+    _startup_log_path = os.path.join(DATASET_SPECIFIC_ROOT, 'training_startup.log')
+    try:
+        with open(_startup_log_path, 'a', encoding='utf-8') as _slg:
+            _slg.write(f"\n[{_dt.datetime.now().isoformat(timespec='seconds')}] Training startup\n")
+            for _line in _summary_lines:
+                _slg.write(_line + '\n')
+            _slg.flush()
+        print(f"  Startup log  : {_startup_log_path}")
+    except Exception as _log_err:
+        print(f"{C_YELLOW}  ⚠ Could not write startup log: {_log_err}{C_RESET}")
+
     print(f"{C_YELLOW}  ⏳  Starting in 10 seconds — press Ctrl+C to abort …{C_RESET}")
     for _i in range(10, 0, -1):
         print(f"      {_i} …", end='\r', flush=True)
