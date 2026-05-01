@@ -569,24 +569,26 @@ class VSRTrainer:
                             display_fps[sk] = display_fps.get(sk, 0) + len(item['files'])
                         current_window_batches = []  # ready for next window
 
-                # Always show the CURRENT iteration's files: merge the committed
-                # display_files with any in-progress batches from the current
-                # (not-yet-complete) accumulation window so that every forward
-                # pass appears in the WebUI immediately, regardless of batch size
-                # or accumulation depth.
-                live_files = display_files + [
-                    f for item in current_window_batches for f in item['files']
-                ]
-                # Build per-size counts in a single pass (O(n)) instead of
-                # re-scanning the list once per size key (O(n·m)).
+                # Show only the in-progress window files so the count is always
+                # ≤ current_accum_steps.  Fall back to the last committed
+                # display_files only when current_window_batches is empty (i.e.
+                # immediately after an optimizer step) so the display is never
+                # blank between the step and the next forward pass.
                 live_fps = {sk: 0 for sk in _active_keys}
-                for f in display_files:
-                    sk_prefix = f.split('/', 1)[0]
-                    if sk_prefix in live_fps:
-                        live_fps[sk_prefix] += 1
-                for item in current_window_batches:
-                    sk_item = item['size_key']
-                    live_fps[sk_item] = live_fps.get(sk_item, 0) + len(item['files'])
+                if current_window_batches:
+                    live_files = [
+                        f for item in current_window_batches for f in item['files']
+                    ]
+                    for item in current_window_batches:
+                        sk_item = item['size_key']
+                        live_fps[sk_item] = live_fps.get(sk_item, 0) + len(item['files'])
+                else:
+                    # Fallback: last complete window (never blank after optimizer step)
+                    live_files = display_files
+                    for f in display_files:
+                        sk_prefix = f.split('/', 1)[0]
+                        if sk_prefix in live_fps:
+                            live_fps[sk_prefix] += 1
 
                 # Update web_monitor with current batch info.
                 # live_files always reflects ALL files of the current iteration
