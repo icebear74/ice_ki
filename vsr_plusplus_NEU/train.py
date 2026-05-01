@@ -42,20 +42,22 @@ from vsr_plusplus_NEU.systems.run_lock import save_run_lock, load_and_verify_run
 #  CONFIG LOADING — ALWAYS FROM config.py (local, gitignored)
 # ══════════════════════════════════════════════════════════════════════════════
 #
-#  train.py ALWAYS loads the file named  config.py  from the Python path.
-#  It NEVER loads config.active.py directly — that file is only a versioned
-#  template/reference kept in the repository.
+#  ► The ONLY config file that is ever loaded at runtime is  config.py.
+#  ► There is NO fallback to config.active.py — if config.py is missing,
+#    Python raises an ImportError immediately.  This is intentional.
+#  ► config.active.py is a VERSIONED TEMPLATE stored in git.  It is NEVER
+#    imported or read by any part of the training code.
 #
-#  If train.py shows wrong values (e.g. ASYNC_VAL_GPU=None or USE_SR_MODEL
-#  not loading), the cause is almost always a stale local config.py that is
-#  missing new parameters.  Fix:
-#
+#  Typical cause of wrong/missing settings (e.g. ASYNC_VAL_GPU=None,
+#  USE_SR_MODEL not taking effect):
+#    → Your local config.py is stale and missing new parameters.
+#  Fix:
 #      cp vsr_plusplus_NEU/config.active.py config.py
 #      # then re-apply your local edits (DATA_ROOT, GPU index, …)
 #
 #  config.py is listed in .gitignore and must NEVER be committed.
 # ══════════════════════════════════════════════════════════════════════════════
-import config as cfg
+import config as cfg  # ← ALWAYS config.py — NO fallback to config.active.py
 
 # ANSI colors
 C_GREEN = "\033[92m"
