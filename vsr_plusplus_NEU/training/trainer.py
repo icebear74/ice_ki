@@ -301,17 +301,26 @@ class VSRTrainer:
 
             # Combine metrics by averaging
             combined_metrics = {
-                'val_loss': sum(m['val_loss'] for _, m in all_metrics) / len(all_metrics),
-                'lr_quality': sum(m['lr_quality'] for _, m in all_metrics) / len(all_metrics),
-                'ki_quality': sum(m['ki_quality'] for _, m in all_metrics) / len(all_metrics),
-                'improvement': sum(m['improvement'] for _, m in all_metrics) / len(all_metrics),
-                'lr_psnr': sum(m['lr_psnr'] for _, m in all_metrics) / len(all_metrics),
-                'lr_ssim': sum(m['lr_ssim'] for _, m in all_metrics) / len(all_metrics),
-                'ki_psnr': sum(m['ki_psnr'] for _, m in all_metrics) / len(all_metrics),
-                'ki_ssim': sum(m['ki_ssim'] for _, m in all_metrics) / len(all_metrics),
-                'ki_to_gt': sum(m.get('ki_to_gt', 0) for _, m in all_metrics) / len(all_metrics),
-                'lr_to_gt': sum(m.get('lr_to_gt', 0) for _, m in all_metrics) / len(all_metrics),
+                'val_loss':       sum(m['val_loss'] for _, m in all_metrics) / len(all_metrics),
+                'lr_quality':     sum(m['lr_quality'] for _, m in all_metrics) / len(all_metrics),
+                'bicubic_quality': sum(m.get('bicubic_quality', 0) for _, m in all_metrics) / len(all_metrics),
+                'ki_quality':     sum(m['ki_quality'] for _, m in all_metrics) / len(all_metrics),
+                'improvement':    sum(m['improvement'] for _, m in all_metrics) / len(all_metrics),
+                'lr_psnr':        sum(m['lr_psnr'] for _, m in all_metrics) / len(all_metrics),
+                'lr_ssim':        sum(m['lr_ssim'] for _, m in all_metrics) / len(all_metrics),
+                'bicubic_psnr':   sum(m.get('bicubic_psnr', 0) for _, m in all_metrics) / len(all_metrics),
+                'bicubic_ssim':   sum(m.get('bicubic_ssim', 0) for _, m in all_metrics) / len(all_metrics),
+                'ki_psnr':        sum(m['ki_psnr'] for _, m in all_metrics) / len(all_metrics),
+                'ki_ssim':        sum(m['ki_ssim'] for _, m in all_metrics) / len(all_metrics),
+                'ki_to_gt':       sum(m.get('ki_to_gt', 0) for _, m in all_metrics) / len(all_metrics),
+                'lr_to_gt':       sum(m.get('lr_to_gt', 0) for _, m in all_metrics) / len(all_metrics),
             }
+
+            # Include sr_quality when available (requires USE_SR_MODEL=True)
+            if any('sr_quality' in m for _, m in all_metrics):
+                combined_metrics['sr_quality'] = (
+                    sum(m.get('sr_quality', 0) for _, m in all_metrics) / len(all_metrics)
+                )
 
             # Include all labeled images from all sizes (list of (tag, tensor) tuples)
             if all_labeled_images:

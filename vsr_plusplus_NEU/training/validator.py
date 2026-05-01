@@ -26,11 +26,12 @@ class VSRValidator:
         device: Device to run on
     """
     
-    def __init__(self, model, val_loader, loss_fn, device='cuda'):
+    def __init__(self, model, val_loader, loss_fn, device='cuda', sr_model=None):
         self.model = model
         self.val_loader = val_loader
         self.loss_fn = loss_fn
         self.device = device
+        self.sr_model = sr_model  # Optional EDSR SR reference model (or None)
     
     def validate(self, global_step, progress_callback=None):
         """
@@ -58,6 +59,7 @@ class VSRValidator:
                 'bicubic_ssim': float,
                 'ki_psnr': float,
                 'ki_ssim': float
+                # 'sr_quality', 'sr_psnr', 'sr_ssim' only present when sr_model is set
             }
         """
         self.model.eval()
@@ -67,12 +69,15 @@ class VSRValidator:
         total_lr_ssim = 0.0
         total_bicubic_psnr = 0.0
         total_bicubic_ssim = 0.0
+        total_sr_psnr = 0.0
+        total_sr_ssim = 0.0
         total_ki_psnr = 0.0
         total_ki_ssim = 0.0
         total_improvement = 0.0   # Sum of per-image (KI_quality - LR_quality)
         total_ki_to_gt = 0.0      # Sum of per-image (KI_quality - GT_quality)
         total_lr_to_gt = 0.0      # Sum of per-image (LR_quality - GT_quality)
         
+        use_sr = self.sr_model is not None
         num_samples = 0
         
         # For image logging - process images immediately to save memory
@@ -129,6 +134,8 @@ class VSRValidator:
                 # Bicubic upscale (clean baseline — always computed)
                 bicubic_upscaled = F.interpolate(lr_center, scale_factor=3, mode='bicubic', align_corners=False)
                 bicubic_upscaled = torch.clamp(bicubic_upscaled, 0.0, 1.0)
+                # SR model receives same center frame (single-frame, no temporal context)
+                sr_output = self.sr_model(lr_center) if use_sr else None
                 del lr_center  # Free immediately after use
                 
                 # Compute metrics for each sample in batch
@@ -151,19 +158,28 @@ class VSRValidator:
                     total_bicubic_ssim += bic_ssim
                     total_ki_psnr      += ki_psnr
                     total_ki_ssim      += ki_ssim
+
+                    # SR metrics (optional)
+                    if use_sr and sr_output is not None:
+                        sr_psnr = calculate_psnr(sr_output[i], gt[i])
+                        sr_ssim = calculate_ssim(sr_output[i], gt[i])
+                        total_sr_psnr += sr_psnr
+                        total_sr_ssim += sr_ssim
                     
                     # Quality scores (SSIM-based, 0-1)
-                    lr_qual      = quality_to_percent(lr_psnr,  lr_ssim)
-                    bic_qual     = quality_to_percent(bic_psnr, bic_ssim)
-                    ki_qual      = quality_to_percent(ki_psnr,  ki_ssim)
-                    gt_qual      = 1.0  # GT is always 100% quality
+                    lr_qual  = quality_to_percent(lr_psnr,  lr_ssim)
+                    bic_qual = quality_to_percent(bic_psnr, bic_ssim)
+                    ki_qual  = quality_to_percent(ki_psnr,  ki_ssim)
+                    gt_qual  = 1.0  # GT is always 100% quality
                     
                     # Per-image deltas (summed, divided later to produce averages)
                     total_improvement += (ki_qual - lr_qual)
                     total_ki_to_gt    += (ki_qual - gt_qual)
                     total_lr_to_gt    += (lr_qual - gt_qual)
                     
-                    # ── Build 4-panel comparison: LR | Bicubic | VSR | GT ──
+                    # ── Build comparison panel ───────────────────────────────
+                    # 4-panel: LR | Bicubic | VSR | GT
+                    # 5-panel: LR | Bicubic | SR | VSR | GT  (when sr_model loaded)
                     # GPU MEMORY OPTIMIZATION: Move to CPU IMMEDIATELY after metrics computed
                     lr_img      = lr_upscaled[i].cpu().permute(1, 2, 0).numpy()
                     bic_img     = bicubic_upscaled[i].cpu().permute(1, 2, 0).numpy()
@@ -192,10 +208,25 @@ class VSRValidator:
                     # Black separators between panels
                     border_width = 3
                     border_color = (0, 0, 0)
-                    lr_b  = cv2.copyMakeBorder(lr_img,  0, 0, 0, border_width, cv2.BORDER_CONSTANT, value=border_color)
-                    bic_b = cv2.copyMakeBorder(bic_img, 0, 0, 0, border_width, cv2.BORDER_CONSTANT, value=border_color)
-                    ki_b  = cv2.copyMakeBorder(ki_img,  0, 0, 0, border_width, cv2.BORDER_CONSTANT, value=border_color)
-                    combined = np.concatenate([lr_b, bic_b, ki_b, gt_img], axis=1)
+
+                    if use_sr and sr_output is not None:
+                        sr_img = sr_output[i].cpu().permute(1, 2, 0).numpy()
+                        sr_img = np.clip(sr_img * 255, 0, 255).astype(np.uint8).copy()
+                        sr_qual = quality_to_percent(
+                            calculate_psnr(sr_output[i], gt[i]),
+                            calculate_ssim(sr_output[i], gt[i]),
+                        )
+                        _label(sr_img, f"SR {sr_qual*100:.1f}%", (255, 165, 0))
+                        lr_b  = cv2.copyMakeBorder(lr_img,  0, 0, 0, border_width, cv2.BORDER_CONSTANT, value=border_color)
+                        bic_b = cv2.copyMakeBorder(bic_img, 0, 0, 0, border_width, cv2.BORDER_CONSTANT, value=border_color)
+                        sr_b  = cv2.copyMakeBorder(sr_img,  0, 0, 0, border_width, cv2.BORDER_CONSTANT, value=border_color)
+                        ki_b  = cv2.copyMakeBorder(ki_img,  0, 0, 0, border_width, cv2.BORDER_CONSTANT, value=border_color)
+                        combined = np.concatenate([lr_b, bic_b, sr_b, ki_b, gt_img], axis=1)
+                    else:
+                        lr_b  = cv2.copyMakeBorder(lr_img,  0, 0, 0, border_width, cv2.BORDER_CONSTANT, value=border_color)
+                        bic_b = cv2.copyMakeBorder(bic_img, 0, 0, 0, border_width, cv2.BORDER_CONSTANT, value=border_color)
+                        ki_b  = cv2.copyMakeBorder(ki_img,  0, 0, 0, border_width, cv2.BORDER_CONSTANT, value=border_color)
+                        combined = np.concatenate([lr_b, bic_b, ki_b, gt_img], axis=1)
                     
                     combined_tensor = torch.from_numpy(combined).permute(2, 0, 1).float() / 255.0
                     combined_tensor = combined_tensor.contiguous()
@@ -205,7 +236,10 @@ class VSRValidator:
                     labeled_images.append((name, combined_tensor))
                 
                 # GPU MEMORY CRITICAL: Free GPU tensors IMMEDIATELY after batch processing
-                del lr_stack, gt, ki_output, lr_upscaled, bicubic_upscaled
+                to_del = [lr_stack, gt, ki_output, lr_upscaled, bicubic_upscaled]
+                if sr_output is not None:
+                    to_del.append(sr_output)
+                del to_del
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()  # Force GPU to release memory NOW
 
@@ -244,20 +278,27 @@ class VSRValidator:
         ki_to_gt    = total_ki_to_gt    / n
         lr_to_gt    = total_lr_to_gt    / n
         
-        return {
-            'val_loss':       avg_loss,
-            'lr_quality':     lr_quality,
+        result = {
+            'val_loss':        avg_loss,
+            'lr_quality':      lr_quality,
             'bicubic_quality': bicubic_quality,
-            'ki_quality':     ki_quality,
-            'improvement':    improvement,
-            'ki_to_gt':       ki_to_gt,
-            'lr_to_gt':       lr_to_gt,
-            'lr_psnr':        avg_lr_psnr,
-            'lr_ssim':        avg_lr_ssim,
-            'bicubic_psnr':   avg_bicubic_psnr,
-            'bicubic_ssim':   avg_bicubic_ssim,
-            'ki_psnr':        avg_ki_psnr,
-            'ki_ssim':        avg_ki_ssim,
-            'labeled_images': labeled_images  # Already labeled and ready for TensorBoard
+            'ki_quality':      ki_quality,
+            'improvement':     improvement,
+            'ki_to_gt':        ki_to_gt,
+            'lr_to_gt':        lr_to_gt,
+            'lr_psnr':         avg_lr_psnr,
+            'lr_ssim':         avg_lr_ssim,
+            'bicubic_psnr':    avg_bicubic_psnr,
+            'bicubic_ssim':    avg_bicubic_ssim,
+            'ki_psnr':         avg_ki_psnr,
+            'ki_ssim':         avg_ki_ssim,
+            'labeled_images':  labeled_images,
         }
+        if use_sr:
+            avg_sr_psnr  = total_sr_psnr / n
+            avg_sr_ssim  = total_sr_ssim / n
+            result['sr_quality'] = quality_to_percent(avg_sr_psnr, avg_sr_ssim)
+            result['sr_psnr']    = avg_sr_psnr
+            result['sr_ssim']    = avg_sr_ssim
+        return result
 

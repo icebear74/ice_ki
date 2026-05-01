@@ -770,7 +770,16 @@ def main():
     tb_logger = TensorBoardLogger(log_dir)
     
     # Create validator
-    validator = VSRValidator(model, val_loader, loss_fn, device=device)
+    # Optionally load EDSR SR model for sync validation when USE_SR_MODEL=True
+    _sync_sr_model = None
+    if config.get('USE_SR_MODEL', False):
+        from vsr_plusplus_NEU.core.sr_model import load_sr_model
+        print(f"{C_CYAN}USE_SR_MODEL=True – loading EDSR SR model for sync validation...{C_RESET}")
+        _sync_sr_model = load_sr_model(device)  # returns None on failure (error already printed)
+        if _sync_sr_model is None:
+            print(f"{C_YELLOW}⚠ SR model could not be loaded – validation will proceed without it{C_RESET}")
+
+    validator = VSRValidator(model, val_loader, loss_fn, device=device, sr_model=_sync_sr_model)
     
     # Load checkpoint if resuming
     if start_step > 0 and selected_checkpoint_path:
@@ -843,8 +852,11 @@ def main():
 
     # Resolve 'auto': pick the GPU that is NOT used by training
     if async_val_gpu == 'auto':
-        training_gpu_idx = device.index if device.type == 'cuda' else None
+        # device.index is None for torch.device('cuda') without explicit index;
+        # treat it as index 0 (PyTorch default) so the math below is always valid.
+        training_gpu_idx = device.index if (device.type == 'cuda' and device.index is not None) else (0 if device.type == 'cuda' else None)
         gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        print(f"{C_CYAN}ASYNC_VAL_GPU='auto': {gpu_count} GPU(s) found, training on GPU {training_gpu_idx}{C_RESET}")
         if gpu_count >= 2 and training_gpu_idx is not None:
             async_val_gpu = 1 - training_gpu_idx  # works for 2-GPU setups
             print(f"{C_GREEN}✓ ASYNC_VAL_GPU='auto' → training GPU {training_gpu_idx}, "
@@ -912,7 +924,20 @@ def main():
             )
             # Close our copy of the file handle – the child process has its own.
             _async_val_log_fh.close()
-            print(f"{C_GREEN}✓ Async validator PID {async_val_proc.pid}{C_RESET}\n")
+            print(f"{C_GREEN}✓ Async validator PID {async_val_proc.pid}{C_RESET}")
+            print(f"  Log: {_async_val_log_path}")
+            # Brief grace period: if the process exits immediately it means the
+            # subprocess crashed on startup (e.g. import error, GPU unavailable).
+            import time as _time
+            _time.sleep(2.0)
+            if async_val_proc.poll() is not None:
+                _exit_code = async_val_proc.returncode
+                print(f"{C_YELLOW}⚠ Async validator crashed immediately (exit code {_exit_code}){C_RESET}")
+                print(f"{C_YELLOW}  Check {_async_val_log_path} for details{C_RESET}")
+                print(f"{C_YELLOW}  Falling back to synchronous validation.{C_RESET}\n")
+                async_val_proc = None
+            else:
+                print(f"{C_GREEN}✓ Async validator running\n{C_RESET}")
         except Exception as e:
             print(f"{C_YELLOW}⚠ Failed to start async validator: {e}{C_RESET}")
             print(f"{C_YELLOW}  Falling back to synchronous validation.{C_RESET}\n")
