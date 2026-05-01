@@ -222,22 +222,23 @@ ASYNC_VAL_GPU = 'auto'  # 'auto' | None | explicit int (e.g. 1)
 
 
 # ============================================================================
-# OPTIONAL SR REFERENCE MODEL
+# OPTIONAL SR REFERENCE MODEL (EDSR – vortrainiert, automatischer Download)
 # ============================================================================
 
-# Path to a pre-trained BasicSRModel checkpoint (.pth) for single-image SR.
-# When set, the async validator loads this model alongside the VSR model and
-# produces an additional "SR" reference in every TensorBoard image comparison
-# panel (LR | Bicubic | SR | VSR | GT).  Quality metrics sr_quality,
-# sr_psnr, sr_ssim are added to every validation result.
+# Aktiviert das EDSR x3 Referenz-Modell für den Validierungsvergleich.
+# Wenn True, lädt der async-Validator automatisch ein vortrainiertes EDSR x3
+# Modell via torch.hub (sanghyun-son/EDSR-PyTorch) auf die Validierungs-GPU.
+# Das Modell wird einmalig heruntergeladen und danach aus dem torch.hub-Cache
+# verwendet (~5 MB, kein manuelles Setup nötig).
 #
-# The file must be a torch.save() of either:
-#   a) a plain state_dict, or
-#   b) a dict with key 'model_state_dict'.
-# Architecture: BasicSRModel(scale=3, n_feats=64, n_mid=32) — see core/sr_model.py.
+# Auswirkung:
+#   - TensorBoard zeigt 5-Panel-Vergleich: LR | Bicubic | SR | VSR | GT
+#   - Zusätzliche Metriken: sr_quality, sr_psnr, sr_ssim in Ergebnis-JSON
+#   - SR-Kachel im WebGUI zeigt den SSIM-basierten Qualitätswert
 #
-# Leave as None to run without SR comparison (4-panel instead of 5-panel):
-SR_MODEL_PATH = None  # e.g. '/mnt/data/models/sr_baseline.pth'
+# Voraussetzungen: Internetzugang beim ersten Start (danach aus Cache geladen)
+# Speicher: ~550 MB VRAM für EDSR x3 auf der Validierungs-GPU
+USE_SR_MODEL = False  # True = EDSR aktivieren, False = ohne SR (4-Panel)
 
 
 # ============================================================================

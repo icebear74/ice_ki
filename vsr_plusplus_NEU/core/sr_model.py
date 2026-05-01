@@ -1,92 +1,68 @@
 """
-BasicSRModel - leichtgewichtiges Single-Image Super-Resolution Modell (SRCNN-Stil)
+SR Reference Model - EDSR (Enhanced Deep Super-Resolution) via torch.hub
 
-Aufbau:
-  1. Bicubic-Upsample des LR-Eingangsbildes auf Zielgröße (3×)
-  2. Drei Conv-Schichten mit ReLU zur Verfeinerung der Struktur
+Lädt automatisch ein vortrainiertes EDSR x3 Modell aus dem offiziellen
+Repository (sanghyun-son/EDSR-PyTorch) und stellt es als PyTorch-Modul
+bereit, das [0,1]-normierte Tensoren erwartet und zurückgibt.
 
-Das Modell verwendet nur das Mittelbild (Frame-Index 3) aus dem 7-Frame-Stack,
-da es keinerlei Temporal-Information verarbeitet – so ist der Vergleich
-mit dem VSR-Modell fair.
-
-Verwendung:
-    model = BasicSRModel()
-    # Für gespeicherte Gewichte:
-    model = BasicSRModel.from_checkpoint('/pfad/zur/datei.pth', device)
+Verwendung (intern im async_validator):
+    from vsr_plusplus_NEU.core.sr_model import load_sr_model
+    sr_model = load_sr_model(device)  # None wenn Download fehlschlägt
 """
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
-class BasicSRModel(nn.Module):
+class _EDSRWrapper(nn.Module):
     """
-    SRCNN-inspiriertes SR-Modell für den Vergleich mit dem VSR-Modell.
+    Schlanker Wrapper um das torch.hub-EDSR-Modell.
 
-    Architektur:
-      Bicubic-Upsample → Conv(3,64,9) → ReLU → Conv(64,32,1) → ReLU → Conv(32,3,5)
-
-    Args:
-        scale:    Upscale-Faktor (Standard: 3, passend zum VSR-Modell)
-        n_mid:    Anzahl mittlere Feature-Maps der zweiten Conv-Schicht
-        n_feats:  Anzahl Feature-Maps der ersten Conv-Schicht
+    Passt die Normierung an:
+      - Eingang : [B, C, H, W]  im Bereich [0, 1]
+      - EDSR    : erwartet und liefert Pixelwerte im Bereich [0, 255]
+      - Ausgang : [B, C, H*scale, W*scale]  im Bereich [0, 1]
     """
 
-    def __init__(self, scale: int = 3, n_feats: int = 64, n_mid: int = 32):
+    def __init__(self, hub_model):
         super().__init__()
-        self.scale = scale
-        self.conv1 = nn.Conv2d(3, n_feats, kernel_size=9, padding=4)
-        self.conv2 = nn.Conv2d(n_feats, n_mid,  kernel_size=1, padding=0)
-        self.conv3 = nn.Conv2d(n_mid,   3,       kernel_size=5, padding=2)
+        self.hub_model = hub_model
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: Tensor der Form [B, C, H, W] (einzelnes Bild, bereits auf Zielgröße
-               hochskaliert ODER noch auf LR-Größe — wird intern upgesamplt).
+        out = self.hub_model(x * 255.0)
+        return torch.clamp(out / 255.0, 0.0, 1.0)
 
-        Returns:
-            Tensor [B, C, H*scale, W*scale] wenn x auf LR-Größe, sonst [B, C, H, W]
-        """
-        # Bicubic-Upsample (kein Gradienten-Overhead außerhalb des Trainings)
-        up = F.interpolate(x, scale_factor=self.scale, mode='bicubic', align_corners=False)
-        out = F.relu(self.conv1(up), inplace=True)
-        out = F.relu(self.conv2(out), inplace=True)
-        out = self.conv3(out)
-        # Residual: SR-Korrektur + Bicubic-Basis
-        return torch.clamp(up + out, 0.0, 1.0)
 
-    # ------------------------------------------------------------------
-    # Hilfsmethoden
-    # ------------------------------------------------------------------
+def load_sr_model(device: torch.device) -> '_EDSRWrapper | None':
+    """
+    Lädt das vortrainierte EDSR x3 Modell via torch.hub.
 
-    @classmethod
-    def from_checkpoint(cls, path: str, device: torch.device,
-                        scale: int = 3, n_feats: int = 64, n_mid: int = 32):
-        """
-        Erstellt ein BasicSRModel und lädt Gewichte aus einer .pth-Datei.
+    Gibt ``None`` zurück wenn der Download fehlschlägt, damit das Training
+    ohne SR-Referenz weiterläuft.
 
-        Die Datei kann entweder ein reines state_dict oder ein dict mit dem
-        Schlüssel 'model_state_dict' sein.
+    Args:
+        device: Ziel-Gerät (z.B. ``torch.device('cuda:1')``)
 
-        Args:
-            path:    Pfad zur Checkpoint-Datei
-            device:  Ziel-Gerät
-            scale:   Upscale-Faktor (muss mit gespeichertem Modell übereinstimmen)
-            n_feats: Feature-Maps (muss mit gespeichertem Modell übereinstimmen)
-            n_mid:   Mittlere Feature-Maps
-
-        Returns:
-            BasicSRModel im eval()-Modus auf *device*
-        """
-        model = cls(scale=scale, n_feats=n_feats, n_mid=n_mid)
-        ckpt = torch.load(path, map_location=device, weights_only=False)
-        if isinstance(ckpt, dict) and 'model_state_dict' in ckpt:
-            state_dict = ckpt['model_state_dict']
-        else:
-            state_dict = ckpt
-        model.load_state_dict(state_dict)
-        model = model.to(device)
-        model.eval()
-        return model
+    Returns:
+        _EDSRWrapper im eval()-Modus auf *device*, oder None bei Fehler.
+    """
+    try:
+        print("[SR] Lade EDSR x3 via torch.hub …", flush=True)
+        hub_model = torch.hub.load(
+            'sanghyun-son/EDSR-PyTorch',
+            'edsr',
+            pretrained=True,
+            scale=3,
+            verbose=False,
+        )
+        hub_model = hub_model.to(device)
+        hub_model.eval()
+        wrapper = _EDSRWrapper(hub_model).to(device)
+        wrapper.eval()
+        total_params = sum(p.numel() for p in wrapper.parameters()) / 1e6
+        print(f"[SR] ✅ EDSR x3 geladen ({total_params:.1f}M Parameter)", flush=True)
+        return wrapper
+    except Exception as e:
+        print(f"[SR] ⚠ EDSR konnte nicht geladen werden: {e}", flush=True)
+        print("[SR]   Validierung läuft ohne SR-Referenz weiter.", flush=True)
+        return None
