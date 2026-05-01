@@ -1005,12 +1005,12 @@ def main():
         _async_status = f"disabled (config value: {_async_val_cfg_value!r})"
 
     # Build SR model status line
-    # NOTE: torch.hub is built into PyTorch — no separate pip install needed.
-    #       It downloads EDSR from GitHub on first use (~550 MB); internet required.
+    # NOTE: EDSR-baseline weights are downloaded from cv.snu.ac.kr (~5 MB) on
+    #       first use and cached in ~/.cache/ice_ki/sr/.  No pip install needed.
     if _sync_sr_model is not None:
         _sr_status = "loaded ✅"
     elif config.get('USE_SR_MODEL', False):
-        _sr_status = "⚠ failed to load (needs internet; torch.hub downloads EDSR from GitHub)"
+        _sr_status = "⚠ failed to load (needs internet on first run; weights cached in ~/.cache/ice_ki/sr/)"
     else:
         _sr_status = "disabled (USE_SR_MODEL=False in config.py)"
 

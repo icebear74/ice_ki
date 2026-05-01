@@ -229,11 +229,14 @@ ASYNC_VAL_GPU = 'auto'  # 'auto' | None | explicit int (e.g. 1)
 # OPTIONAL SR REFERENCE MODEL (EDSR – vortrainiert, automatischer Download)
 # ============================================================================
 
-# Aktiviert das EDSR x3 Referenz-Modell für den Validierungsvergleich.
+# Aktiviert das EDSR-baseline x3 Referenz-Modell für den Validierungsvergleich.
 # Wenn True, lädt der async-Validator automatisch ein vortrainiertes EDSR x3
-# Modell via torch.hub (sanghyun-son/EDSR-PyTorch) auf die Validierungs-GPU.
-# Das Modell wird einmalig heruntergeladen und danach aus dem torch.hub-Cache
-# verwendet (~5 MB, kein manuelles Setup nötig).
+# Modell auf die Validierungs-GPU.
+#
+# Beim ersten Start werden die Gewichte (~5 MB) direkt von der offiziellen
+# SNU-Projektseite heruntergeladen und in ~/.cache/ice_ki/sr/ gecacht.
+# Danach startet das Modell sofort ohne Netzwerkzugriff.
+# (Kein torch.hub, kein separates Paket — nur PyTorch erforderlich.)
 #
 # Auswirkung:
 #   - TensorBoard zeigt 5-Panel-Vergleich: LR | Bicubic | SR | VSR | GT
