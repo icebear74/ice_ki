@@ -226,28 +226,29 @@ ASYNC_VAL_GPU = 'auto'  # 'auto' | None | explicit int (e.g. 1)
 
 
 # ============================================================================
-# OPTIONAL SR REFERENCE MODEL (EDSR – vortrainiert, automatischer Download)
+# OPTIONAL SR REFERENCE MODEL (EDSR / SwinIR – vortrainiert, auto-Download)
 # ============================================================================
 
-# Aktiviert das EDSR-baseline x3 Referenz-Modell für den Validierungsvergleich.
+# Aktiviert ein vortrainiertes SR-Referenz-Modell für den Validierungsvergleich.
 # Wenn True, lädt der async-Validator automatisch ein SR-Referenzmodell auf
 # die Validierungs-GPU.
 #
 # Ladevorgehen (in dieser Reihenfolge):
-#   1. Gecachte EDSR-Gewichte in ~/.cache/ice_ki/sr/ → sofortiger Start
-#   2. Download der EDSR-Gewichte (~5 MB) von mehreren URLs
-#   3. Bicubic ×3 Fallback (kein Download nötig, immer verfügbar)
+#   1. Gecachte EDSR-Gewichte in ~/.cache/ice_ki/sr/  → sofortiger Start
+#   2. EDSR x3 von cv.snu.ac.kr (~5 MB)
+#   3. SwinIR-M x3 von GitHub Releases (~60 MB, immer erreichbar!)
+#   4. Bicubic ×3 Fallback (kein Download nötig, immer verfügbar)
 #
-# Bicubic ist der Standard-SR-Baseline aus der SR-Literatur — auch der
-# Bicubic-Fallback liefert einen sinnvollen 5-Panel-TensorBoard-Vergleich.
-# Das Modell läuft immer; USE_SR_MODEL=True kann niemals zu einem Fehler führen.
+# SwinIR-M x3 ist ein modernes Transformer-basiertes SR-Modell (2021) und
+# deutlich besser als Bicubic. Es wird automatisch von GitHub geladen wenn
+# die SNU-Seite nicht erreichbar ist. Keine externen Pakete (kein timm) nötig.
 #
 # Auswirkung:
 #   - TensorBoard zeigt 5-Panel-Vergleich: LR | Bicubic | SR | VSR | GT
 #   - Zusätzliche Metriken: sr_quality, sr_psnr, sr_ssim in Ergebnis-JSON
 #   - SR-Kachel im WebGUI zeigt den SSIM-basierten Qualitätswert
 #
-# Speicher: ~550 MB VRAM für EDSR x3 / ~0 MB für Bicubic-Fallback
+# Speicher: ~550 MB VRAM für EDSR / ~900 MB für SwinIR-M / ~0 MB für Bicubic
 USE_SR_MODEL = False  # True = SR-Vergleich aktivieren, False = ohne SR (4-Panel)
 
 

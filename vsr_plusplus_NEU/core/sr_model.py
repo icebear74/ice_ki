@@ -1,26 +1,27 @@
 """
-SR Reference Model – EDSR-baseline x3 mit Bicubic-Fallback
+SR Reference Model – EDSR-baseline x3 / SwinIR-M x3 / Bicubic-Fallback
 
-Strategie (in dieser Reihenfolge):
-  1. Versucht, vortrainierte EDSR-baseline-x3-Gewichte von mehreren Quellen
-     herunterzuladen (SNU-Projektseite und GitHub-Mirror) und in
-     ~/.cache/ice_ki/sr/ zu cachen.  Danach startet das Modell sofort offline.
-  2. Schlägt jeder Download fehl, wird automatisch ein eingebautes
-     Bicubic-Upsampling-Modell als SR-Referenz genutzt.
+Ladevorgehen (in dieser Reihenfolge):
+  1. Gecachte EDSR-Gewichte in ~/.cache/ice_ki/sr/  → sofortiger Start
+  2. Download der EDSR-Gewichte von der SNU-Projektseite (cv.snu.ac.kr)
+  3. Download der SwinIR-M x3 Gewichte von GitHub Releases
+     (JingyunLiang/SwinIR, immer erreichbar – keine externen Pakete nötig)
+  4. Bicubic ×3 als eingebauter Fallback (kein Download, immer verfügbar)
 
-Bicubic ist der standardmäßige SR-Vergleichs-Baseline (alle SR-Paper
-vergleichen gegen Bicubic), benötigt keinerlei Download und liefert direkt
-einen brauchbaren 5-Panel-Vergleich in TensorBoard.
+SwinIR-M x3 (Liang et al. 2021, https://arxiv.org/abs/2108.10257):
+    embed_dim=180, depths=[6,6,6,6,6,6], num_heads=[6,6,6,6,6,6],
+    window_size=8, upscale=3, img_range=1.
+    Gewichte: ~60 MB von GitHub Releases (keine timm-Abhängigkeit)
 
-``load_sr_model()`` gibt niemals ``None`` zurück, solange PyTorch funktioniert.
+EDSR-baseline x3 (Lim et al. 2017):
+    n_resblocks=16, n_feats=64, scale=3
+    Gewichte: ~5 MB von cv.snu.ac.kr (wenn erreichbar)
+
+``load_sr_model()`` gibt niemals ``None`` zurück.
 
 Verwendung (intern in async_validator und train.py):
     from vsr_plusplus_NEU.core.sr_model import load_sr_model
-    sr_model = load_sr_model(device)  # Bicubic-Fallback wenn Download fehlschlägt
-
-Architektur (EDSR-baseline, Lim et al. 2017):
-    n_resblocks=16, n_feats=64, scale=3, res_scale=1.0
-    RGB-Mittelwertsubtraktion: (114.4, 111.5, 103.0)
+    sr_model = load_sr_model(device)
 """
 
 import math
@@ -33,14 +34,18 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# ── Download-URLs (werden der Reihe nach versucht) ───────────────────────────
-# Erste URL: offizielle SNU-Projektseite
-# Zweite URL: GitHub-Release-Mirror des gleichen Checkpoints
-_WEIGHTS_URLS = [
+# ── EDSR-Download-URLs (werden der Reihe nach versucht) ──────────────────────
+_EDSR_URLS = [
     "https://cv.snu.ac.kr/research/EDSR/models/edsr_baseline_x3-9aade23f.pt",
-    "https://github.com/sanghyun-son/EDSR-PyTorch/releases/download/v1.0.0/edsr_baseline_x3-9aade23f.pt",
 ]
-_DOWNLOAD_TIMEOUT_S = 15  # Sekunden pro Versuch
+
+# ── SwinIR-M x3 Gewichte (GitHub Releases — immer erreichbar) ────────────────
+_SWINIR_URL = (
+    "https://github.com/JingyunLiang/SwinIR/releases/download/v0.0/"
+    "001_classicalSR_DIV2K_s48w8_SwinIR-M_x3.pth"
+)
+
+_DOWNLOAD_TIMEOUT_S = 20  # Sekunden pro Versuch
 
 # RGB-Mittelwerte die das offizielle EDSR-baseline-Modell subtrahiert (×255-Raum)
 _RGB_MEAN = (0.4488 * 255, 0.4371 * 255, 0.4040 * 255)  # ≈ (114.4, 111.5, 103.0)
@@ -126,6 +131,24 @@ class _EDSRWrapper(nn.Module):
         return torch.clamp(out / 255.0, 0.0, 1.0)
 
 
+class _SwinIRWrapper(nn.Module):
+    """
+    Adapter für SwinIR-M x3: erwartet [0,1]-Tensoren, gibt [0,1] zurück.
+
+    SwinIR verarbeitet [0,1]-Eingaben intern bereits selbst (img_range=1.),
+    daher ist hier nur ein clamp nötig.
+    """
+
+    name = "SwinIR-M x3"
+
+    def __init__(self, model: nn.Module):
+        super().__init__()
+        self.model = model
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x).clamp(0.0, 1.0)
+
+
 class _BicubicSR(nn.Module):
     """
     Bicubic-Upsampling als SR-Fallback-Referenz.
@@ -147,11 +170,19 @@ class _BicubicSR(nn.Module):
 
 # ── Gewichte laden ────────────────────────────────────────────────────────────
 
-def _get_weights_path() -> Path:
-    """Gibt den Cache-Pfad für die Gewichte zurück (~/.cache/ice_ki/sr/)."""
-    cache_dir = Path(os.environ.get("ICE_KI_CACHE_DIR", Path.home() / ".cache" / "ice_ki")) / "sr"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    return cache_dir / "edsr_baseline_x3.pt"
+def _cache_dir() -> Path:
+    """Gibt das Cache-Verzeichnis für SR-Gewichte zurück (~/.cache/ice_ki/sr/)."""
+    d = Path(os.environ.get("ICE_KI_CACHE_DIR", Path.home() / ".cache" / "ice_ki")) / "sr"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _get_edsr_weights_path() -> Path:
+    return _cache_dir() / "edsr_baseline_x3.pt"
+
+
+def _get_swinir_weights_path() -> Path:
+    return _cache_dir() / "swinir_m_x3_div2k.pth"
 
 
 def _download_weights(url: str, dest: Path, timeout: int) -> None:
@@ -184,22 +215,22 @@ def _download_weights(url: str, dest: Path, timeout: int) -> None:
 
 def _try_load_edsr(device: torch.device) -> '_EDSRWrapper | None':
     """
-    Versucht EDSR-Gewichte zu laden (Cache → Download mehrerer URLs).
+    Versucht EDSR-Gewichte zu laden (Cache → Download von SNU).
     Gibt ``None`` zurück wenn alle Versuche fehlschlagen.
     """
-    weights_path = _get_weights_path()
+    weights_path = _get_edsr_weights_path()
 
     if not weights_path.exists():
         last_err: Exception | None = None
-        for url in _WEIGHTS_URLS:
+        for url in _EDSR_URLS:
             try:
-                print(f"[SR] Versuche Download: {url.split('/')[-1]} …", flush=True)
+                print(f"[SR] Versuche EDSR-Download …", flush=True)
                 _download_weights(url, weights_path, _DOWNLOAD_TIMEOUT_S)
-                print("[SR] ✅ Download abgeschlossen", flush=True)
+                print("[SR] ✅ EDSR-Download abgeschlossen", flush=True)
                 last_err = None
                 break
             except Exception as e:
-                print(f"[SR]   ✗ {e}", flush=True)
+                print(f"[SR]   ✗ EDSR: {e}", flush=True)
                 last_err = e
         if last_err is not None:
             return None
@@ -212,31 +243,66 @@ def _try_load_edsr(device: torch.device) -> '_EDSRWrapper | None':
     return _EDSRWrapper(net).to(device).eval()
 
 
-def load_sr_model(device: torch.device) -> '_EDSRWrapper | _BicubicSR':
+def _try_load_swinir(device: torch.device) -> '_SwinIRWrapper | None':
+    """
+    Versucht SwinIR-M x3 Gewichte zu laden (Cache → Download von GitHub Releases).
+    Gibt ``None`` zurück wenn der Download fehlschlägt.
+    """
+    from vsr_plusplus_NEU.core._swinir import SwinIR  # lokaler Import vermeidet zirkuläre Abhängigkeiten
+
+    weights_path = _get_swinir_weights_path()
+
+    if not weights_path.exists():
+        try:
+            print(f"[SR] Versuche SwinIR-Download von GitHub Releases (~60 MB) …", flush=True)
+            _download_weights(_SWINIR_URL, weights_path, _DOWNLOAD_TIMEOUT_S)
+            print("[SR] ✅ SwinIR-Download abgeschlossen", flush=True)
+        except Exception as e:
+            print(f"[SR]   ✗ SwinIR: {e}", flush=True)
+            return None
+
+    print("[SR] Lade SwinIR-M x3 …", flush=True)
+    net = SwinIR(
+        upscale=3, img_size=48, window_size=8, img_range=1.,
+        depths=[6, 6, 6, 6, 6, 6], embed_dim=180,
+        num_heads=[6, 6, 6, 6, 6, 6], mlp_ratio=2.,
+        upsampler='pixelshuffle', resi_connection='1conv')
+
+    raw = torch.load(weights_path, map_location='cpu', weights_only=True)
+    # Official SwinIR checkpoints store weights under 'params' or 'params_ema'
+    state = raw.get('params_ema') or raw.get('params') or raw
+    net.load_state_dict(state, strict=True)
+    net = net.to(device).eval()
+    return _SwinIRWrapper(net).to(device).eval()
+
+
+def load_sr_model(device: torch.device) -> '_EDSRWrapper | _SwinIRWrapper | _BicubicSR':
     """
     Lädt das SR-Referenzmodell für den Validator.
 
     Reihenfolge:
-      1. Gecachte EDSR-Gewichte in ~/.cache/ice_ki/sr/ (sofortiger Start)
-      2. Download der EDSR-Gewichte (mehrere URLs, je {timeout}s Timeout)
-      3. Bicubic ×3 als eingebauter Fallback (kein Download nötig)
+      1. Gecachte EDSR-Gewichte (~/.cache/ice_ki/sr/edsr_baseline_x3.pt)
+      2. Download der EDSR-Gewichte von cv.snu.ac.kr
+      3. SwinIR-M x3 von GitHub Releases (JingyunLiang/SwinIR)
+      4. Bicubic ×3 als eingebauter Fallback
 
     Gibt **immer** ein lauffähiges nn.Module zurück (niemals None), damit
     der 5-Panel-TensorBoard-Vergleich in jedem Fall verfügbar ist.
 
     Das zurückgegebene Modell hat ein ``.name``-Attribut das angibt, welcher
-    Typ geladen wurde (z.B. ``"EDSR-baseline x3"`` oder ``"Bicubic x3 (Fallback)"``).
+    Typ geladen wurde.
 
     Args:
         device: Ziel-Gerät (z.B. ``torch.device('cuda:1')``)
 
     Returns:
-        _EDSRWrapper oder _BicubicSR im eval()-Modus auf *device*.
-    """.format(timeout=_DOWNLOAD_TIMEOUT_S)
+        _EDSRWrapper, _SwinIRWrapper oder _BicubicSR im eval()-Modus auf *device*.
+    """
+    # ── 1+2: EDSR (Cache oder SNU-Download) ──────────────────────────────────
+    edsr_path = _get_edsr_weights_path()
+    if edsr_path.exists():
+        print(f"[SR] Verwende gecachte EDSR-Gewichte: {edsr_path}", flush=True)
     try:
-        weights_path = _get_weights_path()
-        if weights_path.exists():
-            print(f"[SR] Verwende gecachte Gewichte: {weights_path}", flush=True)
         wrapper = _try_load_edsr(device)
         if wrapper is not None:
             total_params = sum(p.numel() for p in wrapper.parameters()) / 1e6
@@ -245,8 +311,20 @@ def load_sr_model(device: torch.device) -> '_EDSRWrapper | _BicubicSR':
     except Exception as e:
         print(f"[SR] ⚠ EDSR-Ladefehler: {e}", flush=True)
 
-    # ── Bicubic-Fallback ──────────────────────────────────────────────────────
-    print("[SR] ↩ Bicubic-Fallback aktiv (kein Download möglich)", flush=True)
+    # ── 3: SwinIR-M x3 (GitHub Releases) ─────────────────────────────────────
+    swinir_path = _get_swinir_weights_path()
+    if swinir_path.exists():
+        print(f"[SR] Verwende gecachte SwinIR-Gewichte: {swinir_path}", flush=True)
+    try:
+        wrapper = _try_load_swinir(device)
+        if wrapper is not None:
+            total_params = sum(p.numel() for p in wrapper.parameters()) / 1e6
+            print(f"[SR] ✅ SwinIR-M x3 geladen ({total_params:.1f}M Parameter)", flush=True)
+            return wrapper
+    except Exception as e:
+        print(f"[SR] ⚠ SwinIR-Ladefehler: {e}", flush=True)
+
+    # ── 4: Bicubic-Fallback ───────────────────────────────────────────────────
+    print("[SR] ↩ Bicubic-Fallback aktiv (kein SR-Modell heruntergeladen)", flush=True)
     print("[SR]   Bicubic ×3 ist der Standard-SR-Baseline — Vergleich bleibt sinnvoll.", flush=True)
-    bicubic = _BicubicSR(scale=3).to(device).eval()
-    return bicubic
+    return _BicubicSR(scale=3).to(device).eval()
