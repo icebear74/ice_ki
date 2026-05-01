@@ -802,10 +802,8 @@ def main():
     _sync_sr_model = None
     if config.get('USE_SR_MODEL', False):
         from vsr_plusplus_NEU.core.sr_model import load_sr_model
-        print(f"{C_CYAN}USE_SR_MODEL=True – loading EDSR SR model for sync validation...{C_RESET}")
-        _sync_sr_model = load_sr_model(device)  # returns None on failure (error already printed)
-        if _sync_sr_model is None:
-            print(f"{C_YELLOW}⚠ SR model could not be loaded – validation will proceed without it{C_RESET}")
+        print(f"{C_CYAN}USE_SR_MODEL=True – loading SR model for sync validation...{C_RESET}")
+        _sync_sr_model = load_sr_model(device)  # always returns a model (EDSR or Bicubic fallback)
 
     validator = VSRValidator(model, val_loader, loss_fn, device=device, sr_model=_sync_sr_model)
     
@@ -1005,12 +1003,8 @@ def main():
         _async_status = f"disabled (config value: {_async_val_cfg_value!r})"
 
     # Build SR model status line
-    # NOTE: EDSR-baseline weights are downloaded from cv.snu.ac.kr (~5 MB) on
-    #       first use and cached in ~/.cache/ice_ki/sr/.  No pip install needed.
     if _sync_sr_model is not None:
-        _sr_status = "loaded ✅"
-    elif config.get('USE_SR_MODEL', False):
-        _sr_status = "⚠ failed to load (needs internet on first run; weights cached in ~/.cache/ice_ki/sr/)"
+        _sr_status = f"loaded ✅ ({getattr(_sync_sr_model, 'name', type(_sync_sr_model).__name__)})"
     else:
         _sr_status = "disabled (USE_SR_MODEL=False in config.py)"
 

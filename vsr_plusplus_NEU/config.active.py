@@ -230,22 +230,25 @@ ASYNC_VAL_GPU = 'auto'  # 'auto' | None | explicit int (e.g. 1)
 # ============================================================================
 
 # Aktiviert das EDSR-baseline x3 Referenz-Modell für den Validierungsvergleich.
-# Wenn True, lädt der async-Validator automatisch ein vortrainiertes EDSR x3
-# Modell auf die Validierungs-GPU.
+# Wenn True, lädt der async-Validator automatisch ein SR-Referenzmodell auf
+# die Validierungs-GPU.
 #
-# Beim ersten Start werden die Gewichte (~5 MB) direkt von der offiziellen
-# SNU-Projektseite heruntergeladen und in ~/.cache/ice_ki/sr/ gecacht.
-# Danach startet das Modell sofort ohne Netzwerkzugriff.
-# (Kein torch.hub, kein separates Paket — nur PyTorch erforderlich.)
+# Ladevorgehen (in dieser Reihenfolge):
+#   1. Gecachte EDSR-Gewichte in ~/.cache/ice_ki/sr/ → sofortiger Start
+#   2. Download der EDSR-Gewichte (~5 MB) von mehreren URLs
+#   3. Bicubic ×3 Fallback (kein Download nötig, immer verfügbar)
+#
+# Bicubic ist der Standard-SR-Baseline aus der SR-Literatur — auch der
+# Bicubic-Fallback liefert einen sinnvollen 5-Panel-TensorBoard-Vergleich.
+# Das Modell läuft immer; USE_SR_MODEL=True kann niemals zu einem Fehler führen.
 #
 # Auswirkung:
 #   - TensorBoard zeigt 5-Panel-Vergleich: LR | Bicubic | SR | VSR | GT
 #   - Zusätzliche Metriken: sr_quality, sr_psnr, sr_ssim in Ergebnis-JSON
 #   - SR-Kachel im WebGUI zeigt den SSIM-basierten Qualitätswert
 #
-# Voraussetzungen: Internetzugang beim ersten Start (danach aus Cache geladen)
-# Speicher: ~550 MB VRAM für EDSR x3 auf der Validierungs-GPU
-USE_SR_MODEL = False  # True = EDSR aktivieren, False = ohne SR (4-Panel)
+# Speicher: ~550 MB VRAM für EDSR x3 / ~0 MB für Bicubic-Fallback
+USE_SR_MODEL = False  # True = SR-Vergleich aktivieren, False = ohne SR (4-Panel)
 
 
 # ============================================================================
