@@ -38,15 +38,23 @@ from vsr_plusplus_NEU.systems.logger import TrainingLogger, TensorBoardLogger
 from vsr_plusplus_NEU.systems.adaptive_system import AdaptiveSystem
 from vsr_plusplus_NEU.systems.run_lock import save_run_lock, load_and_verify_run_lock
 
-# NOTE: config.py is a LOCAL configuration file that exists on each developer's machine.
-# It is listed in .gitignore (line 58) and should NEVER be pushed to the repository!
-# 
-# To create your config.py:
-#   cp config.py.example config.py
-#   OR
-#   cp config.py.active config.py  (if you have an active config)
-# 
-# Then edit config.py to match your local setup (paths, GPU settings, etc.)
+# ══════════════════════════════════════════════════════════════════════════════
+#  CONFIG LOADING — ALWAYS FROM config.py (local, gitignored)
+# ══════════════════════════════════════════════════════════════════════════════
+#
+#  train.py ALWAYS loads the file named  config.py  from the Python path.
+#  It NEVER loads config.active.py directly — that file is only a versioned
+#  template/reference kept in the repository.
+#
+#  If train.py shows wrong values (e.g. ASYNC_VAL_GPU=None or USE_SR_MODEL
+#  not loading), the cause is almost always a stale local config.py that is
+#  missing new parameters.  Fix:
+#
+#      cp vsr_plusplus_NEU/config.active.py config.py
+#      # then re-apply your local edits (DATA_ROOT, GPU index, …)
+#
+#  config.py is listed in .gitignore and must NEVER be committed.
+# ══════════════════════════════════════════════════════════════════════════════
 import config as cfg
 
 # ANSI colors

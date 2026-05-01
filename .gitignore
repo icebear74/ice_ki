@@ -52,6 +52,12 @@ runs/
 .python-version
 
 # Local configuration
+# ─────────────────────────────────────────────────────────────────────────────
+# config.py files are MACHINE-LOCAL and must NEVER be committed.
+# train.py ALWAYS loads config.py (via  import config as cfg).
+# The versioned reference/template is  config.active.py  (edit that in git,
+# then copy it to config.py on each machine and apply local overrides).
+# ─────────────────────────────────────────────────────────────────────────────
 train_config.json
 activate.sh
 vsr_plus_plus/config.py

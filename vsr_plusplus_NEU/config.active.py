@@ -1,19 +1,23 @@
 """
-VSR++ 7-Frame Configuration - Example Template
+VSR++ 7-Frame Configuration - TEMPLATE / ACTIVE REFERENCE
+══════════════════════════════════════════════════════════════════════════════
+  ⚠️  THIS FILE IS A TEMPLATE — IT IS NEVER LOADED DIRECTLY BY train.py!
+──────────────────────────────────────────────────────────────────────────────
+  HOW THE CONFIG SYSTEM WORKS:
+    • train.py ALWAYS loads  →  config.py   (via  import config as cfg)
+    • config.py is listed in .gitignore and is NEVER committed to the repo.
+    • config.active.py  is the versioned template/reference that lives in git.
 
-⚠️  IMPORTANT: Copy this file to config.py before using!
+  WORKFLOW:
+    1. Copy this file to config.py in your working directory:
+           cp vsr_plusplus_NEU/config.active.py config.py
+    2. Edit  config.py  to match your machine (paths, GPU settings, …).
+    3. Re-copy whenever you pull a newer config.active.py from the repo so
+       that new parameters (like USE_SR_MODEL, ASYNC_VAL_GPU, …) are not
+       missing from your local config.py.
 
-    cp config.py.example config.py
-
-The config.py file is in .gitignore and will NOT be committed.
-Edit config.py for your local setup.
-
-This configuration is specifically optimized for 7-frame VSR training on Tesla P100 hardware (16GB VRAM).
-Key parameters:
-- 72 feature channels (optimized for 7-frame model)
-- 26 residual blocks (balanced depth for quality)
-- Gradient accumulation for effective batch size
-- Matches dataset_generator_v2 output structure
+  TL;DR:  Edit config.py — config.active.py is only a reference!
+══════════════════════════════════════════════════════════════════════════════
 """
 
 # ============================================================================
@@ -304,6 +308,8 @@ def get_config():
     config['ASYNC_VAL_GPU'] = ASYNC_VAL_GPU
     # Optional SR reference model path (None = disabled)
     config['SR_MODEL_PATH'] = SR_MODEL_PATH
+    # SR reference model flag (True = load EDSR x3 for validation comparison)
+    config['USE_SR_MODEL'] = USE_SR_MODEL
     
     return config
 
