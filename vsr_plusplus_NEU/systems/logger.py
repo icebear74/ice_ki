@@ -200,12 +200,27 @@ class TensorBoardLogger:
         self.writer.add_scalar('Quality/LR_Quality_Pct', self._to_float(metrics.get('lr_quality', 0)) * 100, step)
         self.writer.add_scalar('Quality/KI_Quality_Pct', self._to_float(metrics.get('ki_quality', 0)) * 100, step)
         self.writer.add_scalar('Quality/Improvement_Pct', self._to_float(metrics.get('improvement', 0)) * 100, step)
+
+        # Bicubic baseline (always present after overhaul)
+        if 'bicubic_quality' in metrics:
+            self.writer.add_scalar('Quality/Bicubic_Quality', self._to_float(metrics['bicubic_quality']), step)
+            self.writer.add_scalar('Quality/Bicubic_Quality_Pct', self._to_float(metrics['bicubic_quality']) * 100, step)
+
+        # Optional SR model (EDSR) — only present when USE_SR_MODEL=True
+        if 'sr_quality' in metrics:
+            self.writer.add_scalar('Quality/SR_Quality', self._to_float(metrics['sr_quality']), step)
+            self.writer.add_scalar('Quality/SR_Quality_Pct', self._to_float(metrics['sr_quality']) * 100, step)
         
-        # Add to CoreMetrics dashboard
-        self.writer.add_scalars('Training/CoreMetrics', {
-            'KI_Quality': self._to_float(metrics.get('ki_quality', 0)) * 100,       # 0-1 -> 0-100%
-            'KI_Improvement': self._to_float(metrics.get('improvement', 0)) * 100,   # 0-1 -> 0-100%
-        }, step)
+        # Add to CoreMetrics dashboard — include all available quality signals
+        core_metrics = {
+            'KI_Quality':    self._to_float(metrics.get('ki_quality', 0)) * 100,
+            'KI_Improvement': self._to_float(metrics.get('improvement', 0)) * 100,
+        }
+        if 'bicubic_quality' in metrics:
+            core_metrics['Bicubic_Quality'] = self._to_float(metrics['bicubic_quality']) * 100
+        if 'sr_quality' in metrics:
+            core_metrics['SR_Quality'] = self._to_float(metrics['sr_quality']) * 100
+        self.writer.add_scalars('Training/CoreMetrics', core_metrics, step)
         
         # Log additional GT difference metrics if available
         if 'ki_to_gt' in metrics:
@@ -224,6 +239,12 @@ class TensorBoardLogger:
         self.writer.add_scalar('Metrics/LR_SSIM', self._to_float(metrics.get('lr_ssim', 0)), step)
         self.writer.add_scalar('Metrics/KI_PSNR', self._to_float(metrics.get('ki_psnr', 0)), step)
         self.writer.add_scalar('Metrics/KI_SSIM', self._to_float(metrics.get('ki_ssim', 0)), step)
+        if 'bicubic_psnr' in metrics:
+            self.writer.add_scalar('Metrics/Bicubic_PSNR', self._to_float(metrics['bicubic_psnr']), step)
+            self.writer.add_scalar('Metrics/Bicubic_SSIM', self._to_float(metrics.get('bicubic_ssim', 0)), step)
+        if 'sr_psnr' in metrics:
+            self.writer.add_scalar('Metrics/SR_PSNR', self._to_float(metrics['sr_psnr']), step)
+            self.writer.add_scalar('Metrics/SR_SSIM', self._to_float(metrics.get('sr_ssim', 0)), step)
     
     def log_system(self, step, speed, vram):
         """Log system metrics"""

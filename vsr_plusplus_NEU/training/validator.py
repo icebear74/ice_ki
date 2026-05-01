@@ -115,12 +115,18 @@ class VSRValidator:
                 loss_dict = self.loss_fn(ki_output, gt)
                 total_loss += loss_dict['total'].item() if torch.is_tensor(loss_dict['total']) else loss_dict['total']
                 del loss_dict  # Free loss tensors immediately
-                
-                # Get LR center frame (upscaled for comparison)
-                lr_center = lr_stack[:, 3]  # Center frame (7-frame model)
-                # Bilinear upscale (matches current model input preprocessing)
-                lr_upscaled = F.interpolate(lr_center, scale_factor=3, mode='bilinear', align_corners=False)
-                # Bicubic upscale (clean reference baseline)
+
+                # ── Center-frame extraction ──────────────────────────────────
+                # lr_stack shape: [B, 7, 3, H_lr, W_lr] — 7 LR frames, RGB.
+                # The VSR model uses all 7 frames but produces the upscaled
+                # CENTER frame as output (frame index n_frames//2 = 3).
+                # LR, bicubic, and SR baselines MUST use the same center frame
+                # for a fair comparison against the GT.
+                center_idx      = lr_stack.size(1) // 2   # = 3 for 7-frame model
+                lr_center       = lr_stack[:, center_idx]  # [B, 3, H_lr, W_lr]
+                # Bilinear upscale (matches original pre-model input preprocessing)
+                lr_upscaled     = F.interpolate(lr_center, scale_factor=3, mode='bilinear', align_corners=False)
+                # Bicubic upscale (clean baseline — always computed)
                 bicubic_upscaled = F.interpolate(lr_center, scale_factor=3, mode='bicubic', align_corners=False)
                 bicubic_upscaled = torch.clamp(bicubic_upscaled, 0.0, 1.0)
                 del lr_center  # Free immediately after use

@@ -178,14 +178,21 @@ def _run_validation_on_device(model, val_loaders, loss_fn, device, global_step,
                 total_loss += loss_dict['total'].item() if torch.is_tensor(loss_dict['total']) else loss_dict['total']
                 del loss_dict
 
-                lr_center = lr_stack[:, 3]
+                # ── Center-frame extraction ──────────────────────────────────
+                # lr_stack shape: [B, 7, 3, H_lr, W_lr] — 7 LR frames, RGB.
+                # The VSR model uses all 7 frames but produces the upscaled
+                # CENTER frame as output (frame index n_frames//2 = 3 of 0–6).
+                # LR, bicubic, and SR baselines MUST use the same center frame
+                # for a fair comparison against the GT.
+                center_idx       = lr_stack.size(1) // 2   # = 3 for 7-frame model
+                lr_center        = lr_stack[:, center_idx]  # [B, 3, H_lr, W_lr]
                 # Bilinear upscale (reference for LR quality tile)
-                lr_upscaled = F.interpolate(lr_center, scale_factor=3, mode='bilinear', align_corners=False)
+                lr_upscaled      = F.interpolate(lr_center, scale_factor=3, mode='bilinear', align_corners=False)
                 # Bicubic upscale (clean baseline, always computed)
                 bicubic_upscaled = F.interpolate(lr_center, scale_factor=3, mode='bicubic', align_corners=False)
                 bicubic_upscaled = torch.clamp(bicubic_upscaled, 0.0, 1.0)
-                # Optional SR model (single-frame, no temporal context)
-                sr_output = sr_model(lr_center) if sr_model is not None else None
+                # SR model receives same center frame (single-frame, no temporal context)
+                sr_output        = sr_model(lr_center) if sr_model is not None else None
                 del lr_center
 
                 font       = cv2.FONT_HERSHEY_SIMPLEX
@@ -504,6 +511,14 @@ def run_async_validator(checkpoint_dir, data_root, dataset_name, log_dir, gpu_in
             time.sleep(5.0)
             continue
 
+        # ── Load optional SR reference model (EDSR) ──────────────────────────
+        # Only loaded when USE_SR_MODEL=True in config.  Loaded once per
+        # validation cycle and released afterwards to free VRAM.
+        sr_model = None
+        if req_config.get('USE_SR_MODEL', False):
+            from vsr_plusplus_NEU.core.sr_model import load_sr_model
+            sr_model = load_sr_model(device)  # returns None on failure
+
         # ── Load loss function ───────────────────────────────────────────────
         try:
             loss_fn = HybridLoss(
@@ -556,6 +571,9 @@ def run_async_validator(checkpoint_dir, data_root, dataset_name, log_dir, gpu_in
             traceback.print_exc()
             _write_error_result(result_file, step, err_msg)
             del model, loss_fn
+            if sr_model is not None:
+                del sr_model
+                sr_model = None
             torch.cuda.empty_cache()
             time.sleep(5.0)
             continue
@@ -565,6 +583,9 @@ def run_async_validator(checkpoint_dir, data_root, dataset_name, log_dir, gpu_in
             print(f"[AsyncVal] ⚠ {err_msg}", flush=True)
             _write_error_result(result_file, step, err_msg)
             del model, loss_fn
+            if sr_model is not None:
+                del sr_model
+                sr_model = None
             torch.cuda.empty_cache()
             time.sleep(5.0)
             continue
@@ -572,7 +593,8 @@ def run_async_validator(checkpoint_dir, data_root, dataset_name, log_dir, gpu_in
         # ── Run validation ───────────────────────────────────────────────────
         t_start = time.time()
         try:
-            metrics = _run_validation_on_device(model, val_loaders, loss_fn, device, step)
+            metrics = _run_validation_on_device(model, val_loaders, loss_fn, device, step,
+                                                sr_model=sr_model)
         except Exception as e:
             err_msg = f"Validation inference failed: {e}"
             print(f"[AsyncVal] ❌ {err_msg}", flush=True)
@@ -580,6 +602,8 @@ def run_async_validator(checkpoint_dir, data_root, dataset_name, log_dir, gpu_in
             _write_error_result(result_file, step, err_msg)
             # Clean up model to free VRAM before retrying
             del model, loss_fn
+            if sr_model is not None:
+                del sr_model
             torch.cuda.empty_cache()
             time.sleep(5.0)
             continue
@@ -636,6 +660,9 @@ def run_async_validator(checkpoint_dir, data_root, dataset_name, log_dir, gpu_in
 
         # ── Clean up GPU memory for next round ───────────────────────────────
         del model, loss_fn, metrics
+        if sr_model is not None:
+            del sr_model
+            sr_model = None
         torch.cuda.empty_cache()
 
         last_processed_step = step

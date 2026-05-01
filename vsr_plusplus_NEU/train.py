@@ -870,8 +870,8 @@ def main():
             'MS_WEIGHT':         config.get('MS_WEIGHT', 0.20),
             'GRAD_WEIGHT':       config.get('GRAD_WEIGHT', 0.20),
             'PERCEPTUAL_WEIGHT': config.get('PERCEPTUAL_WEIGHT', 0.0),
-            # SR reference model (None = disabled)
-            'SR_MODEL_PATH':     config.get('SR_MODEL_PATH', None),
+            # SR reference model (False = disabled)
+            'USE_SR_MODEL':      config.get('USE_SR_MODEL', False),
         }
         try:
             with open(config_json_path, 'w') as f:

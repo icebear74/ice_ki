@@ -1155,9 +1155,11 @@ class VSRTrainer:
         quality_metrics = None
         if self.last_metrics:
             quality_metrics = {
-                'lr_quality': self.last_metrics.get('lr_quality', 0.0) * 100,  # Convert to %
-                'ki_quality': self.last_metrics.get('ki_quality', 0.0) * 100,
-                'improvement': self.last_metrics.get('improvement', 0.0) * 100,
+                'lr_quality':      self.last_metrics.get('lr_quality', 0.0) * 100,
+                'bicubic_quality': self.last_metrics.get('bicubic_quality', 0.0) * 100,
+                'sr_quality':      self.last_metrics.get('sr_quality', 0.0) * 100,
+                'ki_quality':      self.last_metrics.get('ki_quality', 0.0) * 100,
+                'improvement':     self.last_metrics.get('improvement', 0.0) * 100,
             }
             # Add GT difference metrics if available
             if 'ki_to_gt' in self.last_metrics:
@@ -1307,6 +1309,8 @@ class VSRTrainer:
                 
                 # Quality-Metriken
                 quality_lr_value=quality_metrics.get('lr_quality', 0.0) / 100.0 if quality_metrics else 0.0,
+                quality_bicubic_value=quality_metrics.get('bicubic_quality', 0.0) / 100.0 if quality_metrics else 0.0,
+                quality_sr_value=quality_metrics.get('sr_quality', 0.0) / 100.0 if quality_metrics else 0.0,
                 quality_ki_value=quality_metrics.get('ki_quality', 0.0) / 100.0 if quality_metrics else 0.0,
                 quality_improvement_value=quality_metrics.get('improvement', 0.0) / 100.0 if quality_metrics else 0.0,
                 quality_ki_to_gt_value=quality_metrics.get('ki_to_gt', 0.0) / 100.0 if quality_metrics else 0.0,
@@ -2054,8 +2058,10 @@ class VSRTrainer:
         self.web_monitor.data_store.update_all_metrics(
             # Quality fractions (0-1, raw validator output)
             quality_lr_value=metrics.get('lr_quality', 0.0),
+            quality_bicubic_value=metrics.get('bicubic_quality', 0.0),
+            quality_sr_value=metrics.get('sr_quality', 0.0),
             quality_ki_value=metrics.get('ki_quality', 0.0),
-            # Raw sums (not per-image averages – match existing web_monitor convention)
+            # Per-sample average deltas
             quality_improvement_value=metrics.get('improvement', 0.0),
             quality_ki_to_gt_value=metrics.get('ki_to_gt', 0.0),
             quality_lr_to_gt_value=metrics.get('lr_to_gt', 0.0),

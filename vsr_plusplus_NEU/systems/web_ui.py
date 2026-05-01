@@ -110,6 +110,8 @@ class CompleteTrainingDataStore:
             
             # Quality-Metriken (ALLE)
             'quality_lr_value': 0.0,
+            'quality_bicubic_value': 0.0,
+            'quality_sr_value': 0.0,
             'quality_ki_value': 0.0,
             'quality_improvement_value': 0.0,
             'quality_ki_to_gt_value': 0.0,
@@ -1457,25 +1459,35 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
         <div class="section-header">🎯 Qualitäts-Metriken</div>
         
         <div class="grid-container">
-            <div class="info-card" title="Qualitätsbewertung des Eingangsvideos (Low Resolution) – Referenzwert für die KI-Ausgabe">
-                <div class="card-title">LR-Qualität</div>
+            <div class="info-card" title="LR Center-Frame: bilinear hochskaliert – Ausgangsqualität vor jeder KI-Verarbeitung">
+                <div class="card-title">LR-Qualität (bilinear)</div>
                 <div class="card-value" id="lrQuality">0.0%</div>
             </div>
             
-            <div class="info-card" title="Qualitätsbewertung der KI-Ausgabe (Super-Resolution) – höher ist besser">
-                <div class="card-title">KI-Qualität</div>
+            <div class="info-card" title="Bicubic: klassischer Hochskalierungsalgorithmus ohne KI – fairer Vergleichswert">
+                <div class="card-title">Bicubic-Qualität</div>
+                <div class="card-value" id="bicubicQuality">0.0%</div>
+            </div>
+            
+            <div class="info-card" title="EDSR SR-Modell: Single-Image Super-Resolution (kein temporaler Kontext) – nur sichtbar wenn USE_SR_MODEL=True">
+                <div class="card-title">SR-Qualität (EDSR)</div>
+                <div class="card-value" id="srQuality" style="color: var(--accent-orange);">–</div>
+            </div>
+            
+            <div class="info-card" title="VSR KI-Ausgabe: 7-Frame Video Super-Resolution – höher ist besser">
+                <div class="card-title">KI/VSR-Qualität</div>
                 <div class="card-value" id="kiQuality">0.0%</div>
                 <div class="card-subtitle">Bestes: <span id="bestQuality">0.0%</span></div>
                 <div class="card-subtitle" id="valStepHint" style="display:none; color: #7c3aed; margin-top:4px;"></div>
             </div>
             
-            <div class="info-card" title="Wie viel besser die KI-Ausgabe im Vergleich zum LR-Eingangsbild ist (positiv = KI besser als LR)">
-                <div class="card-title">Verbesserung (KI vs. LR)</div>
+            <div class="info-card" title="Wie viel besser VSR im Vergleich zum LR-Eingangsbild ist (positiv = KI besser als LR)">
+                <div class="card-title">Verbesserung (VSR vs. LR)</div>
                 <div class="card-value" id="improvement">0.0%</div>
             </div>
             
-            <div class="info-card" title="Wie nah die KI-Ausgabe am Referenzbild (Ground Truth) ist – gemessen über PSNR und SSIM">
-                <div class="card-title">KI vs. GT (PSNR/SSIM)</div>
+            <div class="info-card" title="Wie nah die KI-Ausgabe am Referenzbild (Ground Truth) ist – gemessen per SSIM">
+                <div class="card-title">KI vs. GT (SSIM)</div>
                 <div class="card-value" id="kiToGt">0.0%</div>
             </div>
             
@@ -1835,8 +1847,16 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             
             document.getElementById('gradClip').textContent = data.gradient_clip_val.toFixed(2);
             
-            // Quality metrics with fixed labels
+            // Quality metrics
             document.getElementById('lrQuality').textContent = (data.quality_lr_value * 100).toFixed(1) + '%';
+            document.getElementById('bicubicQuality').textContent = (data.quality_bicubic_value * 100).toFixed(1) + '%';
+            // SR tile: show dash when no SR model is active (value === 0 and never updated)
+            const srEl = document.getElementById('srQuality');
+            if (data.quality_sr_value > 0) {
+                srEl.textContent = (data.quality_sr_value * 100).toFixed(1) + '%';
+            } else {
+                srEl.textContent = '–';
+            }
             document.getElementById('kiQuality').textContent = (data.quality_ki_value * 100).toFixed(1) + '%';
             document.getElementById('bestQuality').textContent = (data.best_quality_ever * 100).toFixed(1) + '%';
             document.getElementById('improvement').textContent = (data.quality_improvement_value * 100).toFixed(1) + '%';
