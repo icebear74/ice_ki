@@ -1709,6 +1709,7 @@ class VSRTrainer:
             'MS_WEIGHT':          self.config.get('MS_WEIGHT', 0.20),
             'GRAD_WEIGHT':        self.config.get('GRAD_WEIGHT', 0.20),
             'PERCEPTUAL_WEIGHT':  self.config.get('PERCEPTUAL_WEIGHT', 0.0),
+            'USE_SR_MODEL':       self.config.get('USE_SR_MODEL', False),
         }
 
         request = {
