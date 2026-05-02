@@ -100,23 +100,25 @@ def make_bar_final_fusion(percent, width):
 def make_adamw_magic_eye(momentum, width=20):
     """
     Create AdamW "Magic Eye" visualization (tube radio style)
-    
-    Shows momentum as a push/brake indicator:
-    - High momentum (>0.5): Push right [       |====>  ]
-    - Low momentum (<0.5): Brake left [  <====|       ]
-    - Medium momentum: Balanced [   <=|=>   ]
-    
+
+    Shows the Adam momentum SNR (signal-to-noise ratio) as a push/brake
+    indicator.  The input value is already in [0, 1]:
+
+    - High SNR (>0.55): gradients consistent → push right  [  |====>  ]
+    - Low SNR  (<0.45): gradients noisy     → brake left   [  <====|  ]
+    - Medium           : balanced           [   <=|=>   ]
+
     Args:
-        momentum: Momentum value (typically 0-2, normalized to 0-1 range)
+        momentum: Adam SNR value in [0, 1]  (0 = noisy, 1 = fully consistent)
         width: Width of the bar in characters
-    
+
     Returns:
         str: Formatted magic eye bar with ANSI colors
     """
     width = max(10, width)
-    
-    # Normalize momentum to 0-1 range (assume typical range is 0-2)
-    normalized = min(1.0, max(0.0, momentum / 2.0))
+
+    # Value is already in [0, 1] – no scaling required.
+    normalized = min(1.0, max(0.0, momentum))
     
     # Calculate center position
     center = width // 2

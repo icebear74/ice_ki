@@ -1450,10 +1450,10 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 <div class="card-subtitle">GB</div>
             </div>
             
-            <div class="info-card" title="Durchschnittliches erstes Moment des AdamW-Optimierers – zeigt wie aktiv die Gewichte gerade angepasst werden">
-                <div class="card-title">👁️ AdamW-Momentum</div>
-                <div class="card-value" id="adamMomentum">0.000</div>
-                <div class="card-subtitle">Optimierer</div>
+            <div class="info-card" title="Adam-SNR: Verhältnis |exp_avg|/sqrt(exp_avg_sq+ε) – 0=zufällige Gradienten, 1=vollständig konsistente Lernrichtung">
+                <div class="card-title">👁️ AdamW-SNR</div>
+                <div class="card-value" id="adamMomentum">0.00</div>
+                <div class="card-subtitle">0–1 Signal-Ratio</div>
             </div>
         </div>
         
@@ -1748,7 +1748,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             const iterSpeed = data.iteration_duration > 0 ? (1.0 / data.iteration_duration) : 0;
             document.getElementById('iterSpeed').textContent = iterSpeed.toFixed(2);
             document.getElementById('vramUsage').textContent = data.vram_usage_gb.toFixed(1);
-            document.getElementById('adamMomentum').textContent = data.adam_momentum_avg.toFixed(3);
+            document.getElementById('adamMomentum').textContent = data.adam_momentum_avg.toFixed(2);
             const valIterSpeed = data.val_iter_per_sec || 0;
             document.getElementById('valIterSpeed').textContent = valIterSpeed > 0 ? valIterSpeed.toFixed(2) : '--';
             

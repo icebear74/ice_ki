@@ -592,7 +592,7 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
         print_separator(ui_w, 'thin')
         from .ui_terminal import make_adamw_magic_eye
         magic_eye = make_adamw_magic_eye(adam_momentum, width=25)
-        print_line(f"AdamW Momentum: {magic_eye} {C_CYAN}{adam_momentum:.4f}{C_RESET}", ui_w)
+        print_line(f"AdamW SNR: {magic_eye} {C_CYAN}{adam_momentum:.3f}{C_RESET}", ui_w)
         
         print_separator(ui_w, 'double')
     

@@ -1487,47 +1487,59 @@ class VSRTrainer:
     
     def _get_adam_momentum(self):
         """
-        Extract average momentum (exp_avg) from AdamW optimizer state.
+        Compute the momentum signal-to-noise ratio (SNR) from the AdamW state.
 
         Returns:
-            float: Average L2-norm of the first moment (exp_avg) across all
-                   parameter tensors that currently have a gradient.
+            float: Mean per-element SNR = mean(|exp_avg| / sqrt(exp_avg_sq + ε))
+                   averaged over all parameter tensors that have an optimizer
+                   state entry.  The result is always in [0, 1]:
 
-        Why is this value typically very small (e.g. 0.0002)?
-        -------------------------------------------------------
-        AdamW stores exp_avg[i] = β₁ · exp_avg[i-1] + (1-β₁) · grad[i],
-        i.e. a per-parameter exponential moving average of raw gradients.
-        The L2 norm of a single parameter tensor's exp_avg reflects the
-        *magnitude* of the gradients for that tensor only.
+                   0.0 – 0.2 : very noisy / near-zero gradients (early warmup)
+                   0.3 – 0.6 : mixed signal, optimizer still finding direction
+                   0.7 – 0.9 : consistent gradient direction, stable learning
+                   ~1.0       : highly stable, almost no gradient variance
 
-        In a stable training phase the raw gradients are small (the model
-        has converged to a local minimum and makes only tiny corrections),
-        so their EMA is likewise small.  Averaging the L2 norm over all
-        parameter tensors (many of which are large weight matrices with
-        many near-zero entries) produces a value that is typically several
-        orders of magnitude below 1.  A reading of ~0.0003 is therefore
-        expected and correct — it indicates that training is stable, NOT
-        that the optimizer is broken or that momentum is not being tracked.
+        Why SNR instead of the old L2-norm?
+        ------------------------------------
+        The previous implementation used exp_avg.norm(), whose magnitude scales
+        with tensor size (a 1 M-param layer always dwarfs a 1 k-param bias),
+        producing values in the 1e-4 range that were indistinguishable from 0
+        in all display formats (terminal .4f, web .toFixed(3), Magic Eye 0–2
+        normalization).
+
+        The SNR ratio |exp_avg| / sqrt(exp_avg_sq + ε) is the Adam "direction
+        confidence": how much of the second-moment scale is explained by a
+        consistent first-moment direction.  It is naturally in [0, 1] and
+        independent of learning rate, tensor size, or gradient magnitude scale,
+        so it produces legible readings (typically 0.4–0.8 during healthy
+        training) in all existing display widgets without any re-scaling.
         """
-        total_momentum = 0.0
+        import math
+        total_snr = 0.0
         count = 0
-        
+
+        # Default AdamW epsilon (PyTorch default)
+        eps = 1e-8
+
         for group in self.optimizer.param_groups:
             for p in group['params']:
-                if p.grad is None:
+                state = self.optimizer.state.get(p)
+                if not state:
                     continue
-                
-                state = self.optimizer.state[p]
-                if 'exp_avg' in state:
-                    # Get the exponential moving average of gradients (momentum)
-                    exp_avg = state['exp_avg']
-                    # Calculate magnitude (L2 norm)
-                    momentum_mag = exp_avg.norm().item()
-                    total_momentum += momentum_mag
+                if 'exp_avg' not in state or 'exp_avg_sq' not in state:
+                    continue
+
+                exp_avg = state['exp_avg']
+                exp_avg_sq = state['exp_avg_sq']
+
+                # Per-element SNR: |m1| / sqrt(m2 + eps)
+                # mean() collapses the tensor to a scalar → size-independent
+                snr = (exp_avg.abs() / (exp_avg_sq.sqrt() + eps)).mean().item()
+                if math.isfinite(snr):
+                    total_snr += snr
                     count += 1
-        
-        # Return average momentum magnitude
-        return total_momentum / count if count > 0 else 0.0
+
+        return total_snr / count if count > 0 else 0.0
     
     def _check_keyboard_input(self, epoch, steps_per_epoch, current_epoch_step):
         """Check for keyboard input and web commands"""
