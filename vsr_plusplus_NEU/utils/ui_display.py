@@ -187,6 +187,15 @@ def get_activity_data(model):
     # Final fusion layer
     add_fusion_activity("Final Fusion", fusion)
     
+    # Sanitize NaN/inf values to 0.0 before any numeric operations.
+    # Model activities come from .item() on GPU tensors; during gradient
+    # explosion or AMP training they can be NaN, which causes int() to crash
+    # with "cannot convert float NaN to integer".
+    activities_with_names = [
+        (name, v if np.isfinite(v) else 0.0)
+        for name, v in activities_with_names
+    ]
+
     # Extract just the values for trend calculation
     activities_raw = [val for name, val in activities_with_names]
     
