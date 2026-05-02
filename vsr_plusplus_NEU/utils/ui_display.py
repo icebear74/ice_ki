@@ -830,9 +830,9 @@ def _draw_activity_display(activities, display_mode, available_lines, ui_w,
                 fusion_layers.append((name, act, trend, raw))
         
         # Calculate overall activity
-        backward_overall = int(np.mean([act for _, act, _, _ in backward_layers])) if backward_layers else 0
-        forward_overall = int(np.mean([act for _, act, _, _ in forward_layers])) if forward_layers else 0
-        
+        backward_overall = int(np.nanmean([act for _, act, _, _ in backward_layers])) if backward_layers else 0
+        forward_overall = int(np.nanmean([act for _, act, _, _ in forward_layers])) if forward_layers else 0
+
         # Print headers side-by-side
         print_two_columns(
             f"{C_BOLD}🔥 BACKWARD TRUNK{C_RESET} ({backward_overall}%)",
@@ -909,8 +909,8 @@ def _draw_activity_display(activities, display_mode, available_lines, ui_w,
         backward_layers = sorted(backward_layers, key=lambda x: x[1], reverse=True)
         forward_layers = sorted(forward_layers, key=lambda x: x[1], reverse=True)
         
-        backward_overall = int(np.mean([act for _, act, _, _ in backward_layers])) if backward_layers else 0
-        forward_overall = int(np.mean([act for _, act, _, _ in forward_layers])) if forward_layers else 0
+        backward_overall = int(np.nanmean([act for _, act, _, _ in backward_layers])) if backward_layers else 0
+        forward_overall = int(np.nanmean([act for _, act, _, _ in forward_layers])) if forward_layers else 0
         
         print_line(f"{C_BOLD}🔥 BACKWARD TRUNK (sorted){C_RESET} - Overall: {make_bar(backward_overall, bar_width_single)} {backward_overall}%", ui_w)
         print_separator(ui_w, 'single')
