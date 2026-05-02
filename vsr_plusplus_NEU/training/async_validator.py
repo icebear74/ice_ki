@@ -174,6 +174,18 @@ def _run_validation_on_device(model, val_loaders, loss_fn, device, global_step,
 
                 ki_output = model(lr_stack)
 
+                # Detect NaN/Inf in model output (symptom: AMP overflow → NaN
+                # weights in checkpoint).  Without this guard the NaN propagates
+                # through SSIM → quality_to_percent and used to silently return
+                # 100 % quality (Python min/max NaN behaviour).
+                if not torch.isfinite(ki_output).all():
+                    nan_frac = (~torch.isfinite(ki_output)).float().mean().item()
+                    print(f"[AsyncVal] ⚠ ki_output contains non-finite values "
+                          f"({nan_frac*100:.1f}% NaN/Inf) — checkpoint may have "
+                          f"been saved during AMP overflow; metrics will be 0.0",
+                          flush=True)
+                    ki_output = torch.zeros_like(ki_output)
+
                 loss_dict = loss_fn(ki_output, gt)
                 total_loss += loss_dict['total'].item() if torch.is_tensor(loss_dict['total']) else loss_dict['total']
                 del loss_dict

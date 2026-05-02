@@ -2,6 +2,8 @@
 Metrics - PSNR, SSIM, and Quality Calculation
 """
 
+import math
+
 import torch
 import torch.nn.functional as F
 
@@ -15,11 +17,17 @@ def calculate_psnr(img1: torch.Tensor, img2: torch.Tensor) -> float:
         img2: Second image tensor [C, H, W] or [B, C, H, W]
         
     Returns:
-        PSNR value in dB
+        PSNR value in dB, or 0.0 if either tensor contains NaN/Inf
     """
     mse = torch.mean((img1 - img2) ** 2)
-    
-    if mse < 1e-10:
+
+    # NaN or Inf in input (e.g. from unstable AMP training) must not silently
+    # become nan dB — return 0.0 so the caller always gets a finite number.
+    mse_val = mse.item()
+    if not math.isfinite(mse_val):
+        return 0.0
+
+    if mse_val < 1e-10:
         return 50.0  # Perfect match
     
     psnr = 20 * torch.log10(1.0 / torch.sqrt(mse))
@@ -79,6 +87,11 @@ def quality_to_percent(psnr: float, ssim: float) -> float:
         ssim: SSIM value (0-1)
 
     Returns:
-        Quality score (0-1), equal to clipped SSIM
+        Quality score (0-1), equal to clipped SSIM.
+        Returns 0.0 when ssim is NaN or Inf (e.g. from model producing NaN
+        outputs due to AMP overflow — Python's built-in min/max silently turn
+        NaN into 1.0 which would produce a misleading "100% quality" reading).
     """
+    if not math.isfinite(ssim):
+        return 0.0
     return max(0.0, min(1.0, ssim))
