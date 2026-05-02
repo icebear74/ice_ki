@@ -578,31 +578,15 @@ class VSRTrainer:
                             display_fps[sk] = display_fps.get(sk, 0) + len(item['files'])
                         current_window_batches = []  # ready for next window
 
-                # Show only the in-progress window files so the count is always
-                # ≤ current_accum_steps.  Fall back to the last committed
-                # display_files only when current_window_batches is empty (i.e.
-                # immediately after an optimizer step) so the display is never
-                # blank between the step and the next forward pass.
-                live_fps = {sk: 0 for sk in _active_keys}
-                if current_window_batches:
-                    live_files = [
-                        f for item in current_window_batches for f in item['files']
-                    ]
-                    for item in current_window_batches:
-                        sk_item = item['size_key']
-                        live_fps[sk_item] = live_fps.get(sk_item, 0) + len(item['files'])
-                else:
-                    # Fallback: last complete window (never blank after optimizer step)
-                    live_files = display_files
-                    for f in display_files:
-                        sk_prefix = f.split('/', 1)[0]
-                        if sk_prefix in live_fps:
-                            live_fps[sk_prefix] += 1
+                # Always show the LAST COMPLETE accumulation window.
+                # Showing partial windows (fewer files than batch×accum) was
+                # confusing because the count changed on every forward pass.
+                # display_files is only updated when a full window completes, so
+                # the user always sees a consistent, full set of images.
+                live_fps = dict(display_fps)  # copy of the last complete window counters
+                live_files = list(display_files)
 
                 # Update web_monitor with current batch info.
-                # live_files always reflects ALL files of the current iteration
-                # (complete windows + the in-progress window), so the display is
-                # never blank mid-accumulation.
                 self.web_monitor.data_store.update_all_metrics(
                     current_batch={
                         'files': live_files,
@@ -613,7 +597,7 @@ class VSRTrainer:
                         'files_per_size': live_fps,
                         'epoch_files_per_size': dict(epoch_files_per_size),
                         'accumulation_steps': current_accum_steps,
-                        'accum_step': accum_counter + 1,
+                        'accum_step': current_accum_steps,  # display always shows a complete window
                     }
                 )
             
