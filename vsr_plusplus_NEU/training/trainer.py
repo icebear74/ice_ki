@@ -301,17 +301,26 @@ class VSRTrainer:
 
             # Combine metrics by averaging
             combined_metrics = {
-                'val_loss': sum(m['val_loss'] for _, m in all_metrics) / len(all_metrics),
-                'lr_quality': sum(m['lr_quality'] for _, m in all_metrics) / len(all_metrics),
-                'ki_quality': sum(m['ki_quality'] for _, m in all_metrics) / len(all_metrics),
-                'improvement': sum(m['improvement'] for _, m in all_metrics) / len(all_metrics),
-                'lr_psnr': sum(m['lr_psnr'] for _, m in all_metrics) / len(all_metrics),
-                'lr_ssim': sum(m['lr_ssim'] for _, m in all_metrics) / len(all_metrics),
-                'ki_psnr': sum(m['ki_psnr'] for _, m in all_metrics) / len(all_metrics),
-                'ki_ssim': sum(m['ki_ssim'] for _, m in all_metrics) / len(all_metrics),
-                'ki_to_gt': sum(m.get('ki_to_gt', 0) for _, m in all_metrics) / len(all_metrics),
-                'lr_to_gt': sum(m.get('lr_to_gt', 0) for _, m in all_metrics) / len(all_metrics),
+                'val_loss':       sum(m['val_loss'] for _, m in all_metrics) / len(all_metrics),
+                'lr_quality':     sum(m['lr_quality'] for _, m in all_metrics) / len(all_metrics),
+                'bicubic_quality': sum(m.get('bicubic_quality', 0) for _, m in all_metrics) / len(all_metrics),
+                'ki_quality':     sum(m['ki_quality'] for _, m in all_metrics) / len(all_metrics),
+                'improvement':    sum(m['improvement'] for _, m in all_metrics) / len(all_metrics),
+                'lr_psnr':        sum(m['lr_psnr'] for _, m in all_metrics) / len(all_metrics),
+                'lr_ssim':        sum(m['lr_ssim'] for _, m in all_metrics) / len(all_metrics),
+                'bicubic_psnr':   sum(m.get('bicubic_psnr', 0) for _, m in all_metrics) / len(all_metrics),
+                'bicubic_ssim':   sum(m.get('bicubic_ssim', 0) for _, m in all_metrics) / len(all_metrics),
+                'ki_psnr':        sum(m['ki_psnr'] for _, m in all_metrics) / len(all_metrics),
+                'ki_ssim':        sum(m['ki_ssim'] for _, m in all_metrics) / len(all_metrics),
+                'ki_to_gt':       sum(m.get('ki_to_gt', 0) for _, m in all_metrics) / len(all_metrics),
+                'lr_to_gt':       sum(m.get('lr_to_gt', 0) for _, m in all_metrics) / len(all_metrics),
             }
+
+            # Include sr_quality when available (requires USE_SR_MODEL=True)
+            if any('sr_quality' in m for _, m in all_metrics):
+                combined_metrics['sr_quality'] = (
+                    sum(m.get('sr_quality', 0) for _, m in all_metrics) / len(all_metrics)
+                )
 
             # Include all labeled images from all sizes (list of (tag, tensor) tuples)
             if all_labeled_images:
@@ -389,11 +398,17 @@ class VSRTrainer:
         # Updated only when current_window_batches reaches current_accum_steps,
         # so the display always shows a full set of same-resolution files.
         display_files = []   # list[str]: file paths from the last complete window
-        display_fps = {'720': 0, '540': 0, '720_169': 0}
+        # Dynamic per-size counters: initialised from the active size keys so
+        # they work correctly with V2 templates (not just the legacy 3 keys).
+        _active_keys = list(
+            getattr(getattr(self.train_loader, 'sampler', None), 'active_sizes', None)
+            or []
+        ) or ['default']
+        display_fps = {sk: 0 for sk in _active_keys}
 
         # Cumulative per-size file counter for the current epoch (used by WebUI).
         # This is a local variable – reset automatically on each call to train_epoch.
-        epoch_files_per_size = {'720': 0, '540': 0, '720_169': 0}
+        epoch_files_per_size = {sk: 0 for sk in _active_keys}
 
         # AdamW momentum value (updated at every optimizer step).  Initialized
         # here so _update_gui() can always read a defined value even before the
@@ -518,7 +533,7 @@ class VSRTrainer:
                     accum_counter = 0
                 current_window_batches = []
                 display_files = []
-                display_fps = {'720': 0, '540': 0, '720_169': 0}
+                display_fps = {sk: 0 for sk in _active_keys}
             prev_size_key = size_key
             # ── End size-key transition ───────────────────────────────────────
             
@@ -557,35 +572,21 @@ class VSRTrainer:
                         display_files = [
                             f for item in current_window_batches for f in item['files']
                         ]
-                        display_fps = {'720': 0, '540': 0, '720_169': 0}
+                        display_fps = {sk: 0 for sk in _active_keys}
                         for item in current_window_batches:
                             sk = item['size_key']
                             display_fps[sk] = display_fps.get(sk, 0) + len(item['files'])
                         current_window_batches = []  # ready for next window
 
-                # Always show the CURRENT iteration's files: merge the committed
-                # display_files with any in-progress batches from the current
-                # (not-yet-complete) accumulation window so that every forward
-                # pass appears in the WebUI immediately, regardless of batch size
-                # or accumulation depth.
-                live_files = display_files + [
-                    f for item in current_window_batches for f in item['files']
-                ]
-                # Build per-size counts in a single pass (O(n)) instead of
-                # re-scanning the list once per size key (O(n·m)).
-                live_fps = {'720': 0, '540': 0, '720_169': 0}
-                for f in display_files:
-                    sk_prefix = f.split('/', 1)[0]
-                    if sk_prefix in live_fps:
-                        live_fps[sk_prefix] += 1
-                for item in current_window_batches:
-                    sk_item = item['size_key']
-                    live_fps[sk_item] = live_fps.get(sk_item, 0) + len(item['files'])
+                # Always show the LAST COMPLETE accumulation window.
+                # Showing partial windows (fewer files than batch×accum) was
+                # confusing because the count changed on every forward pass.
+                # display_files is only updated when a full window completes, so
+                # the user always sees a consistent, full set of images.
+                live_fps = dict(display_fps)  # copy of the last complete window counters
+                live_files = list(display_files)
 
                 # Update web_monitor with current batch info.
-                # live_files always reflects ALL files of the current iteration
-                # (complete windows + the in-progress window), so the display is
-                # never blank mid-accumulation.
                 self.web_monitor.data_store.update_all_metrics(
                     current_batch={
                         'files': live_files,
@@ -596,7 +597,7 @@ class VSRTrainer:
                         'files_per_size': live_fps,
                         'epoch_files_per_size': dict(epoch_files_per_size),
                         'accumulation_steps': current_accum_steps,
-                        'accum_step': accum_counter + 1,
+                        'accum_step': current_accum_steps,  # display always shows a complete window
                     }
                 )
             
@@ -1147,9 +1148,11 @@ class VSRTrainer:
         quality_metrics = None
         if self.last_metrics:
             quality_metrics = {
-                'lr_quality': self.last_metrics.get('lr_quality', 0.0) * 100,  # Convert to %
-                'ki_quality': self.last_metrics.get('ki_quality', 0.0) * 100,
-                'improvement': self.last_metrics.get('improvement', 0.0) * 100,
+                'lr_quality':      self.last_metrics.get('lr_quality', 0.0) * 100,
+                'bicubic_quality': self.last_metrics.get('bicubic_quality', 0.0) * 100,
+                'sr_quality':      self.last_metrics.get('sr_quality', 0.0) * 100,
+                'ki_quality':      self.last_metrics.get('ki_quality', 0.0) * 100,
+                'improvement':     self.last_metrics.get('improvement', 0.0) * 100,
             }
             # Add GT difference metrics if available
             if 'ki_to_gt' in self.last_metrics:
@@ -1236,14 +1239,7 @@ class VSRTrainer:
         else:
             _perceptual_trend = 0
         
-        # Debug: Print first update to verify data flow
-        if self.global_step == 1:
-            print(f"\n🔍 Web UI Debug - First Update:")
-            print(f"   Step: {self.global_step}")
-            print(f"   Total Loss: {losses['total']}")
-            print(f"   LR: {current_lr}")
-            print(f"   VRAM: {gpu_mem:.2f} GB")
-            print(f"   Layer activities: {len(layer_act_dict)} layers")
+        # (debug print block removed — was polluting the terminal dashboard)
         
         try:
             self.web_monitor.update(
@@ -1299,6 +1295,9 @@ class VSRTrainer:
                 
                 # Quality-Metriken
                 quality_lr_value=quality_metrics.get('lr_quality', 0.0) / 100.0 if quality_metrics else 0.0,
+                quality_bicubic_value=quality_metrics.get('bicubic_quality', 0.0) / 100.0 if quality_metrics else 0.0,
+                quality_sr_value=quality_metrics.get('sr_quality', 0.0) / 100.0 if quality_metrics else 0.0,
+                quality_sr_enabled=(self.last_metrics is not None and 'sr_quality' in self.last_metrics),
                 quality_ki_value=quality_metrics.get('ki_quality', 0.0) / 100.0 if quality_metrics else 0.0,
                 quality_improvement_value=quality_metrics.get('improvement', 0.0) / 100.0 if quality_metrics else 0.0,
                 quality_ki_to_gt_value=quality_metrics.get('ki_to_gt', 0.0) / 100.0 if quality_metrics else 0.0,
@@ -1448,10 +1447,10 @@ class VSRTrainer:
             self._check_dataset_files()
 
         crop_counts = self._get_crop_file_counts()
-        total = DataStrategyScheduler.get_crop_total_count(crop_counts)
+        total = self.data_strategy_scheduler.get_crop_total_count(crop_counts)
         self._crop_wait_current_count = total
 
-        if DataStrategyScheduler.has_enough_training_crops(crop_counts):
+        if self.data_strategy_scheduler.has_enough_training_crops(crop_counts):
             if self.waiting_for_crops:
                 self.train_logger.log_event(
                     f"✅ Crop-Wait beendet: {total:,} Crop-Bilder vorhanden "
@@ -1465,47 +1464,59 @@ class VSRTrainer:
     
     def _get_adam_momentum(self):
         """
-        Extract average momentum (exp_avg) from AdamW optimizer state.
+        Compute the momentum signal-to-noise ratio (SNR) from the AdamW state.
 
         Returns:
-            float: Average L2-norm of the first moment (exp_avg) across all
-                   parameter tensors that currently have a gradient.
+            float: Mean per-element SNR = mean(|exp_avg| / sqrt(exp_avg_sq + ε))
+                   averaged over all parameter tensors that have an optimizer
+                   state entry.  The result is always in [0, 1]:
 
-        Why is this value typically very small (e.g. 0.0002)?
-        -------------------------------------------------------
-        AdamW stores exp_avg[i] = β₁ · exp_avg[i-1] + (1-β₁) · grad[i],
-        i.e. a per-parameter exponential moving average of raw gradients.
-        The L2 norm of a single parameter tensor's exp_avg reflects the
-        *magnitude* of the gradients for that tensor only.
+                   0.0 – 0.2 : very noisy / near-zero gradients (early warmup)
+                   0.3 – 0.6 : mixed signal, optimizer still finding direction
+                   0.7 – 0.9 : consistent gradient direction, stable learning
+                   ~1.0       : highly stable, almost no gradient variance
 
-        In a stable training phase the raw gradients are small (the model
-        has converged to a local minimum and makes only tiny corrections),
-        so their EMA is likewise small.  Averaging the L2 norm over all
-        parameter tensors (many of which are large weight matrices with
-        many near-zero entries) produces a value that is typically several
-        orders of magnitude below 1.  A reading of ~0.0003 is therefore
-        expected and correct — it indicates that training is stable, NOT
-        that the optimizer is broken or that momentum is not being tracked.
+        Why SNR instead of the old L2-norm?
+        ------------------------------------
+        The previous implementation used exp_avg.norm(), whose magnitude scales
+        with tensor size (a 1 M-param layer always dwarfs a 1 k-param bias),
+        producing values in the 1e-4 range that were indistinguishable from 0
+        in all display formats (terminal .4f, web .toFixed(3), Magic Eye 0–2
+        normalization).
+
+        The SNR ratio |exp_avg| / sqrt(exp_avg_sq + ε) is the Adam "direction
+        confidence": how much of the second-moment scale is explained by a
+        consistent first-moment direction.  It is naturally in [0, 1] and
+        independent of learning rate, tensor size, or gradient magnitude scale,
+        so it produces legible readings (typically 0.4–0.8 during healthy
+        training) in all existing display widgets without any re-scaling.
         """
-        total_momentum = 0.0
+        import math
+        total_snr = 0.0
         count = 0
-        
+
+        # Default AdamW epsilon (PyTorch default)
+        eps = 1e-8
+
         for group in self.optimizer.param_groups:
             for p in group['params']:
-                if p.grad is None:
+                state = self.optimizer.state.get(p)
+                if not state:
                     continue
-                
-                state = self.optimizer.state[p]
-                if 'exp_avg' in state:
-                    # Get the exponential moving average of gradients (momentum)
-                    exp_avg = state['exp_avg']
-                    # Calculate magnitude (L2 norm)
-                    momentum_mag = exp_avg.norm().item()
-                    total_momentum += momentum_mag
+                if 'exp_avg' not in state or 'exp_avg_sq' not in state:
+                    continue
+
+                exp_avg = state['exp_avg']
+                exp_avg_sq = state['exp_avg_sq']
+
+                # Per-element SNR: |m1| / sqrt(m2 + eps)
+                # mean() collapses the tensor to a scalar → size-independent
+                snr = (exp_avg.abs() / (exp_avg_sq.sqrt() + eps)).mean().item()
+                if math.isfinite(snr):
+                    total_snr += snr
                     count += 1
-        
-        # Return average momentum magnitude
-        return total_momentum / count if count > 0 else 0.0
+
+        return total_snr / count if count > 0 else 0.0
     
     def _check_keyboard_input(self, epoch, steps_per_epoch, current_epoch_step):
         """Check for keyboard input and web commands"""
@@ -1687,6 +1698,7 @@ class VSRTrainer:
             'MS_WEIGHT':          self.config.get('MS_WEIGHT', 0.20),
             'GRAD_WEIGHT':        self.config.get('GRAD_WEIGHT', 0.20),
             'PERCEPTUAL_WEIGHT':  self.config.get('PERCEPTUAL_WEIGHT', 0.0),
+            'USE_SR_MODEL':       self.config.get('USE_SR_MODEL', False),
         }
 
         request = {
@@ -2046,8 +2058,11 @@ class VSRTrainer:
         self.web_monitor.data_store.update_all_metrics(
             # Quality fractions (0-1, raw validator output)
             quality_lr_value=metrics.get('lr_quality', 0.0),
+            quality_bicubic_value=metrics.get('bicubic_quality', 0.0),
+            quality_sr_value=metrics.get('sr_quality', 0.0),
+            quality_sr_enabled='sr_quality' in metrics,
             quality_ki_value=metrics.get('ki_quality', 0.0),
-            # Raw sums (not per-image averages – match existing web_monitor convention)
+            # Per-sample average deltas
             quality_improvement_value=metrics.get('improvement', 0.0),
             quality_ki_to_gt_value=metrics.get('ki_to_gt', 0.0),
             quality_lr_to_gt_value=metrics.get('lr_to_gt', 0.0),

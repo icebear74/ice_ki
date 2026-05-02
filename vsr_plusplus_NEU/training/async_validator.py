@@ -113,7 +113,8 @@ def _find_safe_batch_size(model, val_dataset, device, config_snapshot):
 # Core validation logic (GPU-agnostic helper)
 # ---------------------------------------------------------------------------
 
-def _run_validation_on_device(model, val_loaders, loss_fn, device, global_step):
+def _run_validation_on_device(model, val_loaders, loss_fn, device, global_step,
+                              sr_model=None):
     """
     Run multi-size validation and return combined metrics dict.
 
@@ -127,6 +128,8 @@ def _run_validation_on_device(model, val_loaders, loss_fn, device, global_step):
         loss_fn:     HybridLoss instance (on *device*).
         device:      torch.device
         global_step: Training step the checkpoint belongs to (for logging).
+        sr_model:    Optional BasicSRModel (already on *device*, eval mode).
+                     When provided, a 5-panel comparison is generated.
 
     Returns:
         dict: Combined metrics (same keys as VSRValidator.validate()).
@@ -137,12 +140,17 @@ def _run_validation_on_device(model, val_loaders, loss_fn, device, global_step):
     all_labeled_images = []
 
     model.eval()
+    if sr_model is not None:
+        sr_model.eval()
 
     for size_key, val_loader in val_loaders:
         print(f"[AsyncVal] Validating {size_key} ({len(val_loader)} batches)…")
 
         total_loss = 0.0
-        total_lr_psnr = total_lr_ssim = total_ki_psnr = total_ki_ssim = 0.0
+        total_lr_psnr = total_lr_ssim = 0.0
+        total_bicubic_psnr = total_bicubic_ssim = 0.0
+        total_sr_psnr = total_sr_ssim = 0.0
+        total_ki_psnr = total_ki_ssim = 0.0
         total_improvement = total_ki_to_gt = total_lr_to_gt = 0.0
         num_samples = 0
 
@@ -166,108 +174,184 @@ def _run_validation_on_device(model, val_loaders, loss_fn, device, global_step):
 
                 ki_output = model(lr_stack)
 
+                # Detect NaN/Inf in model output (symptom: AMP overflow → NaN
+                # weights in checkpoint).  Without this guard the NaN propagates
+                # through SSIM → quality_to_percent and used to silently return
+                # 100 % quality (Python min/max NaN behaviour).
+                if not torch.isfinite(ki_output).all():
+                    nan_frac = (~torch.isfinite(ki_output)).float().mean().item()
+                    print(f"[AsyncVal] ⚠ ki_output contains non-finite values "
+                          f"({nan_frac*100:.1f}% NaN/Inf) — checkpoint may have "
+                          f"been saved during AMP overflow; metrics will be 0.0",
+                          flush=True)
+                    ki_output = torch.zeros_like(ki_output)
+
                 loss_dict = loss_fn(ki_output, gt)
                 total_loss += loss_dict['total'].item() if torch.is_tensor(loss_dict['total']) else loss_dict['total']
                 del loss_dict
 
-                lr_center = lr_stack[:, 3]
-                lr_upscaled = F.interpolate(lr_center, scale_factor=3, mode='bilinear', align_corners=False)
+                # ── Center-frame extraction ──────────────────────────────────
+                # lr_stack shape: [B, 7, 3, H_lr, W_lr] — 7 LR frames, RGB.
+                # The VSR model uses all 7 frames but produces the upscaled
+                # CENTER frame as output (frame index n_frames//2 = 3 of 0–6).
+                # LR, bicubic, and SR baselines MUST use the same center frame
+                # for a fair comparison against the GT.
+                center_idx       = lr_stack.size(1) // 2   # = 3 for 7-frame model
+                lr_center        = lr_stack[:, center_idx]  # [B, 3, H_lr, W_lr]
+                # Bilinear upscale (reference for LR quality tile)
+                lr_upscaled      = F.interpolate(lr_center, scale_factor=3, mode='bilinear', align_corners=False)
+                # Bicubic upscale (clean baseline, always computed)
+                bicubic_upscaled = F.interpolate(lr_center, scale_factor=3, mode='bicubic', align_corners=False)
+                bicubic_upscaled = torch.clamp(bicubic_upscaled, 0.0, 1.0)
+                # SR model receives same center frame (single-frame, no temporal context)
+                sr_output        = sr_model(lr_center) if sr_model is not None else None
                 del lr_center
 
+                font       = cv2.FONT_HERSHEY_SIMPLEX
+                font_scale = 1.5
+                thickness  = 3
+
+                def _label(img, text, color_fg):
+                    cv2.putText(img, text, (10, 40), font, font_scale, (255, 255, 255), thickness)
+                    cv2.putText(img, text, (10, 40), font, font_scale, color_fg, thickness - 1)
+
+                border_width = 3
+
                 for i in range(lr_stack.size(0)):
-                    lr_psnr = calculate_psnr(lr_upscaled[i], gt[i])
-                    lr_ssim = calculate_ssim(lr_upscaled[i], gt[i])
-                    ki_psnr = calculate_psnr(ki_output[i], gt[i])
-                    ki_ssim = calculate_ssim(ki_output[i], gt[i])
+                    lr_psnr  = calculate_psnr(lr_upscaled[i], gt[i])
+                    lr_ssim  = calculate_ssim(lr_upscaled[i], gt[i])
+                    bic_psnr = calculate_psnr(bicubic_upscaled[i], gt[i])
+                    bic_ssim = calculate_ssim(bicubic_upscaled[i], gt[i])
+                    ki_psnr  = calculate_psnr(ki_output[i], gt[i])
+                    ki_ssim  = calculate_ssim(ki_output[i], gt[i])
 
-                    total_lr_psnr += lr_psnr
-                    total_lr_ssim += lr_ssim
-                    total_ki_psnr += ki_psnr
-                    total_ki_ssim += ki_ssim
+                    total_lr_psnr      += lr_psnr
+                    total_lr_ssim      += lr_ssim
+                    total_bicubic_psnr += bic_psnr
+                    total_bicubic_ssim += bic_ssim
+                    total_ki_psnr      += ki_psnr
+                    total_ki_ssim      += ki_ssim
 
-                    lr_qual = quality_to_percent(lr_psnr, lr_ssim)
-                    ki_qual = quality_to_percent(ki_psnr, ki_ssim)
-                    gt_qual = 1.0
+                    lr_qual  = quality_to_percent(lr_psnr,  lr_ssim)
+                    bic_qual = quality_to_percent(bic_psnr, bic_ssim)
+                    ki_qual  = quality_to_percent(ki_psnr,  ki_ssim)
+                    gt_qual  = 1.0
 
                     total_improvement += (ki_qual - lr_qual)
-                    total_ki_to_gt += (ki_qual - gt_qual)
-                    total_lr_to_gt += (lr_qual - gt_qual)
+                    total_ki_to_gt    += (ki_qual - gt_qual)
+                    total_lr_to_gt    += (lr_qual - gt_qual)
 
-                    # Build labeled comparison images for TensorBoard
-                    lr_img = lr_upscaled[i].cpu().permute(1, 2, 0).numpy()
-                    ki_img = ki_output[i].cpu().permute(1, 2, 0).numpy()
-                    gt_img = gt[i].cpu().permute(1, 2, 0).numpy()
+                    # ── Optional SR metrics ──────────────────────────────────
+                    if sr_output is not None:
+                        sr_psnr = calculate_psnr(sr_output[i], gt[i])
+                        sr_ssim = calculate_ssim(sr_output[i], gt[i])
+                        sr_qual = quality_to_percent(sr_psnr, sr_ssim)
+                        total_sr_psnr += sr_psnr
+                        total_sr_ssim += sr_ssim
+                    else:
+                        sr_qual = None
 
-                    lr_img = np.clip(lr_img * 255, 0, 255).astype(np.uint8).copy()
-                    ki_img = np.clip(ki_img * 255, 0, 255).astype(np.uint8).copy()
-                    gt_img = np.clip(gt_img * 255, 0, 255).astype(np.uint8).copy()
+                    # ── Build comparison panels ──────────────────────────────
+                    lr_img  = np.clip(lr_upscaled[i].cpu().permute(1, 2, 0).numpy()    * 255, 0, 255).astype(np.uint8).copy()
+                    bic_img = np.clip(bicubic_upscaled[i].cpu().permute(1, 2, 0).numpy() * 255, 0, 255).astype(np.uint8).copy()
+                    ki_img  = np.clip(ki_output[i].cpu().permute(1, 2, 0).numpy()      * 255, 0, 255).astype(np.uint8).copy()
+                    gt_img  = np.clip(gt[i].cpu().permute(1, 2, 0).numpy()             * 255, 0, 255).astype(np.uint8).copy()
 
-                    font = cv2.FONT_HERSHEY_SIMPLEX
-                    font_scale = 1.5
-                    thickness = 3
+                    _label(lr_img,  f"LR {lr_qual*100:.1f}%",      (0, 255, 0))
+                    _label(bic_img, f"Bicubic {bic_qual*100:.1f}%", (0, 200, 255))
+                    _label(ki_img,  f"VSR {ki_qual*100:.1f}%",     (0, 255, 255))
+                    _label(gt_img,  "GT 100.0%",                    (255, 0, 0))
 
-                    cv2.putText(lr_img, f"LR {lr_qual*100:.1f}%", (10, 40), font, font_scale, (255, 255, 255), thickness)
-                    cv2.putText(lr_img, f"LR {lr_qual*100:.1f}%", (10, 40), font, font_scale, (0, 255, 0), thickness - 1)
+                    panels = [
+                        cv2.copyMakeBorder(lr_img,  0, 0, 0, border_width, cv2.BORDER_CONSTANT, value=(0, 0, 0)),
+                        cv2.copyMakeBorder(bic_img, 0, 0, 0, border_width, cv2.BORDER_CONSTANT, value=(0, 0, 0)),
+                    ]
+                    if sr_output is not None and sr_qual is not None:
+                        sr_img = np.clip(sr_output[i].cpu().permute(1, 2, 0).numpy() * 255, 0, 255).astype(np.uint8).copy()
+                        _label(sr_img, f"SR {sr_qual*100:.1f}%", (255, 165, 0))
+                        panels.append(cv2.copyMakeBorder(sr_img, 0, 0, 0, border_width, cv2.BORDER_CONSTANT, value=(0, 0, 0)))
+                    panels.append(
+                        cv2.copyMakeBorder(ki_img, 0, 0, 0, border_width, cv2.BORDER_CONSTANT, value=(0, 0, 0))
+                    )
+                    panels.append(gt_img)  # no right border on last panel
 
-                    cv2.putText(ki_img, f"KI {ki_qual*100:.1f}%", (10, 40), font, font_scale, (255, 255, 255), thickness)
-                    cv2.putText(ki_img, f"KI {ki_qual*100:.1f}%", (10, 40), font, font_scale, (0, 255, 255), thickness - 1)
-
-                    cv2.putText(gt_img, "GT 100.0%", (10, 40), font, font_scale, (255, 255, 255), thickness)
-                    cv2.putText(gt_img, "GT 100.0%", (10, 40), font, font_scale, (255, 0, 0), thickness - 1)
-
-                    border_width = 3
-                    lr_bordered = cv2.copyMakeBorder(lr_img, 0, 0, 0, border_width, cv2.BORDER_CONSTANT, value=(0, 0, 0))
-                    ki_bordered = cv2.copyMakeBorder(ki_img, 0, 0, 0, border_width, cv2.BORDER_CONSTANT, value=(0, 0, 0))
-                    combined = np.concatenate([lr_bordered, ki_bordered, gt_img], axis=1)
-
+                    combined = np.concatenate(panels, axis=1)
                     combined_tensor = torch.from_numpy(combined).permute(2, 0, 1).float() / 255.0
                     name = os.path.splitext(os.path.basename(filenames[i]))[0]
                     all_labeled_images.append((f"val_{size_key}/{name}", combined_tensor.contiguous()))
 
-                del lr_stack, gt, ki_output, lr_upscaled
+                del lr_stack, gt, ki_output, lr_upscaled, bicubic_upscaled
+                if sr_output is not None:
+                    del sr_output
                 torch.cuda.empty_cache()
 
-        avg_loss = total_loss / max(1, val_total)
-        avg_lr_psnr = total_lr_psnr / max(1, num_samples)
-        avg_lr_ssim = total_lr_ssim / max(1, num_samples)
-        avg_ki_psnr = total_ki_psnr / max(1, num_samples)
-        avg_ki_ssim = total_ki_ssim / max(1, num_samples)
+        n = max(1, num_samples)
+        avg_loss         = total_loss         / max(1, val_total)
+        avg_lr_psnr      = total_lr_psnr      / n
+        avg_lr_ssim      = total_lr_ssim      / n
+        avg_bicubic_psnr = total_bicubic_psnr / n
+        avg_bicubic_ssim = total_bicubic_ssim / n
+        avg_ki_psnr      = total_ki_psnr      / n
+        avg_ki_ssim      = total_ki_ssim      / n
 
-        lr_quality = quality_to_percent(avg_lr_psnr, avg_lr_ssim)
-        ki_quality = quality_to_percent(avg_ki_psnr, avg_ki_ssim)
+        lr_quality      = quality_to_percent(avg_lr_psnr,      avg_lr_ssim)
+        bicubic_quality = quality_to_percent(avg_bicubic_psnr, avg_bicubic_ssim)
+        ki_quality      = quality_to_percent(avg_ki_psnr,      avg_ki_ssim)
 
         m = {
-            'val_loss': avg_loss,
-            'lr_quality': lr_quality,
-            'ki_quality': ki_quality,
-            'improvement': total_improvement,
-            'ki_to_gt': total_ki_to_gt,
-            'lr_to_gt': total_lr_to_gt,
-            'lr_psnr': avg_lr_psnr,
-            'lr_ssim': avg_lr_ssim,
-            'ki_psnr': avg_ki_psnr,
-            'ki_ssim': avg_ki_ssim,
+            'val_loss':       avg_loss,
+            'lr_quality':     lr_quality,
+            'bicubic_quality': bicubic_quality,
+            'ki_quality':     ki_quality,
+            'improvement':    total_improvement / n,
+            'ki_to_gt':       total_ki_to_gt    / n,
+            'lr_to_gt':       total_lr_to_gt    / n,
+            'lr_psnr':        avg_lr_psnr,
+            'lr_ssim':        avg_lr_ssim,
+            'bicubic_psnr':   avg_bicubic_psnr,
+            'bicubic_ssim':   avg_bicubic_ssim,
+            'ki_psnr':        avg_ki_psnr,
+            'ki_ssim':        avg_ki_ssim,
         }
+        if sr_model is not None:
+            avg_sr_psnr = total_sr_psnr / n
+            avg_sr_ssim = total_sr_ssim / n
+            m['sr_psnr']    = avg_sr_psnr
+            m['sr_ssim']    = avg_sr_ssim
+            m['sr_quality'] = quality_to_percent(avg_sr_psnr, avg_sr_ssim)
+
         all_metrics.append((size_key, m))
-        print(f"[AsyncVal]   ✓ {size_key}: KI {ki_quality*100:.1f}%  PSNR {avg_ki_psnr:.2f} dB")
+        ki_info = f"KI {ki_quality*100:.1f}%  PSNR {avg_ki_psnr:.2f} dB"
+        bic_info = f"  Bic {bicubic_quality*100:.1f}%"
+        sr_info  = f"  SR {m.get('sr_quality', 0)*100:.1f}%" if sr_model is not None else ""
+        print(f"[AsyncVal]   ✓ {size_key}: {ki_info}{bic_info}{sr_info}")
 
     if not all_metrics:
         return {}
 
+    cnt = len(all_metrics)
     combined = {
-        'val_loss':    sum(m['val_loss']    for _, m in all_metrics) / len(all_metrics),
-        'lr_quality':  sum(m['lr_quality']  for _, m in all_metrics) / len(all_metrics),
-        'ki_quality':  sum(m['ki_quality']  for _, m in all_metrics) / len(all_metrics),
-        'improvement': sum(m['improvement'] for _, m in all_metrics) / len(all_metrics),
-        'ki_to_gt':    sum(m['ki_to_gt']    for _, m in all_metrics) / len(all_metrics),
-        'lr_to_gt':    sum(m['lr_to_gt']    for _, m in all_metrics) / len(all_metrics),
-        'lr_psnr':     sum(m['lr_psnr']     for _, m in all_metrics) / len(all_metrics),
-        'lr_ssim':     sum(m['lr_ssim']     for _, m in all_metrics) / len(all_metrics),
-        'ki_psnr':     sum(m['ki_psnr']     for _, m in all_metrics) / len(all_metrics),
-        'ki_ssim':     sum(m['ki_ssim']     for _, m in all_metrics) / len(all_metrics),
+        'val_loss':       sum(m['val_loss']       for _, m in all_metrics) / cnt,
+        'lr_quality':     sum(m['lr_quality']     for _, m in all_metrics) / cnt,
+        'bicubic_quality': sum(m['bicubic_quality'] for _, m in all_metrics) / cnt,
+        'ki_quality':     sum(m['ki_quality']     for _, m in all_metrics) / cnt,
+        'improvement':    sum(m['improvement']    for _, m in all_metrics) / cnt,
+        'ki_to_gt':       sum(m['ki_to_gt']       for _, m in all_metrics) / cnt,
+        'lr_to_gt':       sum(m['lr_to_gt']       for _, m in all_metrics) / cnt,
+        'lr_psnr':        sum(m['lr_psnr']        for _, m in all_metrics) / cnt,
+        'lr_ssim':        sum(m['lr_ssim']        for _, m in all_metrics) / cnt,
+        'bicubic_psnr':   sum(m['bicubic_psnr']   for _, m in all_metrics) / cnt,
+        'bicubic_ssim':   sum(m['bicubic_ssim']   for _, m in all_metrics) / cnt,
+        'ki_psnr':        sum(m['ki_psnr']        for _, m in all_metrics) / cnt,
+        'ki_ssim':        sum(m['ki_ssim']        for _, m in all_metrics) / cnt,
         'labeled_images': all_labeled_images,
         'per_size_metrics': {sk: m for sk, m in all_metrics},
     }
+    # Include SR averages when an SR model was used
+    if sr_model is not None:
+        combined['sr_psnr']    = sum(m['sr_psnr']    for _, m in all_metrics) / cnt
+        combined['sr_ssim']    = sum(m['sr_ssim']    for _, m in all_metrics) / cnt
+        combined['sr_quality'] = sum(m['sr_quality'] for _, m in all_metrics) / cnt
     return combined
 
 
@@ -439,6 +523,14 @@ def run_async_validator(checkpoint_dir, data_root, dataset_name, log_dir, gpu_in
             time.sleep(5.0)
             continue
 
+        # ── Load optional SR reference model (EDSR) ──────────────────────────
+        # Only loaded when USE_SR_MODEL=True in config.  Loaded once per
+        # validation cycle and released afterwards to free VRAM.
+        sr_model = None
+        if req_config.get('USE_SR_MODEL', False):
+            from vsr_plusplus_NEU.core.sr_model import load_sr_model
+            sr_model = load_sr_model(device)  # returns None on failure
+
         # ── Load loss function ───────────────────────────────────────────────
         try:
             loss_fn = HybridLoss(
@@ -491,6 +583,9 @@ def run_async_validator(checkpoint_dir, data_root, dataset_name, log_dir, gpu_in
             traceback.print_exc()
             _write_error_result(result_file, step, err_msg)
             del model, loss_fn
+            if sr_model is not None:
+                del sr_model
+                sr_model = None
             torch.cuda.empty_cache()
             time.sleep(5.0)
             continue
@@ -500,6 +595,9 @@ def run_async_validator(checkpoint_dir, data_root, dataset_name, log_dir, gpu_in
             print(f"[AsyncVal] ⚠ {err_msg}", flush=True)
             _write_error_result(result_file, step, err_msg)
             del model, loss_fn
+            if sr_model is not None:
+                del sr_model
+                sr_model = None
             torch.cuda.empty_cache()
             time.sleep(5.0)
             continue
@@ -507,7 +605,8 @@ def run_async_validator(checkpoint_dir, data_root, dataset_name, log_dir, gpu_in
         # ── Run validation ───────────────────────────────────────────────────
         t_start = time.time()
         try:
-            metrics = _run_validation_on_device(model, val_loaders, loss_fn, device, step)
+            metrics = _run_validation_on_device(model, val_loaders, loss_fn, device, step,
+                                                sr_model=sr_model)
         except Exception as e:
             err_msg = f"Validation inference failed: {e}"
             print(f"[AsyncVal] ❌ {err_msg}", flush=True)
@@ -515,6 +614,8 @@ def run_async_validator(checkpoint_dir, data_root, dataset_name, log_dir, gpu_in
             _write_error_result(result_file, step, err_msg)
             # Clean up model to free VRAM before retrying
             del model, loss_fn
+            if sr_model is not None:
+                del sr_model
             torch.cuda.empty_cache()
             time.sleep(5.0)
             continue
@@ -571,6 +672,9 @@ def run_async_validator(checkpoint_dir, data_root, dataset_name, log_dir, gpu_in
 
         # ── Clean up GPU memory for next round ───────────────────────────────
         del model, loss_fn, metrics
+        if sr_model is not None:
+            del sr_model
+            sr_model = None
         torch.cuda.empty_cache()
 
         last_processed_step = step

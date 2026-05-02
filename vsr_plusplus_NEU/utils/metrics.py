@@ -2,6 +2,8 @@
 Metrics - PSNR, SSIM, and Quality Calculation
 """
 
+import math
+
 import torch
 import torch.nn.functional as F
 
@@ -15,11 +17,17 @@ def calculate_psnr(img1: torch.Tensor, img2: torch.Tensor) -> float:
         img2: Second image tensor [C, H, W] or [B, C, H, W]
         
     Returns:
-        PSNR value in dB
+        PSNR value in dB, or 0.0 if either tensor contains NaN/Inf
     """
     mse = torch.mean((img1 - img2) ** 2)
-    
-    if mse < 1e-10:
+
+    # NaN or Inf in input (e.g. from unstable AMP training) must not silently
+    # become nan dB — return 0.0 so the caller always gets a finite number.
+    mse_val = mse.item()
+    if not math.isfinite(mse_val):
+        return 0.0
+
+    if mse_val < 1e-10:
         return 50.0  # Perfect match
     
     psnr = 20 * torch.log10(1.0 / torch.sqrt(mse))
@@ -68,20 +76,22 @@ def calculate_ssim(img1: torch.Tensor, img2: torch.Tensor) -> float:
 
 def quality_to_percent(psnr: float, ssim: float) -> float:
     """
-    Convert PSNR/SSIM to quality percentage (0-1)
-    
+    Convert SSIM to quality percentage (0-1).
+
+    SSIM is used directly because SSIM(GT, GT) = 1.0 by definition, giving a
+    physically correct 100 % upper bound without arbitrary normalisation.
+    The ``psnr`` argument is kept for API compatibility but is not used.
+
     Args:
-        psnr: PSNR value in dB
+        psnr: PSNR value in dB (unused, kept for API compatibility)
         ssim: SSIM value (0-1)
-        
+
     Returns:
-        Quality score (0-1)
+        Quality score (0-1), equal to clipped SSIM.
+        Returns 0.0 when ssim is NaN or Inf (e.g. from model producing NaN
+        outputs due to AMP overflow — Python's built-in min/max silently turn
+        NaN into 1.0 which would produce a misleading "100% quality" reading).
     """
-    # Normalize PSNR to 0-1 (assume 20-50 dB range)
-    psnr_score = (psnr - 20) / 30
-    psnr_score = max(0, min(1, psnr_score))
-    
-    # Combine PSNR and SSIM (70% PSNR, 30% SSIM)
-    combined = 0.7 * psnr_score + 0.3 * ssim
-    
-    return max(0, min(1, combined))
+    if not math.isfinite(ssim):
+        return 0.0
+    return max(0.0, min(1.0, ssim))

@@ -110,6 +110,9 @@ class CompleteTrainingDataStore:
             
             # Quality-Metriken (ALLE)
             'quality_lr_value': 0.0,
+            'quality_bicubic_value': 0.0,
+            'quality_sr_value': 0.0,
+            'quality_sr_enabled': False,   # True sobald ein SR-Modell aktiv ist
             'quality_ki_value': 0.0,
             'quality_improvement_value': 0.0,
             'quality_ki_to_gt_value': 0.0,
@@ -124,23 +127,13 @@ class CompleteTrainingDataStore:
             'align_backward_flow': 0.0,   # TemporalAlign backward: mean flow magnitude
             'align_forward_flow': 0.0,    # TemporalAlign forward: mean flow magnitude
             
-            # Dataset File Information (NEW)
+            # Dataset File Information
+            # Keys are populated dynamically by the trainer from arch templates;
+            # no hardcoded size keys here so V2 formats work without changes.
             'dataset_files': {
-                'train_per_size': {
-                    '720': {'count': 0, 'has_new': False, 'new_count': 0},
-                    '540': {'count': 0, 'has_new': False, 'new_count': 0},
-                    '720_169': {'count': 0, 'has_new': False, 'new_count': 0}
-                },
-                'val': {
-                    '720': {'count': 0, 'has_new': False, 'new_count': 0},
-                    '540': {'count': 0, 'has_new': False, 'new_count': 0},
-                    '720_169': {'count': 0, 'has_new': False, 'new_count': 0}
-                },
-                'distribution': {
-                    '720': 0.0,
-                    '540': 0.0,
-                    '720_169': 0.0
-                },
+                'train_per_size': {},   # {template_key: {count, has_new, new_count}}
+                'val': {},              # {template_key: {count, has_new, new_count}}
+                'distribution': {},     # {template_key: float}
                 'last_check': 0
             },
             
@@ -154,12 +147,8 @@ class CompleteTrainingDataStore:
             },
             
             # Adaptive Batch Configuration (per-size, read-only info)
-            # Werte gemessen mit Gradient-Checkpointing (FP32, 7f, 26b, 72f)
-            'adaptive_batch_config': {
-                '720_169': {'batch': 2, 'accum': 4, 'effective': 8, 'vram_gb': 2.9},
-                '540':     {'batch': 2, 'accum': 3, 'effective': 6, 'vram_gb': 2.9},
-                '720':     {'batch': 1, 'accum': 4, 'effective': 4, 'vram_gb': 3.4},
-            },
+            # Populated dynamically by the trainer — no hardcoded template keys.
+            'adaptive_batch_config': {},
             
             # Statusflags
             'training_active': True,
@@ -1219,7 +1208,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
 
         <!-- Crop-wait banner: shown when training is blocked waiting for crop images -->
         <div id="cropWaitBanner" class="crop-wait-banner">
-            <div class="crop-wait-title">⏳ Warte auf Crop-Bilder (540/720)</div>
+            <div class="crop-wait-title">⏳ Warte auf Crop-Bilder</div>
             <div class="crop-wait-progress-wrap">
                 <div class="crop-wait-bar-outer">
                     <div id="cropWaitBarInner" class="crop-wait-bar-inner" style="width:0%"></div>
@@ -1461,35 +1450,45 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 <div class="card-subtitle">GB</div>
             </div>
             
-            <div class="info-card" title="Durchschnittliches erstes Moment des AdamW-Optimierers – zeigt wie aktiv die Gewichte gerade angepasst werden">
-                <div class="card-title">👁️ AdamW-Momentum</div>
-                <div class="card-value" id="adamMomentum">0.000</div>
-                <div class="card-subtitle">Optimierer</div>
+            <div class="info-card" title="Adam-SNR: Verhältnis |exp_avg|/sqrt(exp_avg_sq+ε) – 0=zufällige Gradienten, 1=vollständig konsistente Lernrichtung">
+                <div class="card-title">👁️ AdamW-SNR</div>
+                <div class="card-value" id="adamMomentum">0.00</div>
+                <div class="card-subtitle">0–1 Signal-Ratio</div>
             </div>
         </div>
         
         <div class="section-header">🎯 Qualitäts-Metriken</div>
         
         <div class="grid-container">
-            <div class="info-card" title="Qualitätsbewertung des Eingangsvideos (Low Resolution) – Referenzwert für die KI-Ausgabe">
-                <div class="card-title">LR-Qualität</div>
+            <div class="info-card" title="LR Center-Frame: bilinear hochskaliert – Ausgangsqualität vor jeder KI-Verarbeitung">
+                <div class="card-title">LR-Qualität (bilinear)</div>
                 <div class="card-value" id="lrQuality">0.0%</div>
             </div>
             
-            <div class="info-card" title="Qualitätsbewertung der KI-Ausgabe (Super-Resolution) – höher ist besser">
-                <div class="card-title">KI-Qualität</div>
+            <div class="info-card" title="Bicubic: klassischer Hochskalierungsalgorithmus ohne KI – fairer Vergleichswert">
+                <div class="card-title">Bicubic-Qualität</div>
+                <div class="card-value" id="bicubicQuality">0.0%</div>
+            </div>
+            
+            <div class="info-card" title="EDSR SR-Modell: Single-Image Super-Resolution (kein temporaler Kontext) – nur sichtbar wenn USE_SR_MODEL=True">
+                <div class="card-title">SR-Qualität (EDSR)</div>
+                <div class="card-value" id="srQuality" style="color: var(--accent-orange);">–</div>
+            </div>
+            
+            <div class="info-card" title="VSR KI-Ausgabe: 7-Frame Video Super-Resolution – höher ist besser">
+                <div class="card-title">KI/VSR-Qualität</div>
                 <div class="card-value" id="kiQuality">0.0%</div>
                 <div class="card-subtitle">Bestes: <span id="bestQuality">0.0%</span></div>
                 <div class="card-subtitle" id="valStepHint" style="display:none; color: #7c3aed; margin-top:4px;"></div>
             </div>
             
-            <div class="info-card" title="Wie viel besser die KI-Ausgabe im Vergleich zum LR-Eingangsbild ist (positiv = KI besser als LR)">
-                <div class="card-title">Verbesserung (KI vs. LR)</div>
+            <div class="info-card" title="Wie viel besser VSR im Vergleich zum LR-Eingangsbild ist (positiv = KI besser als LR)">
+                <div class="card-title">Verbesserung (VSR vs. LR)</div>
                 <div class="card-value" id="improvement">0.0%</div>
             </div>
             
-            <div class="info-card" title="Wie nah die KI-Ausgabe am Referenzbild (Ground Truth) ist – gemessen über PSNR und SSIM">
-                <div class="card-title">KI vs. GT (PSNR/SSIM)</div>
+            <div class="info-card" title="Wie nah die KI-Ausgabe am Referenzbild (Ground Truth) ist – gemessen per SSIM">
+                <div class="card-title">KI vs. GT (SSIM)</div>
                 <div class="card-value" id="kiToGt">0.0%</div>
             </div>
             
@@ -1619,63 +1618,18 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 <div style="font-size: 0.78em; color: var(--text-secondary); margin-bottom: 8px; text-align: right;">
                     <span style="color: var(--accent-orange);">verwendet</span> / <span style="color: var(--text-primary);">gesamt</span>
                 </div>
-                
-                <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border-color);">
-                    <span style="color: var(--text-secondary);">720×720</span>
-                    <span style="font-family: 'Courier New', monospace;">
-                        <span style="color: var(--accent-orange); font-weight: bold;" id="train720Used">0</span><span style="color: var(--text-secondary);"> / </span><span style="color: var(--text-primary); font-weight: bold;" id="train720Count">0</span>
-                    </span>
-                </div>
-                <div id="train720NewFiles" style="display: none; margin-top: 5px; margin-bottom: 8px; padding: 6px; background: rgba(34, 197, 94, 0.1); border-left: 3px solid #22c55e; border-radius: 4px; font-size: 0.85em;">
-                    <span style="color: #22c55e;">✨ +<strong id="train720NewCount">0</strong> reloaded</span>
-                </div>
-                
-                <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border-color);">
-                    <span style="color: var(--text-secondary);">540×540</span>
-                    <span style="font-family: 'Courier New', monospace;">
-                        <span style="color: var(--accent-orange); font-weight: bold;" id="train540Used">0</span><span style="color: var(--text-secondary);"> / </span><span style="color: var(--text-primary); font-weight: bold;" id="train540Count">0</span>
-                    </span>
-                </div>
-                <div id="train540NewFiles" style="display: none; margin-top: 5px; margin-bottom: 8px; padding: 6px; background: rgba(34, 197, 94, 0.1); border-left: 3px solid #22c55e; border-radius: 4px; font-size: 0.85em;">
-                    <span style="color: #22c55e;">✨ +<strong id="train540NewCount">0</strong> reloaded</span>
-                </div>
-                
-                <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border-color);">
-                    <span style="color: var(--text-secondary);">720×405 (16:9)</span>
-                    <span style="font-family: 'Courier New', monospace;">
-                        <span style="color: var(--accent-orange); font-weight: bold;" id="train720_169Used">0</span><span style="color: var(--text-secondary);"> / </span><span style="color: var(--text-primary); font-weight: bold;" id="train720_169Count">0</span>
-                    </span>
-                </div>
-                <div id="train720_169NewFiles" style="display: none; margin-top: 5px; margin-bottom: 8px; padding: 6px; background: rgba(34, 197, 94, 0.1); border-left: 3px solid #22c55e; border-radius: 4px; font-size: 0.85em;">
-                    <span style="color: #22c55e;">✨ +<strong id="train720_169NewCount">0</strong> reloaded</span>
+                <!-- Rows are injected by updateDatasetFiles() from dynamic template keys -->
+                <div id="trainDatasetsContainer">
+                    <div style="color: var(--text-secondary); font-size: 0.9em; padding: 8px 0;">Warte auf Daten…</div>
                 </div>
             </div>
             
             <!-- Validation Datasets -->
             <div>
                 <h3 style="color: var(--accent-green); margin-bottom: 10px; font-size: 1.1em;">✅ Validierungs-Datensätze</h3>
-                <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border-color);">
-                    <span style="color: var(--text-secondary);">720×720</span>
-                    <span style="color: var(--text-primary); font-weight: bold;" id="val720Count">0</span>
-                </div>
-                <div id="val720NewFiles" style="display: none; margin-top: 5px; margin-bottom: 8px; padding: 6px; background: rgba(34, 197, 94, 0.1); border-left: 3px solid #22c55e; border-radius: 4px; font-size: 0.85em;">
-                    <span style="color: #22c55e;">✨ +<strong id="val720NewCount">0</strong> reloaded</span>
-                </div>
-                
-                <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border-color);">
-                    <span style="color: var(--text-secondary);">540×540</span>
-                    <span style="color: var(--text-primary); font-weight: bold;" id="val540Count">0</span>
-                </div>
-                <div id="val540NewFiles" style="display: none; margin-top: 5px; margin-bottom: 8px; padding: 6px; background: rgba(34, 197, 94, 0.1); border-left: 3px solid #22c55e; border-radius: 4px; font-size: 0.85em;">
-                    <span style="color: #22c55e;">✨ +<strong id="val540NewCount">0</strong> reloaded</span>
-                </div>
-                
-                <div style="display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border-color);">
-                    <span style="color: var(--text-secondary);">720×405 (16:9)</span>
-                    <span style="color: var(--text-primary); font-weight: bold;" id="val720_169Count">0</span>
-                </div>
-                <div id="val720_169NewFiles" style="display: none; margin-top: 5px; margin-bottom: 8px; padding: 6px; background: rgba(34, 197, 94, 0.1); border-left: 3px solid #22c55e; border-radius: 4px; font-size: 0.85em;">
-                    <span style="color: #22c55e;">✨ +<strong id="val720_169NewCount">0</strong> reloaded</span>
+                <!-- Rows are injected by updateDatasetFiles() from dynamic template keys -->
+                <div id="valDatasetsContainer">
+                    <div style="color: var(--text-secondary); font-size: 0.9em; padding: 8px 0;">Warte auf Daten…</div>
                 </div>
             </div>
             
@@ -1693,23 +1647,11 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 <span style="color: var(--accent-blue); font-weight: bold; font-family: 'Courier New', monospace; font-size: 1.05em;" id="batchFilesUsed">0 / 0</span>
             </div>
             
-            <!-- Files per size -->
+            <!-- Files per size — rows injected by updateBatchFiles() -->
             <div style="margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--border-color);">
                 <h3 style="color: var(--text-secondary); margin-bottom: 8px; font-size: 0.95em;">Dateien pro Auflösung:</h3>
-                
-                <div style="display: flex; justify-content: space-between; padding: 4px 0;">
-                    <span style="color: var(--text-secondary); font-size: 0.9em;">720×720</span>
-                    <span style="color: var(--accent-green); font-weight: bold; font-family: 'Courier New', monospace; font-size: 0.9em;" id="batchFiles720">0</span>
-                </div>
-                
-                <div style="display: flex; justify-content: space-between; padding: 4px 0;">
-                    <span style="color: var(--text-secondary); font-size: 0.9em;">540×540</span>
-                    <span style="color: var(--accent-green); font-weight: bold; font-family: 'Courier New', monospace; font-size: 0.9em;" id="batchFiles540">0</span>
-                </div>
-                
-                <div style="display: flex; justify-content: space-between; padding: 4px 0;">
-                    <span style="color: var(--text-secondary); font-size: 0.9em;">720×405 (16:9)</span>
-                    <span style="color: var(--accent-green); font-weight: bold; font-family: 'Courier New', monospace; font-size: 0.9em;" id="batchFiles720_169">0</span>
+                <div id="batchFilesPerSizeContainer">
+                    <div style="color: var(--text-secondary); font-size: 0.9em; padding: 4px 0;">Warte auf Daten…</div>
                 </div>
             </div>
             
@@ -1806,7 +1748,7 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             const iterSpeed = data.iteration_duration > 0 ? (1.0 / data.iteration_duration) : 0;
             document.getElementById('iterSpeed').textContent = iterSpeed.toFixed(2);
             document.getElementById('vramUsage').textContent = data.vram_usage_gb.toFixed(1);
-            document.getElementById('adamMomentum').textContent = data.adam_momentum_avg.toFixed(3);
+            document.getElementById('adamMomentum').textContent = data.adam_momentum_avg.toFixed(2);
             const valIterSpeed = data.val_iter_per_sec || 0;
             document.getElementById('valIterSpeed').textContent = valIterSpeed > 0 ? valIterSpeed.toFixed(2) : '--';
             
@@ -1906,8 +1848,16 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             
             document.getElementById('gradClip').textContent = data.gradient_clip_val.toFixed(2);
             
-            // Quality metrics with fixed labels
+            // Quality metrics
             document.getElementById('lrQuality').textContent = (data.quality_lr_value * 100).toFixed(1) + '%';
+            document.getElementById('bicubicQuality').textContent = (data.quality_bicubic_value * 100).toFixed(1) + '%';
+            // SR tile: show dash when no SR model is active (value === 0 and never updated)
+            const srEl = document.getElementById('srQuality');
+            if (data.quality_sr_enabled) {
+                srEl.textContent = (data.quality_sr_value * 100).toFixed(1) + '%';
+            } else {
+                srEl.textContent = '–';
+            }
             document.getElementById('kiQuality').textContent = (data.quality_ki_value * 100).toFixed(1) + '%';
             document.getElementById('bestQuality').textContent = (data.best_quality_ever * 100).toFixed(1) + '%';
             document.getElementById('improvement').textContent = (data.quality_improvement_value * 100).toFixed(1) + '%';
@@ -2523,73 +2473,56 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             // Per-size epoch usage counters
             const epochFilesPerSize = (data.current_batch || {}).epoch_files_per_size || {};
 
-            // Update training datasets (per-size)
+            // Update training datasets (per-size) — dynamic, no hardcoded keys
             const trainPerSize = dsFiles.train_per_size || {};
-            
-            // 720 training
-            const train720 = trainPerSize['720'] || {};
-            document.getElementById('train720Count').textContent = train720.count || 0;
-            document.getElementById('train720Used').textContent = epochFilesPerSize['720'] || 0;
-            if (train720.has_new && train720.new_count > 0) {
-                document.getElementById('train720NewFiles').style.display = 'block';
-                document.getElementById('train720NewCount').textContent = train720.new_count;
-            } else {
-                document.getElementById('train720NewFiles').style.display = 'none';
+            const trainContainer = document.getElementById('trainDatasetsContainer');
+            if (trainContainer) {
+                const trainKeys = Object.keys(trainPerSize);
+                if (trainKeys.length === 0) {
+                    trainContainer.innerHTML = '<div style="color: var(--text-secondary); font-size: 0.9em; padding: 8px 0;">Warte auf Daten…</div>';
+                } else {
+                    let trainHtml = '';
+                    for (const key of trainKeys.sort()) {
+                        const t = trainPerSize[key] || {};
+                        const used = epochFilesPerSize[key] || 0;
+                        const total = t.count || 0;
+                        const newBadge = (t.has_new && t.new_count > 0)
+                            ? `<div style="margin-top:5px; margin-bottom:8px; padding:6px; background:rgba(34,197,94,0.1); border-left:3px solid #22c55e; border-radius:4px; font-size:0.85em;"><span style="color:#22c55e;">✨ +<strong>${t.new_count}</strong> reloaded</span></div>`
+                            : '';
+                        trainHtml += `
+                            <div style="display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid var(--border-color);">
+                                <span style="color:var(--text-secondary);">${key}</span>
+                                <span style="font-family:'Courier New',monospace;">
+                                    <span style="color:var(--accent-orange); font-weight:bold;">${used}</span><span style="color:var(--text-secondary);"> / </span><span style="color:var(--text-primary); font-weight:bold;">${total}</span>
+                                </span>
+                            </div>${newBadge}`;
+                    }
+                    trainContainer.innerHTML = trainHtml;
+                }
             }
             
-            // 540 training
-            const train540 = trainPerSize['540'] || {};
-            document.getElementById('train540Count').textContent = train540.count || 0;
-            document.getElementById('train540Used').textContent = epochFilesPerSize['540'] || 0;
-            if (train540.has_new && train540.new_count > 0) {
-                document.getElementById('train540NewFiles').style.display = 'block';
-                document.getElementById('train540NewCount').textContent = train540.new_count;
-            } else {
-                document.getElementById('train540NewFiles').style.display = 'none';
-            }
-            
-            // 720_169 training
-            const train720_169 = trainPerSize['720_169'] || {};
-            document.getElementById('train720_169Count').textContent = train720_169.count || 0;
-            document.getElementById('train720_169Used').textContent = epochFilesPerSize['720_169'] || 0;
-            if (train720_169.has_new && train720_169.new_count > 0) {
-                document.getElementById('train720_169NewFiles').style.display = 'block';
-                document.getElementById('train720_169NewCount').textContent = train720_169.new_count;
-            } else {
-                document.getElementById('train720_169NewFiles').style.display = 'none';
-            }
-            
-            // Update validation datasets
+            // Update validation datasets — dynamic, no hardcoded keys
             const val = dsFiles.val || {};
-            
-            // 720
-            const val720 = val['720'] || {};
-            document.getElementById('val720Count').textContent = val720.count || 0;
-            if (val720.has_new && val720.new_count > 0) {
-                document.getElementById('val720NewFiles').style.display = 'block';
-                document.getElementById('val720NewCount').textContent = val720.new_count;
-            } else {
-                document.getElementById('val720NewFiles').style.display = 'none';
-            }
-            
-            // 540
-            const val540 = val['540'] || {};
-            document.getElementById('val540Count').textContent = val540.count || 0;
-            if (val540.has_new && val540.new_count > 0) {
-                document.getElementById('val540NewFiles').style.display = 'block';
-                document.getElementById('val540NewCount').textContent = val540.new_count;
-            } else {
-                document.getElementById('val540NewFiles').style.display = 'none';
-            }
-            
-            // 720_169
-            const val720_169 = val['720_169'] || {};
-            document.getElementById('val720_169Count').textContent = val720_169.count || 0;
-            if (val720_169.has_new && val720_169.new_count > 0) {
-                document.getElementById('val720_169NewFiles').style.display = 'block';
-                document.getElementById('val720_169NewCount').textContent = val720_169.new_count;
-            } else {
-                document.getElementById('val720_169NewFiles').style.display = 'none';
+            const valContainer = document.getElementById('valDatasetsContainer');
+            if (valContainer) {
+                const valKeys = Object.keys(val);
+                if (valKeys.length === 0) {
+                    valContainer.innerHTML = '<div style="color: var(--text-secondary); font-size: 0.9em; padding: 8px 0;">Warte auf Daten…</div>';
+                } else {
+                    let valHtml = '';
+                    for (const key of valKeys.sort()) {
+                        const v = val[key] || {};
+                        const newBadge = (v.has_new && v.new_count > 0)
+                            ? `<div style="margin-top:5px; margin-bottom:8px; padding:6px; background:rgba(34,197,94,0.1); border-left:3px solid #22c55e; border-radius:4px; font-size:0.85em;"><span style="color:#22c55e;">✨ +<strong>${v.new_count}</strong> reloaded</span></div>`
+                            : '';
+                        valHtml += `
+                            <div style="display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid var(--border-color);">
+                                <span style="color:var(--text-secondary);">${key}</span>
+                                <span style="color:var(--text-primary); font-weight:bold;">${v.count || 0}</span>
+                            </div>${newBadge}`;
+                    }
+                    valContainer.innerHTML = valHtml;
+                }
             }
             
             // Last check
@@ -2604,11 +2537,24 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
             const totalFiles = batch.total_files_in_epoch || 0;
             document.getElementById('batchFilesUsed').textContent = `${filesUsed} / ${totalFiles}`;
             
-            // Update files per size
-            const filesPerSize = batch.files_per_size || {'720': 0, '540': 0, '720_169': 0};
-            document.getElementById('batchFiles720').textContent = filesPerSize['720'] || 0;
-            document.getElementById('batchFiles540').textContent = filesPerSize['540'] || 0;
-            document.getElementById('batchFiles720_169').textContent = filesPerSize['720_169'] || 0;
+            // Update files per size — dynamic, no hardcoded keys
+            const filesPerSize = batch.files_per_size || {};
+            const batchFilesContainer = document.getElementById('batchFilesPerSizeContainer');
+            if (batchFilesContainer) {
+                const sizeKeys = Object.keys(filesPerSize);
+                if (sizeKeys.length === 0) {
+                    batchFilesContainer.innerHTML = '<div style="color:var(--text-secondary); font-size:0.9em; padding:4px 0;">–</div>';
+                } else {
+                    let html = '';
+                    for (const k of sizeKeys.sort()) {
+                        html += `<div style="display:flex; justify-content:space-between; padding:4px 0;">
+                            <span style="color:var(--text-secondary); font-size:0.9em;">${k}</span>
+                            <span style="color:var(--accent-green); font-weight:bold; font-family:'Courier New',monospace; font-size:0.9em;">${filesPerSize[k] || 0}</span>
+                        </div>`;
+                    }
+                    batchFilesContainer.innerHTML = html;
+                }
+            }
             
             // Update accumulation steps
             const accumulationSteps = batch.accumulation_steps || 1;
@@ -2636,16 +2582,15 @@ class WebMonitorRequestProcessor(BaseHTTPRequestHandler):
                 tbody.innerHTML = '<tr><td colspan="5" style="color: var(--text-secondary); padding: 8px 6px;">Keine Daten</td></tr>';
                 return;
             }
-            const order = ['720_169', '540', '720'];
-            const labels = {'720_169': '720×405 (16:9)', '540': '540×540', '720': '720×720'};
+            // Iterate over dynamic template keys from the actual config
             let html = '';
-            for (const key of order) {
+            for (const key of Object.keys(cfg).sort()) {
                 const c = cfg[key];
                 if (!c) continue;
                 const vram = typeof c.vram_gb === 'number' ? c.vram_gb.toFixed(2) + ' GB' : '–';
                 const vramColor = c.vram_gb >= 3.5 ? 'var(--accent-orange)' : 'var(--accent-green)';
                 html += `<tr style="border-bottom: 1px solid var(--border-color);">
-                    <td style="padding: 5px 6px; color: var(--text-primary);">${labels[key] || key}</td>
+                    <td style="padding: 5px 6px; color: var(--text-primary);">${key}</td>
                     <td style="padding: 5px 6px; text-align: center; color: var(--accent-blue); font-weight: bold;">${c.batch}</td>
                     <td style="padding: 5px 6px; text-align: center; color: var(--accent-blue);">${c.accum}</td>
                     <td style="padding: 5px 6px; text-align: center; color: var(--accent-green); font-weight: bold;">${c.effective}</td>

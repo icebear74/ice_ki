@@ -8,42 +8,63 @@ VSR++ 7-Frame Configuration - Example Template
 The config.py file is in .gitignore and will NOT be committed.
 Edit config.py for your local setup.
 
-This configuration is specifically optimized for 7-frame VSR training on Tesla P4 hardware (8GB VRAM).
+This configuration is optimized for 7-frame VSR training on Tesla P4 hardware (8GB VRAM).
 Key parameters:
-- 72 feature channels (optimized for 7-frame model)
-- 26 residual blocks (balanced depth for quality)
+- 72 feature channels (benchmark-validated default)
+- 24 residual blocks (balanced choice from benchmarks — 26/28 are more expensive without
+  sufficient justification, especially for larger formats like 960x540, 960x720, 1152x648)
 - Gradient accumulation for effective batch size
-- Matches dataset_generator_v2 output structure
+- Matches dataset_generator_v2 output structure (dynamic templates from dataset_architecture.json)
+
+Lighter alternative: N_FEATS=72, N_BLOCKS=20 (if VRAM is tight)
 """
 
 # ============================================================================
-# MODEL ARCHITECTURE PARAMETERS (7-Frame Optimized)
+# MODEL ARCHITECTURE PARAMETERS (7-Frame, 3x Scale — FIXED)
 # ============================================================================
 
-# Number of feature channels - Optimized for 7-frame model
-# 72 features provides good capacity while staying within VRAM limits
+# Number of feature channels — benchmark-validated default
+# 72 features provides strong quality while staying within VRAM limits
 N_FEATS = 72
 
-# Total number of residual blocks - Optimized for quality
-# 28 blocks provides excellent capacity for 7-frame processing
-N_BLOCKS = 28
+# Total number of residual blocks — benchmark-validated balanced default
+# 24 blocks is the recommended default.  26 and 28 are increasingly expensive
+# for the larger V2 formats (960x540, 960x720, 1152x648) without enough benefit.
+# Lighter alternative: 20 blocks (reduces VRAM and iteration time noticeably).
+N_BLOCKS = 24
 
 
 # ============================================================================
-# TRAINING BATCH PARAMETERS (Optimized for 7-Frame Model)
+# TRAINING BATCH PARAMETERS
 # ============================================================================
 
-# Per-size batch and gradient accumulation configuration.
+# Per-template batch and gradient accumulation configuration.
 # These values are read by train.py and trainer.py at startup.
-# Add a new entry here for every new size_key used in your dataset.
 #
+# NOTE: Templates are discovered dynamically from dataset_architecture.json.
+# Add an entry here for any template that needs a custom batch config.
+# The training code uses a pixel-count-based rule as fallback for unknown templates:
+#   GT pixels <= 405×720 (291,600): batch=2, accum=4 → eff=8
+#   GT pixels  > 405×720          : batch=1, accum=4 → eff=4
+#
+# Legacy size keys (for backward compatibility):
 #   720_169 (720×405) – 16:9 full frames:  BS=2, accum=4 → eff=8  (~5.14 GB)
 #   540     (540×540) – 1080p crops:       BS=2, accum=3 → eff=6  (~5.15 GB)
 #   720     (720×720) – 4K crops:          BS=1, accum=4 → eff=4  (~6.14 GB, BS=2 = OOM)
+#
+# V2 template examples (pixel-count rule applies automatically if not listed here):
+#   1152_169 (1152×648) – large 16:9:     BS=1, accum=4 → eff=4
+#   960_43   (960×720)  – 4:3 format:     BS=1, accum=4 → eff=4
+#   960_169  (960×540)  – 16:9 medium:    BS=1, accum=4 → eff=4
 ADAPTIVE_BATCH_CONFIG = {
-    '720_169': {'batch': 2, 'accum': 4},   # eff=8 | ~5.14 GB | Vollbilder 16:9
-    '540':     {'batch': 2, 'accum': 3},   # eff=6 | ~5.15 GB | 1080p Crops
-    '720':     {'batch': 1, 'accum': 4},   # eff=4 | ~6.14 GB | 4K Crops (BS=1 pflicht!)
+    # Legacy V1 size keys
+    '720_169': {'batch': 2, 'accum': 4},   # eff=8 | ~5.14 GB
+    '540':     {'batch': 2, 'accum': 3},   # eff=6 | ~5.15 GB
+    '720':     {'batch': 1, 'accum': 4},   # eff=4 | ~6.14 GB (BS=1 required!)
+    # V2 templates — add your templates here as needed
+    # '1152_169': {'batch': 1, 'accum': 4},
+    # '960_43':   {'batch': 1, 'accum': 4},
+    # '960_169':  {'batch': 2, 'accum': 4},
 }
 
 # Batch size per iteration (single-size fallback)
@@ -130,16 +151,17 @@ PIN_MEMORY = True
 # ============================================================================
 
 # Dataset root directory - base directory for all datasets
-# This matches runtime_config.json "data.root"
-DATASET_ROOT = "/mnt/data/training/datasetNeu"
+# Default: /mnt/data/training/Dataset
+# This is the directory that contains dataset_architecture.json and category subdirs.
+DATASET_ROOT = "/mnt/data/training/Dataset"
 
-# Default dataset name (category) - used if runtime_config.json not found
-# Options: 'master', 'universal', 'space', 'toon' (lowercase)
+# Default dataset category — used to locate training data and write checkpoints.
+# Options: 'master', 'space', 'toon', 'universal' (lowercase, must match a category
+# in dataset_architecture.json and a subdirectory under DATASET_ROOT).
 DEFAULT_DATASET_NAME = "master"
 
-# For backward compatibility - will be overridden by runtime_config.json
-# New structure: DATASET_ROOT/dataset_name/patches/{size_key}/GT
-# Old structure (deprecated): DATASET_ROOT/Master/MasterModel/Learn/Patches/GT
+# Derived path (for backward compatibility; overridden at runtime from DATASET_ROOT + category).
+# New V2 structure: DATASET_ROOT/dataset_name/patches/{template}/GT
 DATA_ROOT = f"{DATASET_ROOT}/{DEFAULT_DATASET_NAME}"
 
 
@@ -171,6 +193,22 @@ USE_AMP = False
 # Reduces activation memory by ~40% at the cost of ~10-15% compute overhead.
 # Set to False to disable (higher VRAM usage, slightly faster training).
 USE_CHECKPOINTING = True
+
+
+# ============================================================================
+# ASYNC VALIDATION (optional – requires a second GPU)
+# ============================================================================
+
+# Set to 'auto' (recommended) to automatically use the GPU not used for
+# training. **Designed for dual-GPU systems** (e.g., two Tesla P100/P4).
+# On a single-GPU system 'auto' gracefully disables async validation
+# (the training process will print a warning and fall back to sync mode).
+# Set to None to disable (synchronous validation only).
+ASYNC_VAL_GPU = 'auto'  # 'auto' | None | explicit int (e.g. 1)
+
+# Optional SR reference model path.
+# See config.active.py for full documentation.
+SR_MODEL_PATH = None  # e.g. '/mnt/data/models/sr_baseline.pth'
 
 
 # ============================================================================
@@ -229,6 +267,10 @@ def get_config():
     # Add AMP setting (always include so training code can rely on its presence)
     config['USE_AMP'] = USE_AMP
     config['USE_CHECKPOINTING'] = USE_CHECKPOINTING
+    # Async validation GPU (None = synchronous mode, 'auto' = other GPU)
+    config['ASYNC_VAL_GPU'] = ASYNC_VAL_GPU
+    # Optional SR reference model path (None = disabled)
+    config['SR_MODEL_PATH'] = SR_MODEL_PATH
     
     return config
 
@@ -236,109 +278,73 @@ def get_config():
 def print_config():
     """Print current configuration in a readable format."""
     print("\n" + "="*80)
-    print("7-FRAME VSR CONFIGURATION (Tesla P4 Optimized)")
+    print("7-FRAME VSR++ CONFIGURATION (Dataset Generator V2)")
     print("="*80)
-    
-    print("\nMODEL ARCHITECTURE (7-Frame Optimized):")
+
+    print("\nMODEL ARCHITECTURE (7 frames, 3× scale — fixed):")
     print(f"  Features (n_feats):     {N_FEATS}")
-    print(f"  Blocks (n_blocks):      {N_BLOCKS}")
-    
+    print(f"  Blocks (n_blocks):      {N_BLOCKS}  "
+          f"{'← default 24' if N_BLOCKS == 24 else '← lighter alt 20' if N_BLOCKS == 20 else ''}")
+
     print("\nBATCH SETTINGS (VRAM-Safe):")
-    print(f"  Batch Size:             {BATCH_SIZE}")
-    print(f"  Accumulation Steps:     {ACCUMULATION_STEPS}")
-    print(f"  Effective Batch Size:   {BATCH_SIZE * ACCUMULATION_STEPS}")
-    print(f"  Estimated VRAM:         ~2.2 GB @ batch=1 (with gradient checkpointing)")
-    
+    print(f"  Batch Size (fallback):  {BATCH_SIZE}")
+    print(f"  Accum Steps (fallback): {ACCUMULATION_STEPS}")
+    print(f"  Effective Batch (fback):{BATCH_SIZE * ACCUMULATION_STEPS}")
+    print(f"  Per-template config:    ADAPTIVE_BATCH_CONFIG (see above)")
+
     print("\nLEARNING RATE:")
     print(f"  Initial LR:             {10**LR_EXPONENT:.2e} (10^{LR_EXPONENT})")
     print(f"  Max LR:                 {MAX_LR:.2e}")
     print(f"  Min LR:                 {MIN_LR:.2e}")
     print(f"  Weight Decay:           {WEIGHT_DECAY}")
     print(f"  Warmup Steps:           {WARMUP_STEPS:,}")
-    
+
     print("\nLOSS WEIGHTS (VGG Perceptual Enabled):")
     print(f"  L1 Weight:              {L1_WEIGHT} (primary)")
     print(f"  MS Weight:              {MS_WEIGHT}")
     print(f"  Grad Weight:            {GRAD_WEIGHT}")
     print(f"  Perceptual Weight:      {PERCEPTUAL_WEIGHT} (VGG16-based)")
     print(f"  Total:                  {L1_WEIGHT + MS_WEIGHT + GRAD_WEIGHT + PERCEPTUAL_WEIGHT}")
-    
+
     print("\nTRAINING SCHEDULE:")
     print(f"  Max Steps:              {MAX_STEPS:,}")
     print(f"  Validation Every:       {VAL_STEP_EVERY:,} steps")
     print(f"  Save Checkpoint Every:  {SAVE_STEP_EVERY:,} steps")
     print(f"  TensorBoard Log Every:  {LOG_TBOARD_EVERY:,} steps")
-    
+
     print("\nDATA LOADING:")
     print(f"  Workers:                {NUM_WORKERS}")
     print(f"  Pin Memory:             {PIN_MEMORY}")
-    
-    print("\nDATASET PATHS:")
+
+    print("\nDATASET PATHS (V2 dynamic structure):")
     print(f"  Dataset Root:           {DATASET_ROOT}")
-    print(f"  Category (dataset_name): {DEFAULT_DATASET_NAME}")
-    
-    # Try to load runtime_config.json to show actual configuration
-    import os
-    import json
-    runtime_config_file = os.path.join(os.path.dirname(__file__), "runtime_config.json")
-    
-    if os.path.exists(runtime_config_file):
-        try:
-            with open(runtime_config_file, 'r') as f:
-                rt_config = json.load(f)
-            dataset_root = rt_config.get('data', {}).get('root', DATASET_ROOT)
-            dataset_name = rt_config.get('data', {}).get('dataset_name', DEFAULT_DATASET_NAME)
-            
-            print(f"\n  ✓ runtime_config.json found:")
-            print(f"    Root:                 {dataset_root}")
-            print(f"    Dataset Name:         {dataset_name}")
-            
-            # Show expected structure for each size_key
-            size_dist = rt_config.get('size_distribution', {})
-            enabled_sizes = [k for k, v in size_dist.items() if v > 0]
-            
-            if enabled_sizes:
-                print(f"\n  Expected Structure (NEW - size-specific):")
-                for size_key in enabled_sizes:
-                    print(f"    Training {size_key}:")
-                    print(f"      {dataset_root}/{dataset_name}/patches/{size_key}/GT/")
-                    print(f"      {dataset_root}/{dataset_name}/patches/{size_key}/LR_7frames/")
-                
-                # Show validation structure
-                val_sizes = rt_config.get('validation', {}).get('sizes', enabled_sizes)
-                if val_sizes:
-                    print(f"\n    Validation:")
-                    for size_key in val_sizes:
-                        print(f"      {dataset_root}/{dataset_name}/val/{size_key}/GT/")
-                        print(f"      (LR auto-found in patches/{size_key}/LR_7frames/)")
-        except Exception as e:
-            print(f"\n  ⚠ Could not parse runtime_config.json: {e}")
-            print(f"  Using default paths (backward compatible)")
-    else:
-        print(f"\n  ⚠ runtime_config.json not found")
-        print(f"  Expected at: {runtime_config_file}")
-        print(f"  Using default single-size structure:")
-        print(f"    {DATA_ROOT}/patches/540/GT/")
-        print(f"    {DATA_ROOT}/patches/540/LR_7frames/")
-    
+    print(f"  Category:               {DEFAULT_DATASET_NAME}")
+    print(f"  Architecture file:      {DATASET_ROOT}/dataset_architecture.json")
+    print(f"  Templates:              discovered dynamically from dataset_architecture.json")
+    print(f"  Training GT pattern:    {DATASET_ROOT}/{DEFAULT_DATASET_NAME}/patches/{{template}}/GT/")
+    print(f"  Training LR pattern:    {DATASET_ROOT}/{DEFAULT_DATASET_NAME}/patches/{{template}}/LR_{{n}}frames/")
+    print(f"  Validation GT pattern:  {DATASET_ROOT}/{DEFAULT_DATASET_NAME}/val/{{template}}/GT/")
+    print(f"  Validation LR source:   patches/{{template}}/LR_{{n}}frames/ (never in val/)")
+    print(f"  Locked run config:      {DATASET_ROOT}/{DEFAULT_DATASET_NAME}/training_run_locked.json")
+
     print("\nADAPTIVE SYSTEM:")
     print(f"  Adaptive Loss Weights:  {ADAPTIVE_LOSS_WEIGHTS}")
     print(f"  Adaptive Grad Clip:     {ADAPTIVE_GRAD_CLIP}")
     print(f"  Initial Grad Clip:      {INITIAL_GRAD_CLIP}")
-    
+
     print("\nPERFORMANCE:")
     print(f"  Mixed Precision (AMP):  {USE_AMP}")
-    
+
     print("\n" + "="*80)
     print("CONFIGURATION NOTES:")
-    print("  - 7-frame model with 72 features and 26 blocks")
-    print("  - Dataset structure matches dataset_generator_v2 output")
-    print("  - Lowercase category names (master, universal, space, toon)")
-    print("  - Size-specific directories: patches/{size_key}/ and val/{size_key}/")
-    print("  - Validation LR files auto-found in patches/{size_key}/LR_7frames/")
-    print("  - VGG perceptual loss enabled for quality")
-    print("  - Gradient accumulation for effective batch size 6")
-    print("="*80 + "\n")
+    print("  - Default: N_FEATS=72, N_BLOCKS=24 (benchmark-validated)")
+    print("  - Lighter alternative: N_BLOCKS=20 (less VRAM, slightly lower quality)")
+    print("  - Model is fixed to 7 frames and 3× scale — mismatch causes early abort")
+    print("  - Templates discovered dynamically from dataset_architecture.json")
+    print("  - Supports V2 bucket subdirs (0000/, 0001/, …) and legacy flat layouts")
+    print("  - Validation GT-only: place GT images in val/{template}/GT/")
+    print("    LR is always found automatically from patches/{template}/LR_{n}frames/")
+    print("  - Locked run config ensures checkpoint compatibility across restarts")
 
 
 if __name__ == '__main__':

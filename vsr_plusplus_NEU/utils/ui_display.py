@@ -1,72 +1,77 @@
 """
-UI Display Module
+UI Display Module — Priority-tile dashboard for VSR++ training.
 
-Complete GUI display functions for training visualization.
-Ported from original train.py to maintain full feature parity.
+Tiles are built as lists of strings and laid out by priority so the most
+important information is always visible regardless of terminal height.
+
+Priority ladder (lower = always shown first):
+  1  header   — title + training score          (always)
+  2  progress — step / epoch / ETA bars         (always)
+  3  losses   — l1 / ms / grad / LR / speed     (always)
+  4  adaptive — mode / plateau / AdamW magic eye
+  5  quality  — KI vs LR quality metrics
+  6  activity — averaged layer activity
+ 99  footer   — status bar + keyboard hints     (always, printed last)
 """
 
 import sys
 import shutil
 import numpy as np
-from .ui_terminal import *
 
-# Convergence detection thresholds
-# These values determine when loss is considered converging/diverging
-CONVERGENCE_SLOPE_THRESHOLD = -0.00005  # Negative slope indicates convergence
-DIVERGENCE_SLOPE_THRESHOLD = 0.00005    # Positive slope indicates divergence
+from .ui_terminal import (
+    C_GREEN, C_GRAY, C_RESET, C_BOLD, C_CYAN, C_RED, C_YELLOW,
+    C_MAGENTA, C_BORDER,
+    _line, _two_cols, _sep, _hdr, _ftr,
+    make_bar, make_bar_fusion, make_bar_final_fusion,
+    make_adamw_magic_eye, make_peak_activity_bar, make_size_bar,
+    get_visible_len, format_time,
+    clear_screen, move_cursor_home, hide_cursor, show_cursor,
+    # kept for external callers
+    print_line, print_two_columns, print_separator, print_header, print_footer,
+)
 
+# Convergence thresholds
+CONVERGENCE_SLOPE_THRESHOLD = -0.00005
+DIVERGENCE_SLOPE_THRESHOLD  =  0.00005
 
-# Global state for UI
-activity_history = {i+1: [] for i in range(64)}  # Support up to 64 layers
-loss_history = []
-TREND_WINDOW = 50
-last_term_size = (0, 0)
+# Global state
+activity_history = {i + 1: [] for i in range(64)}
+loss_history     = []
+TREND_WINDOW     = 50
+last_term_size   = (0, 0)
 last_display_mode = -1
 
 
-def is_fusion_layer(layer_name):
-    """Check if a layer is a fusion layer based on its name"""
-    return "Fuse" in layer_name or "Fusion" in layer_name
+# ── Layer helpers ─────────────────────────────────────────────────────────────
 
+def is_fusion_layer(name):
+    return "Fuse" in name or "Fusion" in name
 
-def is_final_fusion(layer_name):
-    """Check if a layer is the final fusion layer"""
-    return "Final Fusion" in layer_name
+def is_final_fusion(name):
+    return "Final Fusion" in name
 
-
-def get_bar_for_layer(layer_name, percent, width):
-    """Get appropriate bar style based on layer type"""
-    if is_final_fusion(layer_name):
+def get_bar_for_layer(name, percent, width):
+    if is_final_fusion(name):
         return make_bar_final_fusion(percent, width)
-    elif is_fusion_layer(layer_name):
+    elif is_fusion_layer(name):
         return make_bar_fusion(percent, width)
-    else:
-        return make_bar(percent, width)
+    return make_bar(percent, width)
 
+
+# ── Trend / convergence ───────────────────────────────────────────────────────
 
 def calculate_trends(activities):
-    """
-    Calculate activity trends for each layer
-    
-    Args:
-        activities: List of current activity values
-    
-    Returns:
-        list: Trend percentages for each layer
-    """
     trends = []
     for layer_id, current_val in enumerate(activities, 1):
         if layer_id not in activity_history:
             activity_history[layer_id] = []
-        
         activity_history[layer_id].append(current_val)
         if len(activity_history[layer_id]) > TREND_WINDOW:
             activity_history[layer_id].pop(0)
-        
         if len(activity_history[layer_id]) >= 20:
             recent = np.mean(activity_history[layer_id][-10:])
-            old = np.mean(activity_history[layer_id][-20:-10])
-            trend = ((recent - old) / (old + 1e-8)) * 100
+            old    = np.mean(activity_history[layer_id][-20:-10])
+            trend  = ((recent - old) / (old + 1e-8)) * 100
         else:
             trend = 0.0
         trends.append(trend)
@@ -74,895 +79,585 @@ def calculate_trends(activities):
 
 
 def calculate_convergence_status(loss_hist):
-    """
-    Calculate convergence status from loss history
-    
-    Args:
-        loss_hist: List of recent loss values
-    
-    Returns:
-        str: Status string with color codes
-    """
     global loss_history
-    loss_history = loss_hist  # Update global
-    
+    loss_history = loss_hist
     if len(loss_hist) < 100:
-        return "Warming up..."
-    
+        return f"{C_YELLOW}Warming up…{C_RESET}"
     recent = loss_hist[-100:]
-    x = np.arange(len(recent))
-    slope = np.polyfit(x, recent, 1)[0]
-    
-    if slope < -0.00005:
+    x      = np.arange(len(recent))
+    slope  = np.polyfit(x, recent, 1)[0]
+    if slope < CONVERGENCE_SLOPE_THRESHOLD:
         return f"{C_GREEN}Converging ✓{C_RESET}"
-    elif abs(slope) < 0.00005:
+    elif abs(slope) < DIVERGENCE_SLOPE_THRESHOLD:
         return f"{C_CYAN}Plateauing ⚠{C_RESET}"
     else:
         return f"{C_RED}Diverging ✗{C_RESET}"
 
 
+# ── Activity data extraction ──────────────────────────────────────────────────
+
 def get_activity_data(model):
-    """
-    Extract layer activity data from model
-    
-    Args:
-        model: VSR model instance
-    
-    Returns:
-        list: List of tuples (layer_name, activity_percent, trend, raw_value)
-    """
-    # Unwrap DataParallel if needed
+    """Extract per-layer activity tuples (name, percent, trend, raw_value)."""
     m = model.module if hasattr(model, 'module') else model
-    
     if not hasattr(m, 'get_layer_activity'):
-        # Model doesn't have activity tracking
         return [(f"Layer {i+1}", 0, 0, 0.0) for i in range(32)]
-    
+
     activity_dict = m.get_layer_activity()
-    
     if not activity_dict:
         return [(f"Layer {i+1}", 0, 0, 0.0) for i in range(32)]
-    
-    # Combine backward and forward trunk activities + fusion layers into a single list
-    backward = activity_dict.get('backward_trunk', [])
-    backward_fuse = activity_dict.get('backward_fuse', 0.0)
-    backward_align_flow = activity_dict.get('backward_align_flow', None)
-    forward = activity_dict.get('forward_trunk', [])
-    forward_fuse = activity_dict.get('forward_fuse', 0.0)
-    forward_align_flow = activity_dict.get('forward_align_flow', None)
-    fusion = activity_dict.get('fusion', 0.0)
-    
-    # Helper function to convert fusion activity (handles both list and float)
-    def add_fusion_activity(name, activity):
-        """Add fusion layer activity - handles both FusionBlock (list) and TrackedConv2d (float)"""
+
+    backward          = activity_dict.get('backward_trunk', [])
+    backward_fuse     = activity_dict.get('backward_fuse', 0.0)
+    backward_align    = activity_dict.get('backward_align_flow', None)
+    forward           = activity_dict.get('forward_trunk', [])
+    forward_fuse      = activity_dict.get('forward_fuse', 0.0)
+    forward_align     = activity_dict.get('forward_align_flow', None)
+    fusion            = activity_dict.get('fusion', 0.0)
+
+    activities_with_names = []
+
+    def _add_fusion(name, activity):
         if isinstance(activity, list):
             if len(activity) == 3:
-                # GatedFusionBlock v2: [conv3x3_act, conv1x1_act, gate_act]
-                activities_with_names.append((f"{name} 3x3", float(activity[0]) if activity[0] is not None else 0.0))
-                activities_with_names.append((f"{name} 1x1", float(activity[1]) if activity[1] is not None else 0.0))
+                activities_with_names.append((f"{name} 3x3",  float(activity[0]) if activity[0] is not None else 0.0))
+                activities_with_names.append((f"{name} 1x1",  float(activity[1]) if activity[1] is not None else 0.0))
                 activities_with_names.append((f"{name} Gate", float(activity[2]) if activity[2] is not None else 0.0))
             elif len(activity) == 2:
-                # 7-frame FusionBlock: [conv3x3_act, conv1x1_act]
                 activities_with_names.append((f"{name} 3x3", float(activity[0]) if activity[0] is not None else 0.0))
                 activities_with_names.append((f"{name} 1x1", float(activity[1]) if activity[1] is not None else 0.0))
             elif len(activity) > 0:
-                # Unexpected list length - use average
-                avg_act = sum(float(a) if a is not None else 0.0 for a in activity) / len(activity)
-                activities_with_names.append((name, avg_act))
+                avg = sum(float(a) if a is not None else 0.0 for a in activity) / len(activity)
+                activities_with_names.append((name, avg))
             else:
-                # Empty list - use 0.0
                 activities_with_names.append((name, 0.0))
         elif activity is not None:
-            # Old TrackedConv2d: single value
             activities_with_names.append((name, float(activity)))
         else:
-            # None - use 0.0
             activities_with_names.append((name, 0.0))
-    
-    # Build combined list with names
-    activities_with_names = []
-    
-    # Backward trunk blocks
+
     for i, act in enumerate(backward):
         activities_with_names.append((f"Backward {i+1}", float(act) if act is not None else 0.0))
-    
-    # Backward fuse layer
-    add_fusion_activity("Backward Fuse", backward_fuse)
-    
-    # Backward align flow (TemporalAlignBlock)
-    if backward_align_flow is not None:
-        activities_with_names.append(("Backward Align", float(backward_align_flow)))
-    
-    # Forward trunk blocks
+    _add_fusion("Backward Fuse", backward_fuse)
+    if backward_align is not None:
+        activities_with_names.append(("Backward Align", float(backward_align)))
+
     for i, act in enumerate(forward):
         activities_with_names.append((f"Forward {i+1}", float(act) if act is not None else 0.0))
-    
-    # Forward fuse layer
-    add_fusion_activity("Forward Fuse", forward_fuse)
-    
-    # Forward align flow (TemporalAlignBlock)
-    if forward_align_flow is not None:
-        activities_with_names.append(("Forward Align", float(forward_align_flow)))
-    
-    # Final fusion layer
-    add_fusion_activity("Final Fusion", fusion)
-    
-    # Extract just the values for trend calculation
-    activities_raw = [val for name, val in activities_with_names]
-    
-    if not activities_raw:
+    _add_fusion("Forward Fuse", forward_fuse)
+    if forward_align is not None:
+        activities_with_names.append(("Forward Align", float(forward_align)))
+
+    _add_fusion("Final Fusion", fusion)
+
+    # Sanitise NaN / inf
+    activities_with_names = [
+        (n, v if np.isfinite(v) else 0.0)
+        for n, v in activities_with_names
+    ]
+
+    raw_vals = [v for _, v in activities_with_names]
+    if not raw_vals:
         return [(f"Layer {i+1}", 0, 0, 0.0) for i in range(32)]
-    
-    trends = calculate_trends(activities_raw)
-    max_val = max(activities_raw) if max(activities_raw) > 1e-12 else 1e-12
-    
-    # Build final list with layer names
-    activities = [(name, int((v / max_val) * 100), trends[i], v) 
-                  for i, (name, v) in enumerate(activities_with_names)]
-    
-    return activities
+
+    trends  = calculate_trends(raw_vals)
+    max_val = max(raw_vals) if max(raw_vals) > 1e-12 else 1e-12
+
+    return [
+        (name, int((v / max_val) * 100), trends[i], v)
+        for i, (name, v) in enumerate(activities_with_names)
+    ]
 
 
-def draw_ui(step, epoch, losses, it_time, activities, config, num_images, 
-            steps_per_epoch, current_epoch_step, adaptive_status=None, 
-            paused=False, quality_metrics=None, lr_info=None, 
-            total_eta="Calculating...", epoch_eta="Calculating...", adam_momentum=0.0,
-            val_iter_per_sec=0.0):
+# ── Tile builders ─────────────────────────────────────────────────────────────
+
+def _tile_header(ui_w, paused, score_pct, score_color, score_icon, score_label, components_str):
+    """Header tile: app title + training score.  Always shown."""
+    T = [_hdr(ui_w)]
+    title = f"{C_BOLD}{C_CYAN}◈  VSR++ TRAINING{C_RESET}"
+    if paused:
+        title += f"  {C_YELLOW}[ PAUSED ]{C_RESET}"
+    T.append(_line(title, ui_w))
+    T.append(_sep(ui_w, 'double'))
+    T.append(_line(
+        f"{C_BOLD}⭐ SCORE{C_RESET}  {score_icon} "
+        f"{score_color}{C_BOLD}{score_pct:.0f}%  {score_label}{C_RESET}"
+        f"  {C_BORDER}│{C_RESET}  {components_str}",
+        ui_w,
+    ))
+    T.append(_sep(ui_w, 'double'))
+    return T                      # 5 lines
+
+
+def _tile_progress(ui_w, step, max_steps, total_prog, epoch,
+                   current_epoch_step, steps_per_epoch, epoch_prog,
+                   total_eta, epoch_eta, bar_w):
+    """Progress tile: step/epoch progress bars + ETA."""
+    T = []
+    T.append(_line(f"{C_BOLD}📊 PROGRESS{C_RESET}", ui_w))
+    T.append(_sep(ui_w))
+    T.append(_two_cols(
+        f"Step   {C_CYAN}{C_BOLD}{step:,}{C_RESET} / {max_steps:,}",
+        f"Epoch  {C_CYAN}{C_BOLD}{epoch}{C_RESET}  ({current_epoch_step:,} / {steps_per_epoch:,})",
+        ui_w,
+    ))
+    T.append(_line(f"Total  {make_bar(total_prog, bar_w)} {total_prog:>5.1f}%  ETA {total_eta}", ui_w))
+    T.append(_line(f"Epoch  {make_bar(epoch_prog, bar_w)} {epoch_prog:>5.1f}%  ETA {epoch_eta}", ui_w))
+    T.append(_sep(ui_w, 'double'))
+    return T                      # 6 lines
+
+
+def _tile_losses(ui_w, l1, ms, grad, perc, total,
+                 w_l1, w_ms, w_grad, w_perc,
+                 lr, lr_phase_str, it_time, convergence):
+    """Loss & metrics tile."""
+    T = []
+    T.append(_line(f"{C_BOLD}📉 LOSSES & METRICS{C_RESET}", ui_w))
+    T.append(_sep(ui_w))
+    T.append(_two_cols(
+        f"L1   {C_CYAN}{l1:.5f}{C_RESET}  w:{C_GREEN}{w_l1:.2f}{C_RESET}",
+        f"MS   {C_CYAN}{ms:.5f}{C_RESET}  w:{C_GREEN}{w_ms:.2f}{C_RESET}",
+        ui_w,
+    ))
+    T.append(_two_cols(
+        f"Grad {C_CYAN}{grad:.5f}{C_RESET}  w:{C_GREEN}{w_grad:.2f}{C_RESET}",
+        f"Perc {C_CYAN}{perc:.5f}{C_RESET}  w:{C_GREEN}{w_perc:.2f}{C_RESET}",
+        ui_w,
+    ))
+    T.append(_line(f"Total  {C_BOLD}{C_CYAN}{total:.5f}{C_RESET}", ui_w))
+    T.append(_sep(ui_w, 'thin'))
+    ips = 1.0 / it_time if it_time > 0 else 0.0
+    T.append(_two_cols(
+        f"LR  {C_GREEN}{lr:.2e}{C_RESET}  {lr_phase_str}",
+        f"Speed  {C_CYAN}{ips:.2f} it/s{C_RESET}  ({it_time:.2f}s/it)",
+        ui_w,
+    ))
+    T.append(_line(f"Convergence  {convergence}", ui_w))
+    T.append(_sep(ui_w, 'double'))
+    return T                      # 9 lines
+
+
+def _tile_adaptive(ui_w, adaptive_status, adam_momentum):
+    """Adaptive system tile."""
+    T = []
+    T.append(_line(f"{C_BOLD}🔧 ADAPTIVE SYSTEM{C_RESET}", ui_w))
+    T.append(_sep(ui_w))
+
+    mode            = adaptive_status.get('mode', 'Stable')
+    is_cooldown     = adaptive_status.get('is_cooldown', False)
+    cooldown_rem    = adaptive_status.get('cooldown_remaining', 0)
+    plateau         = adaptive_status.get('plateau_counter', 0)
+    patience        = adaptive_status.get('plateau_patience', 100)
+    aggressive      = adaptive_status.get('aggressive_mode', False)
+    lr_boost_ready  = adaptive_status.get('lr_boost_available', False)
+    grad_clip       = adaptive_status.get('grad_clip', 1.0)
+
+    mode_color  = C_RED if mode == 'Aggressive' else C_GREEN
+    mode_icon   = '🔴' if mode == 'Aggressive' else '🟢'
+
+    cool_str = (f"{C_YELLOW}ACTIVE{C_RESET} ({cooldown_rem} steps)"
+                if is_cooldown else f"{C_GREEN}Idle{C_RESET}")
+
+    if plateau > patience * 1.5:
+        plat_str = f"{C_RED}{plateau}  ⚠{C_RESET}"
+    elif plateau > patience * 0.75:
+        plat_str = f"{C_YELLOW}{plateau}{C_RESET}"
+    else:
+        plat_str = f"{C_GREEN}{plateau}{C_RESET}"
+
+    boost_str = f"{C_GREEN}Ready ⚡{C_RESET}" if lr_boost_ready else f"{C_YELLOW}Cooldown{C_RESET}"
+
+    T.append(_two_cols(
+        f"Mode   {mode_icon} {mode_color}{mode}{C_RESET}",
+        f"Cooldown  {cool_str}",
+        ui_w,
+    ))
+    T.append(_two_cols(
+        f"Plateau   {plat_str} steps",
+        f"LR Boost  {boost_str}",
+        ui_w,
+    ))
+    T.append(_two_cols(
+        f"Grad Clip  {C_CYAN}{grad_clip:.3f}{C_RESET}",
+        f"Aggressive  {C_RED if aggressive else C_GRAY}{'ON' if aggressive else 'off'}{C_RESET}",
+        ui_w,
+    ))
+    T.append(_sep(ui_w, 'thin'))
+    eye = make_adamw_magic_eye(adam_momentum, width=25)
+    T.append(_line(f"AdamW SNR  {eye}  {C_CYAN}{adam_momentum:.3f}{C_RESET}", ui_w))
+    T.append(_sep(ui_w, 'double'))
+    return T                      # 8 lines
+
+
+def _tile_quality(ui_w, ki_quality, lr_quality, improvement, ki_to_gt, lr_to_gt):
+    """Quality metrics tile."""
+    T = []
+    T.append(_line(f"{C_BOLD}🎯 QUALITY{C_RESET}", ui_w))
+    T.append(_sep(ui_w))
+    imp_sign  = "+" if improvement >= 0 else ""
+    imp_color = C_GREEN if improvement >= 0 else C_RED
+    T.append(_two_cols(
+        f"LR  {C_YELLOW}{lr_quality:>5.1f}%{C_RESET}",
+        f"KI  {C_GREEN}{ki_quality:>5.1f}%{C_RESET}",
+        ui_w,
+    ))
+    T.append(_line(
+        f"Improvement  {C_BOLD}{imp_color}{imp_sign}{improvement:.1f}%{C_RESET}",
+        ui_w,
+    ))
+    if ki_to_gt is not None and lr_to_gt is not None:
+        ki_s = "+" if ki_to_gt >= 0 else ""
+        lr_s = "+" if lr_to_gt >= 0 else ""
+        T.append(_two_cols(
+            f"KI→GT  {C_CYAN}{ki_s}{ki_to_gt:.1f}%{C_RESET}",
+            f"LR→GT  {C_CYAN}{lr_s}{lr_to_gt:.1f}%{C_RESET}",
+            ui_w,
+        ))
+    T.append(_sep(ui_w, 'double'))
+    return T                      # 5-6 lines
+
+
+def _tile_activity(ui_w, activities, bar_w):
     """
-    Draw the complete training UI
-    
-    Args:
-        step: Global training step
-        epoch: Current epoch
-        losses: Dict with loss components ('l1', 'ms', 'grad', 'total')
-        it_time: Time per iteration (seconds)
-        activities: List of (layer_id, activity%, trend, raw_value) tuples
-        config: Training configuration dict
-        num_images: Total number of training images
-        steps_per_epoch: Number of steps per epoch
-        current_epoch_step: Current step within epoch
-        adaptive_status: Adaptive system status dict (optional)
-        paused: Whether training is paused
-        quality_metrics: Dict with quality info (optional)
-        lr_info: Dict with LR info ('lr', 'phase') (optional)
-        adam_momentum: AdamW momentum value (optional)
-        val_iter_per_sec: Validation throughput in samples/s (optional)
+    Layer activity tile — shows group averages, not individual layers.
+
+    Groups: Backward trunk / Forward trunk / Fusion & Align
+    Also shows the single peak layer.
+    """
+    T = []
+
+    # Separate layers into groups
+    bwd_vals  = [raw for n, _, _, raw in activities
+                 if "Backward" in n and "Fuse" not in n and "Align" not in n]
+    fwd_vals  = [raw for n, _, _, raw in activities
+                 if "Forward"  in n and "Fuse" not in n and "Align" not in n]
+    fus_vals  = [raw for n, _, _, raw in activities
+                 if "Fuse" in n or "Fusion" in n or "Align" in n]
+
+    all_vals = [raw for _, _, _, raw in activities]
+    max_val  = max(all_vals) if all_vals and max(all_vals) > 1e-12 else 1e-12
+
+    peak_tuple = max(activities, key=lambda x: x[3]) if activities else ("?", 0, 0, 0.0)
+    peak_name, peak_raw = peak_tuple[0], peak_tuple[3]
+
+    if peak_raw > 2.0:
+        pk_col = C_RED;    pk_lbl = "EXTREME 🔥🔥"
+    elif peak_raw > 1.5:
+        pk_col = C_YELLOW; pk_lbl = "very high 🔥"
+    elif peak_raw > 1.0:
+        pk_col = C_CYAN;   pk_lbl = "high ⚡"
+    elif peak_raw > 0.5:
+        pk_col = C_GREEN;  pk_lbl = "moderate"
+    else:
+        pk_col = C_GREEN;  pk_lbl = "normal ✓"
+
+    T.append(_two_cols(
+        f"{C_BOLD}⚡ LAYER ACTIVITY{C_RESET}",
+        f"Peak  {C_BOLD}{pk_col}{peak_name}{C_RESET}  "
+        f"{pk_col}{peak_raw:.3f}  {pk_lbl}{C_RESET}",
+        ui_w,
+    ))
+    T.append(_sep(ui_w, 'thin'))
+
+    def _avg_row(vals, label, use_fusion_bar=False):
+        if not vals:
+            return _line(f"  {label:<10}  {C_GRAY}no data{C_RESET}", ui_w)
+        avg  = sum(vals) / len(vals)
+        pct  = int((avg / max_val) * 100)
+        bar  = make_bar_fusion(pct, bar_w) if use_fusion_bar else make_bar(pct, bar_w)
+        n    = len(vals)
+        return _line(f"  {label:<10}  {bar}  {pct:>3}%  ({n} layers)", ui_w)
+
+    T.append(_avg_row(bwd_vals, "Backward"))
+    T.append(_avg_row(fwd_vals, "Forward"))
+    if fus_vals:
+        T.append(_avg_row(fus_vals, "Fusion", use_fusion_bar=True))
+
+    T.append(_sep(ui_w, 'double'))
+    return T                      # 6-7 lines
+
+
+def _tile_footer(ui_w, step, config, grad_clip):
+    """Footer tile: status bar + keyboard hints.  Always shown last."""
+    T = []
+
+    val_every  = config.get('VAL_STEP_EVERY',  config.get('val_step_every',  500))
+    save_every = config.get('SAVE_STEP_EVERY', config.get('save_step_every', 10000))
+    batch      = config.get('BATCH_SIZE', 4)
+    accum      = config.get('ACCUMULATION_STEPS', 1)
+
+    nv = (val_every  - (step % val_every))  if val_every  > 0 else 0
+    ns = (save_every - (step % save_every)) if save_every > 0 else 0
+
+    T.append(_line(
+        f"VAL IN {C_CYAN}{nv:<5}{C_RESET}  "
+        f"SAVE IN {C_CYAN}{ns:<6}{C_RESET}  "
+        f"BATCH {C_CYAN}{batch}×{accum}={batch*accum}{C_RESET}  "
+        f"CLIP {C_CYAN}{grad_clip:.3f}{C_RESET}",
+        ui_w,
+    ))
+    T.append(_ftr(ui_w))
+    T.append(_line(
+        f"{C_CYAN}P{C_RESET} Pause  "
+        f"{C_CYAN}V{C_RESET} Validate  "
+        f"{C_CYAN}C{C_RESET} Checkpoint  "
+        f"{C_CYAN}Q{C_RESET} Quit  "
+        f"{C_CYAN}ESC{C_RESET} Emergency Stop",
+        ui_w,
+    ))
+    return T                      # 3 lines
+
+
+# ── Main draw entry point ─────────────────────────────────────────────────────
+
+def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
+            steps_per_epoch, current_epoch_step, adaptive_status=None,
+            paused=False, quality_metrics=None, lr_info=None,
+            total_eta="Calculating...", epoch_eta="Calculating...",
+            adam_momentum=0.0, val_iter_per_sec=0.0):
+    """
+    Draw the complete training dashboard.
+
+    Tiles are stacked in priority order.  If the terminal is too short to fit
+    all tiles, lower-priority tiles (layer activity, quality, adaptive) are
+    silently omitted until everything fits.
     """
     global last_term_size, last_display_mode
-    
-    term_size = shutil.get_terminal_size()
+
+    term_size    = shutil.get_terminal_size()
     display_mode = config.get("DISPLAY_MODE", 0)
-    
-    # Clear screen if terminal size changed OR display mode changed
+
     if term_size != last_term_size or display_mode != last_display_mode:
         clear_screen()
-        last_term_size = term_size
+        last_term_size    = term_size
         last_display_mode = display_mode
-    
-    # Move cursor to home and hide cursor
+
     move_cursor_home()
     hide_cursor()
-    
-    # Calculate UI width
-    ui_w = max(90, term_size.columns - 4)
-    col_width = (ui_w - 7) // 2
-    
-    # Use dynamic widths for progress bars based on terminal size
-    # Allocate space for labels and percentage, use remaining for bar
-    LABEL_AND_PERCENTAGE_SPACE = 50  # Space for labels, numbers, borders
-    DOUBLE_COLUMN_OVERHEAD = 60  # Additional space for 2-column layouts
-    
-    total_available = ui_w - 4  # Account for borders
-    bar_width_single = min(50, max(20, total_available - LABEL_AND_PERCENTAGE_SPACE))
-    bar_width_double = min(30, max(15, (total_available - DOUBLE_COLUMN_OVERHEAD) // 2))
-    
-    # Calculate progress percentages (ETAs already calculated and passed from trainer)
-    max_steps = config.get("MAX_STEPS", 100000)
-    total_prog = (step / max_steps) * 100 if max_steps > 0 else 0
-    epoch_prog = (current_epoch_step / steps_per_epoch) * 100 if steps_per_epoch > 0 else 0
-    
-    # Extract values
-    l1_loss = losses.get('l1', 0.0)
-    ms_loss = losses.get('ms', 0.0)
-    grad_loss = losses.get('grad', 0.0)
-    perceptual_loss = losses.get('perceptual', 0.0)
-    total_loss = losses.get('total', 0.0)
-    
-    # LR info
+
+    rows = term_size.lines
+    ui_w = max(80, term_size.columns - 4)
+    bar_w = min(50, max(15, ui_w - 58))
+
+    # ── Extract values ────────────────────────────────────────────────────────
+    l1   = losses.get('l1',         0.0)
+    ms   = losses.get('ms',         0.0)
+    grad = losses.get('grad',       0.0)
+    perc = losses.get('perceptual', 0.0)
+    tot  = losses.get('total',      0.0)
+
     if lr_info:
-        current_lr = lr_info.get('lr', 0.0)
-        lr_phase = lr_info.get('phase', 'unknown')
+        current_lr = lr_info.get('lr',    0.0)
+        lr_phase   = lr_info.get('phase', 'unknown')
     else:
         current_lr = 0.0
-        lr_phase = 'unknown'
-    
-    # Quality metrics
+        lr_phase   = 'unknown'
+
+    lr_phase_str = {
+        'warmup':          f'{C_YELLOW}WARMUP{C_RESET}',
+        'cosine':          f'{C_GREEN}COSINE{C_RESET}',
+        'plateau_reduced': f'{C_RED}PLATEAU{C_RESET}',
+    }.get(lr_phase, lr_phase)
+
     if quality_metrics:
-        lr_quality = quality_metrics.get('lr_quality', 0.0)
-        ki_quality = quality_metrics.get('ki_quality', 0.0)
+        lr_quality  = quality_metrics.get('lr_quality',  0.0)
+        ki_quality  = quality_metrics.get('ki_quality',  0.0)
         improvement = quality_metrics.get('improvement', 0.0)
-        ki_to_gt = quality_metrics.get('ki_to_gt', None)
-        lr_to_gt = quality_metrics.get('lr_to_gt', None)
+        ki_to_gt    = quality_metrics.get('ki_to_gt',    None)
+        lr_to_gt    = quality_metrics.get('lr_to_gt',    None)
     else:
         lr_quality = ki_quality = improvement = 0.0
-        ki_to_gt = lr_to_gt = None
-    
-    # Adaptive status
+        ki_to_gt   = lr_to_gt  = None
+
     if adaptive_status:
-        l1_weight = adaptive_status.get('l1_weight', 0.7)
-        ms_weight = adaptive_status.get('ms_weight', 0.2)
-        grad_weight = adaptive_status.get('grad_weight', 0.1)
-        perceptual_weight = adaptive_status.get('perceptual_weight', 0.0)
-        grad_clip = adaptive_status.get('grad_clip', 1.0)
-        aggressive = adaptive_status.get('aggressive_mode', False)
-        # NEW: Get cooldown status
-        is_cooldown = adaptive_status.get('is_cooldown', False)
-        cooldown_remaining = adaptive_status.get('cooldown_remaining', 0)
-        adaptive_mode = adaptive_status.get('mode', 'Stable')
+        w_l1   = adaptive_status.get('l1_weight',          0.7)
+        w_ms   = adaptive_status.get('ms_weight',          0.2)
+        w_grad = adaptive_status.get('grad_weight',        0.1)
+        w_perc = adaptive_status.get('perceptual_weight',  0.0)
+        grad_clip = adaptive_status.get('grad_clip',       1.0)
     else:
-        l1_weight = 0.7
-        ms_weight = 0.2
-        grad_weight = 0.1
-        perceptual_weight = config.get('PERCEPTUAL_WEIGHT', 0.0)
-        grad_clip = config.get('GRAD_CLIP', 1.0)
-        aggressive = False
-        is_cooldown = False
-        cooldown_remaining = 0
-        adaptive_mode = 'Stable'
-    
-    # === HEADER ===
-    print_header(ui_w)
-    
-    title = f"{C_BOLD}VSR++ TRAINING{C_RESET}"
-    if paused:
-        title += f" {C_YELLOW}[PAUSED]{C_RESET}"
-    print_line(f"{title:^{ui_w-4}}", ui_w)
-    
-    print_separator(ui_w, 'double')
-    
-    # === TRAINING SCORE (Prominent indicator of training quality/performance) ===
-    # Calculate training score based on multiple factors
-    score_components = []
+        w_l1      = 0.7
+        w_ms      = 0.2
+        w_grad    = 0.1
+        w_perc    = config.get('PERCEPTUAL_WEIGHT', 0.0)
+        grad_clip = config.get('GRAD_CLIP',         1.0)
+
+    max_steps   = config.get("MAX_STEPS", 100000)
+    total_prog  = (step / max_steps)         * 100 if max_steps        > 0 else 0.0
+    epoch_prog  = (current_epoch_step / steps_per_epoch) * 100 if steps_per_epoch > 0 else 0.0
+
+    # ── Training score ────────────────────────────────────────────────────────
+    global loss_history
+
     score_total = 0.0
-    score_max = 0.0
-    
-    # 1. Loss trend (up to 30 points) - based on convergence
+    score_max   = 0.0
+    score_parts = []
+
     if len(loss_history) >= 100:
         recent = loss_history[-100:]
-        x = np.arange(len(recent))
-        slope = np.polyfit(x, recent, 1)[0]
-        
-        if slope < CONVERGENCE_SLOPE_THRESHOLD:  # Converging
-            loss_trend_score = 30.0
-            loss_trend_status = f"{C_GREEN}Converging{C_RESET}"
-        elif abs(slope) < DIVERGENCE_SLOPE_THRESHOLD:  # Plateauing
-            loss_trend_score = 20.0
-            loss_trend_status = f"{C_CYAN}Plateau{C_RESET}"
-        else:  # Diverging
-            loss_trend_score = 5.0
-            loss_trend_status = f"{C_RED}Diverging{C_RESET}"
+        slope  = np.polyfit(np.arange(len(recent)), recent, 1)[0]
+        if slope < CONVERGENCE_SLOPE_THRESHOLD:
+            score_total += 30.0; score_parts.append(f"Trend:{C_GREEN}↓Conv{C_RESET}")
+        elif abs(slope) < DIVERGENCE_SLOPE_THRESHOLD:
+            score_total += 20.0; score_parts.append(f"Trend:{C_CYAN}Plateau{C_RESET}")
+        else:
+            score_total +=  5.0; score_parts.append(f"Trend:{C_RED}↑Div{C_RESET}")
     else:
-        loss_trend_score = 15.0
-        loss_trend_status = f"{C_YELLOW}Warming Up{C_RESET}"
-    score_total += loss_trend_score
+        score_total += 15.0;     score_parts.append(f"Trend:{C_YELLOW}WarmUp{C_RESET}")
     score_max += 30.0
-    score_components.append(f"Trend:{loss_trend_status}")
-    
-    # 2. Quality metrics (up to 40 points) - if available
+
     if quality_metrics and ki_quality > 0:
-        # KI quality (0-100%) -> 0-40 points
-        quality_score = (ki_quality / 100.0) * 40.0
-        score_total += quality_score
-        score_max += 40.0
-        
-        quality_color = C_GREEN if ki_quality >= 70 else C_YELLOW if ki_quality >= 50 else C_RED
-        score_components.append(f"Quality:{quality_color}{ki_quality:.0f}%{C_RESET}")
-    
-    # 3. Learning stability (up to 30 points) - based on plateau counter and adaptive mode
+        score_total += (ki_quality / 100.0) * 40.0
+        score_max   += 40.0
+        qc = C_GREEN if ki_quality >= 70 else C_YELLOW if ki_quality >= 50 else C_RED
+        score_parts.append(f"Quality:{qc}{ki_quality:.0f}%{C_RESET}")
+
     if adaptive_status:
-        plateau = adaptive_status.get('plateau_counter', 0)
+        plateau  = adaptive_status.get('plateau_counter', 0)
         patience = adaptive_status.get('plateau_patience', 100)
-        adaptive_mode_val = adaptive_status.get('mode', 'Stable')
-        
         if plateau < patience * 0.75:
-            stability_score = 30.0
-            stability_status = f"{C_GREEN}Stable{C_RESET}"
+            score_total += 30.0; score_parts.append(f"Stab:{C_GREEN}Stable{C_RESET}")
         elif plateau < patience * 1.5:
-            stability_score = 20.0
-            stability_status = f"{C_YELLOW}Moderate{C_RESET}"
+            score_total += 20.0; score_parts.append(f"Stab:{C_YELLOW}Moderate{C_RESET}")
         else:
-            stability_score = 10.0
-            stability_status = f"{C_RED}Unstable{C_RESET}"
-        
-        score_total += stability_score
+            score_total += 10.0; score_parts.append(f"Stab:{C_RED}Unstable{C_RESET}")
         score_max += 30.0
-        score_components.append(f"Stability:{stability_status}")
-    
-    # Calculate overall score percentage
-    if score_max > 0:
-        training_score_pct = (score_total / score_max) * 100.0
-    else:
-        # No components available - indicate insufficient data instead of assuming moderate
-        training_score_pct = 0.0  # Will be labeled as "INSUFFICIENT DATA"
-    
-    # Determine color and icon based on score
+
+    score_pct = (score_total / score_max * 100.0) if score_max > 0 else 0.0
+
     if score_max == 0:
-        # Insufficient data
-        score_color = C_GRAY
-        score_icon = "⚪"
-        score_label = "INSUFFICIENT DATA"
-    elif training_score_pct >= 80:
-        score_color = C_GREEN
-        score_icon = "🟢"
-        score_label = "EXCELLENT"
-    elif training_score_pct >= 60:
-        score_color = C_CYAN
-        score_icon = "🔵"
-        score_label = "GOOD"
-    elif training_score_pct >= 40:
-        score_color = C_YELLOW
-        score_icon = "🟡"
-        score_label = "MODERATE"
+        sc_col = C_GRAY;   sc_icon = "⚪"; sc_lbl = "NO DATA"
+    elif score_pct >= 80:
+        sc_col = C_GREEN;  sc_icon = "🟢"; sc_lbl = "EXCELLENT"
+    elif score_pct >= 60:
+        sc_col = C_CYAN;   sc_icon = "🔵"; sc_lbl = "GOOD"
+    elif score_pct >= 40:
+        sc_col = C_YELLOW; sc_icon = "🟡"; sc_lbl = "MODERATE"
     else:
-        score_color = C_RED
-        score_icon = "🔴"
-        score_label = "NEEDS ATTENTION"
-    
-    # Display prominent training score
-    print_line(f"{C_BOLD}⭐ TRAINING SCORE: {score_icon} {score_color}{training_score_pct:.1f}%{C_RESET} {C_BOLD}({score_label}){C_RESET}", ui_w)
-    
-    # Show component breakdown
-    components_str = " | ".join(score_components)
-    print_line(f"   {components_str}", ui_w)
-    
-    print_separator(ui_w, 'double')
-    
-    # === PROGRESS ===
-    print_line(f"{C_BOLD}📊 PROGRESS{C_RESET}", ui_w)
-    print_separator(ui_w, 'single')
-    
-    print_line(f"Step: {C_BOLD}{step:,}{C_RESET} / {max_steps:,} ({total_prog:.1f}%) | ETA: {total_eta}", ui_w)
-    print_line(f"Epoch: {C_BOLD}{epoch}{C_RESET} (Step {current_epoch_step}/{steps_per_epoch})", ui_w)
-    
-    print_line(f"Total:  {make_bar(total_prog, bar_width_single)} {total_prog:>5.1f}% ETA: {total_eta}", ui_w)
-    print_line(f"Epoch:  {make_bar(epoch_prog, bar_width_single)} {epoch_prog:>5.1f}% ETA: {epoch_eta}", ui_w)
-    
-    print_separator(ui_w, 'double')
-    
-    # === LOSS & METRICS ===
-    print_line(f"{C_BOLD}📉 LOSS & METRICS{C_RESET}", ui_w)
-    print_separator(ui_w, 'single')
-    
-    print_two_columns(
-        f"L1:   {C_CYAN}{l1_loss:.6f}{C_RESET} (w:{l1_weight:.2f})",
-        f"MS:   {C_CYAN}{ms_loss:.6f}{C_RESET} (w:{ms_weight:.2f})",
-        ui_w
-    )
-    print_two_columns(
-        f"Grad: {C_CYAN}{grad_loss:.6f}{C_RESET} (w:{grad_weight:.2f})",
-        f"Perc: {C_CYAN}{perceptual_loss:.6f}{C_RESET} (w:{perceptual_weight:.2f})",
-        ui_w
-    )
-    print_line(f"Total: {C_BOLD}{C_CYAN}{total_loss:.6f}{C_RESET}", ui_w)
-    
-    # Perceptual Loss Status - show details if enabled
-    if perceptual_weight > 0:
-        perc_status = f"{C_GREEN}ACTIVE{C_RESET}" if perceptual_loss > 0 else f"{C_YELLOW}ENABLED (0){C_RESET}"
-        print_separator(ui_w, 'thin')
-        print_two_columns(
-            f"Perceptual: {perc_status} (w:{perceptual_weight:.2f})",
-            f"Type: {C_MAGENTA}VGG16{C_RESET} (ImageNet)",
-            ui_w
-        )
-        # Show perceptual loss is active (VGG weights are frozen, not learning)
-        if perceptual_loss > 0.001:
-            learning_indicator = f"{C_GREEN}●{C_RESET} VGG Features Active"
-        else:
-            learning_indicator = f"{C_YELLOW}○{C_RESET} Initializing"
-        print_line(f"  {learning_indicator} | Pretrained frozen weights", ui_w)
-    else:
-        print_separator(ui_w, 'thin')
-        print_line(f"Perceptual: {C_GRAY}DISABLED{C_RESET} (w:0.00)", ui_w)
-    
-    print_separator(ui_w, 'single')
-    
-    # Learning Rate
-    lr_phase_str = {
-        'warmup': f'{C_YELLOW}WARMUP{C_RESET}',
-        'cosine': f'{C_GREEN}COSINE{C_RESET}',
-        'plateau_reduced': f'{C_RED}PLATEAU{C_RESET}'
-    }.get(lr_phase, lr_phase)
-    
-    # Training speed: iter/s derived from the rolling 200-step average
-    train_iter_per_sec = 1.0 / it_time if it_time > 0 else 0.0
-    print_two_columns(
-        f"LR: {C_GREEN}{current_lr:.6f}{C_RESET} ({lr_phase_str})",
-        f"Train: {C_CYAN}{train_iter_per_sec:.2f} it/s{C_RESET} ({it_time:.2f}s/it)",
-        ui_w
-    )
-    # Validation speed (samples/s, last 200 samples, incl. I/O)
-    if val_iter_per_sec > 0:
-        print_line(
-            f"Val Speed: {C_CYAN}{val_iter_per_sec:.2f} spl/s{C_RESET}"
-            f"  (last 200 samples incl. TensorBoard I/O)",
-            ui_w
-        )
-    
-    # Convergence status
-    convergence = calculate_convergence_status(loss_history)
-    print_line(f"Convergence: {convergence}", ui_w)
-    
-    print_separator(ui_w, 'double')
-    
-    # === QUALITY (if available) ===
-    if quality_metrics and ki_quality > 0:
-        print_line(f"{C_BOLD}🎯 QUALITY{C_RESET}", ui_w)
-        print_separator(ui_w, 'single')
-        
-        print_two_columns(
-            f"LR:  {C_YELLOW}{lr_quality:>5.1f}%{C_RESET}",
-            f"KI:  {C_GREEN}{ki_quality:>5.1f}%{C_RESET}",
-            ui_w
-        )
-        
-        # Improvement (Sum of per-image KI-LR differences)
-        imp_sign = "+" if improvement >= 0 else ""
-        imp_color = C_GREEN if improvement >= 0 else C_RED
-        print_line(f"Improvement (Sum): {C_BOLD}{imp_color}{imp_sign}{improvement:.1f}%{C_RESET}", ui_w)
-        
-        # Display GT differences if available
-        if ki_to_gt is not None and lr_to_gt is not None:
-            ki_gt_sign = "+" if ki_to_gt >= 0 else ""
-            lr_gt_sign = "+" if lr_to_gt >= 0 else ""
-            print_two_columns(
-                f"KI to GT: {C_CYAN}{ki_gt_sign}{ki_to_gt:.1f}%{C_RESET}",
-                f"LR to GT: {C_CYAN}{lr_gt_sign}{lr_to_gt:.1f}%{C_RESET}",
-                ui_w
-            )
-        
-        print_separator(ui_w, 'double')
-    
-    # === ADAPTIVE SYSTEM ===
+        sc_col = C_RED;    sc_icon = "🔴"; sc_lbl = "NEEDS ATTENTION"
+
+    convergence   = calculate_convergence_status(loss_history)
+    components_str = "  ".join(score_parts)
+
+    # ── Build all tiles ───────────────────────────────────────────────────────
+    #  (priority, name, lines[])
+    tiles = []
+
+    tiles.append((1, 'header', _tile_header(
+        ui_w, paused, score_pct, sc_col, sc_icon, sc_lbl, components_str,
+    )))
+
+    tiles.append((2, 'progress', _tile_progress(
+        ui_w, step, max_steps, total_prog, epoch,
+        current_epoch_step, steps_per_epoch, epoch_prog,
+        total_eta, epoch_eta, bar_w,
+    )))
+
+    tiles.append((3, 'losses', _tile_losses(
+        ui_w, l1, ms, grad, perc, tot,
+        w_l1, w_ms, w_grad, w_perc,
+        current_lr, lr_phase_str, it_time, convergence,
+    )))
+
     if adaptive_status:
-        print_line(f"{C_BOLD}🔧 ADAPTIVE SYSTEM{C_RESET}", ui_w)
-        print_separator(ui_w, 'single')
-        
-        # Mode
-        mode_color = C_RED if adaptive_mode == 'Aggressive' else C_GREEN
-        mode_icon = '🔴' if adaptive_mode == 'Aggressive' else '🟢'
-        mode_display = f"{mode_icon} {mode_color}{adaptive_mode}{C_RESET}"
-        print_line(f"Mode: {mode_display}", ui_w)
-        
-        # Cooldown status
-        if is_cooldown:
-            cooldown_display = f"⏸️  {C_YELLOW}ACTIVE{C_RESET} ({cooldown_remaining} steps remaining)"
-        else:
-            cooldown_display = f"✅ {C_GREEN}Inactive{C_RESET}"
-        print_line(f"Cooldown: {cooldown_display}", ui_w)
-        
-        # Plateau counter (thresholds derived from plateau_patience)
-        plateau = adaptive_status.get('plateau_counter', 0)
-        patience = adaptive_status.get('plateau_patience', 100)
-        if plateau > patience * 1.5:
-            plateau_color = C_RED
-            plateau_icon = '🚨'
-            plateau_text = f"{plateau} steps (WARNING)"
-        elif plateau > patience * 0.75:
-            plateau_color = C_YELLOW
-            plateau_icon = '🟡'
-            plateau_text = f"{plateau} steps"
-        else:
-            plateau_color = C_GREEN
-            plateau_icon = '🟢'
-            plateau_text = f"{plateau} steps"
-        print_line(f"Plateau: {plateau_icon} {plateau_color}{plateau_text}{C_RESET}", ui_w)
-        
-        # LR Boost status
-        lr_boost_available = adaptive_status.get('lr_boost_available', False)
-        if lr_boost_available:
-            boost_display = f"⚡ {C_GREEN}Ready{C_RESET}"
-        else:
-            boost_display = f"⏳ {C_YELLOW}Cooldown{C_RESET}"
-        print_line(f"LR Boost: {boost_display}", ui_w)
-        
-        print_separator(ui_w, 'thin')
-        
-        # Weight bars with current values
-        print_two_columns(
-            f"Grad Clip: {C_CYAN}{grad_clip:.3f}{C_RESET}",
-            f"Aggressive: {C_RED if aggressive else C_GRAY}{'YES' if aggressive else 'NO'}{C_RESET}",
-            ui_w
-        )
-        print_two_columns(
-            f"Perceptual W: {C_CYAN}{perceptual_weight:.3f}{C_RESET}",
-            f"Plateau Patience: {C_CYAN}{adaptive_status.get('plateau_patience', 100)}{C_RESET}",
-            ui_w
-        )
-        
-        # AdamW Magic Eye
-        print_separator(ui_w, 'thin')
-        from .ui_terminal import make_adamw_magic_eye
-        magic_eye = make_adamw_magic_eye(adam_momentum, width=25)
-        print_line(f"AdamW Momentum: {magic_eye} {C_CYAN}{adam_momentum:.4f}{C_RESET}", ui_w)
-        
-        print_separator(ui_w, 'double')
-    
-    # === RUNTIME CONFIGURATION (New config parameters) ===
-    # Display key runtime config parameters accessible via ENTER menu
-    print_line(f"{C_BOLD}⚙️ RUNTIME CONFIG{C_RESET} (Press ENTER to edit)", ui_w)
-    print_separator(ui_w, 'single')
-    
-    # Display key parameters
-    plateau_threshold = config.get('plateau_safety_threshold', 500)
-    plateau_patience = config.get('plateau_patience', 200)
-    cooldown_dur = config.get('cooldown_duration', 50)
-    
-    print_two_columns(
-        f"Plateau Threshold: {C_CYAN}{plateau_threshold}{C_RESET} steps",
-        f"Plateau Patience: {C_CYAN}{plateau_patience}{C_RESET} steps",
-        ui_w
+        tiles.append((4, 'adaptive', _tile_adaptive(ui_w, adaptive_status, adam_momentum)))
+
+    if quality_metrics and ki_quality > 0:
+        tiles.append((5, 'quality', _tile_quality(
+            ui_w, ki_quality, lr_quality, improvement, ki_to_gt, lr_to_gt,
+        )))
+
+    if activities:
+        tiles.append((6, 'activity', _tile_activity(ui_w, activities, bar_w)))
+
+    tiles.append((99, 'footer', _tile_footer(ui_w, step, config, grad_clip)))
+
+    # ── Priority budget allocation ────────────────────────────────────────────
+    # Core tiles (header, progress, losses, footer) are always rendered even if
+    # they slightly overflow — they carry critical information.
+    # Optional tiles (adaptive, quality, activity) are added in strict priority
+    # order; we stop at the first one that no longer fits so we never show a
+    # less-important tile without a more-important one above it.
+    budget = rows - 2   # reserve 2 lines so the shell prompt is never covered
+
+    CORE_PRIORITIES = {1, 2, 3, 99}
+    always_tiles   = [(p, n, t) for p, n, t in tiles if p in CORE_PRIORITIES]
+    optional_tiles = sorted(
+        [(p, n, t) for p, n, t in tiles if p not in CORE_PRIORITIES],
+        key=lambda x: x[0],
     )
-    print_two_columns(
-        f"Cooldown Duration: {C_CYAN}{cooldown_dur}{C_RESET} steps",
-        f"LR Range: {C_GREEN}{config.get('min_lr', 1e-6):.2e}{C_RESET} - {C_GREEN}{config.get('max_lr', 1e-4):.2e}{C_RESET}",
-        ui_w
-    )
-    
-    # TensorBoard settings
-    tb_interval = config.get('log_tboard_every', 50)
-    val_interval = config.get('val_step_every', 500)
-    save_interval = config.get('save_step_every', 10000)
-    
-    print_separator(ui_w, 'thin')
-    print_two_columns(
-        f"TensorBoard Log: Every {C_CYAN}{tb_interval}{C_RESET} steps",
-        f"Validation: Every {C_CYAN}{val_interval}{C_RESET} steps",
-        ui_w
-    )
-    print_line(f"Checkpoint Save: Every {C_CYAN}{save_interval}{C_RESET} steps", ui_w)
-    
-    print_separator(ui_w, 'double')
-    
-    # === PEAK LAYER ACTIVITY (Enhanced visibility) ===
-    if activities and len(activities) > 0:
-        # Find peak activity
-        # activities is a list of tuples: (name, percent, trend, raw_value)
-        if isinstance(activities, dict):
-            peak_value = max(activities.values())
-            peak_layer_name = ""
-            for layer_name, value in activities.items():
-                if value == peak_value:
-                    peak_layer_name = layer_name
-                    break
+
+    for _, _, t in always_tiles:
+        budget -= len(t)
+
+    selected = []
+    for p, n, t in optional_tiles:
+        if budget >= len(t):
+            budget -= len(t)
+            selected.append((p, n, t))
         else:
-            # For list of tuples, find the one with max raw_value (index 3)
-            peak_tuple = max(activities, key=lambda x: x[3] if isinstance(x, tuple) and len(x) > 3 else 0)
-            if isinstance(peak_tuple, tuple) and len(peak_tuple) > 3:
-                peak_layer_name = peak_tuple[0]
-                peak_value = peak_tuple[3]  # raw_value is at index 3
-            else:
-                peak_layer_name = "Unknown"
-                peak_value = 0.0
-        
-        # Determine color and icon based on peak value
-        if peak_value > 2.0:
-            peak_color = C_RED
-            peak_icon = "🔥🔥🔥"
-            peak_status = "EXTREME"
-        elif peak_value > 1.5:
-            peak_color = C_YELLOW
-            peak_icon = "🔥🔥"
-            peak_status = "VERY HIGH"
-        elif peak_value > 1.0:
-            peak_color = C_CYAN
-            peak_icon = "🔥"
-            peak_status = "HIGH"
-        elif peak_value > 0.5:
-            peak_color = C_GREEN
-            peak_icon = "⚡"
-            peak_status = "MODERATE"
-        else:
-            peak_color = C_GREEN
-            peak_icon = "✓"
-            peak_status = "NORMAL"
-        
-        # Create peak activity bar (0.0 - 2.0 scale)
-        from .ui_terminal import make_peak_activity_bar
-        peak_bar = make_peak_activity_bar(peak_value, width=ui_w - 40)
-        
-        # Enhanced header with icon and color
-        print_line(f"{C_BOLD}{peak_icon} PEAK LAYER ACTIVITY - {peak_color}{peak_status}{C_RESET}", ui_w)
-        print_separator(ui_w, 'thin')
-        
-        # Show peak layer with enhanced formatting
-        print_line(f"Layer: {C_BOLD}{peak_color}{peak_layer_name}{C_RESET} | Value: {C_BOLD}{peak_color}{peak_value:.3f}{C_RESET}", ui_w)
-        print_separator(ui_w, 'thin')
-        
-        # Visual bar display
-        print_line(peak_bar, ui_w)
-        print_separator(ui_w, 'thin')
-        
-        # Warning if extreme with prominent display
-        if peak_value > 2.0:
-            print_line(f"{C_BOLD}{C_RED}⚠️  🔴 EXTREME ACTIVITY! Check training stability! 🔴 ⚠️{C_RESET}", ui_w)
-        elif peak_value > 1.5:
-            print_line(f"{C_BOLD}{C_YELLOW}⚠️  Unusually high activity - Monitor closely{C_RESET}", ui_w)
-        elif peak_value > 1.0:
-            print_line(f"{C_CYAN}ℹ️  High activity detected - This is normal during training{C_RESET}", ui_w)
-        else:
-            print_line(f"{C_GREEN}✓ Activity levels within normal range{C_RESET}", ui_w)
-        
-        # Stream overview removed as per user request
-        
-        print_separator(ui_w, 'double')
-    
-    # === LAYER ACTIVITY (Fusion layers only) ===
-    print_line(f"{C_BOLD}⚡ FUSION LAYER ACTIVITY{C_RESET}", ui_w)
-    print_separator(ui_w, 'single')
-    
-    _draw_activity_display(activities, display_mode, term_size.lines, ui_w, bar_width_single, bar_width_double, peak_layer_name if activities else None)
-    
-    # === FOOTER ===
-    print_separator(ui_w, 'double')
-    
-    nv = config.get('VAL_STEP_EVERY', 500) - (step % config.get('VAL_STEP_EVERY', 500))
-    ns = config.get('SAVE_STEP_EVERY', 10000) - (step % config.get('SAVE_STEP_EVERY', 10000))
-    batch = config.get('BATCH_SIZE', 4)
-    accum = config.get('ACCUMULATION_STEPS', 1)
-    
-    print_line(f"VAL IN: {nv:<5} │ SAVE IN: {ns:<5} │ BATCH: {batch}x{accum}={batch*accum} │ GRAD CLIP: {grad_clip:.3f}", ui_w)
-    
-    print_footer(ui_w)
-    
-    # Control hints - Enhanced with all action buttons
-    print_line(f"{C_BOLD}⌨️  KEYBOARD SHORTCUTS{C_RESET}", ui_w)
-    print_separator(ui_w, 'thin')
-    print_two_columns(
-        f"{C_CYAN}P{C_RESET} Pause/Resume  │  {C_CYAN}V{C_RESET} Validation",
-        f"{C_CYAN}ENTER{C_RESET} Config  │  {C_CYAN}Q{C_RESET} Quit",
-        ui_w
-    )
-    print_line(
-        f"{C_CYAN}C{C_RESET} Save Checkpoint  │  {C_CYAN}ESC{C_RESET} Emergency Stop",
-        ui_w
-    )
-    sys.stdout.write("\n")
+            break   # strict: stop at first tile that no longer fits
+
+    all_tiles = sorted(always_tiles + selected, key=lambda x: x[0])
+
+    # ── Render ────────────────────────────────────────────────────────────────
+    footer_lines = next(t for p, n, t in all_tiles if n == 'footer')
+    body_tiles   = [(p, n, t) for p, n, t in all_tiles if n != 'footer']
+
+    output = []
+    for _, _, t in body_tiles:
+        output.extend(t)
+    output.extend(footer_lines)
+
+    # Fill any remaining rows with blank cleared lines so no old content
+    # from previous renders or external print() calls bleeds through.
+    used_rows  = len(output)
+    blank_line = ' ' * (ui_w + 4)  # +4 for the box border characters
+    for _ in range(max(0, rows - used_rows - 1)):
+        output.append(blank_line)
+
+    sys.stdout.write('\n'.join(output) + '\n')
     sys.stdout.flush()
 
 
-def _draw_activity_display(activities, display_mode, available_lines, ui_w, 
-                           bar_width_single, bar_width_double, peak_layer_name=None):
-    """
-    Draw layer activity based on selected display mode
-    
-    MODE 0: 2-Column Detailed Layout (NEW!)
-      - Left column: BACKWARD TRUNK
-      - Right column: FORWARD TRUNK
-      - Bottom center: FINAL FUSION
-    
-    MODE 1: Grouped by Trunk → Sorted by Activity
-    MODE 2: Flat List → Sorted by Position  
-    MODE 3: Flat List → Sorted by Activity
-    
-    Args:
-        activities: List of (layer_name, activity%, trend, raw_value) tuples
-        display_mode: Display mode (0-3)
-        available_lines: Available terminal lines for display
-        ui_w: UI width
-        bar_width_single: Width for single-column bars
-        bar_width_double: Width for double-column bars
-        peak_layer_name: Name of the peak layer to highlight (optional)
-    """
-    if not activities:
-        print_line("No activity data available", ui_w)
+# ── Size distribution helpers (used by external callers) ─────────────────────
+
+def print_size_distribution_panel(size_stats, ui_width=120):
+    """Print size-distribution tracking panel (direct-print, not tiled)."""
+    if not size_stats or 'size_stats' not in size_stats:
         return
-    
-    num_activities = len(activities)
-    
-    # Peak marker formatting constants
-    PEAK_MARKER_PREFIX = f"{C_YELLOW}▶{C_RESET}"
-    PEAK_MARKER_SUFFIX = f"{C_YELLOW}◀ PEAK{C_RESET}"
-    PEAK_COLOR_START = f"{C_BOLD}{C_YELLOW}"
-    PEAK_COLOR_END = f"{C_RESET}"
-    
-    # Helper function to format a layer line with peak marker
-    def format_layer_line(name, act, bar_width, is_peak=False):
-        """Format a single layer activity line with optional peak marker"""
-        bar = get_bar_for_layer(name, act, bar_width)
-        if is_peak:
-            # Add prominent peak marker
-            return f"{PEAK_MARKER_PREFIX} {name:<18}: {bar} {PEAK_COLOR_START}{act:>3}%{PEAK_COLOR_END} {PEAK_MARKER_SUFFIX}"
-        else:
-            return f"  {name:<18}: {bar} {act:>3}%"
-    
-    # Helper function to format short layer line (for two-column display)
-    def format_short_layer(short_name, bar, act, is_peak=False):
-        """Format a short layer line with optional peak marker for two-column display"""
-        if is_peak:
-            return f"{PEAK_MARKER_PREFIX}{short_name:>3}: {bar} {PEAK_COLOR_START}{act:>3}%{PEAK_COLOR_END}"
-        else:
-            return f" {short_name:>3}: {bar} {act:>3}%"
-    
-    # Helper function to format two-column row with peak markers
-    def format_two_column_row(left_layer, right_layer, bar_width, peak_name):
-        """Format a two-column row with peak markers"""
-        left_is_peak = (left_layer[0] == peak_name)
-        left_bar = get_bar_for_layer(left_layer[0], left_layer[1], bar_width)
-        if left_is_peak:
-            left_str = f"{PEAK_MARKER_PREFIX}{left_layer[0]:<16}:{left_bar}{PEAK_COLOR_START}{left_layer[1]:3}%{PEAK_COLOR_END}"
-        else:
-            left_str = f" {left_layer[0]:<16}:{left_bar}{left_layer[1]:3}%"
-        
-        if right_layer:
-            right_is_peak = (right_layer[0] == peak_name)
-            right_bar = get_bar_for_layer(right_layer[0], right_layer[1], bar_width)
-            if right_is_peak:
-                right_str = f"{PEAK_MARKER_PREFIX}{right_layer[0]:<16}:{right_bar}{PEAK_COLOR_START}{right_layer[1]:3}%{PEAK_COLOR_END}"
-            else:
-                right_str = f" {right_layer[0]:<16}:{right_bar}{right_layer[1]:3}%"
-        else:
-            right_str = ""
-        
-        return left_str, right_str
-    
-    if display_mode == 0:
-        # MODE 0: NEW 2-Column Detailed Layout
-        # Separate layers by type
-        backward_layers = []
-        forward_layers = []
-        fusion_layers = []
-        
-        for name, act, trend, raw in activities:
-            if "Backward" in name and "Fuse" not in name:
-                backward_layers.append((name, act, trend, raw))
-            elif "Forward" in name and "Fuse" not in name:
-                forward_layers.append((name, act, trend, raw))
-            else:
-                fusion_layers.append((name, act, trend, raw))
-        
-        # Calculate overall activity
-        backward_overall = int(np.mean([act for _, act, _, _ in backward_layers])) if backward_layers else 0
-        forward_overall = int(np.mean([act for _, act, _, _ in forward_layers])) if forward_layers else 0
-        
-        # Print headers side-by-side
-        print_two_columns(
-            f"{C_BOLD}🔥 BACKWARD TRUNK{C_RESET} ({backward_overall}%)",
-            f"{C_BOLD}⚡ FORWARD TRUNK{C_RESET} ({forward_overall}%)",
-            ui_w
-        )
-        print_separator(ui_w, 'thin')
-        
-        # Print layers side-by-side
-        max_rows = max(len(backward_layers), len(forward_layers))
-        for i in range(max_rows):
-            left_str = ""
-            right_str = ""
-            
-            if i < len(backward_layers):
-                name, act, trend, raw = backward_layers[i]
-                is_peak = (name == peak_layer_name)
-                # Extract number from "Backward N" format (e.g., "Backward 1" -> "B1")
-                if name.startswith("Backward ") and name.split()[-1].isdigit():
-                    short_name = f"B{name.split()[-1]}"
-                else:
-                    short_name = name[:4]  # Fallback: first 4 chars
-                
-                bar = get_bar_for_layer(name, act, bar_width_double)
-                left_str = format_short_layer(short_name, bar, act, is_peak)
-            
-            if i < len(forward_layers):
-                name, act, trend, raw = forward_layers[i]
-                is_peak = (name == peak_layer_name)
-                # Extract number from "Forward N" format (e.g., "Forward 1" -> "F1")
-                if name.startswith("Forward ") and name.split()[-1].isdigit():
-                    short_name = f"F{name.split()[-1]}"
-                else:
-                    short_name = name[:4]  # Fallback: first 4 chars
-                
-                bar = get_bar_for_layer(name, act, bar_width_double)
-                right_str = format_short_layer(short_name, bar, act, is_peak)
-            
-            print_two_columns(left_str, right_str, ui_w)
-        
-        # Print fusion layers centered at bottom
-        if fusion_layers:
-            print_separator(ui_w, 'thin')
-            for name, act, trend, raw in fusion_layers:
-                is_peak = (name == peak_layer_name)
-                bar = get_bar_for_layer(name, act, bar_width_single)
-                
-                if "Final" in name:
-                    # Final fusion gets special treatment - centered
-                    if is_peak:
-                        print_line(f"{PEAK_MARKER_PREFIX} {C_BOLD}{name:^18}{C_RESET}: {bar} {PEAK_COLOR_START}{act:>3}%{PEAK_COLOR_END} {PEAK_MARKER_SUFFIX}", ui_w)
-                    else:
-                        print_line(f"  {C_BOLD}{name:^18}{C_RESET}: {bar} {act:>3}%", ui_w)
-                else:
-                    # Other fusion layers (Backward Fuse, Forward Fuse)
-                    print_line(format_layer_line(name, act, bar_width_single, is_peak), ui_w)
-    
-    elif display_mode == 1:
-        # MODE 1: Grouped by Trunk → Sorted by Activity
-        # Separate layers by type
-        backward_layers = []
-        forward_layers = []
-        fusion_layers = []
-        
-        for name, act, trend, raw in activities:
-            if "Backward" in name and "Fuse" not in name:
-                backward_layers.append((name, act, trend, raw))
-            elif "Forward" in name and "Fuse" not in name:
-                forward_layers.append((name, act, trend, raw))
-            else:
-                fusion_layers.append((name, act, trend, raw))
-        
-        # Sort by activity
-        backward_layers = sorted(backward_layers, key=lambda x: x[1], reverse=True)
-        forward_layers = sorted(forward_layers, key=lambda x: x[1], reverse=True)
-        
-        backward_overall = int(np.mean([act for _, act, _, _ in backward_layers])) if backward_layers else 0
-        forward_overall = int(np.mean([act for _, act, _, _ in forward_layers])) if forward_layers else 0
-        
-        print_line(f"{C_BOLD}🔥 BACKWARD TRUNK (sorted){C_RESET} - Overall: {make_bar(backward_overall, bar_width_single)} {backward_overall}%", ui_w)
-        print_separator(ui_w, 'single')
-        
-        if available_lines >= num_activities:
-            for name, act, trend, raw in backward_layers:
-                is_peak = (name == peak_layer_name)
-                print_line(format_layer_line(name, act, bar_width_single, is_peak), ui_w)
-        else:
-            for row in range(0, len(backward_layers), 2):
-                left = backward_layers[row]
-                right = backward_layers[row+1] if row+1 < len(backward_layers) else None
-                left_str, right_str = format_two_column_row(left, right, bar_width_double, peak_layer_name)
-                print_two_columns(left_str, right_str, ui_w)
-        
-        print_separator(ui_w, 'double')
-        print_line(f"{C_BOLD}⚡ FORWARD TRUNK (sorted){C_RESET} - Overall: {make_bar(forward_overall, bar_width_single)} {forward_overall}%", ui_w)
-        print_separator(ui_w, 'single')
-        
-        if available_lines >= num_activities:
-            for name, act, trend, raw in forward_layers:
-                is_peak = (name == peak_layer_name)
-                print_line(format_layer_line(name, act, bar_width_single, is_peak), ui_w)
-        else:
-            for row in range(0, len(forward_layers), 2):
-                left = forward_layers[row]
-                right = forward_layers[row+1] if row+1 < len(forward_layers) else None
-                left_str, right_str = format_two_column_row(left, right, bar_width_double, peak_layer_name)
-                print_two_columns(left_str, right_str, ui_w)
-        
-        # Print fusion layers at end
-        if fusion_layers:
-            print_separator(ui_w, 'double')
-            for name, act, trend, raw in fusion_layers:
-                is_peak = (name == peak_layer_name)
-                print_line(format_layer_line(name, act, bar_width_single, is_peak), ui_w)
-    
-    elif display_mode == 2:
-        # MODE 2: Flat List → Sorted by Position
-        if available_lines >= num_activities:
-            for name, act, trend, raw in activities:
-                is_peak = (name == peak_layer_name)
-                print_line(format_layer_line(name, act, bar_width_single, is_peak), ui_w)
-        else:
-            for row in range(0, num_activities, 2):
-                left = activities[row]
-                right = activities[row+1] if row+1 < num_activities else None
-                left_str, right_str = format_two_column_row(left, right, bar_width_double, peak_layer_name)
-                print_two_columns(left_str, right_str, ui_w)
-    
-    else:  # display_mode == 3
-        # MODE 3: Flat List → Sorted by Activity
-        sorted_acts = sorted(activities, key=lambda x: x[1], reverse=True)
-        
-        if available_lines >= num_activities:
-            for name, act, trend, raw in sorted_acts:
-                is_peak = (name == peak_layer_name)
-                print_line(format_layer_line(name, act, bar_width_single, is_peak), ui_w)
-        else:
-            for row in range(0, num_activities, 2):
-                left = sorted_acts[row]
-                right = sorted_acts[row+1] if row+1 < num_activities else None
-                left_str, right_str = format_two_column_row(left, right, bar_width_double, peak_layer_name)
-                print_two_columns(left_str, right_str, ui_w)
+
+    stats          = size_stats['size_stats']
+    category_order = sorted(stats.keys())
+
+    print_separator(ui_width, style='double')
+    print_line(f"{C_BOLD}Size Distribution Progress{C_RESET}", ui_width)
+    print_separator(ui_width, style='thin')
+
+    for category in category_order:
+        cat_stats = stats[category]
+        trained   = cat_stats['images_trained']
+        target    = cat_stats['target_images']
+        pct       = cat_stats['percentage_complete']
+        bar       = make_size_bar(trained, target, 30)
+        line      = f"{category:>15}: {bar} {trained:>8,} / {target:>8,}  ({pct:>6.2f}%)"
+        print_line(line, ui_width)
+
+    print_separator(ui_width, style='thin')
+    total = size_stats.get('total_images_trained', 0)
+    print_line(f"Total Images Trained: {C_BOLD}{total:,}{C_RESET}", ui_width)
+
+
+def format_size_stats_compact(size_stats):
+    """Return size stats as a compact status string."""
+    if not size_stats or 'size_stats' not in size_stats:
+        return "No size stats"
+
+    stats  = size_stats['size_stats']
+    parts  = []
+    for cat in sorted(stats.keys()):
+        s      = stats[cat]
+        target = s['target_images']
+        trained = s['images_trained']
+        pct    = (trained / target * 100.0) if target > 0 else 0.0
+        parts.append(f"{cat.split('_')[0]}: {pct:.0f}%")
+    return " | ".join(parts)

@@ -502,28 +502,37 @@ class AdaptiveSystem:
         Returns:
             Tuple of (total_norm, clip_value)
         """
-        # Compute gradient norm
+        # Compute gradient norm, skipping any NaN/inf parameter gradients.
+        # NaN gradients arise during AMP training when activations explode;
+        # without this guard, total_norm becomes NaN, which poisons clip_value
+        # and disables clipping entirely — accelerating the explosion.
         total_norm = 0.0
         for p in model.parameters():
             if p.grad is not None:
-                param_norm = p.grad.data.norm(2)
-                total_norm += param_norm.item() ** 2
+                pn = p.grad.data.norm(2).item()
+                if np.isfinite(pn):
+                    total_norm += pn ** 2
         total_norm = total_norm ** 0.5
-        
-        self.grad_norms.append(total_norm)
-        
+
+        # Only record finite norms so the history stays clean.
+        if np.isfinite(total_norm):
+            self.grad_norms.append(total_norm)
+
         # Keep last 500 norms
         if len(self.grad_norms) > 500:
             self.grad_norms.pop(0)
-        
-        # Update clip value after warmup
+
+        # Update clip value after warmup.  Filter out any stale NaN entries
+        # (shouldn't occur after the guard above, but defensive nonetheless).
         if len(self.grad_norms) >= 100:
-            new_clip = np.percentile(self.grad_norms, 95)
-            # Smooth update with minimum floor to prevent feedback-loop collapse.
-            # 1.0 floor (was 0.5) ensures deep layers keep receiving gradient signal.
-            MIN_CLIP_VALUE = 1.0
-            self.clip_value = max(MIN_CLIP_VALUE, 0.9 * self.clip_value + 0.1 * new_clip)
-        
+            finite_norms = [v for v in self.grad_norms if np.isfinite(v)]
+            if finite_norms:
+                new_clip = np.percentile(finite_norms, 95)
+                # Smooth update with minimum floor to prevent feedback-loop collapse.
+                # 1.0 floor (was 0.5) ensures deep layers keep receiving gradient signal.
+                MIN_CLIP_VALUE = 1.0
+                self.clip_value = max(MIN_CLIP_VALUE, 0.9 * self.clip_value + 0.1 * new_clip)
+
         # Clip gradients
         torch.nn.utils.clip_grad_norm_(model.parameters(), self.clip_value)
         

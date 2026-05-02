@@ -36,17 +36,28 @@ from vsr_plusplus_NEU.training.lr_scheduler import AdaptiveLRScheduler
 from vsr_plusplus_NEU.systems.checkpoint_manager import CheckpointManager
 from vsr_plusplus_NEU.systems.logger import TrainingLogger, TensorBoardLogger
 from vsr_plusplus_NEU.systems.adaptive_system import AdaptiveSystem
+from vsr_plusplus_NEU.systems.run_lock import save_run_lock, load_and_verify_run_lock
 
-# NOTE: config.py is a LOCAL configuration file that exists on each developer's machine.
-# It is listed in .gitignore (line 58) and should NEVER be pushed to the repository!
-# 
-# To create your config.py:
-#   cp config.py.example config.py
-#   OR
-#   cp config.py.active config.py  (if you have an active config)
-# 
-# Then edit config.py to match your local setup (paths, GPU settings, etc.)
-import config as cfg
+# ══════════════════════════════════════════════════════════════════════════════
+#  CONFIG LOADING — ALWAYS FROM config.py (local, gitignored)
+# ══════════════════════════════════════════════════════════════════════════════
+#
+#  ► The ONLY config file that is ever loaded at runtime is  config.py.
+#  ► There is NO fallback to config.active.py — if config.py is missing,
+#    Python raises an ImportError immediately.  This is intentional.
+#  ► config.active.py is a VERSIONED TEMPLATE stored in git.  It is NEVER
+#    imported or read by any part of the training code.
+#
+#  Typical cause of wrong/missing settings (e.g. ASYNC_VAL_GPU=None,
+#  USE_SR_MODEL not taking effect):
+#    → Your local config.py is stale and missing new parameters.
+#  Fix:
+#      cp vsr_plusplus_NEU/config.active.py config.py
+#      # then re-apply your local edits (DATA_ROOT, GPU index, …)
+#
+#  config.py is listed in .gitignore and must NEVER be committed.
+# ══════════════════════════════════════════════════════════════════════════════
+import config as cfg  # ← ALWAYS config.py — NO fallback to config.active.py
 
 # ANSI colors
 C_GREEN = "\033[92m"
@@ -56,7 +67,7 @@ C_YELLOW = "\033[93m"
 C_BOLD = "\033[1m"
 C_RESET = "\033[0m"
 
-# Canonical list of all supported training/validation size keys
+# Canonical fallback list of size keys used when no dataset_architecture.json is found.
 KNOWN_SIZE_KEYS = ['540', '720', '720_169']
 
 # Default per-size batch and gradient accumulation configuration.
@@ -160,7 +171,31 @@ def main():
     """Main training entry point"""
     
     # Load configuration from config.py
+    # ► ALWAYS config.py — NO fallback to config.active.py (see import block above)
     config = cfg.get_config()
+
+    # ── Stale-config safety net ───────────────────────────────────────────────
+    # If the user's local config.py was copied from an older version of
+    # config.active.py its get_config() may not include newer parameters
+    # (e.g. ASYNC_VAL_GPU, USE_SR_MODEL).  Rather than silently using the
+    # default (None / False), we detect missing keys and inject them from the
+    # module-level attributes that the user DID set in their config.py.
+    # A prominent warning is printed so the user knows to re-copy.
+    _REQUIRED_KEYS = ['ASYNC_VAL_GPU', 'USE_SR_MODEL', 'SR_MODEL_PATH']
+    _stale_keys = [k for k in _REQUIRED_KEYS if k not in config and hasattr(cfg, k)]
+    if _stale_keys:
+        print(f"\n{C_YELLOW}{'═'*60}{C_RESET}")
+        print(f"{C_YELLOW}  ⚠  STALE config.py DETECTED{C_RESET}")
+        print(f"{C_YELLOW}{'─'*60}{C_RESET}")
+        print(f"  The following keys are set in config.py but missing from")
+        print(f"  get_config() — your config.py needs to be updated:")
+        for k in _stale_keys:
+            injected = getattr(cfg, k)
+            config[k] = injected
+            print(f"    {k} = {injected!r}  ← injected from module attribute")
+        print(f"{C_YELLOW}  Fix: cp vsr_plusplus_NEU/config.active.py config.py{C_RESET}")
+        print(f"{C_YELLOW}{'═'*60}{C_RESET}\n")
+    # ─────────────────────────────────────────────────────────────────────────
 
     # Resolve batch config: prefer ADAPTIVE_BATCH_CONFIG from config.py over the
     # module-level default so users can change batch/accum in config.py and have
@@ -200,6 +235,7 @@ def main():
     
     start_step = 0
     selected_checkpoint_path = None
+    is_fresh_start = False
     checkpoint_mgr = CheckpointManager(DATASET_SPECIFIC_ROOT)
     
     if choice == 'l':
@@ -224,7 +260,14 @@ def main():
             if backed_up > 0:
                 print(f"{C_GREEN}✓ {backed_up} .pth Dateien als .BAK gesichert{C_RESET}")
             
+            # Remove old lock file so a new one is written below
+            _old_lock = os.path.join(DATASET_SPECIFIC_ROOT, "training_run_locked.json")
+            if os.path.exists(_old_lock):
+                os.remove(_old_lock)
+                print(f"{C_CYAN}🔓 Old run lock removed (fresh start){C_RESET}")
+            
             print(f"{C_GREEN}✅ All checkpoints, logs, and TensorBoard events cleaned up{C_RESET}\n")
+            is_fresh_start = True
     
     if choice != 'l' or choice == 'f':
         # Resume mode (either selected 'f' or canceled 'l')
@@ -244,6 +287,7 @@ def main():
             selected_checkpoint_path = selected_ckpt['path']
         else:
             print("⚠️  No checkpoint found, starting fresh")
+            is_fresh_start = True
     
     # Start TensorBoard with dataset-specific log directory
     log_dir = os.path.join(DATASET_SPECIFIC_ROOT, "logs")
@@ -395,27 +439,84 @@ def main():
     # Create datasets
     print("Loading datasets...")
 
-    # All paths come from config.py — no runtime_config.json
-    data_root        = DATASET_ROOT
-    train_gt_pattern = 'patches/{size_key}/GT'
-    train_lr_pattern = 'patches/{size_key}/LR_7frames'
+    # All paths come from config.py
+    data_root    = DATASET_ROOT
 
-    # Detect which size directories exist and have GT files
+    # ------------------------------------------------------------------
+    # Load dataset_architecture.json to discover format keys, n_frames,
+    # and output image format.  Falls back gracefully when not present.
+    # ------------------------------------------------------------------
+    from vsr_plusplus_NEU.utils.dataset_architecture import load_dataset_architecture
+    arch = load_dataset_architecture(data_root)
+    if arch is not None:
+        print(f"{C_GREEN}✓ Loaded dataset_architecture.json: {arch}{C_RESET}")
+        arch_n_frames = arch.n_frames
+        arch_img_ext  = arch.img_ext          # e.g. ".bmp" or ".png"
+        arch_lr_dir_name = arch.get_lr_dir_name()   # e.g. "LR_7frames"
+        # Size keys from the architecture JSON take priority over KNOWN_SIZE_KEYS
+        arch_size_keys = arch.get_templates_for_category(dataset_name)
+        if arch_size_keys:
+            print(f"{C_CYAN}  Templates for category '{dataset_name}': {', '.join(arch_size_keys)}{C_RESET}")
+        else:
+            print(f"{C_YELLOW}  ⚠ No templates found for category '{dataset_name}' in architecture file{C_RESET}")
+            arch_size_keys = []
+    else:
+        print(f"{C_YELLOW}⚠ dataset_architecture.json not found at {data_root} — using defaults{C_RESET}")
+        arch_n_frames    = 7
+        arch_img_ext     = ".png"             # legacy default
+        arch_lr_dir_name = "LR_7frames"
+        arch_size_keys   = []
+
+    # ------------------------------------------------------------------
+    # Model constraint validation (early abort on architecture mismatch).
+    #
+    # The training model is fixed to 7 frames and 3× scale.  If the
+    # architecture file says something different, training must not start
+    # so checkpoints remain compatible.
+    # ------------------------------------------------------------------
+    FIXED_N_FRAMES = 7
+    FIXED_SCALE    = 3
+
+    if arch_n_frames != FIXED_N_FRAMES:
+        print(f"\n{C_RED}{'='*72}{C_RESET}")
+        print(f"{C_RED}❌  MODEL ARCHITECTURE MISMATCH{C_RESET}")
+        print(f"{C_RED}    dataset_architecture.json says n_frames={arch_n_frames}{C_RESET}")
+        print(f"{C_RED}    but the training model is fixed to n_frames={FIXED_N_FRAMES}.{C_RESET}")
+        print(f"{C_RED}    Training aborted — update the model or the architecture file.{C_RESET}")
+        print(f"{C_RED}{'='*72}{C_RESET}\n")
+        return
+
+    # scale is not stored in the architecture file but is implicit in the LR
+    # directory dimensions; we simply document the expectation here.
+    print(f"{C_GREEN}✅ Architecture validated: n_frames={arch_n_frames}, scale={FIXED_SCALE} (fixed){C_RESET}")
+
+    train_gt_pattern = 'patches/{size_key}/GT'
+    train_lr_pattern = f'patches/{{size_key}}/{arch_lr_dir_name}'
+
+    # Size keys to probe: architecture JSON first, then KNOWN_SIZE_KEYS as fallback
+    probe_size_keys = arch_size_keys if arch_size_keys else KNOWN_SIZE_KEYS
+
+    # Detect which size directories exist and have image files
     available_sizes = []
     print(f"{C_CYAN}Checking for dataset sizes in: {os.path.join(data_root, dataset_name)}{C_RESET}")
-    print(f"{C_CYAN}  Using path pattern: {train_gt_pattern}{C_RESET}")
+    print(f"{C_CYAN}  Using path pattern: {train_gt_pattern}  (ext: {arch_img_ext}){C_RESET}")
 
-    for size_key in KNOWN_SIZE_KEYS:
+    from vsr_plusplus_NEU.core.dataset import _collect_image_files
+    for size_key in probe_size_keys:
         train_dir = os.path.join(data_root, dataset_name,
                                  train_gt_pattern.replace('{size_key}', size_key))
         print(f"{C_CYAN}  Checking {size_key}: {train_dir}{C_RESET}")
         if os.path.exists(train_dir):
-            files = [f for f in os.listdir(train_dir) if f.lower().endswith('.png')]
+            # Single scan: use arch_img_ext as hint but accept any supported ext
+            # to handle datasets where the format differs from the architecture file.
+            files = _collect_image_files(train_dir, arch_img_ext)
+            if not files:
+                files = _collect_image_files(train_dir, "")  # fallback: any supported ext
             if files:
                 available_sizes.append(size_key)
                 print(f"{C_GREEN}    ✓ Found {len(files)} files{C_RESET}")
             else:
-                print(f"{C_YELLOW}    ⚠ Directory exists but no .png files found{C_RESET}")
+                print(f"{C_YELLOW}    ⚠ Directory exists but no image files found{C_RESET}")
         else:
             print(f"{C_YELLOW}    ⚠ Directory does not exist{C_RESET}")
 
@@ -441,8 +542,9 @@ def main():
             for size_key in available_sizes:
                 batch_cfg = FIXED_BATCH_CONFIG.get(size_key)
                 if batch_cfg is None:
-                    print(f"{C_RED}❌ size_key '{size_key}' not in FIXED_BATCH_CONFIG — add it to train.py!{C_RESET}")
-                    raise ValueError(f"Unknown size_key '{size_key}'")
+                    # Dynamic size keys from V2 architecture use a safe default
+                    print(f"{C_YELLOW}⚠ size_key '{size_key}' not in FIXED_BATCH_CONFIG — using safe defaults (batch=1, accum=4){C_RESET}")
+                    batch_cfg = {'batch': 1, 'accum': 4}
                 sizes_config[size_key] = {
                     'enabled':    True,
                     'distribution': 1.0 / len(available_sizes),
@@ -450,7 +552,7 @@ def main():
                     'accum':      batch_cfg['accum'],
                 }
 
-            # Startup diagnostic: file counts per size
+            # Startup diagnostic: file counts per size (bucket-aware, ext-aware)
             import time as _time
             print(f"\n{C_CYAN}{'━'*56}")
             print(f"  📋  DATASET FILE COUNTS (pre-load diagnostic)")
@@ -460,15 +562,17 @@ def main():
                                       train_gt_pattern.replace('{size_key}', sk))
                 lr_dir = os.path.join(data_root, dataset_name,
                                       train_lr_pattern.replace('{size_key}', sk))
-                gt_files = sorted([f for f in os.listdir(gt_dir)
-                                   if f.lower().endswith('.png')]) if os.path.isdir(gt_dir) else []
-                lr_files = sorted([f for f in os.listdir(lr_dir)
-                                   if f.lower().endswith('.png')]) if os.path.isdir(lr_dir) else []
-                match_count = len(set(gt_files) & set(lr_files))
+                gt_files = _collect_image_files(gt_dir, arch_img_ext) if os.path.isdir(gt_dir) else []
+                lr_files = _collect_image_files(lr_dir, arch_img_ext) if os.path.isdir(lr_dir) else []
+                # Match by basename only (bucket paths differ between GT and LR)
+                gt_bases = {os.path.basename(f) for f in gt_files}
+                lr_bases = {os.path.basename(f) for f in lr_files}
+                match_count = len(gt_bases & lr_bases)
                 ok = len(gt_files) > 0 and len(lr_files) > 0 and match_count > 0
                 status = f"{C_GREEN}✓" if ok else f"{C_RED}✗"
-                cfg_info = FIXED_BATCH_CONFIG.get(sk, {})
-                print(f"  {status}  {sk:8s}{C_RESET}  GT={len(gt_files):6,}  LR={len(lr_files):6,}  "
+                cfg_info = FIXED_BATCH_CONFIG.get(sk, {'batch': 1, 'accum': 4})
+                # Width 12 accommodates long V2 template names like "1152_169"
+                print(f"  {status}  {sk:12s}{C_RESET}  GT={len(gt_files):6,}  LR={len(lr_files):6,}  "
                       f"matched={match_count:6,}  BS={cfg_info.get('batch','?')} accum={cfg_info.get('accum','?')}")
                 if not os.path.isdir(lr_dir):
                     print(f"           {C_RED}⚠  LR directory NOT FOUND: {lr_dir}{C_RESET}")
@@ -476,12 +580,6 @@ def main():
                     print(f"           {C_YELLOW}⚠  LR directory is empty{C_RESET}")
                 elif match_count == 0:
                     print(f"           {C_RED}⚠  No GT/LR filename matches!{C_RESET}")
-            print(f"{C_CYAN}{'━'*56}{C_RESET}")
-            print(f"{C_YELLOW}  ⏳  Starting in 10 seconds — press Ctrl+C to abort …{C_RESET}")
-            for _i in range(10, 0, -1):
-                print(f"      {_i} …", end='\r', flush=True)
-                _time.sleep(1)
-            print(f"  {C_GREEN}▶  Continuing …{C_RESET}                    ")
             print(f"{C_CYAN}{'━'*56}{C_RESET}\n")
 
             loader_config = {
@@ -491,6 +589,8 @@ def main():
                 'augment':          True,
                 'shuffle':          True,
                 'paths':            None,  # use default path patterns
+                'n_frames':         arch_n_frames,
+                'img_ext':          arch_img_ext,
                 'prefetch_count':   config.get('PREFETCH_BATCHES',     10),
                 'prefetch_workers': config.get('PREFETCH_WORKERS',      1),
                 'pin_workers':      config.get('PREFETCH_PIN_WORKERS',  1),
@@ -509,13 +609,34 @@ def main():
             print(f"{C_CYAN}{'━'*47}{C_RESET}\n")
 
             # Graduated data/loss strategy scheduler
+            # Build template_areas from arch metadata (needed to choose warmup template
+            # dynamically as the one with the largest GT area).
+            _template_areas = {}
+            _arch_weights = {}
+            if arch is not None:
+                try:
+                    for _sk in list(train_loader.datasets_dict.keys()):
+                        _entry = arch.get_format_entry(dataset_name, _sk)
+                        if _entry:
+                            _gt = _entry.get('gt_size')  # [width, height]
+                            if _gt and len(_gt) == 2:
+                                _template_areas[_sk] = _gt[0] * _gt[1]
+                            _wt = _entry.get('weight', 0.0)
+                            if _wt:
+                                _arch_weights[_sk] = float(_wt)
+                except Exception:
+                    pass  # Fallback: equal shares (handled by DataStrategyScheduler)
+
             from vsr_plusplus_NEU.core.dataloader import DataStrategyScheduler
             data_strategy_scheduler = DataStrategyScheduler(
-                all_size_keys=list(train_loader.datasets_dict.keys())
+                all_size_keys=list(train_loader.datasets_dict.keys()),
+                template_areas=_template_areas or None,
+                arch_weights=_arch_weights or None,
             )
+            _warmup_tmpl = data_strategy_scheduler.warmup_template or 'unknown'
             print(f"{C_CYAN}📅 DataStrategyScheduler enabled:{C_RESET}")
             print(f"  • Phase 1 (steps 0–{DataStrategyScheduler.WARMUP_END}): "
-                  f"100% 720_169 only, perceptual=0.0")
+                  f"100% {_warmup_tmpl} (largest GT area), perceptual=0.0")
             print(f"  • Phase 2 (steps {DataStrategyScheduler.WARMUP_END}–"
                   f"{DataStrategyScheduler.CROP_INTRO_END}): "
                   f"linear mix-in, perceptual 0.0→{DataStrategyScheduler.TARGET_PERCEPTUAL_WEIGHT}")
@@ -541,6 +662,8 @@ def main():
                 size_key=size_key,
                 mode='train',
                 augment=True,
+                n_frames=arch_n_frames,
+                img_ext=arch_img_ext,
                 paths_config=None,
             )
             print(f"✅ Training samples: {len(train_dataset):,}\n")
@@ -560,18 +683,23 @@ def main():
     val_loaders = []  # List of (size_key, loader) tuples
     val_gt_pattern = 'val/{size_key}/GT'
 
-    # Ensure validation GT subdirs exist so the user can copy images into them
-    for size_key in KNOWN_SIZE_KEYS:
+    # Ensure validation GT subdirs exist for all known template keys.
+    # Use arch_size_keys when available, otherwise KNOWN_SIZE_KEYS.
+    val_template_keys = arch_size_keys if arch_size_keys else KNOWN_SIZE_KEYS
+    for size_key in val_template_keys:
         os.makedirs(os.path.join(data_root, dataset_name, 'val', size_key, 'GT'), exist_ok=True)
-    print(f"{C_GREEN}✅ Validation GT directories ready: "
-          f"{os.path.join(data_root, dataset_name, 'val', '{size_key}', 'GT')}{C_RESET}")
+    print(f"{C_GREEN}✅ Validation GT directories ready under "
+          f"{os.path.join(data_root, dataset_name, 'val')}{C_RESET}")
 
-    # Auto-detect validation sizes
+    # Auto-detect validation sizes (check for any image files, BMP or PNG)
     val_sizes = []
-    for sk in KNOWN_SIZE_KEYS:
+    for sk in val_template_keys:
         val_dir = os.path.join(data_root, dataset_name, val_gt_pattern.replace('{size_key}', sk))
         if os.path.isdir(val_dir):
-            files = [f for f in os.listdir(val_dir) if f.lower().endswith('.png')]
+            files = _collect_image_files(val_dir, arch_img_ext)
+            if not files:
+                # Try any supported format (handles mixed or auto-detected layouts)
+                files = _collect_image_files(val_dir, "")
             if files:
                 val_sizes.append(sk)
     if not val_sizes:
@@ -588,6 +716,8 @@ def main():
                 size_key=size_key,
                 mode='val',
                 augment=False,
+                n_frames=arch_n_frames,
+                img_ext=arch_img_ext,
                 paths_config=None,
             )
             val_loader = DataLoader(
@@ -612,6 +742,53 @@ def main():
     # First loader is used as the primary validator target
     val_loader = val_loaders[0][1]
 
+    # ------------------------------------------------------------------
+    # Locked run config — checkpoint compatibility guard
+    #
+    # On fresh start: writes training_run_locked.json with the key model
+    # and dataset parameters.  On resume: loads the locked file and aborts
+    # with a clear error if any critical parameter has changed.
+    # ------------------------------------------------------------------
+    _run_templates = sorted(available_sizes)
+    if is_fresh_start:
+        _lock_path = save_run_lock(
+            run_dir=DATASET_SPECIFIC_ROOT,
+            n_feats=n_feats,
+            n_blocks=n_blocks,
+            n_frames=arch_n_frames,
+            scale=FIXED_SCALE,
+            dataset_root=data_root,
+            category=dataset_name,
+            templates=_run_templates,
+        )
+        print(f"{C_GREEN}🔒 Run lock created: {_lock_path}{C_RESET}")
+    else:
+        # On resume: verify the lock is compatible with the current config.
+        # load_and_verify_run_lock() calls sys.exit(1) on mismatch.
+        load_and_verify_run_lock(
+            run_dir=DATASET_SPECIFIC_ROOT,
+            n_feats=n_feats,
+            n_blocks=n_blocks,
+            n_frames=arch_n_frames,
+            scale=FIXED_SCALE,
+            dataset_root=data_root,
+            category=dataset_name,
+            templates=_run_templates,
+        )
+        # If we reach here, the lock either didn't exist (first run after upgrade)
+        # or verification passed.  In the former case, create the lock now.
+        save_run_lock(
+            run_dir=DATASET_SPECIFIC_ROOT,
+            n_feats=n_feats,
+            n_blocks=n_blocks,
+            n_frames=arch_n_frames,
+            scale=FIXED_SCALE,
+            dataset_root=data_root,
+            category=dataset_name,
+            templates=_run_templates,
+        )
+    # ------------------------------------------------------------------
+
     # Create checkpoint manager
     checkpoint_mgr = CheckpointManager(DATASET_SPECIFIC_ROOT)
     
@@ -621,7 +798,14 @@ def main():
     tb_logger = TensorBoardLogger(log_dir)
     
     # Create validator
-    validator = VSRValidator(model, val_loader, loss_fn, device=device)
+    # Optionally load EDSR SR model for sync validation when USE_SR_MODEL=True
+    _sync_sr_model = None
+    if config.get('USE_SR_MODEL', False):
+        from vsr_plusplus_NEU.core.sr_model import load_sr_model
+        print(f"{C_CYAN}USE_SR_MODEL=True – loading SR model for sync validation...{C_RESET}")
+        _sync_sr_model = load_sr_model(device)  # always returns a model (EDSR or Bicubic fallback)
+
+    validator = VSRValidator(model, val_loader, loss_fn, device=device, sr_model=_sync_sr_model)
     
     # Load checkpoint if resuming
     if start_step > 0 and selected_checkpoint_path:
@@ -687,10 +871,30 @@ def main():
     
     # ── Async validation setup ────────────────────────────────────────────────
     # Set ASYNC_VAL_GPU in your config.py to the GPU index that should run
-    # validation (e.g. ASYNC_VAL_GPU = 1).  Leave unset (or set to None) to
+    # validation (e.g. ASYNC_VAL_GPU = 1).  Use 'auto' to automatically pick
+    # the GPU that is NOT used for training.  Leave unset (or set to None) to
     # use the default synchronous validation that runs inline on the training GPU.
     async_val_gpu = config.get('ASYNC_VAL_GPU', None)
+    _async_val_cfg_value = async_val_gpu  # keep original config value for summary display
+
+    # Resolve 'auto': pick the GPU that is NOT used by training
+    if async_val_gpu == 'auto':
+        # device.index is None for torch.device('cuda') without explicit index;
+        # treat it as index 0 (PyTorch default) so the math below is always valid.
+        training_gpu_idx = device.index if (device.type == 'cuda' and device.index is not None) else (0 if device.type == 'cuda' else None)
+        gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        print(f"{C_CYAN}ASYNC_VAL_GPU='auto': {gpu_count} GPU(s) found, training on GPU {training_gpu_idx}{C_RESET}")
+        if gpu_count >= 2 and training_gpu_idx is not None:
+            async_val_gpu = 1 - training_gpu_idx  # works for 2-GPU setups
+            print(f"{C_GREEN}✓ ASYNC_VAL_GPU='auto' → training GPU {training_gpu_idx}, "
+                  f"validation GPU {async_val_gpu}{C_RESET}")
+        else:
+            print(f"{C_YELLOW}⚠ ASYNC_VAL_GPU='auto': only {gpu_count} GPU(s) found – "
+                  f"disabling async validation (synchronous mode){C_RESET}")
+            async_val_gpu = None
+
     async_val_proc = None
+    _async_val_disable_reason = None  # set below when async val cannot start
 
     if async_val_gpu is not None:
         # Determine which size keys have validation data
@@ -700,12 +904,14 @@ def main():
         config_json_path = os.path.join(DATASET_SPECIFIC_ROOT, 'async_val_config.json')
         config_snapshot = {
             'N_FEATS':           config.get('N_FEATS', 72),
-            'N_BLOCKS':          config.get('N_BLOCKS', 28),
+            'N_BLOCKS':          config.get('N_BLOCKS', 24),
             'USE_CHECKPOINTING': config.get('USE_CHECKPOINTING', False),
             'L1_WEIGHT':         config.get('L1_WEIGHT', 0.60),
             'MS_WEIGHT':         config.get('MS_WEIGHT', 0.20),
             'GRAD_WEIGHT':       config.get('GRAD_WEIGHT', 0.20),
             'PERCEPTUAL_WEIGHT': config.get('PERCEPTUAL_WEIGHT', 0.0),
+            # SR reference model (False = disabled)
+            'USE_SR_MODEL':      config.get('USE_SR_MODEL', False),
         }
         try:
             with open(config_json_path, 'w') as f:
@@ -746,10 +952,25 @@ def main():
             )
             # Close our copy of the file handle – the child process has its own.
             _async_val_log_fh.close()
-            print(f"{C_GREEN}✓ Async validator PID {async_val_proc.pid}{C_RESET}\n")
+            print(f"{C_GREEN}✓ Async validator PID {async_val_proc.pid}{C_RESET}")
+            print(f"  Log: {_async_val_log_path}")
+            # Brief grace period: if the process exits immediately it means the
+            # subprocess crashed on startup (e.g. import error, GPU unavailable).
+            import time as _time
+            _time.sleep(2.0)
+            if async_val_proc.poll() is not None:
+                _exit_code = async_val_proc.returncode
+                print(f"{C_YELLOW}⚠ Async validator crashed immediately (exit code {_exit_code}){C_RESET}")
+                print(f"{C_YELLOW}  Check {_async_val_log_path} for details{C_RESET}")
+                print(f"{C_YELLOW}  Falling back to synchronous validation.{C_RESET}\n")
+                _async_val_disable_reason = f"subprocess crashed (exit {_exit_code}) – see async_val.log"
+                async_val_proc = None
+            else:
+                print(f"{C_GREEN}✓ Async validator running\n{C_RESET}")
         except Exception as e:
             print(f"{C_YELLOW}⚠ Failed to start async validator: {e}{C_RESET}")
             print(f"{C_YELLOW}  Falling back to synchronous validation.{C_RESET}\n")
+            _async_val_disable_reason = f"subprocess failed to start: {e}"
             async_val_proc = None
 
         if async_val_proc is not None:
@@ -762,6 +983,79 @@ def main():
                 log_path=_async_val_log_path,
             )
     # ── End async validation setup ────────────────────────────────────────────
+
+    # ── Final setup summary + countdown ──────────────────────────────────────
+    # All setup steps are complete.  Print a summary so the user can verify
+    # everything before the terminal UI takes over the screen.
+    # The same summary is written to training_startup.log for post-hoc debugging.
+
+    # Build async val status line
+    if async_val_proc is not None:
+        _async_status = f"✅ running on GPU {async_val_gpu} (PID {async_val_proc.pid})"
+    elif _async_val_disable_reason:
+        _async_status = f"⚠ {_async_val_disable_reason}"
+    elif _async_val_cfg_value == 'auto':
+        gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        _async_status = f"disabled (auto: only {gpu_count} GPU found – synchronous mode)"
+    elif _async_val_cfg_value is None:
+        _async_status = "disabled (ASYNC_VAL_GPU=None in config.py)"
+    else:
+        _async_status = f"disabled (config value: {_async_val_cfg_value!r})"
+
+    # Build SR model status line
+    if _sync_sr_model is not None:
+        _sr_status = f"loaded ✅ ({getattr(_sync_sr_model, 'name', type(_sync_sr_model).__name__)})"
+    else:
+        _sr_status = "disabled (USE_SR_MODEL=False in config.py)"
+
+    _summary_lines = [
+        f"{'═'*60}",
+        f"  ✅  SETUP COMPLETE – ready to start training",
+        f"{'─'*60}",
+        f"  Training GPU : {device}",
+        f"  SR model     : {_sr_status}",
+        f"  Async val    : {_async_status}",
+        f"  Steps        : {start_step:,} → {config.get('MAX_STEPS', 150000):,}",
+        f"  Config file  : config.py (ASYNC_VAL_GPU={_async_val_cfg_value!r}, USE_SR_MODEL={config.get('USE_SR_MODEL', False)!r})",
+        f"{'─'*60}",
+    ]
+
+    # Print to console (with ANSI colours)
+    print(f"\n{C_CYAN}{'═'*60}{C_RESET}")
+    print(f"{C_CYAN}  ✅  SETUP COMPLETE – ready to start training{C_RESET}")
+    print(f"{C_CYAN}{'─'*60}{C_RESET}")
+    print(f"  Training GPU : {device}")
+    print(f"  SR model     : {_sr_status}")
+    if async_val_proc is not None:
+        print(f"  Async val    : {C_GREEN}{_async_status}{C_RESET}")
+    elif _async_val_disable_reason or _async_val_cfg_value is not None:
+        print(f"  Async val    : {C_YELLOW}{_async_status}{C_RESET}")
+    else:
+        print(f"  Async val    : {_async_status}")
+    print(f"  Steps        : {start_step:,} → {config.get('MAX_STEPS', 150000):,}")
+    print(f"  Config file  : config.py  (ASYNC_VAL_GPU={_async_val_cfg_value!r}, USE_SR_MODEL={config.get('USE_SR_MODEL', False)!r})")
+    print(f"{C_CYAN}{'─'*60}{C_RESET}")
+
+    # Write the same summary (no ANSI) to training_startup.log for debugging
+    import datetime as _dt
+    _startup_log_path = os.path.join(DATASET_SPECIFIC_ROOT, 'training_startup.log')
+    try:
+        with open(_startup_log_path, 'a', encoding='utf-8') as _slg:
+            _slg.write(f"\n[{_dt.datetime.now().isoformat(timespec='seconds')}] Training startup\n")
+            for _line in _summary_lines:
+                _slg.write(_line + '\n')
+            _slg.flush()
+        print(f"  Startup log  : {_startup_log_path}")
+    except Exception as _log_err:
+        print(f"{C_YELLOW}  ⚠ Could not write startup log: {_log_err}{C_RESET}")
+
+    print(f"{C_YELLOW}  ⏳  Starting in 10 seconds — press Ctrl+C to abort …{C_RESET}")
+    for _i in range(10, 0, -1):
+        print(f"      {_i} …", end='\r', flush=True)
+        time.sleep(1)
+    print(f"  {C_GREEN}▶  Starting …{C_RESET}                    ")
+    print(f"{C_CYAN}{'═'*60}{C_RESET}\n")
+    # ─────────────────────────────────────────────────────────────────────────
 
     # Start training
     print("="*80)

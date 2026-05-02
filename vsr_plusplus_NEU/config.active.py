@@ -1,19 +1,23 @@
 """
-VSR++ 7-Frame Configuration - Example Template
+VSR++ 7-Frame Configuration - TEMPLATE / ACTIVE REFERENCE
+══════════════════════════════════════════════════════════════════════════════
+  ⚠️  THIS FILE IS A TEMPLATE — IT IS NEVER LOADED DIRECTLY BY train.py!
+──────────────────────────────────────────────────────────────────────────────
+  HOW THE CONFIG SYSTEM WORKS:
+    • train.py ALWAYS loads  →  config.py   (via  import config as cfg)
+    • config.py is listed in .gitignore and is NEVER committed to the repo.
+    • config.active.py  is the versioned template/reference that lives in git.
 
-⚠️  IMPORTANT: Copy this file to config.py before using!
+  WORKFLOW:
+    1. Copy this file to config.py in your working directory:
+           cp vsr_plusplus_NEU/config.active.py config.py
+    2. Edit  config.py  to match your machine (paths, GPU settings, …).
+    3. Re-copy whenever you pull a newer config.active.py from the repo so
+       that new parameters (like USE_SR_MODEL, ASYNC_VAL_GPU, …) are not
+       missing from your local config.py.
 
-    cp config.py.example config.py
-
-The config.py file is in .gitignore and will NOT be committed.
-Edit config.py for your local setup.
-
-This configuration is specifically optimized for 7-frame VSR training on Tesla P100 hardware (16GB VRAM).
-Key parameters:
-- 72 feature channels (optimized for 7-frame model)
-- 26 residual blocks (balanced depth for quality)
-- Gradient accumulation for effective batch size
-- Matches dataset_generator_v2 output structure
+  TL;DR:  Edit config.py — config.active.py is only a reference!
+══════════════════════════════════════════════════════════════════════════════
 """
 
 # ============================================================================
@@ -212,8 +216,40 @@ USE_CHECKPOINTING = True
 #   - Manual validation (key 'v' or WebUI button) still runs synchronously on
 #     demand and is not affected by this setting.
 #
+# Set to 'auto' (recommended for dual-GPU systems) to let the system
+# automatically pick the GPU that is NOT used for training:
+#   - If training runs on GPU 0  → validation uses GPU 1 (and vice versa).
+#   - If only one GPU is present, 'auto' disables async validation gracefully.
+#
 # Set to None to disable async validation (default synchronous behaviour):
-ASYNC_VAL_GPU = None   # e.g. set to 1 for Tesla P4 on a dual-GPU machine
+ASYNC_VAL_GPU = 'auto'  # 'auto' | None | explicit int (e.g. 1)
+
+
+# ============================================================================
+# OPTIONAL SR REFERENCE MODEL (EDSR / SwinIR – vortrainiert, auto-Download)
+# ============================================================================
+
+# Aktiviert ein vortrainiertes SR-Referenz-Modell für den Validierungsvergleich.
+# Wenn True, lädt der async-Validator automatisch ein SR-Referenzmodell auf
+# die Validierungs-GPU.
+#
+# Ladevorgehen (in dieser Reihenfolge):
+#   1. Gecachte EDSR-Gewichte in ~/.cache/ice_ki/sr/  → sofortiger Start
+#   2. EDSR x3 von cv.snu.ac.kr (~5 MB)
+#   3. SwinIR-M x3 von GitHub Releases (~60 MB, immer erreichbar!)
+#   4. Bicubic ×3 Fallback (kein Download nötig, immer verfügbar)
+#
+# SwinIR-M x3 ist ein modernes Transformer-basiertes SR-Modell (2021) und
+# deutlich besser als Bicubic. Es wird automatisch von GitHub geladen wenn
+# die SNU-Seite nicht erreichbar ist. Keine externen Pakete (kein timm) nötig.
+#
+# Auswirkung:
+#   - TensorBoard zeigt 5-Panel-Vergleich: LR | Bicubic | SR | VSR | GT
+#   - Zusätzliche Metriken: sr_quality, sr_psnr, sr_ssim in Ergebnis-JSON
+#   - SR-Kachel im WebGUI zeigt den SSIM-basierten Qualitätswert
+#
+# Speicher: ~550 MB VRAM für EDSR / ~900 MB für SwinIR-M / ~0 MB für Bicubic
+USE_SR_MODEL = False  # True = SR-Vergleich aktivieren, False = ohne SR (4-Panel)
 
 
 # ============================================================================
@@ -275,8 +311,12 @@ def get_config():
     config['USE_AMP'] = USE_AMP
     config['USE_CHECKPOINTING'] = USE_CHECKPOINTING
 
-    # Async validation GPU (None = synchronous mode)
+    # Async validation GPU (None = synchronous mode, 'auto' = other GPU)
     config['ASYNC_VAL_GPU'] = ASYNC_VAL_GPU
+    # Optional SR reference model path (None = disabled)
+    config['SR_MODEL_PATH'] = SR_MODEL_PATH
+    # SR reference model flag (True = load EDSR x3 for validation comparison)
+    config['USE_SR_MODEL'] = USE_SR_MODEL
     
     return config
 
