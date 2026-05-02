@@ -1239,14 +1239,7 @@ class VSRTrainer:
         else:
             _perceptual_trend = 0
         
-        # Debug: Print first update to verify data flow
-        if self.global_step == 1:
-            print(f"\n🔍 Web UI Debug - First Update:")
-            print(f"   Step: {self.global_step}")
-            print(f"   Total Loss: {losses['total']}")
-            print(f"   LR: {current_lr}")
-            print(f"   VRAM: {gpu_mem:.2f} GB")
-            print(f"   Layer activities: {len(layer_act_dict)} layers")
+        # (debug print block removed — was polluting the terminal dashboard)
         
         try:
             self.web_monitor.update(

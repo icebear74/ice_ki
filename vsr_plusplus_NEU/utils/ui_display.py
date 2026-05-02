@@ -608,6 +608,13 @@ def draw_ui(step, epoch, losses, it_time, activities, config, num_images,
         output.extend(t)
     output.extend(footer_lines)
 
+    # Fill any remaining rows with blank cleared lines so no old content
+    # from previous renders or external print() calls bleeds through.
+    used_rows  = len(output)
+    blank_line = ' ' * (ui_w + 4)  # +4 for the box border characters
+    for _ in range(max(0, rows - used_rows - 1)):
+        output.append(blank_line)
+
     sys.stdout.write('\n'.join(output) + '\n')
     sys.stdout.flush()
 
