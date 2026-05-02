@@ -9,25 +9,26 @@ import re
 import sys
 
 # ANSI Color Codes
-C_GREEN = "\033[92m"
-C_GRAY = "\033[90m"
-C_RESET = "\033[0m"
-C_BOLD = "\033[1m"
-C_CYAN = "\033[96m"
-C_RED = "\033[91m"
-C_YELLOW = "\033[93m"
+C_GREEN   = "\033[92m"
+C_GRAY    = "\033[90m"
+C_RESET   = "\033[0m"
+C_BOLD    = "\033[1m"
+C_CYAN    = "\033[96m"
+C_RED     = "\033[91m"
+C_YELLOW  = "\033[93m"
 C_MAGENTA = "\033[95m"
+C_BORDER  = "\033[36m"   # Regular cyan — visible on both dark and light terminals
 
 # ANSI Control Codes
-ANSI_HOME = "\033[H"
-ANSI_CLEAR = "\033[2J"
+ANSI_HOME       = "\033[H"
+ANSI_CLEAR      = "\033[2J"
 ANSI_HIDE_CURSOR = "\033[?25l"
 ANSI_SHOW_CURSOR = "\033[?25h"
 
-# ANSI Escape Sequence Pattern (for stripping colors from text)
+# ANSI Escape Sequence Pattern (for stripping colours from text)
 ANSI_ESCAPE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 
-# Display Mode Names
+# Display Mode Names (kept for reference)
 DISPLAY_MODE_NAMES = [
     "2-Column Detailed (Backward | Forward)",
     "Grouped by Trunk → Sorted by Activity",
@@ -36,444 +37,263 @@ DISPLAY_MODE_NAMES = [
 ]
 
 
+# ── Utility ────────────────────────────────────────────────────────────────────
+
 def get_visible_len(text):
-    """
-    Get visible length of text (excluding ANSI escape codes)
-    
-    Args:
-        text: String potentially containing ANSI codes
-    
-    Returns:
-        int: Visible length of text
-    """
+    """Return the visible length of *text* (ANSI escape codes excluded)."""
     return len(ANSI_ESCAPE.sub('', text))
 
 
+def _truncate(content, max_cw):
+    """Truncate *content* to *max_cw* visible characters, appending '…' if cut."""
+    if get_visible_len(content) <= max_cw:
+        return content
+    truncated   = ""
+    visible     = 0
+    in_ansi     = False
+    ansi_buf    = ""
+    for ch in content:
+        if ch == '\033':
+            in_ansi  = True
+            ansi_buf = ch
+        elif in_ansi:
+            ansi_buf += ch
+            if ch in 'mHJKSTfABCDsu':
+                truncated += ansi_buf
+                in_ansi  = False
+                ansi_buf = ""
+        else:
+            if visible < max_cw - 1:
+                truncated += ch
+                visible   += 1
+            else:
+                truncated += "…"
+                break
+    return truncated + C_RESET
+
+
+# ── String-returning border helpers (no print side-effects) ───────────────────
+
+def _line(content, ui_w):
+    """Return one bordered line string (no trailing newline)."""
+    max_cw   = ui_w - 4
+    content  = _truncate(content, max_cw)
+    vis      = get_visible_len(content)
+    padding  = max(0, max_cw - vis)
+    return f" {C_BORDER}║{C_RESET} {content}{' ' * padding} {C_BORDER}║{C_RESET}"
+
+
+def _two_cols(left, right, ui_w):
+    """Return a two-column bordered line string (no trailing newline)."""
+    col_w   = (ui_w - 7) // 2
+    lv      = get_visible_len(left)
+    rv      = get_visible_len(right) if right else 0
+    lpad    = max(0, col_w - lv)
+    rpad    = max(0, col_w - rv)
+    left_s  = f"{left}{' ' * lpad}"
+    right_s = f"{right}{' ' * rpad}" if right else (' ' * col_w)
+    return f" {C_BORDER}║{C_RESET} {left_s} {C_BORDER}│{C_RESET} {right_s} {C_BORDER}║{C_RESET}"
+
+
+def _sep(ui_w, style='single'):
+    """Return a horizontal separator string (no trailing newline)."""
+    if style == 'double':
+        return f" {C_BORDER}╠{'═' * (ui_w - 2)}╣{C_RESET}"
+    elif style == 'thin':
+        return f" {C_BORDER}╟{'·' * (ui_w - 2)}╢{C_RESET}"
+    else:
+        return f" {C_BORDER}╟{'─' * (ui_w - 2)}╢{C_RESET}"
+
+
+def _hdr(ui_w):
+    """Return the top border string (no trailing newline)."""
+    return f" {C_BORDER}╔{'═' * (ui_w - 2)}╗{C_RESET}"
+
+
+def _ftr(ui_w):
+    """Return the bottom border string (no trailing newline)."""
+    return f" {C_BORDER}╚{'═' * (ui_w - 2)}╝{C_RESET}"
+
+
+# ── Print wrappers (kept for backward compatibility) ──────────────────────────
+
+def print_line(content, ui_w):
+    sys.stdout.write(_line(content, ui_w) + "\n")
+
+
+def print_two_columns(left_content, right_content, ui_w):
+    sys.stdout.write(_two_cols(left_content, right_content, ui_w) + "\n")
+
+
+def print_separator(ui_w, style='single'):
+    sys.stdout.write(_sep(ui_w, style) + "\n")
+
+
+def print_header(ui_w):
+    sys.stdout.write(_hdr(ui_w) + "\n")
+
+
+def print_footer(ui_w):
+    sys.stdout.write(_ftr(ui_w) + "\n")
+
+
+# ── Progress bars ─────────────────────────────────────────────────────────────
+
 def make_bar(percent, width):
-    """
-    Create an ASCII progress bar
-    
-    Args:
-        percent: Percentage (0-100)
-        width: Width of the bar in characters
-    
-    Returns:
-        str: Formatted progress bar with ANSI colors (green)
-    """
-    width = max(5, width)
+    """Green ASCII progress bar (0-100 %)."""
+    width  = max(5, width)
     filled = max(0, min(width, int((percent / 100.0) * width)))
     return f"{C_GREEN}{'█' * filled}{C_GRAY}{'░' * (width - filled)}{C_RESET}"
 
 
 def make_bar_fusion(percent, width):
-    """
-    Create an ASCII progress bar for fusion layers (cyan color)
-    
-    Args:
-        percent: Percentage (0-100)
-        width: Width of the bar in characters
-    
-    Returns:
-        str: Formatted progress bar with ANSI colors (cyan for fusion layers)
-    """
-    width = max(5, width)
+    """Cyan ASCII progress bar for fusion layers."""
+    width  = max(5, width)
     filled = max(0, min(width, int((percent / 100.0) * width)))
     return f"{C_CYAN}{'█' * filled}{C_GRAY}{'░' * (width - filled)}{C_RESET}"
 
 
 def make_bar_final_fusion(percent, width):
-    """
-    Create an ASCII progress bar for final fusion layer (yellow color)
-    
-    Args:
-        percent: Percentage (0-100)
-        width: Width of the bar in characters
-    
-    Returns:
-        str: Formatted progress bar with ANSI colors (yellow for final fusion)
-    """
-    width = max(5, width)
+    """Yellow ASCII progress bar for the final fusion layer."""
+    width  = max(5, width)
     filled = max(0, min(width, int((percent / 100.0) * width)))
     return f"{C_YELLOW}{'█' * filled}{C_GRAY}{'░' * (width - filled)}{C_RESET}"
 
 
 def make_adamw_magic_eye(momentum, width=20):
     """
-    Create AdamW "Magic Eye" visualization (tube radio style)
-
-    Shows the Adam momentum SNR (signal-to-noise ratio) as a push/brake
-    indicator.  The input value is already in [0, 1]:
+    AdamW 'Magic Eye' — tube radio style momentum indicator.
 
     - High SNR (>0.55): gradients consistent → push right  [  |====>  ]
     - Low SNR  (<0.45): gradients noisy     → brake left   [  <====|  ]
     - Medium           : balanced           [   <=|=>   ]
-
-    Args:
-        momentum: Adam SNR value in [0, 1]  (0 = noisy, 1 = fully consistent)
-        width: Width of the bar in characters
-
-    Returns:
-        str: Formatted magic eye bar with ANSI colors
     """
-    width = max(10, width)
-
-    # Value is already in [0, 1] – no scaling required.
+    width      = max(10, width)
     normalized = min(1.0, max(0.0, momentum))
-    
-    # Calculate center position
-    center = width // 2
-    
-    # Calculate needle position based on momentum
-    # normalized=0.5 -> center, normalized=1.0 -> right, normalized=0.0 -> left
+    center     = width // 2
     needle_pos = int(normalized * (width - 1))
-    
-    # Build the visualization
-    if normalized > 0.55:  # Push right
-        # More momentum = push to the right
-        fill_start = center
-        fill_end = needle_pos
+
+    if normalized > 0.55:
         bar = ['·'] * width
-        for i in range(fill_start, min(fill_end, width)):
+        for i in range(center, min(needle_pos, width)):
             bar[i] = '='
         bar[center] = '|'
         if needle_pos < width:
             bar[needle_pos] = '>'
-        result = ''.join(bar)
-        return f"[{C_GREEN}{result}{C_RESET}]"
-    
-    elif normalized < 0.45:  # Brake left
-        # Less momentum = brake to the left
-        fill_start = needle_pos
-        fill_end = center
+        return f"[{C_GREEN}{''.join(bar)}{C_RESET}]"
+
+    elif normalized < 0.45:
         bar = ['·'] * width
-        for i in range(max(0, fill_start + 1), fill_end + 1):
+        for i in range(max(0, needle_pos + 1), center + 1):
             bar[i] = '='
         bar[center] = '|'
         if needle_pos >= 0:
             bar[needle_pos] = '<'
-        result = ''.join(bar)
-        return f"[{C_YELLOW}{result}{C_RESET}]"
-    
-    else:  # Balanced
+        return f"[{C_YELLOW}{''.join(bar)}{C_RESET}]"
+
+    else:
         bar = ['·'] * width
         bar[center - 1] = '='
-        bar[center] = '|'
+        bar[center]     = '|'
         bar[center + 1] = '='
         if needle_pos < center:
             bar[needle_pos] = '<'
         elif needle_pos > center:
             bar[needle_pos] = '>'
-        result = ''.join(bar)
-        return f"[{C_CYAN}{result}{C_RESET}]"
+        return f"[{C_CYAN}{''.join(bar)}{C_RESET}]"
 
 
 def make_peak_activity_bar(peak_value, width=60):
     """
-    Create peak layer activity gradient bar (0.0 - 2.0 scale)
-    
-    Shows activity level with color-coded gradient:
-    - Green (0.0-0.5): Normal
-    - Yellow (0.5-1.0): Moderate
-    - Orange (1.0-1.5): High
-    - Red (1.5-2.0+): Extreme
-    
-    Args:
-        peak_value: Peak activity value
-        width: Width of the bar in characters
-    
-    Returns:
-        str: Formatted gradient bar with position indicator
+    Gradient bar visualising peak layer activity on a 0.0–2.0+ scale.
+
+    Zones: green (0–0.5) → cyan (0.5–1.0) → yellow (1.0–1.5) → red (1.5–2.0+).
+    Includes a ▼ position indicator and a scale line with aligned labels.
     """
-    width = max(20, width)
-    
-    # Calculate position on 0.0-2.0 scale
+    width    = max(20, width)
     position = min(peak_value / 2.0, 1.0)
-    bar_pos = int(position * width)
-    
-    # Determine color based on value
+    bar_pos  = min(int(position * (width - 1)), width - 1)
+
     if peak_value < 0.5:
-        color = C_GREEN
-        label = "Normal"
+        color = C_GREEN;              label = "Normal"
     elif peak_value < 1.0:
-        color = C_CYAN
-        label = "Moderate"
+        color = C_CYAN;               label = "Moderate"
     elif peak_value < 1.5:
-        color = C_YELLOW
-        label = "High"
+        color = C_YELLOW;             label = "High"
     elif peak_value < 2.0:
-        color = "\033[38;5;208m"  # Orange
-        label = "Very High"
+        color = "\033[38;5;208m";     label = "Very High"
     else:
-        color = C_RED
-        label = "EXTREME"
-    
-    # Build the bar with gradient zones
+        color = C_RED;                label = "EXTREME"
+
+    # Gradient bar
     bar = ""
     for i in range(width):
-        if i < width * 0.25:  # 0.0-0.5 zone
-            bar += C_GREEN + "█" + C_RESET
-        elif i < width * 0.5:  # 0.5-1.0 zone
-            bar += C_CYAN + "█" + C_RESET
-        elif i < width * 0.75:  # 1.0-1.5 zone
+        frac = i / width
+        if frac < 0.25:
+            bar += C_GREEN  + "█" + C_RESET
+        elif frac < 0.50:
+            bar += C_CYAN   + "█" + C_RESET
+        elif frac < 0.75:
             bar += C_YELLOW + "█" + C_RESET
-        else:  # 1.5-2.0+ zone
-            bar += C_RED + "█" + C_RESET
-    
-    # Add position indicator
-    indicator_line = " " * bar_pos + f"{color}▼{C_RESET}"
-    scale_line = f"0.0{' ' * (width // 4 - 3)}0.5{' ' * (width // 4 - 3)}1.0{' ' * (width // 4 - 3)}1.5{' ' * (width // 4 - 5)}2.0+"
-    
-    return f"{bar}\n{indicator_line}\n{scale_line} ({color}{label}{C_RESET})"
+        else:
+            bar += C_RED    + "█" + C_RESET
 
+    # Position indicator
+    indicator_line = " " * bar_pos + f"{color}▼{C_RESET}"
+
+    # Scale labels placed at their exact proportional positions
+    scale = [' '] * (width + 6)
+
+    def _put(lbl, frac):
+        pos = int(frac * (width - 1))
+        for j, ch in enumerate(lbl):
+            idx = pos + j
+            if 0 <= idx < len(scale):
+                scale[idx] = ch
+
+    _put("0.0", 0.0)
+    _put("0.5", 0.25)
+    _put("1.0", 0.50)
+    _put("1.5", 0.75)
+    # "2.0+" sits at the right edge — shift left by label length so it doesn't overflow
+    _put("2.0+", max(0.0, 1.0 - 4.0 / width))
+
+    scale_line = ''.join(scale).rstrip()
+    return f"{bar}\n{indicator_line}\n{scale_line}  {color}{label}{C_RESET}"
+
+
+def make_size_bar(trained, target, width):
+    """Progress bar for size-distribution tracking."""
+    width = max(5, width)
+    pct   = min(100.0, (trained / target) * 100.0) if target > 0 else 0.0
+    filled = max(0, min(width, int((pct / 100.0) * width)))
+    color  = C_GREEN if pct >= 90.0 else C_CYAN if pct >= 50.0 else C_YELLOW
+    return f"{color}{'█' * filled}{C_GRAY}{'░' * (width - filled)}{C_RESET}"
+
+
+# ── Misc helpers ──────────────────────────────────────────────────────────────
 
 def format_time(seconds):
-    """
-    Format seconds into human-readable time string
-    
-    Args:
-        seconds: Time in seconds
-    
-    Returns:
-        str: Formatted time (e.g., "2d 5h 30m" or "3h 45m")
-    """
+    """Format *seconds* into a human-readable string like '2d 5h 30m'."""
     if seconds < 0:
         return "N/A"
-    
-    days = int(seconds // 86400)
-    hours = int((seconds % 86400) // 3600)
+    days    = int(seconds // 86400)
+    hours   = int((seconds % 86400) // 3600)
     minutes = int((seconds % 3600) // 60)
-    
-    if days > 0:
-        return f"{days}d {hours}h {minutes}m"
-    else:
-        return f"{hours}h {minutes}m"
+    return f"{days}d {hours}h {minutes}m" if days > 0 else f"{hours}h {minutes}m"
 
 
 def clear_screen():
-    """Clear the terminal screen"""
     print(ANSI_CLEAR, end='')
 
 
 def move_cursor_home():
-    """Move cursor to home position (top-left)"""
     print(ANSI_HOME, end='')
 
 
 def hide_cursor():
-    """Hide terminal cursor"""
     print(ANSI_HIDE_CURSOR, end='')
 
 
 def show_cursor():
-    """Show terminal cursor"""
     print(ANSI_SHOW_CURSOR, end='')
-
-
-def print_line(content, ui_width):
-    """
-    Print a single line within UI borders
-    
-    Args:
-        content: Content to print
-        ui_width: Total UI width
-    """
-    visible_len = get_visible_len(content)
-    max_content_width = ui_width - 4  # Account for borders " ║ " and " ║"
-    
-    # Truncate content if it exceeds maximum width
-    if visible_len > max_content_width:
-        # Find where to cut (accounting for ANSI codes)
-        truncated = ""
-        current_visible = 0
-        in_ansi = False
-        ansi_buffer = ""
-        
-        for char in content:
-            if char == '\033':
-                in_ansi = True
-                ansi_buffer = char
-            elif in_ansi:
-                ansi_buffer += char
-                if char in 'mHJKSTfABCDsu':  # ANSI sequence terminators
-                    truncated += ansi_buffer
-                    in_ansi = False
-                    ansi_buffer = ""
-            else:
-                if current_visible < max_content_width - 3:  # Leave space for "..."
-                    truncated += char
-                    current_visible += 1
-                elif current_visible == max_content_width - 3:
-                    truncated += "..."
-                    current_visible += 3
-                    break
-        
-        content = truncated + C_RESET
-        visible_len = max_content_width
-    
-    # Pad to exact width
-    padding = max(0, max_content_width - visible_len)
-    sys.stdout.write(f" ║ {content}{' ' * padding} ║\n")
-
-
-def print_two_columns(left_content, right_content, ui_width):
-    """
-    Print two columns within UI borders
-    
-    Args:
-        left_content: Left column content
-        right_content: Right column content (can be None)
-        ui_width: Total UI width
-    """
-    col_width = (ui_width - 7) // 2  # For two-column layout
-    
-    # Get visible lengths (accounting for ANSI codes)
-    left_vis = get_visible_len(left_content)
-    right_vis = get_visible_len(right_content) if right_content else 0
-    
-    # Pad to exact column width
-    left_pad = max(0, col_width - left_vis)
-    right_pad = max(0, col_width - right_vis)
-    
-    left_str = f"{left_content}{' ' * left_pad}"
-    right_str = f"{right_content}{' ' * right_pad}" if right_content else (' ' * col_width)
-    
-    sys.stdout.write(f" ║ {left_str} │ {right_str} ║\n")
-
-
-def print_separator(ui_width, style='single'):
-    """
-    Print a separator line
-    
-    Args:
-        ui_width: Total UI width
-        style: 'single', 'double', or 'thin'
-    """
-    if style == 'double':
-        sys.stdout.write(f" {C_GRAY}╠{'═'*(ui_width-2)}╣{C_RESET}\n")
-    elif style == 'thin':
-        sys.stdout.write(f" {C_GRAY}╟{'·'*(ui_width-2)}╢{C_RESET}\n")
-    else:  # single
-        sys.stdout.write(f" {C_GRAY}╟{'─'*(ui_width-2)}╢{C_RESET}\n")
-
-
-def print_header(ui_width):
-    """Print UI header"""
-    sys.stdout.write(f" {C_GRAY}╔{'═'*(ui_width-2)}╗{C_RESET}\n")
-
-
-def print_footer(ui_width):
-    """Print UI footer"""
-    sys.stdout.write(f" {C_GRAY}╚{'═'*(ui_width-2)}╝{C_RESET}\n")
-
-
-def make_size_bar(trained, target, width):
-    """
-    Create an ASCII progress bar for size tracking
-    
-    Args:
-        trained: Number of images trained
-        target: Target number of images
-        width: Width of the bar in characters
-    
-    Returns:
-        str: Formatted progress bar with ANSI colors
-    """
-    width = max(5, width)
-    
-    if target > 0:
-        percent = min(100.0, (trained / target) * 100.0)
-    else:
-        percent = 0.0
-    
-    filled = max(0, min(width, int((percent / 100.0) * width)))
-    
-    # Color based on progress
-    if percent >= 90.0:
-        color = C_GREEN
-    elif percent >= 50.0:
-        color = C_CYAN
-    else:
-        color = C_YELLOW
-    
-    return f"{color}{'█' * filled}{C_GRAY}{'░' * (width - filled)}{C_RESET}"
-
-
-def print_size_distribution_panel(size_stats, ui_width=120):
-    """
-    Print size distribution tracking panel
-    
-    Args:
-        size_stats: Dict from SizeTracker.get_stats()
-        ui_width: Total UI width
-    """
-    if not size_stats or 'size_stats' not in size_stats:
-        return
-    
-    stats = size_stats['size_stats']
-    
-    print_separator(ui_width, style='double')
-    print_line(f"{C_BOLD}Size Distribution Progress{C_RESET}", ui_width)
-    print_separator(ui_width, style='thin')
-    
-    # Use the actual keys present in the data (dynamic V2 templates)
-    category_order = sorted(stats.keys())
-    
-    # Print each size category
-    for category in category_order:
-        
-        cat_stats = stats[category]
-        trained = cat_stats['images_trained']
-        target = cat_stats['target_images']
-        pct = cat_stats['percentage_complete']
-        
-        # Create progress bar
-        bar_width = 30
-        bar = make_size_bar(trained, target, bar_width)
-        
-        # Format line
-        category_str = f"{category:>15}"
-        progress_str = f"{trained:>8,} / {target:>8,}"
-        pct_str = f"({pct:>6.2f}%)"
-        line = f"{category_str}: {bar} {progress_str} {pct_str}"
-        
-        print_line(line, ui_width)
-    
-    # Print total
-    total_trained = size_stats.get('total_images_trained', 0)
-    print_separator(ui_width, style='thin')
-    print_line(f"Total Images Trained: {C_BOLD}{total_trained:,}{C_RESET}", ui_width)
-
-
-def format_size_stats_compact(size_stats):
-    """
-    Format size stats as compact string for status line
-    
-    Args:
-        size_stats: Dict from SizeTracker.get_stats()
-    
-    Returns:
-        str: Compact formatted string
-    """
-    if not size_stats or 'size_stats' not in size_stats:
-        return "No size stats"
-    
-    stats = size_stats['size_stats']
-    
-    # Use the actual keys present in the data (dynamic V2 templates)
-    category_order = sorted(stats.keys())
-    parts = []
-    
-    for category in category_order:
-        
-        cat_stats = stats[category]
-        trained = cat_stats['images_trained']
-        target = cat_stats['target_images']
-        
-        if target > 0:
-            pct = (trained / target) * 100.0
-            parts.append(f"{category.split('_')[0]}: {pct:.0f}%")
-        else:
-            parts.append(f"{category.split('_')[0]}: 0%")
-    
-    return " | ".join(parts)
-
