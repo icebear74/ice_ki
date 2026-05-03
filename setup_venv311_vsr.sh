@@ -326,19 +326,22 @@ elif [[ "$GPU_CC_MAJOR" -lt 7 ]]; then
   # CC 6.x (z.B. Tesla P100): nur TensorRT 8.6.x unterstützt diese GPU!
   # TensorRT 9.0+ hat Support für CC < 7.0 fallen gelassen.
   echo -e "${YELLOW}  GPU CC ${GPU_CC} — TensorRT ≥ 9.0 unterstützt CC < 7.0 NICHT!${RESET}"
-  echo -e "${CYAN}  → Installiere tensorrt==8.6.* (letztes Release mit CC 6.0-Support)${RESET}"
-  if pip install 'tensorrt==8.6.*' onnx; then
+  echo -e "${CYAN}  → Installiere tensorrt==8.6.* + tensorrt-libs + tensorrt-bindings (CC 6.0-Support)${RESET}"
+  # Das PyPI-Wheel 'tensorrt' ist nur ein Wrapper; die eigentlichen shared libs
+  # kommen aus tensorrt-libs, die Python-Bindings aus tensorrt-bindings.
+  # Ohne diese beiden schlägt 'import tensorrt' trotz installiertem Paket fehl.
+  if pip install 'tensorrt==8.6.*' 'tensorrt-libs==8.6.*' 'tensorrt-bindings==8.6.*' onnx; then
     echo -e "${GREEN}✓ tensorrt 8.6.x installiert${RESET}"
     python -c "import tensorrt as trt; print(f'  TensorRT Version: {trt.__version__}')" 2>/dev/null \
-      || echo -e "${YELLOW}  ⚠  tensorrt importierbar, aber Version nicht lesbar${RESET}"
+      || echo -e "${YELLOW}  ⚠  tensorrt Packages installiert, aber Import fehlgeschlagen — LD_LIBRARY_PATH prüfen${RESET}"
   else
     echo -e "${RED}✗ tensorrt 8.6.x Installation fehlgeschlagen!${RESET}"
-    echo -e "${YELLOW}  Manuelle Installation: pip install 'tensorrt==8.6.*'${RESET}"
+    echo -e "${YELLOW}  Manuelle Installation: pip install 'tensorrt==8.6.*' 'tensorrt-libs==8.6.*' 'tensorrt-bindings==8.6.*'${RESET}"
   fi
 else
   # CC ≥ 7.0: aktuelle TensorRT-Version verwenden
   echo -e "${CYAN}  GPU CC ${GPU_CC} — installiere aktuelle tensorrt-Version${RESET}"
-  if pip install tensorrt onnx; then
+  if pip install tensorrt tensorrt-libs tensorrt-bindings onnx; then
     echo -e "${GREEN}✓ tensorrt installiert${RESET}"
     python -c "import tensorrt as trt; print(f'  TensorRT Version: {trt.__version__}')" 2>/dev/null || true
   else

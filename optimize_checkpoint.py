@@ -258,9 +258,9 @@ def _build_trt_engine(onnx_path: str, engine_path: str,
     try:
         import tensorrt as trt
     except ImportError:
-        print("❌ tensorrt fehlt!")
-        print("   pip install tensorrt          # passend zu CUDA-Toolkit-Version")
-        print("   Für CUDA 12.0: pip install tensorrt==8.6.*")
+        print("❌ tensorrt fehlt oder nicht importierbar!")
+        print("   Das PyPI-Wheel 'tensorrt' benötigt zusätzlich tensorrt-libs + tensorrt-bindings:")
+        print("   pip install 'tensorrt==8.6.*' 'tensorrt-libs==8.6.*' 'tensorrt-bindings==8.6.*'")
         return False
 
     TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
