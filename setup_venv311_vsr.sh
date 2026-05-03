@@ -306,6 +306,53 @@ fi
 # ============================================================
 # 7. TensorRT installieren (CC-6.0-kompatible Version 8.6.x)
 # ============================================================
+# Helper: cuBLAS-Compat-Symlinks für TRT 8.6.x auf CUDA-12-Systemen.
+# Das TRT-8.6.1-Python-Wheel (.so) ist in BEIDEN Tarballs (cuda-11 und cuda-12)
+# gegen libcublas.so.11 gelinkt. Auf CUDA-12-Systemen gibt es kein libcublas.so.11
+# (nur .so.12 aus nvidia-cublas-cu12). Fix: Symlinks .so.11 → .so.12 anlegen.
+_trt_cublas_compat() {
+  local trt_lib_dir="$1"
+  [[ $CUDA_MAJOR -lt 12 ]] && return 0
+  [[ ! -d "$trt_lib_dir" ]] && return 0
+  # libcublas.so.12 finden — erst venv (nvidia-cublas-cu12), dann System
+  local cublas_dir=""
+  cublas_dir=$(python -c "
+import os, sys
+for p in sys.path:
+    c = os.path.join(p, 'nvidia', 'cublas', 'lib', 'libcublas.so.12')
+    if os.path.isfile(c):
+        print(os.path.dirname(c)); break
+" 2>/dev/null || true)
+  if [[ -z "$cublas_dir" ]]; then
+    for d in /usr/local/cuda/lib64 /usr/local/cuda-12.0/lib64 \
+              /usr/local/cuda-12/lib64 /usr/lib/x86_64-linux-gnu; do
+      [[ -f "$d/libcublas.so.12" ]] && { cublas_dir="$d"; break; }
+    done
+  fi
+  if [[ -z "$cublas_dir" ]]; then
+    echo -e "${YELLOW}  ⚠  libcublas.so.12 nicht gefunden — Compat-Symlinks nicht möglich${RESET}"
+    return 0
+  fi
+  # cuBLAS-12-Pfad zu ldconfig hinzufügen (für libnvinfer.so.8 aus cuda-12-Tarball)
+  if ! grep -qxF "$cublas_dir" /etc/ld.so.conf.d/tensorrt.conf 2>/dev/null; then
+    echo "$cublas_dir" >> /etc/ld.so.conf.d/tensorrt.conf
+  fi
+  # Compat-Symlinks .so.11 → .so.12 im TRT-lib-Verzeichnis anlegen
+  local changed=0
+  for lib in libcublas libcublasLt; do
+    local src="$cublas_dir/${lib}.so.12"
+    local dst="$trt_lib_dir/${lib}.so.11"
+    if [[ -f "$src" ]] && [[ ! -e "$dst" ]]; then
+      ln -sf "$src" "$dst" 2>/dev/null || true
+      changed=1
+    fi
+  done
+  if [[ $changed -eq 1 ]]; then
+    echo -e "${CYAN}  → cuBLAS-12-Compat: libcublas.so.11 + libcublasLt.so.11 → .so.12${RESET}"
+  fi
+  ldconfig 2>/dev/null || true
+}
+
 echo -e "\n${CYAN}[7/10] TensorRT installieren...${RESET}"
 
 # Compute Capability der GPU ermitteln
@@ -387,6 +434,7 @@ elif [[ "$GPU_CC_MAJOR" -lt 7 ]]; then
       echo -e "${CYAN}  → Registriere TRT-Libs via /etc/ld.so.conf.d/tensorrt.conf${RESET}"
       echo "$TRT_LIB_DIR" > /etc/ld.so.conf.d/tensorrt.conf
       ldconfig 2>/dev/null || true
+      _trt_cublas_compat "$TRT_LIB_DIR"
       TRT_INSTALLED=1
     fi
     # Python-Wheel für cp311 installieren
@@ -446,6 +494,7 @@ elif [[ "$GPU_CC_MAJOR" -lt 7 ]]; then
         if [[ -d "$_FIX_LIB_DIR" ]]; then
           echo "$_FIX_LIB_DIR" > /etc/ld.so.conf.d/tensorrt.conf
           ldconfig 2>/dev/null || true
+          _trt_cublas_compat "$_FIX_LIB_DIR"
         fi
         _FIX_WHL=$(ls "$_FIX_EXTRACT_DIR"/python/tensorrt-8.6.*-cp311-*.whl 2>/dev/null | head -1)
         if [[ -n "$_FIX_WHL" ]]; then
