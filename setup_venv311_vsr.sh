@@ -524,14 +524,19 @@ declare -A PIP_MAP=(
 SKIP_AUTO=("torch2trt" "tensorrt" "pycuda" "onnxruntime_gpu" "trt" "builtins")
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-IMPORTS=$(find "$REPO_ROOT" -name "*.py" 2>/dev/null \
+# Nur die relevanten Verzeichnisse und Dateien scannen — NICHT das gesamte Repo
+IMPORTS=$(find \
+    "$REPO_ROOT/vsr_plusplus_NEU" \
+    "$REPO_ROOT/dataset_generator_v2" \
+    "$REPO_ROOT/optimize_checkpoint.py" \
+    -name "*.py" 2>/dev/null \
   | xargs grep -h -E "^(import|from) [a-zA-Z_][a-zA-Z0-9_]*" 2>/dev/null \
   | grep -oE "^(import|from) [a-zA-Z_][a-zA-Z0-9_]*" \
   | awk '{print $2}' | sort -u || true)
 
 LOCAL_PKGS="vsr_plusplus_NEU dataset_generator_v2 config category_utils \
   generation_plan interactive_selector streaming_extractor video_manager \
-  utils core ice_audio_nexus ice_brain tools"
+  utils core"
 
 IMPORT_FAIL=0
 while IFS= read -r pkg; do
