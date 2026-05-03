@@ -98,64 +98,110 @@ fi
 # ============================================================
 echo -e "\n${CYAN}[2/9] CUDA-Toolkit-Version ermitteln...${RESET}"
 
+NVCC_BIN=""
 NVCC_CUDA=""
 DRIVER_CUDA=""
 CUDA_MAJOR=0
 CUDA_MINOR=0
 
-# nvcc ist die maßgebliche Toolkit-Version für Wheel-Auswahl
-if command -v nvcc &>/dev/null; then
-  NVCC_CUDA=$(nvcc --version 2>/dev/null | grep -oE 'release [0-9]+\.[0-9]+' | head -1 | awk '{print $2}' || true)
+# nvcc in PATH und in Standard-Installationspfaden suchen
+# nvcc suchen — /usr/local/cuda* zuerst (NVIDIA-Installer), /usr/bin/nvcc ist
+# oft die alte apt-Version (nvidia-cuda-toolkit, z.B. 10.x/11.x) und wird
+# absichtlich ZULETZT geprüft.
+NVCC_SEARCH_PATHS=(
+  /usr/local/cuda/bin/nvcc
+  /usr/local/cuda-12.0/bin/nvcc
+  /usr/local/cuda-12.1/bin/nvcc
+  /usr/local/cuda-12.2/bin/nvcc
+  /usr/local/cuda-12.3/bin/nvcc
+  /usr/local/cuda-12.4/bin/nvcc
+  /usr/local/cuda-11.8/bin/nvcc
+  /usr/local/cuda-11/bin/nvcc
+)
+# dynamisch alle /usr/local/cuda-*/bin/nvcc einbeziehen
+for d in /usr/local/cuda-*/bin/nvcc; do
+  NVCC_SEARCH_PATHS+=("$d")
+done
+# /usr/bin/nvcc (apt nvidia-cuda-toolkit) als letzten Fallback
+NVCC_SEARCH_PATHS+=("$(command -v nvcc 2>/dev/null || true)")
+
+echo -e "  Suche nvcc..."
+for candidate in "${NVCC_SEARCH_PATHS[@]}"; do
+  [[ -z "$candidate" ]] && continue
+  [[ -x "$candidate" ]] || continue
+  NVCC_BIN="$candidate"
+  NVCC_RAW=$("$NVCC_BIN" --version 2>&1 | head -5)
+  echo -e "  ${GREEN}✓ nvcc gefunden: ${NVCC_BIN}${RESET}"
+  echo -e "  ${CYAN}  Version-Output:${RESET}"
+  echo "$NVCC_RAW" | sed 's/^/    /'
+  break
+done
+
+if [[ -n "$NVCC_BIN" ]]; then
+  NVCC_CUDA=$("$NVCC_BIN" --version 2>/dev/null \
+    | grep -oE 'release [0-9]+\.[0-9]+' | head -1 | awk '{print $2}' || true)
   if [[ -n "$NVCC_CUDA" ]]; then
     CUDA_MAJOR=$(echo "$NVCC_CUDA" | cut -d'.' -f1)
     CUDA_MINOR=$(echo "$NVCC_CUDA" | cut -d'.' -f2)
-    echo -e "${GREEN}✓ nvcc CUDA Toolkit: ${NVCC_CUDA}${RESET}"
-  fi
-fi
-
-if command -v nvidia-smi &>/dev/null; then
-  DRIVER_CUDA=$(nvidia-smi 2>/dev/null | grep -iE 'CUDA Version' | grep -oE '[0-9]+\.[0-9]+' | head -1 || true)
-  GPU_NAME=$(nvidia-smi --query-gpu=gpu_name --format=csv,noheader 2>/dev/null | head -1 || echo "unbekannt")
-  GPU_CC=$(python3 -c "
-import subprocess, re
-try:
-  out = subprocess.check_output(['nvidia-smi','--query-gpu=compute_cap','--format=csv,noheader'],
-                                 stderr=subprocess.DEVNULL).decode()
-  print(out.strip().split('\n')[0])
-except Exception:
-  print('?')
-" 2>/dev/null || echo "?")
-  echo -e "${GREEN}✓ GPU: ${GPU_NAME} (Compute Capability: ${GPU_CC})${RESET}"
-  if [[ -n "$DRIVER_CUDA" ]]; then
-    echo -e "${CYAN}  nvidia-smi CUDA (Treiber-Max): ${DRIVER_CUDA}${RESET}"
-    echo -e "${YELLOW}  Hinweis: nvidia-smi zeigt die vom Treiber max. unterstützte CUDA-Version,${RESET}"
-    echo -e "${YELLOW}  nicht die des Toolkits. Maßgeblich für Wheel-Wahl ist nvcc: ${NVCC_CUDA:-'nicht gefunden'}.${RESET}"
+    echo -e "  ${GREEN}✓ CUDA Toolkit (nvcc): ${NVCC_CUDA}${RESET}"
+  else
+    echo -e "  ${YELLOW}⚠ nvcc gefunden, aber Version nicht parsebar — Ausgabe:${RESET}"
+    "$NVCC_BIN" --version 2>&1 | head -5 | sed 's/^/    /'
   fi
 else
-  echo -e "${YELLOW}⚠ nvidia-smi nicht gefunden — CPU-Modus${RESET}"
+  echo -e "  ${YELLOW}⚠ nvcc nicht gefunden (weder in PATH noch in Standard-Pfaden)${RESET}"
+  echo -e "  ${YELLOW}  Gesucht in: /usr/local/cuda*/bin/nvcc, /usr/bin/nvcc${RESET}"
 fi
 
-# Wheel-Index nach Toolkit-Version wählen
+# nvidia-smi: GPU-Info + Treiber-CUDA anzeigen
+if command -v nvidia-smi &>/dev/null; then
+  DRIVER_CUDA=$(nvidia-smi 2>/dev/null \
+    | grep -iE 'CUDA Version' | grep -oE '[0-9]+\.[0-9]+' | head -1 || true)
+  GPU_NAME=$(nvidia-smi --query-gpu=gpu_name --format=csv,noheader 2>/dev/null \
+    | head -1 || echo "unbekannt")
+  GPU_CC=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null \
+    | head -1 || echo "?")
+  echo -e "  ${GREEN}✓ GPU: ${GPU_NAME} (Compute Capability: ${GPU_CC})${RESET}"
+  if [[ -n "$DRIVER_CUDA" ]]; then
+    echo -e "  ${CYAN}  nvidia-smi CUDA (Treiber-Max): ${DRIVER_CUDA}${RESET}"
+    echo -e "  ${YELLOW}  Hinweis: nvidia-smi zeigt die vom Treiber max. unterstützte CUDA-Version,${RESET}"
+    echo -e "  ${YELLOW}  NICHT die des Toolkits (nvcc). Für Wheels ist nvcc maßgeblich.${RESET}"
+  fi
+  # Falls nvcc nicht gefunden: nvidia-smi-Wert als Fallback für Wheel-Wahl verwenden
+  if [[ $CUDA_MAJOR -eq 0 && -n "$DRIVER_CUDA" ]]; then
+    echo -e "  ${YELLOW}  nvcc nicht gefunden — verwende nvidia-smi-Wert (${DRIVER_CUDA}) für Wheel-Auswahl${RESET}"
+    echo -e "  ${YELLOW}  (nvidia-smi zeigt Treiber-Max, echtes Toolkit könnte niedriger sein)${RESET}"
+    CUDA_MAJOR=$(echo "$DRIVER_CUDA" | cut -d'.' -f1)
+    CUDA_MINOR=$(echo "$DRIVER_CUDA" | cut -d'.' -f2)
+  fi
+else
+  echo -e "  ${YELLOW}⚠ nvidia-smi nicht gefunden — kein NVIDIA-Treiber aktiv?${RESET}"
+fi
+
+# Wheel-Index nach CUDA-Version wählen und Entscheidung erklären
 WHEEL_INDEX=""
 WHEEL_FALLBACK=""
+WHEEL_SRC="${NVCC_CUDA:-nvidia-smi:${DRIVER_CUDA:-?}}"
 if [[ $CUDA_MAJOR -ge 12 && $CUDA_MINOR -ge 8 ]]; then
   WHEEL_INDEX="https://download.pytorch.org/whl/cu128"
   WHEEL_FALLBACK="https://download.pytorch.org/whl/cu124"
-  echo -e "${CYAN}  → PyTorch-Wheel: cu128 (Toolkit ≥ 12.8)${RESET}"
+  echo -e "  ${CYAN}→ PyTorch-Wheel: cu128 (CUDA ≥ 12.8, Quelle: ${WHEEL_SRC})${RESET}"
 elif [[ $CUDA_MAJOR -ge 12 && $CUDA_MINOR -ge 4 ]]; then
   WHEEL_INDEX="https://download.pytorch.org/whl/cu124"
   WHEEL_FALLBACK="https://download.pytorch.org/whl/cu121"
-  echo -e "${CYAN}  → PyTorch-Wheel: cu124 (Toolkit ≥ 12.4)${RESET}"
-elif [[ $CUDA_MAJOR -ge 12 && $CUDA_MINOR -ge 1 ]]; then
+  echo -e "  ${CYAN}→ PyTorch-Wheel: cu124 (CUDA ≥ 12.4, Quelle: ${WHEEL_SRC})${RESET}"
+elif [[ $CUDA_MAJOR -ge 12 && $CUDA_MINOR -ge 0 ]]; then
   WHEEL_INDEX="https://download.pytorch.org/whl/cu121"
-  echo -e "${CYAN}  → PyTorch-Wheel: cu121 (Toolkit 12.0–12.3)${RESET}"
+  echo -e "  ${CYAN}→ PyTorch-Wheel: cu121 (CUDA 12.0–12.3, Quelle: ${WHEEL_SRC})${RESET}"
 elif [[ $CUDA_MAJOR -eq 11 && $CUDA_MINOR -ge 8 ]]; then
   WHEEL_INDEX="https://download.pytorch.org/whl/cu118"
-  echo -e "${CYAN}  → PyTorch-Wheel: cu118 (Toolkit 11.8–11.x)${RESET}"
+  echo -e "  ${CYAN}→ PyTorch-Wheel: cu118 (CUDA 11.8–11.x, Quelle: ${WHEEL_SRC})${RESET}"
 elif [[ $CUDA_MAJOR -gt 0 ]]; then
-  echo -e "${YELLOW}  → CUDA Toolkit ${NVCC_CUDA} < 11.8 erkannt — verwende CPU-Wheel als Fallback${RESET}"
+  echo -e "  ${YELLOW}→ CUDA ${CUDA_MAJOR}.${CUDA_MINOR} < 11.8 — CPU-Wheel als Fallback${RESET}"
 else
-  echo -e "${YELLOW}  → Kein CUDA Toolkit erkannt — CPU-Wheel${RESET}"
+  echo -e "  ${RED}→ CUDA nicht erkannt (nvcc und nvidia-smi beide fehlgeschlagen) — CPU-Wheel${RESET}"
+  echo -e "  ${YELLOW}  Prüfe: which nvcc | nvcc --version | nvidia-smi${RESET}"
+  echo -e "  ${YELLOW}  Falls CUDA installiert: export PATH=\$PATH:/usr/local/cuda/bin${RESET}"
 fi
 
 # ============================================================
@@ -207,7 +253,7 @@ if [[ -f "$REQ_FILE" ]]; then
   TMP_REQ=$(mktemp)
   grep -v -E '^(torch|torchvision)([=<>!~[:space:]]|$)' "$REQ_FILE" > "$TMP_REQ" || true
   if [[ -s "$TMP_REQ" ]]; then
-    pip install -r "$TMP_REQ" --quiet
+    pip install -r "$TMP_REQ"
     echo -e "${GREEN}✓ requirements.txt installiert${RESET}"
   else
     echo -e "${YELLOW}  Keine weiteren Pakete nach torch-Filter${RESET}"
@@ -226,18 +272,18 @@ if [[ "$SKIP_TORCH" == "false" ]]; then
 
   TORCH_OK=false
   if [[ -n "$WHEEL_INDEX" ]]; then
-    echo -e "${CYAN}  → pip install torch torchvision --index-url ${WHEEL_INDEX}${RESET}"
-    if pip install torch torchvision --index-url "$WHEEL_INDEX" --quiet; then
+    echo -e "  ${CYAN}→ pip install torch torchvision --index-url ${WHEEL_INDEX}${RESET}"
+    if pip install torch torchvision --index-url "$WHEEL_INDEX"; then
       TORCH_OK=true
     elif [[ -n "${WHEEL_FALLBACK:-}" ]]; then
-      echo -e "${YELLOW}  Primärer Index fehlgeschlagen — Fallback: ${WHEEL_FALLBACK}${RESET}"
-      if pip install torch torchvision --index-url "$WHEEL_FALLBACK" --quiet; then
+      echo -e "  ${YELLOW}  Primärer Index fehlgeschlagen — Fallback: ${WHEEL_FALLBACK}${RESET}"
+      if pip install torch torchvision --index-url "$WHEEL_FALLBACK"; then
         TORCH_OK=true
       fi
     fi
   else
-    echo -e "${YELLOW}  Kein CUDA-Wheel — CPU-Version${RESET}"
-    if pip install torch torchvision --quiet; then
+    echo -e "  ${YELLOW}  Kein CUDA-Wheel — CPU-Version${RESET}"
+    if pip install torch torchvision; then
       TORCH_OK=true
     fi
   fi
