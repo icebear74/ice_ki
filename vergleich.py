@@ -274,11 +274,17 @@ class VSRComparator:
             self.use_fp16 = True
 
             # torch.compile: fuses ops and removes Python overhead (PyTorch >= 2.0)
-            try:
-                self.model = torch.compile(self.model, mode='reduce-overhead')
-                print(f"  ✅ torch.compile enabled (reduce-overhead)")
-            except Exception:
-                pass  # graceful fallback on older PyTorch
+            # Triton (the compile backend) requires CUDA Capability >= 7.0.
+            # Tesla P100 is CC 6.0 — skip compile silently on old GPUs.
+            _cc = torch.cuda.get_device_capability(self.device)
+            if _cc[0] >= 7:
+                try:
+                    self.model = torch.compile(self.model, mode='reduce-overhead')
+                    print(f"  ✅ torch.compile enabled (reduce-overhead, CC {_cc[0]}.{_cc[1]})")
+                except Exception:
+                    pass  # graceful fallback on older PyTorch
+            else:
+                print(f"  ℹ️  torch.compile skipped (GPU CC {_cc[0]}.{_cc[1]} < 7.0, Triton not supported)")
 
             self.available = True
             print(f"  ✅ VSR model loaded (fp16, cudnn.benchmark=True)")
