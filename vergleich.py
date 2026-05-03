@@ -368,41 +368,57 @@ class VSRComparator:
             # ────────────────────────────────────────────────────────────
             print(f"  [3/5] VSR upscaling (7-frame model, {len(frames)} frames)...")
 
-            # --- Optimization 1: load all frames once as a single GPU tensor ---
-            # Shape: [N, 3, H, W], fp16 — one CPU→GPU transfer, no per-frame copy
-            dtype = torch.float16 if self.use_fp16 else torch.float32
-            print(f"       Pre-loading {len(frames)} frames to GPU ({dtype})...")
-            frame_list = []
+            # --- Optimization 1: load all frames to CPU RAM as numpy (cheap) ---
+            # GPU memory stays O(chunk), not O(N*7) — no OOM on large videos
+            print(f"       Loading {len(frames)} frames to CPU RAM...")
+            cpu_frames = []
             for fp in frames:
                 bgr = cv2.imread(str(fp))
-                rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-                frame_list.append(
-                    torch.from_numpy(rgb).permute(2, 0, 1).to(dtype=dtype, device=self.device) / 255.0
-                )
-            gpu_frames = torch.stack(frame_list)   # [N, 3, H, W] on GPU
-            del frame_list
-            N = gpu_frames.shape[0]
-            print(f"       Loaded {N} frames to GPU")
+                cpu_frames.append(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))  # HWC uint8
+            N = len(cpu_frames)
+            print(f"       {N} frames loaded to RAM")
 
-            # --- Optimization 2: build ALL 7-frame windows in one tensor op ---
-            # offsets: [-3, -2, -1, 0, 1, 2, 3]
-            # indices: [N, 7] — fully vectorised, no Python loop
-            offsets = torch.tensor([-3, -2, -1, 0, 1, 2, 3], device=self.device)
-            indices = torch.arange(N, device=self.device).unsqueeze(1) + offsets.unsqueeze(0)
-            indices = indices.clamp(0, N - 1)   # edge padding by clamping
-            # windows: [N, 7, 3, H, W]  — advanced indexing stays on GPU
-            windows = gpu_frames[indices]
-            del gpu_frames
+            # --- Optimization 2: pre-compute all 7-frame window indices (CPU, tiny) ---
+            OFFSETS = [-3, -2, -1, 0, 1, 2, 3]
+            all_indices = [
+                [max(0, min(N - 1, i + o)) for o in OFFSETS]
+                for i in range(N)
+            ]  # list[N][7]  — plain ints, no GPU needed yet
 
-            # --- Optimization 3 & 4: mini-batch inference (chunk=8) + fp16 ---
-            # GPU utilisation: ~10% (B=1) → ~80-90% (B=8)
+            # --- Optimization 3 & 4: streaming mini-batch inference (chunk=8) ---
+            # Per chunk: only ≤14 unique source frames are transferred to GPU (fp16).
+            # GPU memory usage is constant O(chunk) regardless of video length.
             CHUNK = 8
+            dtype = torch.float16 if self.use_fp16 else torch.float32
             vsr_frames = []
             try:
                 with torch.no_grad():
                     for start in range(0, N, CHUNK):
-                        batch = windows[start:start + CHUNK]   # [≤8, 7, 3, H, W]
-                        out = self.model(batch)                 # [≤8, 3, H*3, W*3]
+                        end = min(start + CHUNK, N)
+                        batch_indices = all_indices[start:end]   # list[≤8][7]
+
+                        # Collect only the unique source frames this chunk needs
+                        needed = sorted({idx for window in batch_indices for idx in window})
+                        idx_map = {g: l for l, g in enumerate(needed)}
+
+                        # Transfer ≤14 unique frames to GPU as fp16 [K, 3, H, W]
+                        src = torch.stack([
+                            torch.from_numpy(cpu_frames[i])
+                                 .permute(2, 0, 1)
+                                 .to(dtype=dtype, device=self.device) / 255.0
+                            for i in needed
+                        ])
+
+                        # Build windows via local indices: [≤8, 7, 3, H, W]
+                        local_idx = torch.tensor(
+                            [[idx_map[g] for g in w] for w in batch_indices],
+                            device=self.device
+                        )
+                        batch_windows = src[local_idx]
+                        del src
+
+                        out = self.model(batch_windows)   # [≤8, 3, H*3, W*3]
+
                         # --- Optimization 5: uint8 conversion on GPU (no .astype) ---
                         out_np = (
                             out.permute(0, 2, 3, 1)
@@ -413,8 +429,7 @@ class VSRComparator:
                                .numpy()
                         )   # [≤8, H*3, W*3, 3]  RGB uint8
                         vsr_frames.extend(out_np)
-                        if start % max(CHUNK, (N // 4) * CHUNK) < CHUNK:
-                            print(f"       [{min(start + CHUNK, N)}/{N}] chunks done...")
+                        print(f"       [{end}/{N}] frames processed...")
             except Exception as e:
                 print(f"       ❌ VSR inference failed:")
                 print(f"          Error: {e}")
