@@ -401,17 +401,26 @@ class VSRComparator:
                 return False
             
             print(f"       ✓ Extracted {len(frames)} frames")
-            
+
+            # Detect input dimensions from first frame to derive 3× output size
+            _probe = cv2.imread(str(frames[0]))
+            H_in, W_in = _probe.shape[:2]
+            del _probe
+            H_out, W_out = H_in * 3, W_in * 3
+            half_w = W_out // 2
+            print(f"       Input: {W_in}×{H_in} → Output: {W_out}×{H_out}")
+
             # ────────────────────────────────────────────────────────────
             # Phase 2: FFmpeg upscale - ONLY the extracted frames segment
             # ────────────────────────────────────────────────────────────
-            print(f"  [2/5] FFmpeg upscaling (3x to 2160×1728)...")
+            print(f"  [2/5] FFmpeg upscaling (3x to {W_out}×{H_out})...")
             print(f"       Processing {len(frames)}-frame segment...")
             
             ffmpeg_cmd = [
                 'ffmpeg', '-hwaccel', 'cuda', '-loglevel', 'error',
                 '-framerate', '25',
                 '-pattern_type', 'glob', '-i', f'{temp_dir}/frame_*.png',
+                '-vf', f'scale={W_out}:{H_out}:flags=lanczos',
                 '-c:v', 'hevc_nvenc', '-preset', 'medium', '-crf', '18',
                 f'{temp_dir}/ffmpeg_upscale.mkv'
             ]
@@ -598,18 +607,27 @@ class VSRComparator:
             gc.collect()
 
             print(f"  [5/5] Creating split-screen comparison...")
+            # Left half  = left portion of FFmpeg upscale (input 0, x=0)
+            # Right half = right portion of VSR upscale   (input 1, x=half_w)
+            # White divider line at the seam + labels per side
+            filter_complex = (
+                f"[0:v]crop={half_w}:{H_out}:0:0[left];"
+                f"[1:v]crop={half_w}:{H_out}:{half_w}:0[right];"
+                f"[left][right]hstack[combined];"
+                f"[combined]"
+                f"drawbox=x={half_w - 2}:y=0:w=4:h={H_out}:color=white:t=fill,"
+                f"drawtext=text='FFmpeg Upscale (x3)':fontsize=60:fontcolor=white"
+                f":x=50:y=50:box=1:boxcolor=black@0.5,"
+                f"drawtext=text='VSR Model (x3)':fontsize=60:fontcolor=white"
+                f":x={half_w + 30}:y=50:box=1:boxcolor=black@0.5[out]"
+            )
             combine_cmd = [
                 'ffmpeg', '-loglevel', 'error',
                 '-i', f'{temp_dir}/ffmpeg_upscale.mkv',
-                '-f', 'rawvideo', '-pix_fmt', 'bgr24', '-s', '2160x1728', '-r', '25',
+                '-f', 'rawvideo', '-pix_fmt', 'bgr24',
+                '-s', f'{W_out}x{H_out}', '-r', '25',
                 '-i', vsr_raw,
-                '-filter_complex', '''
-                    [0:v]crop=1080:1728:0:0[left];
-                    [1:v]crop=1080:1728:1080:0[right];
-                    [left][right]hstack[combined];
-                    [combined]drawtext=text='FFmpeg Upscale (x3)':fontsize=60:fontcolor=white:x=50:y=50:box=1:boxcolor=black@0.5,
-                    drawtext=text='VSR Model (x3)':fontsize=60:fontcolor=white:x=1130:y=50:box=1:boxcolor=black@0.5[out]
-                ''',
+                '-filter_complex', filter_complex,
                 '-map', '[out]',
                 '-c:v', 'hevc_nvenc', '-preset', 'medium', '-crf', '18',
                 output_video
@@ -639,7 +657,7 @@ class VSRComparator:
             
             print(f"  ✅ VSR comparison complete!")
             print(f"     Output: {output_video}")
-            print(f"     Resolution: 2880×1728 (split-screen)")
+            print(f"     Resolution: {W_out}×{H_out} (split-screen: FFmpeg left | VSR right)")
             
             return True
         
