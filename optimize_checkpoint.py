@@ -1,641 +1,692 @@
 #!/usr/bin/env python3
 """
-Model Optimization Script - Konvertiert PyTorch Checkpoint zu optimierten Formaten
+optimize_checkpoint.py — VSR++ Modell-Konvertierung
 
-Unterstützt mehrere Optimierungs-Optionen:
-1. TensorRT (FP32/FP16) - Beste Performance auf NVIDIA GPUs
-2. TorchScript - PyTorch JIT Compiler (portabel, gute Performance)
-3. ONNX - Offenes Format (portabel)
-4. Pruning - Entfernt unwichtige Weights für kleineres/schnelleres Modell
+Konvertiert einen trainierten VSR++ Checkpoint in optimierte Formate:
+
+  1. TensorRT (FP16/FP32) — beste NVIDIA-Performance
+       Pfad: PyTorch → ONNX (temp) → TensorRT Engine
+       Benötigt: pip install tensorrt onnx
+       Hinweis: tensorrt-Paket muss zur CUDA-Toolkit-Version passen
+
+  2. ONNX — portables offenes Format
+       Benötigt: pip install onnx onnxruntime-gpu
+
+  3. TorchScript — PyTorch JIT, läuft ohne Originalcode
+       Benötigt: nur torch (eingebaut)
+
+  4. Pruning — entfernt unwichtige Weights (kleineres Modell)
+       Benötigt: nur torch (eingebaut)
 
 Verwendung:
-    # TensorRT FP16 (empfohlen für beste Performance)
-    python optimize_checkpoint.py --checkpoint model.pth --output model_trt_fp16.engine --format tensorrt --precision fp16
-    
-    # TensorRT FP32
-    python optimize_checkpoint.py --checkpoint model.pth --output model_trt_fp32.engine --format tensorrt --precision fp32
-    
-    # TorchScript
-    python optimize_checkpoint.py --checkpoint model.pth --output model_scripted.pt --format torchscript
-    
-    # ONNX
-    python optimize_checkpoint.py --checkpoint model.pth --output model.onnx --format onnx
-    
-    # Pruning (strukturiert, 30% der Kanäle entfernen)
-    python optimize_checkpoint.py --checkpoint model.pth --output model_pruned.pth --format pruned --prune-amount 0.3 --prune-type structured
-    
-    # Pruning (unstrukturiert, 50% der Weights entfernen)
-    python optimize_checkpoint.py --checkpoint model.pth --output model_pruned.pth --format pruned --prune-amount 0.5 --prune-type unstructured
+    # TensorRT FP16 (empfohlen für P100)
+    python optimize_checkpoint.py -c model.pth -o model_fp16.engine -f tensorrt -p fp16
 
-Installations-Voraussetzungen:
-    # Basis
-    pip install torch torchvision
-    
-    # Für TensorRT (NVIDIA GPU erforderlich)
-    pip install torch2trt
-    # Oder: https://developer.nvidia.com/tensorrt
-    
-    # Für ONNX
-    pip install onnx onnxruntime-gpu
-    
-    # Pruning ist in PyTorch eingebaut (torch.nn.utils.prune)
+    # ONNX (480×270 LR → 1440×810 SR)
+    python optimize_checkpoint.py -c model.pth -o model.onnx -f onnx --width 480 --height 270
+
+    # TorchScript
+    python optimize_checkpoint.py -c model.pth -o model.pt -f torchscript
+
+    # Pruning 30% strukturiert
+    python optimize_checkpoint.py -c model.pth -o model_pruned.pth -f pruned --prune-amount 0.3
+
+Hinweis P100 / CC 6.0:
+    FP16 wird vollständig unterstützt.
+    torch.compile/Triton ist NICHT verfügbar (erfordert CC ≥ 7.0).
 """
 
 import argparse
+import json
 import os
 import sys
+import tempfile
 import time
-import torch
+import traceback
+from pathlib import Path
+
 import numpy as np
+import torch
 
-# Add vsr_plusplus_NEU to path
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'vsr_plusplus_NEU'))
+# Repo-Root und vsr_plusplus_NEU in Suchpfad aufnehmen
+_REPO_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(_REPO_ROOT))
+sys.path.insert(0, str(_REPO_ROOT / "vsr_plusplus_NEU"))
 
 
-def load_pytorch_model(checkpoint_path, device='cuda'):
+# ─────────────────────────────────────────────────────────────────────────────
+# Modell laden
+# ─────────────────────────────────────────────────────────────────────────────
+
+def load_model(checkpoint_path: str, device: str):
     """
-    Lädt das PyTorch Modell aus einem Checkpoint
-    
-    Args:
-        checkpoint_path: Pfad zum Checkpoint (.pth Datei)
-        device: Device für Modell
-        
-    Returns:
-        model: Geladenes PyTorch Modell im eval() Modus
-        checkpoint_info: Checkpoint-Informationen
+    Lädt VSRBidirectional_7frames_3x aus einem .pth-Checkpoint.
+
+    Gibt (model, info_dict) zurück.
+    model ist im eval()-Modus ohne Gradienten.
     """
-    print(f"📦 Lade PyTorch Checkpoint: {checkpoint_path}")
-    
-    if not os.path.exists(checkpoint_path):
-        raise FileNotFoundError(f"Checkpoint nicht gefunden: {checkpoint_path}")
-    
-    # Checkpoint laden
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    
-    # Modell-Konfiguration laden
-    n_feats = 72
-    n_blocks = 28
-    
+    ckpt_path = Path(checkpoint_path)
+    if not ckpt_path.exists():
+        raise FileNotFoundError(f"Checkpoint nicht gefunden: {ckpt_path}")
+
+    print(f"📦 Lade Checkpoint: {ckpt_path}")
+    ckpt = torch.load(str(ckpt_path), map_location=device, weights_only=False)
+
+    # Konfig — aus lokalem config.py falls vorhanden, sonst Defaults
+    n_feats, n_blocks = 72, 28
     try:
         import config as cfg
-        config = cfg.get_config()
-        n_feats = config.get('N_FEATS', 72)
-        n_blocks = config.get('N_BLOCKS', 28)
-        print(f"   ✅ Config geladen: n_feats={n_feats}, n_blocks={n_blocks}")
-    except:
-        print(f"   ℹ️  Verwende Standard-Config: n_feats={n_feats}, n_blocks={n_blocks}")
-    
-    # Modell erstellen
+        c = cfg.get_config()
+        n_feats  = c.get("N_FEATS",  n_feats)
+        n_blocks = c.get("N_BLOCKS", n_blocks)
+        print(f"   ✅ config.py: N_FEATS={n_feats}, N_BLOCKS={n_blocks}")
+    except Exception:
+        print(f"   ℹ️  config.py nicht gefunden — Defaults: N_FEATS={n_feats}, N_BLOCKS={n_blocks}")
+
     from vsr_plusplus_NEU.core.model_7frame import VSRBidirectional_7frames_3x
-    model = VSRBidirectional_7frames_3x(
-        n_feats=n_feats,
-        n_blocks=n_blocks
-    ).to(device)
-    
-    # Weights laden
-    model.load_state_dict(checkpoint['model_state_dict'])
+    model = VSRBidirectional_7frames_3x(n_feats=n_feats, n_blocks=n_blocks).to(device)
+
+    # state_dict kann direkt oder in 'model_state_dict' liegen
+    state = ckpt.get("model_state_dict", ckpt)
+    model.load_state_dict(state)
     model.eval()
-    
-    checkpoint_info = {
-        'step': checkpoint.get('step', 'unknown'),
-        'epoch': checkpoint.get('epoch', 'unknown'),
-        'n_feats': n_feats,
-        'n_blocks': n_blocks
+
+    info = {
+        "step":    ckpt.get("step",  "?"),
+        "epoch":   ckpt.get("epoch", "?"),
+        "n_feats": n_feats,
+        "n_blocks": n_blocks,
     }
-    
-    print(f"✅ Modell geladen (Step: {checkpoint_info['step']}, Epoch: {checkpoint_info['epoch']})")
-    
-    return model, checkpoint_info
+    print(f"✅ Modell geladen — Step {info['step']}, Epoch {info['epoch']}, "
+          f"N_FEATS={n_feats}, N_BLOCKS={n_blocks}")
+    return model, info
 
 
-def benchmark_model(model, device='cuda', input_shape=(1, 7, 3, 180, 180), iterations=10):
-    """
-    Benchmark-Test für Modell-Performance
-    
-    Args:
-        model: Zu testendes Modell
-        device: Device
-        input_shape: Input-Tensor Shape
-        iterations: Anzahl Durchläufe
-        
-    Returns:
-        avg_time: Durchschnittliche Inferenz-Zeit in ms
-    """
-    print(f"\n⏱️  Benchmark mit {iterations} Iterationen...")
-    print(f"   Input Shape: {input_shape}")
-    
-    # Dummy Input erstellen
-    dummy_input = torch.randn(*input_shape).to(device)
-    
+# ─────────────────────────────────────────────────────────────────────────────
+# Benchmark
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _benchmark(model, device: str, input_shape: tuple, n: int = 20) -> float:
+    """Gibt mittlere Inferenzzeit in ms zurück."""
+    dummy = torch.randn(*input_shape).to(device)
     # Warmup
     with torch.no_grad():
-        for _ in range(3):
-            _ = model(dummy_input)
-    
-    # Benchmark
+        for _ in range(5):
+            model(dummy)
+    if device == "cuda":
+        torch.cuda.synchronize()
+
     times = []
     with torch.no_grad():
-        for i in range(iterations):
-            if device == 'cuda':
+        for _ in range(n):
+            if device == "cuda":
                 torch.cuda.synchronize()
-            
-            start = time.time()
-            _ = model(dummy_input)
-            
-            if device == 'cuda':
+            t0 = time.perf_counter()
+            model(dummy)
+            if device == "cuda":
                 torch.cuda.synchronize()
-            
-            end = time.time()
-            times.append((end - start) * 1000)  # Convert to ms
-    
-    avg_time = np.mean(times)
-    std_time = np.std(times)
-    
-    print(f"   ⏱️  Durchschnitt: {avg_time:.2f} ms (±{std_time:.2f} ms)")
-    print(f"   ⏱️  FPS: {1000/avg_time:.2f}")
-    
-    return avg_time
+            times.append((time.perf_counter() - t0) * 1000)
+
+    avg, std = float(np.mean(times)), float(np.std(times))
+    print(f"   ⏱  {avg:.1f} ms ±{std:.1f} ms  ({1000/avg:.1f} fps)  —  shape {input_shape}")
+    return avg
 
 
-def optimize_tensorrt(model, output_path, precision='fp16', input_shape=(1, 7, 3, 180, 180), device='cuda'):
-    """
-    Konvertiert zu TensorRT Engine
-    
-    Args:
-        model: PyTorch Modell
-        output_path: Ausgabe-Pfad für .engine Datei
-        precision: 'fp32' oder 'fp16'
-        input_shape: Input Shape für Engine
-        device: Device
-    """
+def _write_meta(path: str, data: dict):
+    meta = Path(path).with_suffix(Path(path).suffix + ".meta")
+    with open(meta, "w") as f:
+        json.dump(data, f, indent=2)
+    print(f"   📄 Metadaten: {meta}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TorchScript
+# ─────────────────────────────────────────────────────────────────────────────
+
+def convert_torchscript(model, output_path: str, input_shape: tuple, device: str) -> bool:
+    """Konvertiert zu TorchScript via torch.jit.trace."""
+    print(f"\n🔷 TorchScript — Input {input_shape}")
+
+    print("📊 Baseline:")
+    t_orig = _benchmark(model, device, input_shape)
+
+    dummy = torch.randn(*input_shape).to(device)
+    print("🔄 Tracing...")
     try:
-        from torch2trt import torch2trt
-    except ImportError:
-        print("❌ torch2trt nicht installiert!")
-        print("   Installation: pip install torch2trt")
-        print("   Oder von: https://github.com/NVIDIA-AI-IOT/torch2trt")
-        return False
-    
-    print(f"\n🚀 Konvertiere zu TensorRT ({precision.upper()})...")
-    print(f"   Input Shape: {input_shape}")
-    
-    # Benchmark Original
-    print("\n📊 Original PyTorch Modell:")
-    original_time = benchmark_model(model, device, input_shape)
-    
-    # Erstelle Dummy Input
-    dummy_input = torch.randn(*input_shape).to(device)
-    
-    # Konvertiere zu TensorRT
-    print(f"\n🔄 TensorRT Konvertierung...")
-    
-    fp16_mode = (precision == 'fp16')
-    
-    try:
-        # TensorRT logger level - use WARNING to reduce verbosity
-        model_trt = torch2trt(
-            model,
-            [dummy_input],
-            fp16_mode=fp16_mode,
-            max_workspace_size=1 << 30  # 1GB
-        )
-        
-        print(f"✅ TensorRT Konvertierung erfolgreich!")
-        
-        # Benchmark TensorRT
-        print(f"\n📊 TensorRT {precision.upper()} Modell:")
-        trt_time = benchmark_model(model_trt, device, input_shape)
-        
-        # Speedup
-        speedup = original_time / trt_time
-        print(f"\n🎉 Speedup: {speedup:.2f}x schneller!")
-        
-        # Speichern
-        torch.save(model_trt.state_dict(), output_path)
-        print(f"💾 TensorRT Engine gespeichert: {output_path}")
-        
-        # Metadaten speichern
-        meta_path = output_path + '.meta'
-        with open(meta_path, 'w') as f:
-            f.write(f"precision: {precision}\n")
-            f.write(f"input_shape: {input_shape}\n")
-            f.write(f"original_time_ms: {original_time:.2f}\n")
-            f.write(f"trt_time_ms: {trt_time:.2f}\n")
-            f.write(f"speedup: {speedup:.2f}x\n")
-        
-        print(f"💾 Metadaten gespeichert: {meta_path}")
-        
-        return True
-        
+        with torch.no_grad():
+            scripted = torch.jit.trace(model, dummy)
+        scripted = torch.jit.optimize_for_inference(scripted)
+        print("✅ Tracing erfolgreich")
     except Exception as e:
-        print(f"❌ TensorRT Konvertierung fehlgeschlagen: {e}")
-        import traceback
+        print(f"❌ Tracing fehlgeschlagen: {e}")
         traceback.print_exc()
         return False
 
+    print("📊 TorchScript:")
+    t_jit = _benchmark(scripted, device, input_shape)
 
-def optimize_torchscript(model, output_path, input_shape=(1, 7, 3, 180, 180), device='cuda'):
-    """
-    Konvertiert zu TorchScript
-    
-    Args:
-        model: PyTorch Modell
-        output_path: Ausgabe-Pfad für .pt Datei
-        input_shape: Input Shape
-        device: Device
-    """
-    print(f"\n🚀 Konvertiere zu TorchScript...")
-    print(f"   Input Shape: {input_shape}")
-    
-    # Benchmark Original
-    print("\n📊 Original PyTorch Modell:")
-    original_time = benchmark_model(model, device, input_shape)
-    
-    # Erstelle Dummy Input
-    dummy_input = torch.randn(*input_shape).to(device)
-    
-    # Trace Modell
-    print(f"\n🔄 TorchScript Tracing...")
-    
-    try:
-        model_scripted = torch.jit.trace(model, dummy_input)
-        
-        # Optimierungen
-        model_scripted = torch.jit.optimize_for_inference(model_scripted)
-        
-        print(f"✅ TorchScript Konvertierung erfolgreich!")
-        
-        # Benchmark TorchScript
-        print(f"\n📊 TorchScript Modell:")
-        scripted_time = benchmark_model(model_scripted, device, input_shape)
-        
-        # Speedup
-        speedup = original_time / scripted_time
-        print(f"\n🎉 Speedup: {speedup:.2f}x schneller!")
-        
-        # Speichern
-        model_scripted.save(output_path)
-        print(f"💾 TorchScript Modell gespeichert: {output_path}")
-        
-        # Metadaten
-        meta_path = output_path + '.meta'
-        with open(meta_path, 'w') as f:
-            f.write(f"format: torchscript\n")
-            f.write(f"input_shape: {input_shape}\n")
-            f.write(f"original_time_ms: {original_time:.2f}\n")
-            f.write(f"scripted_time_ms: {scripted_time:.2f}\n")
-            f.write(f"speedup: {speedup:.2f}x\n")
-        
-        print(f"💾 Metadaten gespeichert: {meta_path}")
-        
-        return True
-        
-    except Exception as e:
-        print(f"❌ TorchScript Konvertierung fehlgeschlagen: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
+    scripted.save(output_path)
+    print(f"💾 Gespeichert: {output_path}")
+    _write_meta(output_path, {
+        "format": "torchscript",
+        "input_shape": list(input_shape),
+        "baseline_ms": round(t_orig, 2),
+        "torchscript_ms": round(t_jit, 2),
+        "speedup": round(t_orig / t_jit, 3),
+    })
+    print(f"🎉 Speedup: {t_orig / t_jit:.2f}×")
+    return True
 
 
-def optimize_onnx(model, output_path, input_shape=(1, 7, 3, 720, 576), device='cuda'):
+# ─────────────────────────────────────────────────────────────────────────────
+# ONNX
+# ─────────────────────────────────────────────────────────────────────────────
+
+def convert_onnx(model, output_path: str, input_shape: tuple, device: str,
+                 opset: int = 17) -> bool:
     """
-    Konvertiert zu ONNX
-    
-    Args:
-        model: PyTorch Modell
-        output_path: Ausgabe-Pfad für .onnx Datei
-        input_shape: Input Shape
-        device: Device
+    Exportiert das Modell nach ONNX.
+
+    Input-Shape: (1, 7, 3, H, W)
+    Batch-Dimension wird dynamisch exportiert.
     """
     try:
         import onnx
     except ImportError:
-        print("❌ onnx nicht installiert!")
-        print("   Installation: pip install onnx onnxruntime-gpu")
+        print("❌ onnx fehlt — pip install onnx onnxruntime-gpu")
         return False
-    
-    print(f"\n🚀 Konvertiere zu ONNX...")
-    print(f"   Input Shape: {input_shape}")
-    
-    # Benchmark Original
-    print("\n📊 Original PyTorch Modell:")
-    original_time = benchmark_model(model, device, input_shape)
-    
-    # Erstelle Dummy Input
-    dummy_input = torch.randn(*input_shape).to(device)
-    
-    # Export zu ONNX
-    print(f"\n🔄 ONNX Export...")
-    
+
+    print(f"\n🔷 ONNX Export — opset {opset}, Input {input_shape}")
+
+    print("📊 Baseline:")
+    t_orig = _benchmark(model, device, input_shape)
+
+    dummy = torch.randn(*input_shape).to(device)
+    print("🔄 Exportiere...")
     try:
-        torch.onnx.export(
-            model,
-            dummy_input,
-            output_path,
-            export_params=True,
-            opset_version=17,
-            do_constant_folding=True,
-            input_names=['input'],
-            output_names=['output'],
-            dynamic_axes={
-                'input': {0: 'batch_size'},
-                'output': {0: 'batch_size'}
-            }
-        )
-        
-        print(f"✅ ONNX Export erfolgreich!")
-        
-        # Verifiziere ONNX Modell
-        onnx_model = onnx.load(output_path)
-        onnx.checker.check_model(onnx_model)
-        print(f"✅ ONNX Modell verifiziert!")
-        
-        print(f"💾 ONNX Modell gespeichert: {output_path}")
-        
-        # Metadaten
-        meta_path = output_path + '.meta'
-        with open(meta_path, 'w') as f:
-            f.write(f"format: onnx\n")
-            f.write(f"input_shape: {input_shape}\n")
-            f.write(f"original_time_ms: {original_time:.2f}\n")
-            f.write(f"opset_version: 17\n")
-        
-        print(f"💾 Metadaten gespeichert: {meta_path}")
-        
-        return True
-        
+        with torch.no_grad():
+            torch.onnx.export(
+                model,
+                dummy,
+                output_path,
+                export_params=True,
+                opset_version=opset,
+                do_constant_folding=True,
+                input_names=["frames"],
+                output_names=["sr_frame"],
+                dynamic_axes={
+                    "frames":    {0: "batch"},
+                    "sr_frame":  {0: "batch"},
+                },
+            )
     except Exception as e:
         print(f"❌ ONNX Export fehlgeschlagen: {e}")
-        import traceback
+        traceback.print_exc()
+        return False
+
+    # Validierung
+    try:
+        m = onnx.load(output_path)
+        onnx.checker.check_model(m)
+        print("✅ ONNX-Modell verifiziert")
+    except Exception as e:
+        print(f"⚠️  ONNX-Verifikation: {e}")
+
+    print(f"💾 Gespeichert: {output_path}")
+    _write_meta(output_path, {
+        "format": "onnx",
+        "opset": opset,
+        "input_shape": list(input_shape),
+        "output_shape": [input_shape[0], 3, input_shape[3] * 3, input_shape[4] * 3],
+        "baseline_ms": round(t_orig, 2),
+    })
+    return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TensorRT  (PyTorch → ONNX → TRT Engine)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_trt_engine(onnx_path: str, engine_path: str,
+                      precision: str, workspace_gb: int = 2) -> bool:
+    """
+    Baut eine TensorRT-Engine aus einer ONNX-Datei.
+
+    Benötigt das 'tensorrt' PyPI-Paket (muss zur CUDA-Toolkit-Version passen).
+    Für CUDA 12.0: pip install tensorrt==8.6.*  (letzte Version mit CC 6.0-Support)
+    """
+    try:
+        import tensorrt as trt
+    except ImportError:
+        print("❌ tensorrt fehlt!")
+        print("   pip install tensorrt          # passend zu CUDA-Toolkit-Version")
+        print("   Für CUDA 12.0: pip install tensorrt==8.6.*")
+        return False
+
+    TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
+    network_flags = 1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
+
+    print(f"🔄 Baue TensorRT-Engine ({precision.upper()})...")
+    print(f"   TensorRT-Version: {trt.__version__}")
+    print(f"   Workspace: {workspace_gb} GB")
+
+    try:
+        with trt.Builder(TRT_LOGGER) as builder, \
+             builder.create_network(network_flags) as network, \
+             trt.OnnxParser(network, TRT_LOGGER) as parser, \
+             builder.create_builder_config() as config:
+
+            # Workspace
+            config.set_memory_pool_limit(
+                trt.MemoryPoolType.WORKSPACE, workspace_gb << 30
+            )
+
+            # Precision
+            if precision == "fp16":
+                if not builder.platform_has_fast_fp16:
+                    print("   ⚠️  GPU meldet kein 'fast_fp16' — Engine wird trotzdem mit FP16 gebaut")
+                config.set_flag(trt.BuilderFlag.FP16)
+                print("   ✅ FP16 aktiviert")
+
+            # ONNX einlesen
+            with open(onnx_path, "rb") as f:
+                raw = f.read()
+            if not parser.parse(raw):
+                print("❌ ONNX-Parser Fehler:")
+                for i in range(parser.num_errors):
+                    print(f"   [{i}] {parser.get_error(i)}")
+                return False
+
+            print(f"   ONNX gelesen — {network.num_layers} Layer")
+
+            # Engine bauen (kann mehrere Minuten dauern)
+            print("   ⏳ Kompiliere Engine (kann einige Minuten dauern)...")
+            serialized = builder.build_serialized_network(network, config)
+            if serialized is None:
+                print("❌ build_serialized_network gab None zurück")
+                return False
+
+            with open(engine_path, "wb") as f:
+                f.write(serialized)
+
+            size_mb = Path(engine_path).stat().st_size / (1024 * 1024)
+            print(f"✅ Engine gebaut — {size_mb:.1f} MB")
+            return True
+
+    except Exception as e:
+        print(f"❌ TensorRT-Engine-Bau fehlgeschlagen: {e}")
         traceback.print_exc()
         return False
 
 
-def optimize_pruned(model, checkpoint_path, output_path, prune_amount=0.3, prune_type='structured', 
-                    input_shape=(1, 7, 3, 180, 180), device='cuda'):
-    """
-    Pruning - Entfernt unwichtige Weights/Kanäle
-    
-    Args:
-        model: PyTorch Modell
-        checkpoint_path: Original Checkpoint (für metadata)
-        output_path: Ausgabe-Pfad für .pth Datei
-        prune_amount: Anteil zu entfernender Weights/Kanäle (0.0-1.0)
-        prune_type: 'structured' (ganze Kanäle) oder 'unstructured' (einzelne Weights)
-        input_shape: Input Shape
-        device: Device
-    """
-    import torch.nn.utils.prune as prune
-    
-    print(f"\n🚀 Model Pruning ({prune_type})...")
-    print(f"   Prune Amount: {prune_amount*100:.1f}%")
-    print(f"   Input Shape: {input_shape}")
-    
-    # Benchmark Original
-    print("\n📊 Original Modell:")
-    original_time = benchmark_model(model, device, input_shape)
-    
-    # Original Modell-Größe
-    original_size = sum(p.numel() for p in model.parameters())
-    print(f"   Parameter: {original_size:,}")
-    
-    # Pruning anwenden
-    print(f"\n🔄 Wende Pruning an...")
-    
-    modules_to_prune = []
-    
-    # Sammle alle Conv2d Layer
-    for name, module in model.named_modules():
-        if isinstance(module, torch.nn.Conv2d):
-            modules_to_prune.append((module, 'weight'))
-    
-    print(f"   Gefunden: {len(modules_to_prune)} Conv2d Layer")
-    
+def _benchmark_trt_engine(engine_path: str, input_shape: tuple, device: str,
+                           n: int = 20) -> float:
+    """Benchmarkt eine gespeicherte TRT-Engine über IExecutionContext."""
     try:
-        if prune_type == 'structured':
-            # Strukturiertes Pruning - entfernt ganze Kanäle
-            for module, param_name in modules_to_prune:
-                # Prune output channels (dim=0)
-                prune.ln_structured(
-                    module, 
-                    name=param_name,
-                    amount=prune_amount,
-                    n=2,  # L2 norm
-                    dim=0  # Output channels
-                )
-        
-        elif prune_type == 'unstructured':
-            # Unstrukturiertes Pruning - entfernt einzelne Weights
-            for module, param_name in modules_to_prune:
-                prune.l1_unstructured(
-                    module,
-                    name=param_name,
-                    amount=prune_amount
-                )
-        
+        import tensorrt as trt
+        import pycuda.driver as cuda
+        import pycuda.autoinit  # noqa: F401
+    except ImportError:
+        print("   ⚠️  pycuda nicht verfügbar — TRT-Benchmark übersprungen")
+        return 0.0
+
+    TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
+    runtime = trt.Runtime(TRT_LOGGER)
+    with open(engine_path, "rb") as f:
+        engine = runtime.deserialize_cuda_engine(f.read())
+    context = engine.create_execution_context()
+
+    dummy = np.random.randn(*input_shape).astype(np.float32)
+    out_shape = (input_shape[0], 3, input_shape[3] * 3, input_shape[4] * 3)
+    out = np.empty(out_shape, dtype=np.float32)
+
+    d_in  = cuda.mem_alloc(dummy.nbytes)
+    d_out = cuda.mem_alloc(out.nbytes)
+
+    # Warmup
+    for _ in range(5):
+        cuda.memcpy_htod(d_in, dummy)
+        context.execute_v2([int(d_in), int(d_out)])
+        cuda.memcpy_dtoh(out, d_out)
+
+    times = []
+    for _ in range(n):
+        cuda.memcpy_htod(d_in, dummy)
+        t0 = time.perf_counter()
+        context.execute_v2([int(d_in), int(d_out)])
+        cuda.memcpy_dtoh(out, d_out)
+        times.append((time.perf_counter() - t0) * 1000)
+
+    avg = float(np.mean(times))
+    print(f"   ⏱  TRT Engine: {avg:.1f} ms ±{np.std(times):.1f} ms  ({1000/avg:.1f} fps)")
+    return avg
+
+
+def convert_tensorrt(model, output_path: str, input_shape: tuple, device: str,
+                     precision: str = "fp16", workspace_gb: int = 2) -> bool:
+    """
+    Konvertiert das VSR++-Modell zu einer TensorRT-Engine.
+
+    Ablauf:
+      1. ONNX-Export in eine temporäre Datei
+      2. TRT-Engine aus ONNX bauen
+      3. Benchmark (falls pycuda verfügbar)
+    """
+    if device != "cuda":
+        print("❌ TensorRT benötigt CUDA — bitte --device cuda verwenden")
+        return False
+
+    print(f"\n🔷 TensorRT ({precision.upper()}) — Input {input_shape}")
+
+    print("📊 Baseline PyTorch:")
+    t_orig = _benchmark(model, device, input_shape)
+
+    # Schritt 1: ONNX temporär
+    with tempfile.NamedTemporaryFile(suffix=".onnx", delete=False) as tmp:
+        tmp_onnx = tmp.name
+
+    try:
+        print("🔄 Schritt 1/2 — ONNX Export...")
+        ok = convert_onnx(model, tmp_onnx, input_shape, device, opset=17)
+        if not ok:
+            return False
+
+        # Schritt 2: TRT Engine
+        print("🔄 Schritt 2/2 — TensorRT Engine bauen...")
+        ok = _build_trt_engine(tmp_onnx, output_path, precision, workspace_gb)
+        if not ok:
+            return False
+
+    finally:
+        if os.path.exists(tmp_onnx):
+            os.unlink(tmp_onnx)
+        meta_tmp = tmp_onnx + ".meta"
+        if os.path.exists(meta_tmp):
+            os.unlink(meta_tmp)
+
+    print(f"💾 Engine gespeichert: {output_path}")
+
+    # Benchmark (optional, braucht pycuda)
+    t_trt = _benchmark_trt_engine(output_path, input_shape, device)
+
+    meta: dict = {
+        "format": "tensorrt",
+        "precision": precision,
+        "input_shape": list(input_shape),
+        "output_shape": [input_shape[0], 3, input_shape[3] * 3, input_shape[4] * 3],
+        "baseline_ms": round(t_orig, 2),
+        "workspace_gb": workspace_gb,
+    }
+    if t_trt > 0:
+        meta["trt_ms"] = round(t_trt, 2)
+        meta["speedup"] = round(t_orig / t_trt, 3)
+        print(f"🎉 Speedup: {t_orig / t_trt:.2f}×")
+    _write_meta(output_path, meta)
+    return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pruning
+# ─────────────────────────────────────────────────────────────────────────────
+
+def convert_pruned(model, checkpoint_path: str, output_path: str,
+                   prune_amount: float, prune_type: str,
+                   input_shape: tuple, device: str) -> bool:
+    """
+    Pruning — entfernt unwichtige Conv2d-Weights.
+
+    prune_type 'structured'   → ganze Ausgangskanäle (echt kleiner nach Re-Training)
+    prune_type 'unstructured' → einzelne Weights auf 0 (Sparsity, kein Größenvorteil)
+    """
+    import torch.nn.utils.prune as prune_utils
+
+    print(f"\n🔷 Pruning ({prune_type}, {prune_amount*100:.0f}%) — Input {input_shape}")
+
+    print("📊 Baseline:")
+    t_orig = _benchmark(model, device, input_shape)
+
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"   Parameter gesamt: {total_params:,}")
+
+    conv_layers = [
+        (m, "weight")
+        for m in model.modules()
+        if isinstance(m, torch.nn.Conv2d)
+    ]
+    print(f"   Conv2d-Layer: {len(conv_layers)}")
+
+    try:
+        if prune_type == "structured":
+            for m, name in conv_layers:
+                prune_utils.ln_structured(m, name=name, amount=prune_amount, n=2, dim=0)
+        elif prune_type == "unstructured":
+            for m, name in conv_layers:
+                prune_utils.l1_unstructured(m, name=name, amount=prune_amount)
         else:
-            raise ValueError(f"Unbekannter Prune-Typ: {prune_type}")
-        
-        print(f"✅ Pruning erfolgreich angewendet!")
-        
-        # Zähle tatsächlich geprunte Parameter
-        zero_params = 0
-        total_params = 0
-        
-        for module, param_name in modules_to_prune:
-            # Zugriff auf die Maske
-            if hasattr(module, param_name + '_mask'):
-                mask = getattr(module, param_name + '_mask')
-                zero_params += (mask == 0).sum().item()
-                total_params += mask.numel()
-        
-        actual_prune_ratio = zero_params / total_params if total_params > 0 else 0
-        print(f"   Tatsächlich gepruned: {actual_prune_ratio*100:.1f}% der Conv-Weights")
-        print(f"   Null-Parameter: {zero_params:,} von {total_params:,}")
-        
-        # Pruning permanent machen (entfernt Masken, setzt Weights auf 0)
-        print(f"\n🔄 Mache Pruning permanent...")
-        for module, param_name in modules_to_prune:
-            prune.remove(module, param_name)
-        
-        print(f"✅ Pruning permanent gemacht!")
-        
-        # Benchmark nach Pruning
-        print(f"\n📊 Gepruntes Modell:")
-        pruned_time = benchmark_model(model, device, input_shape)
-        
-        # Statistiken
-        speedup = original_time / pruned_time
-        print(f"\n📈 Pruning-Statistiken:")
-        print(f"   Speedup: {speedup:.2f}x schneller")
-        print(f"   Kompression: {actual_prune_ratio*100:.1f}% Weights entfernt")
-        
-        # Modell speichern
-        print(f"\n💾 Speichere gepruntes Modell...")
-        
-        # Lade original checkpoint für metadata
-        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-        
-        # Update model state dict
-        checkpoint['model_state_dict'] = model.state_dict()
-        checkpoint['pruned'] = True
-        checkpoint['prune_amount'] = prune_amount
-        checkpoint['prune_type'] = prune_type
-        checkpoint['actual_prune_ratio'] = actual_prune_ratio
-        
-        # Speichern
-        torch.save(checkpoint, output_path)
-        print(f"💾 Gepruntes Modell gespeichert: {output_path}")
-        
-        # Metadaten
-        meta_path = output_path + '.meta'
-        with open(meta_path, 'w') as f:
-            f.write(f"format: pruned\n")
-            f.write(f"prune_type: {prune_type}\n")
-            f.write(f"prune_amount: {prune_amount}\n")
-            f.write(f"actual_prune_ratio: {actual_prune_ratio:.4f}\n")
-            f.write(f"input_shape: {input_shape}\n")
-            f.write(f"original_time_ms: {original_time:.2f}\n")
-            f.write(f"pruned_time_ms: {pruned_time:.2f}\n")
-            f.write(f"speedup: {speedup:.2f}x\n")
-            f.write(f"zero_params: {zero_params}\n")
-            f.write(f"total_conv_params: {total_params}\n")
-        
-        print(f"💾 Metadaten gespeichert: {meta_path}")
-        
-        # Warnung bei unstrukturiertem Pruning
-        if prune_type == 'unstructured':
-            print(f"\n⚠️  Hinweis: Unstrukturiertes Pruning setzt Weights auf 0,")
-            print(f"    aber die Modell-Größe bleibt gleich. Für echte Kompression")
-            print(f"    verwende strukturiertes Pruning (--prune-type structured)")
-        
-        return True
-        
+            raise ValueError(f"Unbekannter prune_type: {prune_type!r}")
     except Exception as e:
         print(f"❌ Pruning fehlgeschlagen: {e}")
-        import traceback
         traceback.print_exc()
         return False
 
+    # Null-Anteil messen
+    zero = sum(
+        (getattr(m, name + "_mask") == 0).sum().item()
+        for m, name in conv_layers
+        if hasattr(m, name + "_mask")
+    )
+    total_conv = sum(
+        getattr(m, name + "_mask").numel()
+        for m, name in conv_layers
+        if hasattr(m, name + "_mask")
+    )
+    ratio = zero / total_conv if total_conv > 0 else 0.0
+    print(f"✅ Gepruned: {ratio*100:.1f}% der Conv-Weights ({zero:,}/{total_conv:,} auf 0)")
+
+    # Masken permanent machen
+    for m, name in conv_layers:
+        try:
+            prune_utils.remove(m, name)
+        except Exception:
+            pass
+
+    print("📊 Nach Pruning:")
+    t_pruned = _benchmark(model, device, input_shape)
+
+    # Checkpoint mit Metadaten speichern
+    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    ckpt["model_state_dict"]  = model.state_dict()
+    ckpt["pruned"]            = True
+    ckpt["prune_amount"]      = prune_amount
+    ckpt["prune_type"]        = prune_type
+    ckpt["actual_prune_ratio"] = ratio
+
+    torch.save(ckpt, output_path)
+    print(f"💾 Gespeichert: {output_path}")
+
+    meta = {
+        "format": "pruned",
+        "prune_type": prune_type,
+        "prune_amount": prune_amount,
+        "actual_ratio": round(ratio, 4),
+        "input_shape": list(input_shape),
+        "baseline_ms": round(t_orig, 2),
+        "pruned_ms": round(t_pruned, 2),
+        "speedup": round(t_orig / t_pruned, 3) if t_pruned > 0 else None,
+        "total_params": total_params,
+        "zero_conv_weights": zero,
+        "total_conv_weights": total_conv,
+    }
+    _write_meta(output_path, meta)
+
+    if prune_type == "unstructured":
+        print("⚠️  Hinweis: Unstrukturiertes Pruning erzeugt Sparsity, aber keine echte "
+              "Modell-Größenreduktion.\n"
+              "   Für kleinere Modelle: --prune-type structured verwenden.")
+    return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CLI
+# ─────────────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Optimiert PyTorch Checkpoint für schnellere Inferenz',
+        description="VSR++ Modell-Konvertierung (TensorRT / ONNX / TorchScript / Pruning)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Beispiele:
-  # TensorRT FP16 (empfohlen)
-  python optimize_checkpoint.py --checkpoint model.pth --output model_trt_fp16.engine --format tensorrt --precision fp16
-  
-  # TorchScript
-  python optimize_checkpoint.py --checkpoint model.pth --output model_scripted.pt --format torchscript
-  
-  # ONNX
-  python optimize_checkpoint.py --checkpoint model.pth --output model.onnx --format onnx
-  
-  # Pruning (strukturiert, 30%)
-  python optimize_checkpoint.py --checkpoint model.pth --output model_pruned.pth --format pruned --prune-amount 0.3
+  # TensorRT FP16 bei 480×270 LR-Auflösung
+  python optimize_checkpoint.py -c model.pth -o model_fp16.engine -f tensorrt -p fp16 --width 480 --height 270
 
-Installations-Voraussetzungen:
-  TensorRT: pip install torch2trt
-  ONNX: pip install onnx onnxruntime-gpu
-  Pruning: In PyTorch eingebaut (torch.nn.utils.prune)
-        """
+  # ONNX
+  python optimize_checkpoint.py -c model.pth -o model.onnx -f onnx --width 480 --height 270
+
+  # TorchScript
+  python optimize_checkpoint.py -c model.pth -o model.pt -f torchscript
+
+  # Pruning strukturiert 30%
+  python optimize_checkpoint.py -c model.pth -o model_pruned.pth -f pruned --prune-amount 0.3
+        """,
     )
-    
-    parser.add_argument('--checkpoint', '-c', required=True,
-                        help='Pfad zum PyTorch Checkpoint (.pth)')
-    parser.add_argument('--output', '-o', required=True,
-                        help='Pfad für optimiertes Modell')
-    parser.add_argument('--format', '-f', choices=['tensorrt', 'torchscript', 'onnx', 'pruned'],
-                        default='tensorrt',
-                        help='Optimierungs-Format (Standard: tensorrt)')
-    parser.add_argument('--precision', '-p', choices=['fp32', 'fp16'],
-                        default='fp16',
-                        help='Precision für TensorRT (Standard: fp16)')
-    parser.add_argument('--prune-amount', type=float, default=0.3,
-                        help='Pruning: Anteil zu entfernender Weights (0.0-1.0, Standard: 0.3)')
-    parser.add_argument('--prune-type', choices=['structured', 'unstructured'],
-                        default='structured',
-                        help='Pruning-Typ (Standard: structured)')
-    parser.add_argument('--device', '-d', choices=['cuda', 'cpu'],
-                        default='cuda' if torch.cuda.is_available() else 'cpu',
-                        help='Device (Standard: cuda falls verfügbar)')
-    parser.add_argument('--input-size', type=int, default=180,
-                        help='Input-Größe (Höhe/Breite) (Standard: 180)')
-    
+    parser.add_argument("--checkpoint", "-c", required=True,
+                        help="Pfad zum .pth-Checkpoint")
+    parser.add_argument("--output", "-o", required=True,
+                        help="Ausgabe-Pfad (Endung: .engine / .onnx / .pt / .pth)")
+    parser.add_argument("--format", "-f",
+                        choices=["tensorrt", "onnx", "torchscript", "pruned"],
+                        default="tensorrt",
+                        help="Konvertierungsformat (Standard: tensorrt)")
+    parser.add_argument("--precision", "-p", choices=["fp16", "fp32"],
+                        default="fp16",
+                        help="TensorRT Precision (Standard: fp16)")
+    parser.add_argument("--width", type=int, default=480,
+                        help="LR-Eingabebreite in Pixeln (Standard: 480)")
+    parser.add_argument("--height", type=int, default=270,
+                        help="LR-Eingabehöhe in Pixeln (Standard: 270)")
+    parser.add_argument("--prune-amount", type=float, default=0.3,
+                        help="Pruning-Anteil 0.0–1.0 (Standard: 0.3)")
+    parser.add_argument("--prune-type", choices=["structured", "unstructured"],
+                        default="structured",
+                        help="Pruning-Typ (Standard: structured)")
+    parser.add_argument("--workspace-gb", type=int, default=2,
+                        help="TensorRT Workspace-Größe in GB (Standard: 2)")
+    parser.add_argument("--device", "-d", choices=["cuda", "cpu"],
+                        default="cuda" if torch.cuda.is_available() else "cpu",
+                        help="Device (Standard: cuda falls verfügbar)")
+    parser.add_argument("--benchmark-iters", type=int, default=20,
+                        help="Anzahl Benchmark-Iterationen (Standard: 20)")
+
     args = parser.parse_args()
-    
-    # Header
-    print("=" * 70)
-    print("🚀 Model Optimization Tool")
-    print("=" * 70)
-    print(f"Checkpoint: {args.checkpoint}")
-    print(f"Output: {args.output}")
-    print(f"Format: {args.format}")
-    if args.format == 'tensorrt':
-        print(f"Precision: {args.precision}")
-    elif args.format == 'pruned':
-        print(f"Prune Amount: {args.prune_amount*100:.1f}%")
-        print(f"Prune Type: {args.prune_type}")
-    print(f"Device: {args.device}")
-    print(f"Input Size: {args.input_size}x{args.input_size}")
-    print("=" * 70)
-    
+    input_shape = (1, 7, 3, args.height, args.width)
+
+    print("=" * 68)
+    print("🚀  VSR++ Modell-Konvertierung")
+    print("=" * 68)
+    print(f"  Checkpoint  : {args.checkpoint}")
+    print(f"  Ausgabe     : {args.output}")
+    print(f"  Format      : {args.format}")
+    print(f"  Input-Shape : {input_shape}  →  SR {args.height*3}×{args.width*3}")
+    if args.format == "tensorrt":
+        print(f"  Precision   : {args.precision.upper()}")
+        print(f"  Workspace   : {args.workspace_gb} GB")
+    if args.format == "pruned":
+        print(f"  Prune       : {args.prune_amount*100:.0f}% {args.prune_type}")
+    print(f"  Device      : {args.device}")
+    print("=" * 68)
+
     # Validierung
-    if not os.path.exists(args.checkpoint):
+    if not Path(args.checkpoint).exists():
         print(f"❌ Checkpoint nicht gefunden: {args.checkpoint}")
         return 1
-    
-    if args.device == 'cuda' and not torch.cuda.is_available():
-        print("⚠️  CUDA nicht verfügbar, verwende CPU")
-        args.device = 'cpu'
-    
-    if args.format == 'pruned' and not (0.0 < args.prune_amount < 1.0):
-        print(f"❌ Prune-Amount muss zwischen 0.0 und 1.0 liegen, ist: {args.prune_amount}")
+
+    if args.device == "cuda" and not torch.cuda.is_available():
+        print("⚠️  CUDA nicht verfügbar — wechsle auf CPU")
+        args.device = "cpu"
+
+    if args.format == "tensorrt" and args.device != "cuda":
+        print("❌ TensorRT benötigt CUDA")
         return 1
-    
+
+    if args.format == "pruned" and not (0.0 < args.prune_amount < 1.0):
+        print(f"❌ --prune-amount muss zwischen 0 und 1 liegen (ist: {args.prune_amount})")
+        return 1
+
     # Modell laden
     try:
-        model, checkpoint_info = load_pytorch_model(args.checkpoint, args.device)
+        model, info = load_model(args.checkpoint, args.device)
     except Exception as e:
-        print(f"❌ Fehler beim Laden des Modells: {e}")
-        import traceback
+        print(f"❌ Modell laden fehlgeschlagen: {e}")
         traceback.print_exc()
         return 1
-    
-    # Input Shape
-    input_shape = (1, 7, 3, args.input_size, args.input_size)
-    
-    # Optimierung
+
+    # GPU-Info + P100/CC-6.0-Warnungen ausgeben
+    if args.device == "cuda":
+        cc = torch.cuda.get_device_capability(0)
+        gpu_name = torch.cuda.get_device_name(0)
+        print(f"\n  GPU : {gpu_name}  (CC {cc[0]}.{cc[1]})")
+        if cc < (7, 0):
+            print("  ⚠️  CC < 7.0 — torch.compile/Triton nicht verfügbar (nicht benötigt)")
+            if args.format == "tensorrt":
+                print("  ⚠️  CC 6.0: TensorRT ≥ 9.0 unterstützt diese GPU NICHT!")
+                print("       Benötigt: pip install 'tensorrt==8.6.*'")
+                print("       Kompatible Versionen: tensorrt 8.5.x / 8.6.x")
+        print()
+
+    # Konvertierung starten
     success = False
-    
-    if args.format == 'tensorrt':
-        success = optimize_tensorrt(model, args.output, args.precision, input_shape, args.device)
-    elif args.format == 'torchscript':
-        success = optimize_torchscript(model, args.output, input_shape, args.device)
-    elif args.format == 'onnx':
-        success = optimize_onnx(model, args.output, input_shape, args.device)
-    elif args.format == 'pruned':
-        success = optimize_pruned(model, args.checkpoint, args.output, args.prune_amount, 
-                                 args.prune_type, input_shape, args.device)
-    
-    # Abschluss
-    print("\n" + "=" * 70)
+
+    if args.format == "tensorrt":
+        # Zusätzlicher Vorab-Check: tensorrt-Version für CC 6.0 validieren
+        try:
+            import tensorrt as trt
+            trt_major = int(trt.__version__.split(".")[0])
+            if trt_major >= 9 and args.device == "cuda":
+                cc = torch.cuda.get_device_capability(0)
+                if cc < (7, 0):
+                    print(f"❌ tensorrt {trt.__version__} unterstützt CC {cc[0]}.{cc[1]} nicht!")
+                    print("   TensorRT 9.x erfordert CC ≥ 7.0.")
+                    print("   Lösung: pip install 'tensorrt==8.6.*'")
+                    return 1
+        except ImportError:
+            pass  # Fehlermeldung kommt aus convert_tensorrt
+
+        success = convert_tensorrt(
+            model, args.output, input_shape, args.device,
+            precision=args.precision,
+            workspace_gb=args.workspace_gb,
+        )
+
+    elif args.format == "torchscript":
+        success = convert_torchscript(model, args.output, input_shape, args.device)
+
+    elif args.format == "onnx":
+        success = convert_onnx(model, args.output, input_shape, args.device)
+
+    elif args.format == "pruned":
+        success = convert_pruned(
+            model, args.checkpoint, args.output,
+            prune_amount=args.prune_amount,
+            prune_type=args.prune_type,
+            input_shape=input_shape,
+            device=args.device,
+        )
+
+    # Zusammenfassung
+    print("\n" + "=" * 68)
     if success:
-        print("✅ Optimierung erfolgreich!")
-        print("=" * 70)
-        print(f"📄 Optimiertes Modell: {args.output}")
-        print(f"📄 Metadaten: {args.output}.meta")
-        print("\nNächster Schritt:")
-        print(f"  python run_video_inference_optimized.py --model {args.output} --input video.mkv --output result.mkv")
-        print("=" * 70)
+        print(f"✅ Konvertierung erfolgreich!")
+        print(f"   Ausgabe : {args.output}")
+        meta = Path(args.output).with_suffix(Path(args.output).suffix + ".meta")
+        if meta.exists():
+            print(f"   Metadaten: {meta}")
+        print("=" * 68)
         return 0
     else:
-        print("❌ Optimierung fehlgeschlagen!")
-        print("=" * 70)
+        print("❌ Konvertierung fehlgeschlagen — siehe Ausgabe oben.")
+        print("=" * 68)
         return 1
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     sys.exit(main())

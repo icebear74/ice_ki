@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # ============================================================
-# setup_venv311.sh
-# Erstellt eine saubere Python-3.11-venv in ./venv311/
-# und testet die Lauffähigkeit für diese Hardware:
-#   GPU  : Tesla P100-PCIE-16GB (CUDA Capability 6.0)
-#   nvcc : 12.0 (Toolkit)
+# setup_venv311_vsr.sh
+# Erstellt eine saubere Python-3.11-venv in ./venv311_vsr/
+# für vsr_plusplus_NEU + dataset_generator_v2 + Modell-Konvertierung
+#
+# Getestete Hardware:
+#   GPU    : Tesla P100-PCIE-16GB (CUDA Capability 6.0)
+#   nvcc   : 12.0 (Toolkit)
 #   Treiber: 580.x (meldet CUDA 13.0 in nvidia-smi — das ist
 #            die vom Treiber maximal unterstützte Version,
 #            nicht die des installierten Toolkits!)
@@ -18,8 +20,9 @@
 #   ✗ torch.compile / Triton  → erfordert CC ≥ 7.0
 #   ✗ Flash Attention          → erfordert CC ≥ 7.5
 #   ✗ bfloat16 (nativ)        → erfordert CC ≥ 8.0 (nur float16/fp32)
+#   ✗ TensorRT ≥ 9.0          → erfordert CC ≥ 7.0  (→ 8.6.x verwenden!)
 #   ✓ AMP (float16 / fp32)    → läuft
-#   ✓ TensorRT PyPI-Paket      → läuft (CC 6.0 unterstützt)
+#   ✓ TensorRT 8.6.x           → läuft (letztes Release mit CC 6.0-Support)
 # ============================================================
 set -euo pipefail
 
@@ -27,7 +30,7 @@ set -euo pipefail
 GREEN='\033[92m'; CYAN='\033[96m'; RED='\033[91m'
 YELLOW='\033[93m'; BOLD='\033[1m'; RESET='\033[0m'
 
-VENV_DIR="venv311"
+VENV_DIR="venv311_vsr"
 FORCE=false
 SKIP_TORCH=false
 
@@ -38,8 +41,8 @@ while [[ $# -gt 0 ]]; do
     --no-torch)   SKIP_TORCH=true;  shift ;;
     -h|--help)
       echo "Usage: $0 [--force] [--no-torch]"
-      echo "  --force      venv311/ ohne Rückfrage löschen und neu erstellen"
-      echo "  --no-torch   torch/torchvision überspringen (nur requirements.txt)"
+      echo "  --force      venv311_vsr/ ohne Rückfrage löschen und neu erstellen"
+      echo "  --no-torch   torch/torchvision überspringen (nur requirements_vsr.txt)"
       exit 0 ;;
     *) echo -e "${RED}Unbekannte Option: $1${RESET}"; exit 2 ;;
   esac
@@ -48,7 +51,7 @@ done
 # ---------- Banner ----------
 echo -e "${BOLD}${CYAN}"
 echo "╔════════════════════════════════════════════════════════════╗"
-echo "║   setup_venv311.sh — Python 3.11 venv für P100/CC-6.0    ║"
+echo "║  setup_venv311_vsr.sh — Python 3.11 venv für VSR++/P100  ║"
 echo "╚════════════════════════════════════════════════════════════╝"
 echo -e "${RESET}"
 
@@ -243,31 +246,32 @@ pip install --upgrade pip setuptools wheel --quiet
 echo -e "${GREEN}✓ pip $(pip --version | awk '{print $2}')${RESET}"
 
 # ============================================================
-# 5. requirements.txt installieren (ohne torch/torchvision)
+# 5. requirements_vsr.txt installieren (ohne torch/torchvision)
 # ============================================================
-echo -e "\n${CYAN}[5/9] requirements.txt installieren (ohne torch/torchvision)...${RESET}"
+echo -e "\n${CYAN}[5/10] requirements_vsr.txt installieren (ohne torch/torchvision)...${RESET}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REQ_FILE="$SCRIPT_DIR/requirements.txt"
+REQ_FILE="$SCRIPT_DIR/requirements_vsr.txt"
 
 if [[ -f "$REQ_FILE" ]]; then
   TMP_REQ=$(mktemp)
-  grep -v -E '^(torch|torchvision)([=<>!~[:space:]]|$)' "$REQ_FILE" > "$TMP_REQ" || true
+  # torch/torchvision/tensorrt werden separat mit versionierten Wheels installiert
+  grep -v -E '^\s*(#|$|torch|torchvision|tensorrt|pycuda)' "$REQ_FILE" > "$TMP_REQ" || true
   if [[ -s "$TMP_REQ" ]]; then
     pip install -r "$TMP_REQ"
-    echo -e "${GREEN}✓ requirements.txt installiert${RESET}"
+    echo -e "${GREEN}✓ requirements_vsr.txt installiert${RESET}"
   else
-    echo -e "${YELLOW}  Keine weiteren Pakete nach torch-Filter${RESET}"
+    echo -e "${YELLOW}  Keine weiteren Pakete nach Filter${RESET}"
   fi
   rm -f "$TMP_REQ"
 else
-  echo -e "${YELLOW}  requirements.txt nicht gefunden — übersprungen${RESET}"
+  echo -e "${YELLOW}  requirements_vsr.txt nicht gefunden — übersprungen${RESET}"
 fi
 
 # ============================================================
 # 6. PyTorch installieren
 # ============================================================
 if [[ "$SKIP_TORCH" == "false" ]]; then
-  echo -e "\n${CYAN}[6/9] PyTorch + torchvision installieren...${RESET}"
+  echo -e "\n${CYAN}[6/10] PyTorch + torchvision installieren...${RESET}"
   echo -e "${YELLOW}  (kann einige Minuten dauern)${RESET}"
 
   TORCH_OK=false
@@ -296,13 +300,56 @@ if [[ "$SKIP_TORCH" == "false" ]]; then
     echo -e "${RED}✗ PyTorch-Installation fehlgeschlagen!${RESET}"
   fi
 else
-  echo -e "\n${YELLOW}[6/9] PyTorch übersprungen (--no-torch)${RESET}"
+  echo -e "\n${YELLOW}[6/10] PyTorch übersprungen (--no-torch)${RESET}"
 fi
 
 # ============================================================
-# 7. Kompatibilitäts-Test P100 / CC 6.0
+# 7. TensorRT installieren (CC-6.0-kompatible Version 8.6.x)
 # ============================================================
-echo -e "\n${CYAN}[7/9] Kompatibilitäts-Test für P100 (CC 6.0)...${RESET}"
+echo -e "\n${CYAN}[7/10] TensorRT installieren...${RESET}"
+
+# Compute Capability der GPU ermitteln
+GPU_CC=$(python -c "
+import torch, sys
+if not torch.cuda.is_available():
+    print('0.0')
+    sys.exit(0)
+cc = torch.cuda.get_device_capability(0)
+print(f'{cc[0]}.{cc[1]}')
+" 2>/dev/null || echo "0.0")
+
+GPU_CC_MAJOR=$(echo "$GPU_CC" | cut -d. -f1)
+
+if [[ "$GPU_CC_MAJOR" -eq 0 ]]; then
+  echo -e "${YELLOW}  ⚠  CUDA nicht verfügbar — TensorRT übersprungen${RESET}"
+elif [[ "$GPU_CC_MAJOR" -lt 7 ]]; then
+  # CC 6.x (z.B. Tesla P100): nur TensorRT 8.6.x unterstützt diese GPU!
+  # TensorRT 9.0+ hat Support für CC < 7.0 fallen gelassen.
+  echo -e "${YELLOW}  GPU CC ${GPU_CC} — TensorRT ≥ 9.0 unterstützt CC < 7.0 NICHT!${RESET}"
+  echo -e "${CYAN}  → Installiere tensorrt==8.6.* (letztes Release mit CC 6.0-Support)${RESET}"
+  if pip install 'tensorrt==8.6.*' onnx; then
+    echo -e "${GREEN}✓ tensorrt 8.6.x installiert${RESET}"
+    python -c "import tensorrt as trt; print(f'  TensorRT Version: {trt.__version__}')" 2>/dev/null \
+      || echo -e "${YELLOW}  ⚠  tensorrt importierbar, aber Version nicht lesbar${RESET}"
+  else
+    echo -e "${RED}✗ tensorrt 8.6.x Installation fehlgeschlagen!${RESET}"
+    echo -e "${YELLOW}  Manuelle Installation: pip install 'tensorrt==8.6.*'${RESET}"
+  fi
+else
+  # CC ≥ 7.0: aktuelle TensorRT-Version verwenden
+  echo -e "${CYAN}  GPU CC ${GPU_CC} — installiere aktuelle tensorrt-Version${RESET}"
+  if pip install tensorrt onnx; then
+    echo -e "${GREEN}✓ tensorrt installiert${RESET}"
+    python -c "import tensorrt as trt; print(f'  TensorRT Version: {trt.__version__}')" 2>/dev/null || true
+  else
+    echo -e "${RED}✗ tensorrt Installation fehlgeschlagen!${RESET}"
+  fi
+fi
+
+# ============================================================
+# 8. Kompatibilitäts-Test P100 / CC 6.0
+# ============================================================
+echo -e "\n${CYAN}[8/10] Kompatibilitäts-Test für P100 (CC 6.0)...${RESET}"
 
 COMPAT_PASS=0
 COMPAT_WARN=0
@@ -326,16 +373,17 @@ run_test() {
   fi
 }
 
-# Basis-Imports
-run_test "import torch" "import torch"
+# Basis-Imports (nur was vsr_plusplus_NEU + dataset_generator_v2 + Konvertierung brauchen)
+run_test "import torch"       "import torch"
 run_test "import torchvision" "import torchvision"
-run_test "import numpy" "import numpy"
-run_test "import cv2" "import cv2"
-run_test "import PIL" "import PIL"
+run_test "import numpy"       "import numpy"
+run_test "import cv2"         "import cv2"
 run_test "import tensorboard" "import tensorboard"
-run_test "import tqdm" "import tqdm"
-run_test "import psutil" "import psutil"
-run_test "import rich" "import rich"
+run_test "import psutil"      "import psutil"
+run_test "import rich"        "import rich"
+run_test "import questionary" "import questionary"
+run_test "import onnx"        "import onnx" warn
+run_test "import tensorrt"    "import tensorrt" warn
 
 # CUDA-Basis
 run_test "torch.cuda.is_available()" \
@@ -351,11 +399,31 @@ name = torch.cuda.get_device_name(0)
 print(f'  GPU erkannt: {name}  (CC {cc[0]}.{cc[1]})')
 if cc < (7, 0):
     print(f'  → CC {cc[0]}.{cc[1]} < 7.0: torch.compile/Triton NICHT verfügbar (erwartet für P100)')
+    print(f'  → TensorRT: nur 8.6.x kompatibel (9.x hat CC < 7.0 nicht mehr)')
 if cc < (7, 5):
     print(f'  → CC {cc[0]}.{cc[1]} < 7.5: Flash Attention NICHT verfügbar (erwartet für P100)')
 if cc < (8, 0):
     print(f'  → CC {cc[0]}.{cc[1]} < 8.0: bfloat16 NICHT nativ verfügbar (float16/fp32 laufen)')
 " 2>/dev/null || true
+
+# TensorRT-Version auf CC-Kompatibilität prüfen
+python -c "
+import sys
+try:
+    import tensorrt as trt
+    import torch
+    if not torch.cuda.is_available():
+        sys.exit(0)
+    cc = torch.cuda.get_device_capability(0)
+    major = int(trt.__version__.split('.')[0])
+    if cc < (7, 0) and major >= 9:
+        print(f'  ✗ tensorrt {trt.__version__} unterstützt CC {cc[0]}.{cc[1]} NICHT (erfordert CC ≥ 7.0)')
+        print(f'    Lösung: pip install \"tensorrt==8.6.*\"')
+        sys.exit(1)
+    print(f'  ✓ tensorrt {trt.__version__} kompatibel mit CC {cc[0]}.{cc[1]}')
+except ImportError:
+    print('  ⚠ tensorrt nicht installiert — Konvertierung zu .engine nicht möglich')
+" 2>/dev/null || COMPAT_WARN=$((COMPAT_WARN + 1))
 
 # FP16 (float16) — läuft auf P100
 run_test "torch FP16 Tensor auf CUDA" "
@@ -436,9 +504,9 @@ else
 fi
 
 # ============================================================
-# 8. Import-Check aller .py-Dateien im Repo
+# 9. Import-Check aller .py-Dateien im Repo
 # ============================================================
-echo -e "\n${CYAN}[8/9] Import-Check der Projekt-.py-Dateien...${RESET}"
+echo -e "\n${CYAN}[9/10] Import-Check der Projekt-.py-Dateien...${RESET}"
 
 STDLIB="os sys re json math time argparse subprocess threading logging \
   pathlib typing collections itertools functools hashlib tempfile signal \
@@ -453,7 +521,7 @@ declare -A PIP_MAP=(
   ["skimage"]="scikit-image"
   ["yaml"]="PyYAML"
 )
-SKIP_AUTO=("torch2trt" "tensorrt" "pycuda" "onnxruntime_gpu")
+SKIP_AUTO=("torch2trt" "tensorrt" "pycuda" "onnxruntime_gpu" "trt" "builtins")
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 IMPORTS=$(find "$REPO_ROOT" -name "*.py" 2>/dev/null \
@@ -502,9 +570,9 @@ while IFS= read -r pkg; do
 done <<< "$IMPORTS"
 
 # ============================================================
-# 9. Zusammenfassung
+# 10. Zusammenfassung
 # ============================================================
-echo -e "\n${BOLD}${CYAN}[9/9] Zusammenfassung${RESET}"
+echo -e "\n${BOLD}${CYAN}[10/10] Zusammenfassung${RESET}"
 echo -e "─────────────────────────────────────────────────────"
 echo -e "  ${GREEN}✓ Tests bestanden : ${COMPAT_PASS}${RESET}"
 echo -e "  ${YELLOW}⚠ Warnungen       : ${COMPAT_WARN} (P100/CC-6.0-Einschränkungen, erwartet)${RESET}"
@@ -512,17 +580,21 @@ echo -e "  ${RED}✗ Fehler          : $((COMPAT_FAIL + IMPORT_FAIL))${RESET}"
 echo -e "─────────────────────────────────────────────────────"
 
 if [[ $COMPAT_FAIL -eq 0 && $IMPORT_FAIL -eq 0 ]]; then
-  echo -e "\n${BOLD}${GREEN}✓ venv311/ ist lauffähig!${RESET}"
+  echo -e "\n${BOLD}${GREEN}✓ venv311_vsr/ ist lauffähig!${RESET}"
   echo -e "${YELLOW}  Warnungen betreffen nur Features, die CC ≥ 7.0 benötigen (P100 = CC 6.0):${RESET}"
-  echo -e "${YELLOW}  • torch.compile / Triton → deaktiviert (USE_COMPILE = False in config.py)${RESET}"
-  echo -e "${YELLOW}  • bfloat16 → AMP mit float16 stattdessen nutzen (bereits so konfiguriert)${RESET}"
-  echo -e "${YELLOW}  • Flash Attention → wird im Modell nicht verwendet${RESET}"
+  echo -e "${YELLOW}  • torch.compile / Triton   → deaktiviert (USE_COMPILE = False in config.py)${RESET}"
+  echo -e "${YELLOW}  • bfloat16                 → AMP mit float16 stattdessen (bereits konfiguriert)${RESET}"
+  echo -e "${YELLOW}  • Flash Attention          → wird im Modell nicht verwendet${RESET}"
+  echo -e "${YELLOW}  • TensorRT ≥ 9.0           → tensorrt 8.6.x installiert (CC 6.0-kompatibel)${RESET}"
   echo ""
   echo -e "${BOLD}Aktivieren:${RESET}"
   echo -e "  ${CYAN}source ${VENV_DIR}/bin/activate${RESET}"
   echo ""
   echo -e "${BOLD}Training starten:${RESET}"
   echo -e "  ${CYAN}python vsr_plusplus_NEU/train.py${RESET}"
+  echo ""
+  echo -e "${BOLD}Modell konvertieren:${RESET}"
+  echo -e "  ${CYAN}python optimize_checkpoint.py -c model.pth -o model_fp16.engine -f tensorrt -p fp16${RESET}"
   echo ""
   deactivate 2>/dev/null || true
   exit 0
