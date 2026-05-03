@@ -396,8 +396,8 @@ elif [[ "$GPU_CC_MAJOR" -lt 7 ]]; then
       pip install "$TRT_WHL" onnx --quiet
       echo -e "${GREEN}✓ TensorRT 8.6.x aus lokalem Tarball installiert${RESET}"
     else
-      echo -e "${YELLOW}  ⚠  Kein cp311-Wheel im Tarball gefunden — versuche pip-Fallback${RESET}"
-      pip install 'tensorrt==8.6.*' onnx 2>/dev/null || true
+      echo -e "${YELLOW}  ⚠  Kein cp311-Wheel im Tarball gefunden — TRT-Wheel nicht installierbar${RESET}"
+      echo -e "${YELLOW}     Bitte komplettes TensorRT-8.6.x-Tarball (CUDA ${CUDA_MAJOR}.x) verwenden.${RESET}"
     fi
   else
     # Option 2: System-Libs via apt (erfordert NVIDIAs CUDA-apt-Repo)
@@ -412,9 +412,10 @@ elif [[ "$GPU_CC_MAJOR" -lt 7 ]]; then
         echo -e "${YELLOW}  ⚠  apt-get fehlgeschlagen — TRT-apt-Repo nicht konfiguriert?${RESET}"
       fi
     fi
-    if pip install 'tensorrt==8.6.*' onnx 2>/dev/null; then
-      echo -e "${GREEN}✓ tensorrt 8.6.x Python-Bindings installiert${RESET}"
-    fi
+    # KEIN pip install 'tensorrt==8.6.*' hier: alle öffentlich verfügbaren Wheels
+    # (PyPI und NGC) für 8.6.x sind entweder Stubs (keine .so-Dateien) oder
+    # enthalten CUDA-11-Libs, die auf CUDA-12-Systemen nicht funktionieren.
+    # Einzig zuverlässige Installation: lokales Tarball (Option 1) oder apt (oben).
   fi
 
   if python -c "import tensorrt as trt; print(f'  TensorRT Version: {trt.__version__}')" 2>/dev/null; then
@@ -468,6 +469,12 @@ elif [[ "$GPU_CC_MAJOR" -lt 7 ]]; then
         echo -e "${YELLOW}    ${_WANTED_TAR}${RESET}"
         echo -e "${YELLOW}    https://developer.nvidia.com/tensorrt → Archive → 8.6.1 → Linux x86_64 CUDA ${CUDA_MAJOR}.0${RESET}"
         echo -e "${YELLOW}    Danach Script erneut ausführen.${RESET}"
+        # Kaputtes pip-Wheel entfernen damit kein defektes 'import tensorrt' im venv bleibt
+        if pip show tensorrt &>/dev/null; then
+          echo -e "${CYAN}  → Deinstalliere kaputtes tensorrt-Wheel (CUDA-Versionskonflikt)...${RESET}"
+          pip uninstall -y tensorrt 2>/dev/null || true
+          echo -e "${YELLOW}  ✓ tensorrt entfernt — nach Tarball-Download Script erneut ausführen.${RESET}"
+        fi
       fi
     elif [[ "$TRT_INSTALLED" -eq 0 ]]; then
       echo -e "${YELLOW}     Die pip-Wheels für TRT 8.6.x enthalten KEINE .so-Dateien (py2.py3-none-any Stub).${RESET}"
@@ -479,6 +486,12 @@ elif [[ "$GPU_CC_MAJOR" -lt 7 ]]; then
       echo -e "${YELLOW}     Option 2 (apt): NVIDIAs CUDA-apt-Repo einrichten, dann:${RESET}"
       echo -e "${YELLOW}       sudo apt-get install libnvinfer8 libnvinfer-plugin8 libnvonnxparser8 python3-libnvinfer${RESET}"
       echo -e "${YELLOW}     TRT-Optimierung (optimize_checkpoint.py) wird ohne TRT nicht verfügbar sein.${RESET}"
+      # Kaputtes pip-Stub-Wheel entfernen (verursacht irreführende Import-Fehler)
+      if pip show tensorrt &>/dev/null; then
+        echo -e "${CYAN}  → Deinstalliere defektes/unvollständiges tensorrt-Wheel...${RESET}"
+        pip uninstall -y tensorrt 2>/dev/null || true
+        echo -e "${YELLOW}  ✓ tensorrt entfernt — nach Tarball-Download Script erneut ausführen.${RESET}"
+      fi
     else
       echo -e "${YELLOW}     Import-Fehler: $_TRT_IMPORT_ERR${RESET}"
     fi
