@@ -326,38 +326,69 @@ elif [[ "$GPU_CC_MAJOR" -lt 7 ]]; then
   # CC 6.x (z.B. Tesla P100): nur TensorRT 8.6.x unterstützt diese GPU!
   # TensorRT 9.0+ hat Support für CC < 7.0 fallen gelassen.
   echo -e "${YELLOW}  GPU CC ${GPU_CC} — TensorRT ≥ 9.0 unterstützt CC < 7.0 NICHT!${RESET}"
-  echo -e "${CYAN}  → TensorRT 8.6.x: System-Libs via apt + Python-Bindings via pip${RESET}"
+  echo -e "${CYAN}  → TensorRT 8.6.x: lokales Tarball (bevorzugt) oder apt + Python-Bindings${RESET}"
   # Alle pip-Wheels für tensorrt 8.6.x (PyPI und NGC) sind py2.py3-none-any Stubs
   # ohne gebündelte Shared Libraries (libnvinfer.so.8 etc.).
-  # Einzig zuverlässige Option: System-Installation via NVIDIAs CUDA apt-Repo,
-  # danach pip-Bindings die auf die System-Libs zurückgreifen.
+  # Zuverlässige Optionen:
+  #   1. Lokales Tarball (TensorRT-8.6.x.tar.gz) im Repo-Root → extrahieren + Wheel installieren
+  #   2. System-Installation via NVIDIAs CUDA apt-Repo + pip-Bindings
   TRT_INSTALLED=0
-  if command -v apt-get &>/dev/null; then
-    echo -e "${CYAN}  → Versuche apt-get install libnvinfer8 (TRT 8.6.x System-Libs)...${RESET}"
-    if apt-get install -y --no-install-recommends \
-        libnvinfer8 libnvinfer-plugin8 libnvonnxparser8 \
-        python3-libnvinfer 2>/dev/null; then
-      echo -e "${GREEN}✓ TensorRT 8.6.x System-Libs via apt installiert${RESET}"
+
+  # Option 1 (bevorzugt): lokales TRT-8.6.x-Tarball im Repo-Root verwenden
+  TRT_TARBALL=$(ls "$SCRIPT_DIR"/TensorRT-8.6.*.tar.gz 2>/dev/null | head -1)
+  if [[ -n "$TRT_TARBALL" ]]; then
+    echo -e "${CYAN}  → Lokales Tarball gefunden: $(basename "$TRT_TARBALL")${RESET}"
+    TRT_EXTRACT_DIR="$SCRIPT_DIR/TensorRT-8.6.1.6"
+    if [[ ! -d "$TRT_EXTRACT_DIR" ]]; then
+      echo -e "${CYAN}  → Entpacke Tarball...${RESET}"
+      tar -xzf "$TRT_TARBALL" -C "$SCRIPT_DIR"
+    fi
+    # Shared Libraries ins System kopieren damit libnvinfer.so.8 gefunden wird
+    if [[ -d "$TRT_EXTRACT_DIR/lib" ]]; then
+      echo -e "${CYAN}  → Kopiere .so-Libs nach /usr/local/lib/...${RESET}"
+      cp -n "$TRT_EXTRACT_DIR"/lib/lib*.so* /usr/local/lib/ 2>/dev/null || true
+      ldconfig 2>/dev/null || true
       TRT_INSTALLED=1
+    fi
+    # Python-Wheel für cp311 installieren
+    TRT_WHL=$(ls "$TRT_EXTRACT_DIR"/python/tensorrt-8.6.*-cp311-*.whl 2>/dev/null | head -1)
+    if [[ -n "$TRT_WHL" ]]; then
+      echo -e "${CYAN}  → Installiere Python-Wheel: $(basename "$TRT_WHL")${RESET}"
+      pip install "$TRT_WHL" onnx --quiet
+      echo -e "${GREEN}✓ TensorRT 8.6.x aus lokalem Tarball installiert${RESET}"
     else
-      echo -e "${YELLOW}  ⚠  apt-get fehlgeschlagen — TRT-apt-Repo nicht konfiguriert?${RESET}"
+      echo -e "${YELLOW}  ⚠  Kein cp311-Wheel im Tarball gefunden — versuche pip-Fallback${RESET}"
+      pip install 'tensorrt==8.6.*' onnx 2>/dev/null || true
+    fi
+  else
+    # Option 2: System-Libs via apt (erfordert NVIDIAs CUDA-apt-Repo)
+    if command -v apt-get &>/dev/null; then
+      echo -e "${CYAN}  → Versuche apt-get install libnvinfer8 (TRT 8.6.x System-Libs)...${RESET}"
+      if apt-get install -y --no-install-recommends \
+          libnvinfer8 libnvinfer-plugin8 libnvonnxparser8 \
+          python3-libnvinfer 2>/dev/null; then
+        echo -e "${GREEN}✓ TensorRT 8.6.x System-Libs via apt installiert${RESET}"
+        TRT_INSTALLED=1
+      else
+        echo -e "${YELLOW}  ⚠  apt-get fehlgeschlagen — TRT-apt-Repo nicht konfiguriert?${RESET}"
+      fi
+    fi
+    if pip install 'tensorrt==8.6.*' onnx 2>/dev/null; then
+      echo -e "${GREEN}✓ tensorrt 8.6.x Python-Bindings installiert${RESET}"
     fi
   fi
-  if pip install 'tensorrt==8.6.*' onnx 2>/dev/null; then
-    echo -e "${GREEN}✓ tensorrt 8.6.x Python-Bindings installiert${RESET}"
-  fi
+
   if python -c "import tensorrt as trt; print(f'  TensorRT Version: {trt.__version__}')" 2>/dev/null; then
     echo -e "${GREEN}✓ tensorrt import erfolgreich${RESET}"
   else
     echo -e "${YELLOW}  ⚠  tensorrt Import fehlgeschlagen!${RESET}"
     if [[ "$TRT_INSTALLED" -eq 0 ]]; then
       echo -e "${YELLOW}     Die pip-Wheels für TRT 8.6.x enthalten KEINE .so-Dateien (py2.py3-none-any Stub).${RESET}"
-      echo -e "${YELLOW}     Manuelle Installation erforderlich — eine der folgenden Optionen:${RESET}"
-      echo -e "${YELLOW}     Option 1 (apt): NVIDIAs CUDA-apt-Repo einrichten, dann:${RESET}"
+      echo -e "${YELLOW}     Manuelle Installation — eine der folgenden Optionen:${RESET}"
+      echo -e "${YELLOW}     Option 1 (lokal): TensorRT-8.6.1.6.Linux.x86_64-gnu.cuda-11.8.tar.gz ins${RESET}"
+      echo -e "${YELLOW}       Repo-Root legen, dann dieses Script erneut ausführen.${RESET}"
+      echo -e "${YELLOW}     Option 2 (apt): NVIDIAs CUDA-apt-Repo einrichten, dann:${RESET}"
       echo -e "${YELLOW}       sudo apt-get install libnvinfer8 libnvinfer-plugin8 libnvonnxparser8 python3-libnvinfer${RESET}"
-      echo -e "${YELLOW}     Option 2 (lokal): TensorRT-8.6.1.6.Linux.x86_64-gnu.cuda-12.0.tar.gz von${RESET}"
-      echo -e "${YELLOW}       developer.nvidia.com herunterladen, dann das enthaltene .whl installieren:${RESET}"
-      echo -e "${YELLOW}       pip install tensorrt-8.6.1-cp311-none-linux_x86_64.whl${RESET}"
       echo -e "${YELLOW}     TRT-Optimierung (optimize_checkpoint.py) wird ohne TRT nicht verfügbar sein.${RESET}"
     fi
   fi
