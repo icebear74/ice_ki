@@ -775,7 +775,8 @@ Examples:
     video_path = sys.argv[1]
     output_video = None
     apply_corrections = '--no-correct' not in sys.argv
-    use_vsr = '--vsr' in sys.argv
+    # --checkpoint is accepted as an alias for --vsr
+    use_vsr = '--vsr' in sys.argv or '--checkpoint' in sys.argv
     vsr_checkpoint = None
 
     # Parse output path (if provided and not an option)
@@ -783,11 +784,12 @@ Examples:
         output_video = sys.argv[2]
 
     if use_vsr:
+        flag = '--vsr' if '--vsr' in sys.argv else '--checkpoint'
         try:
-            idx = sys.argv.index('--vsr')
+            idx = sys.argv.index(flag)
             vsr_checkpoint = sys.argv[idx + 1]
         except (IndexError, ValueError):
-            print("❌ --vsr requires checkpoint path")
+            print(f"❌ {flag} requires checkpoint path")
             sys.exit(1)
 
     # Parse --gpu <index>
@@ -809,13 +811,20 @@ Examples:
 
     # Wiederholungsbefehl ausgeben
     args = list(sys.argv)
+    # Alias --checkpoint → --vsr normalisieren, damit der Hinweis korrekt ist
+    if '--checkpoint' in args:
+        args[args.index('--checkpoint')] = '--vsr'
     # --gpu bereits vorhanden? Wert aktualisieren; sonst anhängen
     if '--gpu' in args:
         args[args.index('--gpu') + 1] = str(device.index if device.type == 'cuda' else 0)
     elif device.type == 'cuda':
         args.extend(['--gpu', str(device.index if device.index is not None else 0)])
     print(f"{C_CYAN}💡 Nächstes Mal ohne Auswahl:{C_RESET}")
-    print(f"   {' '.join(args)}\n")
+    # Pfade mit Leerzeichen oder Sonderzeichen in Anführungszeichen
+    quoted = []
+    for a in args:
+        quoted.append(f'"{a}"' if (' ' in a or '(' in a or ')' in a) else a)
+    print(f"   {' '.join(quoted)}\n")
 
     success = process_video(
         video_path,
