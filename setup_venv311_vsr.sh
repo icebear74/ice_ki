@@ -326,20 +326,22 @@ elif [[ "$GPU_CC_MAJOR" -lt 7 ]]; then
   # CC 6.x (z.B. Tesla P100): nur TensorRT 8.6.x unterstützt diese GPU!
   # TensorRT 9.0+ hat Support für CC < 7.0 fallen gelassen.
   echo -e "${YELLOW}  GPU CC ${GPU_CC} — TensorRT ≥ 9.0 unterstützt CC < 7.0 NICHT!${RESET}"
-  echo -e "${CYAN}  → Installiere tensorrt==8.6.* + tensorrt-libs + tensorrt-bindings (CC 6.0-Support)${RESET}"
-  # Das PyPI-Wheel 'tensorrt' ist nur ein Wrapper; die eigentlichen shared libs
-  # kommen aus tensorrt-libs, die Python-Bindings aus tensorrt-bindings.
-  # Ohne diese beiden schlägt 'import tensorrt' trotz installiertem Paket fehl.
-  if pip install 'tensorrt==8.6.*' 'tensorrt-libs==8.6.*' 'tensorrt-bindings==8.6.*' onnx; then
-    echo -e "${GREEN}✓ tensorrt 8.6.x installiert${RESET}"
+  echo -e "${CYAN}  → Installiere tensorrt==8.6.* via NGC-Index (vollständiges Wheel mit .so-Dateien)${RESET}"
+  # tensorrt-libs und tensorrt-bindings existieren auf PyPI erst ab 9.x.
+  # Für 8.6.x liefert NVIDIAs NGC-Index das vollständige Wheel inkl. libnvinfer.so.8 etc.
+  # Der Standard-PyPI-Wheel (8.6.1.post1) ist ein Stub ohne gebündelte Shared Libraries
+  # und schlägt deshalb beim Import fehl.
+  NGC_INDEX="https://pypi.ngc.nvidia.com"
+  if pip install 'tensorrt==8.6.*' onnx --extra-index-url "$NGC_INDEX"; then
+    echo -e "${GREEN}✓ tensorrt 8.6.x (NGC) installiert${RESET}"
     python -c "import tensorrt as trt; print(f'  TensorRT Version: {trt.__version__}')" 2>/dev/null \
-      || echo -e "${YELLOW}  ⚠  tensorrt Packages installiert, aber Import fehlgeschlagen — LD_LIBRARY_PATH prüfen${RESET}"
+      || echo -e "${YELLOW}  ⚠  tensorrt installiert, aber Import fehlgeschlagen — LD_LIBRARY_PATH prüfen${RESET}"
   else
     echo -e "${RED}✗ tensorrt 8.6.x Installation fehlgeschlagen!${RESET}"
-    echo -e "${YELLOW}  Manuelle Installation: pip install 'tensorrt==8.6.*' 'tensorrt-libs==8.6.*' 'tensorrt-bindings==8.6.*'${RESET}"
+    echo -e "${YELLOW}  Manuelle Installation: pip install 'tensorrt==8.6.*' --extra-index-url https://pypi.ngc.nvidia.com${RESET}"
   fi
 else
-  # CC ≥ 7.0: aktuelle TensorRT-Version verwenden
+  # CC ≥ 7.0: aktuelle TensorRT-Version verwenden (9.x, Standard-PyPI)
   echo -e "${CYAN}  GPU CC ${GPU_CC} — installiere aktuelle tensorrt-Version${RESET}"
   if pip install tensorrt tensorrt-libs tensorrt-bindings onnx; then
     echo -e "${GREEN}✓ tensorrt installiert${RESET}"

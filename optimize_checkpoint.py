@@ -259,8 +259,9 @@ def _build_trt_engine(onnx_path: str, engine_path: str,
         import tensorrt as trt
     except ImportError:
         print("❌ tensorrt fehlt oder nicht importierbar!")
-        print("   Das PyPI-Wheel 'tensorrt' benötigt zusätzlich tensorrt-libs + tensorrt-bindings:")
-        print("   pip install 'tensorrt==8.6.*' 'tensorrt-libs==8.6.*' 'tensorrt-bindings==8.6.*'")
+        print("   Für CUDA 12 + CC 6.0 (Tesla P100): NGC-Index verwenden:")
+        print("   pip install 'tensorrt==8.6.*' --extra-index-url https://pypi.ngc.nvidia.com")
+        print("   (tensorrt-libs/tensorrt-bindings existieren auf PyPI nur für TRT 9.x+)")
         return False
 
     TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
