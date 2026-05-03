@@ -380,9 +380,12 @@ class VSRComparator:
                             idx = len(all_frames) - 1
                         frame_indices.append(idx)
                     
-                    # Stack 7 frames: shape (3, 504, 720) each → (3, 504, 5040) stacked
-                    frame_stack = np.concatenate([all_frames[idx] for idx in frame_indices], axis=2)
-                    frame_t = torch.from_numpy(frame_stack).float().permute(2, 0, 1).unsqueeze(0) / 255.0
+                    # Stack 7 frames: shape [1, 7, 3, H, W] as expected by model.forward
+                    frames_tensors = [
+                        torch.from_numpy(all_frames[idx]).float().permute(2, 0, 1) / 255.0
+                        for idx in frame_indices
+                    ]
+                    frame_t = torch.stack(frames_tensors, dim=0).unsqueeze(0)  # (1, 7, 3, H, W)
                     
                     if i % max(1, len(all_frames)//4) == 0 or i == len(all_frames) - 1:
                         print(f"       [{i+1}/{len(all_frames)}] Processing frame {i+1}...")
@@ -395,7 +398,7 @@ class VSRComparator:
                         vsr_frames.append(vsr_output)
                     except Exception as e:
                         print(f"       ❌ VSR inference failed on frame {i}:")
-                        print(f"          Input shape: {frame_t.shape} (expected: 1, 21, H, W)")
+                        print(f"          Input shape: {frame_t.shape} (expected: 1, 7, 3, H, W)")
                         print(f"          Error: {e}")
                         import traceback
                         traceback.print_exc()
