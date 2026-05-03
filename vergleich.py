@@ -622,7 +622,7 @@ class VSRComparator:
                 f":x={half_w + 30}:y=50:box=1:boxcolor=black@0.5[out]"
             )
             combine_cmd = [
-                'ffmpeg', '-loglevel', 'error',
+                'ffmpeg', '-y',
                 '-i', f'{temp_dir}/ffmpeg_upscale.mkv',
                 '-f', 'rawvideo', '-pix_fmt', 'bgr24',
                 '-s', f'{W_out}x{H_out}', '-r', '25',
@@ -632,19 +632,18 @@ class VSRComparator:
                 '-c:v', 'hevc_nvenc', '-preset', 'medium', '-crf', '18',
                 output_video
             ]
+            print(f"       CMD: {' '.join(combine_cmd)}")
             
             start_time = time_module.time()
             try:
                 result = subprocess.run(
                     combine_cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=60
+                    timeout=600
                 )
                 elapsed = time_module.time() - start_time
                 
                 if result.returncode != 0:
-                    print(f"       ❌ Combine failed: {result.stderr}")
+                    print(f"       ❌ Combine failed (returncode={result.returncode})")
                     return False
                 
                 output_size_mb = os.path.getsize(output_video) / (1024 * 1024)
