@@ -437,7 +437,7 @@ class VSRComparator:
                 '-filter_complex', '''
                     [0:v]crop=1080:1728:0:0[left];
                     [1:v]crop=1080:1728:1080:0[right];
-                    [left][right]hstack=spacing=2[combined];
+                    [left][right]hstack[combined];
                     [combined]drawtext=text='FFmpeg Upscale (x3)':fontsize=60:fontcolor=white:x=50:y=50:box=1:boxcolor=black@0.5,
                     drawtext=text='VSR Model (x3)':fontsize=60:fontcolor=white:x=1130:y=50:box=1:boxcolor=black@0.5[out]
                 ''',
