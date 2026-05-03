@@ -343,10 +343,18 @@ elif [[ "$GPU_CC_MAJOR" -lt 7 ]]; then
       echo -e "${CYAN}  → Entpacke Tarball...${RESET}"
       tar -xzf "$TRT_TARBALL" -C "$SCRIPT_DIR"
     fi
-    # Shared Libraries ins System kopieren damit libnvinfer.so.8 gefunden wird
-    if [[ -d "$TRT_EXTRACT_DIR/lib" ]]; then
-      echo -e "${CYAN}  → Kopiere .so-Libs nach /usr/local/lib/...${RESET}"
-      cp -n "$TRT_EXTRACT_DIR"/lib/lib*.so* /usr/local/lib/ 2>/dev/null || true
+    # Shared Libraries registrieren — wir KOPIEREN NICHT (cp würde Symlinks zerstören).
+    # Stattdessen: ld.so.conf.d-Eintrag auf das TRT-lib-Verzeichnis setzen.
+    TRT_LIB_DIR="$TRT_EXTRACT_DIR/targets/x86_64-linux-gnu/lib"
+    [[ -d "$TRT_LIB_DIR" ]] || TRT_LIB_DIR="$TRT_EXTRACT_DIR/lib"
+    if [[ -d "$TRT_LIB_DIR" ]]; then
+      # Bereits fälschlich nach /usr/local/lib/ kopierte Nicht-Symlinks entfernen
+      for f in libnvinfer libnvinfer_lean libnvinfer_dispatch libnvinfer_vc_plugin \
+                libnvonnxparser libnvparsers libnvinfer_plugin; do
+        rm -f "/usr/local/lib/${f}.so.8" 2>/dev/null || true
+      done
+      echo -e "${CYAN}  → Registriere TRT-Libs via /etc/ld.so.conf.d/tensorrt.conf${RESET}"
+      echo "$TRT_LIB_DIR" > /etc/ld.so.conf.d/tensorrt.conf
       ldconfig 2>/dev/null || true
       TRT_INSTALLED=1
     fi
