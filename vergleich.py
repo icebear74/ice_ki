@@ -16,6 +16,7 @@ from pathlib import Path
 import sys
 import shutil
 import os
+import gc
 import torch
 from collections import defaultdict
 import time as time_module
@@ -455,59 +456,86 @@ class VSRComparator:
                 for i in range(N)
             ]  # list[N][7]  — plain ints, no GPU needed yet
 
-            # --- Optimization 3 & 4: streaming mini-batch inference (chunk=8) ---
+            # --- Optimization 3 & 4: streaming mini-batch inference ---
             # Per chunk: only ≤14 unique source frames are transferred to GPU (fp16).
             # GPU memory usage is constant O(chunk) regardless of video length.
+            # OOM failsafe: on OutOfMemoryError the chunk size is halved and the
+            # whole pass is restarted until CHUNK=1; only then we give up.
             CHUNK = 8
+            MIN_CHUNK = 1
             dtype = torch.float16 if self.use_fp16 else torch.float32
+
             vsr_frames = []
-            try:
-                with torch.no_grad():
-                    for start in range(0, N, CHUNK):
-                        end = min(start + CHUNK, N)
-                        batch_indices = all_indices[start:end]   # list[≤8][7]
+            while CHUNK >= MIN_CHUNK:
+                vsr_frames = []
+                oom_hit = False
+                try:
+                    with torch.no_grad():
+                        for start in range(0, N, CHUNK):
+                            end = min(start + CHUNK, N)
+                            batch_indices = all_indices[start:end]
 
-                        # Collect only the unique source frames this chunk needs
-                        needed = sorted({idx for window in batch_indices for idx in window})
-                        idx_map = {g: l for l, g in enumerate(needed)}
+                            # Collect only the unique source frames this chunk needs
+                            needed = sorted({idx for window in batch_indices for idx in window})
+                            idx_map = {g: l for l, g in enumerate(needed)}
 
-                        # Transfer ≤14 unique frames to GPU as fp16 [K, 3, H, W]
-                        src = torch.stack([
-                            torch.from_numpy(cpu_frames[i])
-                                 .permute(2, 0, 1)
-                                 .to(dtype=dtype, device=self.device) / 255.0
-                            for i in needed
-                        ])
+                            # Transfer ≤(CHUNK+6) unique frames to GPU as fp16
+                            src = torch.stack([
+                                torch.from_numpy(cpu_frames[i])
+                                     .permute(2, 0, 1)
+                                     .to(dtype=dtype, device=self.device) / 255.0
+                                for i in needed
+                            ])
 
-                        # Build windows via local indices: [≤8, 7, 3, H, W]
-                        local_idx = torch.tensor(
-                            [[idx_map[g] for g in w] for w in batch_indices],
-                            device=self.device
-                        )
-                        batch_windows = src[local_idx]
-                        del src
+                            # Build windows: [CHUNK, 7, 3, H, W]
+                            local_idx = torch.tensor(
+                                [[idx_map[g] for g in w] for w in batch_indices],
+                                device=self.device
+                            )
+                            batch_windows = src[local_idx]
+                            del src
 
-                        out = self.model(batch_windows)   # [≤8, 3, H*3, W*3]
+                            out = self.model(batch_windows)   # [CHUNK, 3, H*3, W*3]
 
-                        # --- Optimization 5: uint8 conversion on GPU (no .astype) ---
-                        out_np = (
-                            out.permute(0, 2, 3, 1)
-                               .clamp(0.0, 1.0)
-                               .mul(255)
-                               .to(torch.uint8)
-                               .cpu()
-                               .numpy()
-                        )   # [≤8, H*3, W*3, 3]  RGB uint8
-                        vsr_frames.extend(out_np)
-                        print(f"       [{end}/{N}] frames processed...")
-            except Exception as e:
-                print(f"       ❌ VSR inference failed:")
-                print(f"          Error: {e}")
-                import traceback
-                traceback.print_exc()
-                return False
+                            # uint8 conversion on GPU (no .astype)
+                            out_np = (
+                                out.permute(0, 2, 3, 1)
+                                   .clamp(0.0, 1.0)
+                                   .mul(255)
+                                   .to(torch.uint8)
+                                   .cpu()
+                                   .numpy()
+                            )   # [CHUNK, H*3, W*3, 3]  RGB uint8
+                            del out, batch_windows, local_idx
+                            vsr_frames.extend(out_np)
+                            print(f"       [{end}/{N}] chunk={CHUNK} frames processed...")
 
-            print(f"       ✓ VSR done ({len(vsr_frames)} frames processed)")
+                    break  # success – leave retry loop
+
+                except Exception as e:
+                    is_oom = isinstance(e, torch.cuda.OutOfMemoryError) or (
+                        isinstance(e, RuntimeError) and 'out of memory' in str(e).lower()
+                    )
+                    if is_oom:
+                        old_chunk = CHUNK
+                        CHUNK = CHUNK // 2
+                        torch.cuda.empty_cache()
+                        gc.collect()
+                        if CHUNK < MIN_CHUNK:
+                            print(f"       ❌ GPU OOM at CHUNK=1 – not enough VRAM for this video.")
+                            print(f"          Try a shorter clip or a GPU with more VRAM.")
+                            return False
+                        print(f"       {C_YELLOW}⚠ GPU OOM (CHUNK={old_chunk}) → "
+                              f"retrying with CHUNK={CHUNK}...{C_RESET}")
+                        oom_hit = True
+                    else:
+                        print(f"       ❌ VSR inference failed:")
+                        print(f"          Error: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        return False
+
+            print(f"       ✓ VSR done ({len(vsr_frames)} frames, chunk={CHUNK})")
             
             # ────────────────────────────────────────────────────────────
             # Phase 4: Write VSR raw video
