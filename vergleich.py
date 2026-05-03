@@ -245,27 +245,43 @@ def correct_video(input_path: str, output_path: str, correction_type: str) -> bo
 
 class VSRComparator:
     def __init__(self, checkpoint_path: str, device: str = 'cuda:0'):
-        """Initialize VSR model with 24 blocks"""
+        """Initialize VSR model with 24 blocks — optimized for inference"""
         self.device = torch.device(device)
         self.available = False
-        
+        self.use_fp16 = False
+
         try:
             from vsr_plusplus_NEU.core.model_7frame import VSRBidirectional_7frames_3x
-            
+
             # Model uses 24 blocks (12 backward + 12 forward)
             n_blocks = 24
             n_feats = 72
-            
+
+            # Let cuDNN auto-select the fastest conv kernels for the fixed input size
+            torch.backends.cudnn.benchmark = True
+
             print(f"  Loading VSR model (n_blocks={n_blocks}, n_feats={n_feats})...")
-            self.model = VSRBidirectional_7frames_3x(n_feats=n_feats, n_blocks=n_blocks).to(self.device)
-            
-            # Load checkpoint with weights_only=False for custom classes
+            self.model = VSRBidirectional_7frames_3x(n_feats=n_feats, n_blocks=n_blocks)
+
+            # Load checkpoint to CPU first — avoids doubling GPU peak memory during load
             print(f"  Loading checkpoint: {checkpoint_path}")
-            ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+            ckpt = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
             self.model.load_state_dict(ckpt['model_state_dict'])
-            self.model.eval()
+            del ckpt  # free CPU RAM immediately
+
+            # Move to GPU, switch to fp16 (2× throughput on CUDA), set eval mode
+            self.model = self.model.to(self.device).half().eval()
+            self.use_fp16 = True
+
+            # torch.compile: fuses ops and removes Python overhead (PyTorch >= 2.0)
+            try:
+                self.model = torch.compile(self.model, mode='reduce-overhead')
+                print(f"  ✅ torch.compile enabled (reduce-overhead)")
+            except Exception:
+                pass  # graceful fallback on older PyTorch
+
             self.available = True
-            print(f"  ✅ VSR model loaded successfully")
+            print(f"  ✅ VSR model loaded (fp16, cudnn.benchmark=True)")
         except Exception as e:
             print(f"  ⚠️  VSR model failed to load: {e}")
             import traceback
