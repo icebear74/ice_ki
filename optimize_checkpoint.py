@@ -259,9 +259,12 @@ def _build_trt_engine(onnx_path: str, engine_path: str,
         import tensorrt as trt
     except ImportError:
         print("❌ tensorrt fehlt oder nicht importierbar!")
-        print("   Für CUDA 12 + CC 6.0 (Tesla P100): NGC-Index verwenden:")
-        print("   pip install 'tensorrt==8.6.*' --extra-index-url https://pypi.ngc.nvidia.com")
-        print("   (tensorrt-libs/tensorrt-bindings existieren auf PyPI nur für TRT 9.x+)")
+        print("   Alle pip-Wheels für TRT 8.6.x sind Stubs ohne gebündelte .so-Dateien.")
+        print("   System-Installation erforderlich — eine der folgenden Optionen:")
+        print("   Option 1 (apt):  sudo apt-get install libnvinfer8 libnvinfer-plugin8 libnvonnxparser8 python3-libnvinfer")
+        print("   Option 2 (lokal): TensorRT-8.6.1.6.Linux.x86_64-gnu.cuda-12.0.tar.gz von")
+        print("                     developer.nvidia.com herunterladen, dann das enthaltene Wheel installieren:")
+        print("                     pip install tensorrt-8.6.1-cp311-none-linux_x86_64.whl")
         return False
 
     TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
