@@ -335,9 +335,24 @@ elif [[ "$GPU_CC_MAJOR" -lt 7 ]]; then
   TRT_INSTALLED=0
 
   # Option 1 (bevorzugt): lokales TRT-8.6.x-Tarball im Repo-Root verwenden
-  TRT_TARBALL=$(ls "$SCRIPT_DIR"/TensorRT-8.6.*.tar.gz 2>/dev/null | head -1)
+  # CUDA-Version-passendes Tarball bevorzugen (cuda-12 vor cuda-11 auf CUDA-12-System)
+  TRT_TARBALL=""
+  if [[ $CUDA_MAJOR -ge 12 ]]; then
+    TRT_TARBALL=$(ls "$SCRIPT_DIR"/TensorRT-8.6.*cuda-12*.tar.gz 2>/dev/null | head -1)
+  elif [[ $CUDA_MAJOR -eq 11 ]]; then
+    TRT_TARBALL=$(ls "$SCRIPT_DIR"/TensorRT-8.6.*cuda-11*.tar.gz 2>/dev/null | head -1)
+  fi
+  # Fallback: erstes verfügbares TRT-8.6.x-Tarball
+  [[ -z "$TRT_TARBALL" ]] && \
+    TRT_TARBALL=$(ls "$SCRIPT_DIR"/TensorRT-8.6.*.tar.gz 2>/dev/null | head -1)
   if [[ -n "$TRT_TARBALL" ]]; then
     echo -e "${CYAN}  → Lokales Tarball gefunden: $(basename "$TRT_TARBALL")${RESET}"
+    # CUDA-Versionskonflikt erkennen (z.B. cuda-11-Tarball auf CUDA-12-System)
+    if [[ $CUDA_MAJOR -ge 12 ]] && echo "$TRT_TARBALL" | grep -q "cuda-11"; then
+      echo -e "${YELLOW}  ⚠  Tarball für CUDA 11.x — System hat CUDA ${CUDA_MAJOR}.${CUDA_MINOR}!${RESET}"
+      echo -e "${YELLOW}     TRT-Import wird mit 'libcublas.so.11: cannot open shared object file' scheitern.${RESET}"
+      echo -e "${YELLOW}     Besser: TensorRT-8.6.1.6.Linux.x86_64-gnu.cuda-12.0.tar.gz ins Repo-Root legen.${RESET}"
+    fi
     TRT_EXTRACT_DIR="$SCRIPT_DIR/TensorRT-8.6.1.6"
     if [[ ! -d "$TRT_EXTRACT_DIR" ]]; then
       echo -e "${CYAN}  → Entpacke Tarball...${RESET}"
@@ -390,14 +405,27 @@ elif [[ "$GPU_CC_MAJOR" -lt 7 ]]; then
     echo -e "${GREEN}✓ tensorrt import erfolgreich${RESET}"
   else
     echo -e "${YELLOW}  ⚠  tensorrt Import fehlgeschlagen!${RESET}"
-    if [[ "$TRT_INSTALLED" -eq 0 ]]; then
+    # Spezifische Fehlerdiagnose: CUDA-Versionskonflikt (cuda-11-Wheel auf CUDA-12-System)
+    _TRT_IMPORT_ERR=$(python -c "import tensorrt" 2>&1 || true)
+    if echo "$_TRT_IMPORT_ERR" | grep -qE "libcublas\.so\.1[01]|libcublasLt\.so\.1[01]|libcufft\.so\.1[01]"; then
+      echo -e "${YELLOW}  Ursache: TRT-Wheel für CUDA 11.x — System hat CUDA ${CUDA_MAJOR}.${CUDA_MINOR}${RESET}"
+      echo -e "${YELLOW}  Fehlende Bibliothek: $(echo "$_TRT_IMPORT_ERR" | grep -oE 'lib[a-zA-Z]+\.so\.[0-9]+' | head -1)${RESET}"
+      echo -e "${YELLOW}  Lösung: CUDA-12-kompatiblen TRT-Tarball verwenden:${RESET}"
+      echo -e "${YELLOW}    https://developer.nvidia.com/tensorrt → Archive → 8.6.1 → Linux x86_64 CUDA 12.0${RESET}"
+      echo -e "${YELLOW}    Dateiname: TensorRT-8.6.1.6.Linux.x86_64-gnu.cuda-12.0.tar.gz${RESET}"
+      echo -e "${YELLOW}    Tarball ins Repo-Root legen → Script erneut ausführen.${RESET}"
+    elif [[ "$TRT_INSTALLED" -eq 0 ]]; then
       echo -e "${YELLOW}     Die pip-Wheels für TRT 8.6.x enthalten KEINE .so-Dateien (py2.py3-none-any Stub).${RESET}"
       echo -e "${YELLOW}     Manuelle Installation — eine der folgenden Optionen:${RESET}"
-      echo -e "${YELLOW}     Option 1 (lokal): TensorRT-8.6.1.6.Linux.x86_64-gnu.cuda-11.8.tar.gz ins${RESET}"
-      echo -e "${YELLOW}       Repo-Root legen, dann dieses Script erneut ausführen.${RESET}"
+      echo -e "${YELLOW}     Option 1 (lokal): Passendes TRT-8.6.x-Tarball ins Repo-Root legen:${RESET}"
+      echo -e "${YELLOW}       CUDA 12.x: TensorRT-8.6.1.6.Linux.x86_64-gnu.cuda-12.0.tar.gz${RESET}"
+      echo -e "${YELLOW}       CUDA 11.x: TensorRT-8.6.1.6.Linux.x86_64-gnu.cuda-11.8.tar.gz${RESET}"
+      echo -e "${YELLOW}       https://developer.nvidia.com/tensorrt → Archive → 8.6.1${RESET}"
       echo -e "${YELLOW}     Option 2 (apt): NVIDIAs CUDA-apt-Repo einrichten, dann:${RESET}"
       echo -e "${YELLOW}       sudo apt-get install libnvinfer8 libnvinfer-plugin8 libnvonnxparser8 python3-libnvinfer${RESET}"
       echo -e "${YELLOW}     TRT-Optimierung (optimize_checkpoint.py) wird ohne TRT nicht verfügbar sein.${RESET}"
+    else
+      echo -e "${YELLOW}     Import-Fehler: $_TRT_IMPORT_ERR${RESET}"
     fi
   fi
 else
