@@ -17,6 +17,7 @@ import sys
 import shutil
 import os
 import gc
+import warnings
 import torch
 from collections import defaultdict
 import time as time_module
@@ -479,7 +480,11 @@ class VSRComparator:
                     print(f"       🔧 Applying torch.jit.trace+freeze (input {H_in}×{W_in})...")
                     dummy = torch.zeros(1, 7, 3, H_in, W_in, dtype=dtype, device=self.device)
                     try:
-                        with torch.no_grad():
+                        # Suppress TracerWarning for self.last_* diagnostic .item() calls.
+                        # These attributes are pure monitoring side-effects and do not
+                        # affect the output tensor, so the trace is correct.
+                        with torch.no_grad(), warnings.catch_warnings():
+                            warnings.simplefilter("ignore", torch.jit.TracerWarning)
                             traced = torch.jit.trace(self.model, dummy)
                             self._jit_model = torch.jit.freeze(traced)
                         self._jit_traced_shape = (H_in, W_in)
