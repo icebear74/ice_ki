@@ -349,7 +349,12 @@ class VSRComparator:
                 except Exception:
                     pass  # graceful fallback on older PyTorch
             else:
-                print(f"  ℹ️  torch.compile skipped (GPU CC {_cc[0]}.{_cc[1]} < 7.0, Triton not supported)")
+                # CC < 7.0: torch.compile/Triton not supported.
+                # Fallback: torch.jit.trace + freeze applied lazily on first inference
+                # (shape-dependent; traced once per unique input resolution).
+                self._jit_traced_shape = None  # (H, W) of currently frozen trace; None = not yet traced
+                self._jit_model = None
+                print(f"  ℹ️  torch.compile skipped (CC {_cc[0]}.{_cc[1]} < 7.0) — torch.jit.trace fallback will be used")
 
             self.available = True
             print(f"  ✅ VSR model loaded (fp16, cudnn.benchmark=True)")
@@ -465,6 +470,28 @@ class VSRComparator:
             MIN_CHUNK = 1
             dtype = torch.float16 if self.use_fp16 else torch.float32
 
+            # ── torch.jit.trace fallback for CC < 7.0 (torch.compile unavailable) ──
+            # Traced once per unique input resolution; retraced if resolution changes.
+            # self.model (eager) is always kept intact so retracing is always possible.
+            if hasattr(self, '_jit_traced_shape'):
+                H_in, W_in = cpu_frames[0].shape[:2]
+                if self._jit_traced_shape != (H_in, W_in):
+                    print(f"       🔧 Applying torch.jit.trace+freeze (input {H_in}×{W_in})...")
+                    dummy = torch.zeros(1, 7, 3, H_in, W_in, dtype=dtype, device=self.device)
+                    try:
+                        with torch.no_grad():
+                            traced = torch.jit.trace(self.model, dummy)
+                            self._jit_model = torch.jit.freeze(traced)
+                        self._jit_traced_shape = (H_in, W_in)
+                        print(f"       ✅ torch.jit.trace+freeze ready")
+                    except Exception as _jit_ex:
+                        print(f"       ⚠️  JIT trace failed ({_jit_ex}), falling back to eager mode")
+                        self._jit_model = self.model
+                        self._jit_traced_shape = (H_in, W_in)  # don't retry
+                infer_model = self._jit_model
+            else:
+                infer_model = self.model
+
             vsr_frames = []
             while CHUNK >= MIN_CHUNK:
                 vsr_frames = []
@@ -495,7 +522,7 @@ class VSRComparator:
                             batch_windows = src[local_idx]
                             del src
 
-                            out = self.model(batch_windows)   # [CHUNK, 3, H*3, W*3]
+                            out = infer_model(batch_windows)   # [CHUNK, 3, H*3, W*3]
 
                             # uint8 conversion on GPU (no .astype)
                             out_np = (
@@ -559,9 +586,15 @@ class VSRComparator:
             # ────────────────────────────────────────────────────────────
             # Phase 5: Combine split-screen
             # ────────────────────────────────────────────────────────────
+            # Release all GPU tensors / cached allocations before starting
+            # FFmpeg so it can create a fresh CUDA context for nvenc encode
+            # without hitting CUDA_ERROR_OUT_OF_MEMORY.
+            torch.cuda.empty_cache()
+            gc.collect()
+
             print(f"  [5/5] Creating split-screen comparison...")
             combine_cmd = [
-                'ffmpeg', '-hwaccel', 'cuda', '-loglevel', 'error',
+                'ffmpeg', '-loglevel', 'error',
                 '-i', f'{temp_dir}/ffmpeg_upscale.mkv',
                 '-f', 'rawvideo', '-pix_fmt', 'bgr24', '-s', '2160x1728', '-r', '25',
                 '-i', vsr_raw,
