@@ -83,3 +83,4 @@ ice_brain/certs/
 *.pem
 *.crt
 *.key
+ice_brain/models/*
