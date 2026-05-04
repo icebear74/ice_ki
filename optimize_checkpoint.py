@@ -248,7 +248,8 @@ def convert_onnx(model, output_path: str, input_shape: tuple, device: str,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _build_trt_engine(onnx_path: str, engine_path: str,
-                      precision: str, workspace_gb: int = 2) -> bool:
+                      precision: str, workspace_gb: int = 2,
+                      input_shape: tuple = None) -> bool:
     """
     Baut eine TensorRT-Engine aus einer ONNX-Datei.
 
@@ -302,6 +303,16 @@ def _build_trt_engine(onnx_path: str, engine_path: str,
                 return False
 
             print(f"   ONNX gelesen — {network.num_layers} Layer")
+
+            # Optimization Profile für dynamische Batch-Dimension ("frames")
+            if input_shape is not None:
+                profile = builder.create_optimization_profile()
+                profile.set_shape("frames",
+                                  min=input_shape,
+                                  opt=input_shape,
+                                  max=input_shape)
+                config.add_optimization_profile(profile)
+                print(f"   ✅ Optimization Profile gesetzt: {input_shape}")
 
             # Engine bauen (kann mehrere Minuten dauern)
             print("   ⏳ Kompiliere Engine (kann einige Minuten dauern)...")
@@ -397,7 +408,8 @@ def convert_tensorrt(model, output_path: str, input_shape: tuple, device: str,
 
         # Schritt 2: TRT Engine
         print("🔄 Schritt 2/2 — TensorRT Engine bauen...")
-        ok = _build_trt_engine(tmp_onnx, output_path, precision, workspace_gb)
+        ok = _build_trt_engine(tmp_onnx, output_path, precision, workspace_gb,
+                               input_shape=input_shape)
         if not ok:
             return False
 
