@@ -306,10 +306,10 @@ fi
 # ============================================================
 # 7. TensorRT installieren (CC-6.0-kompatible Version 8.6.x)
 # ============================================================
-# Helper: cuBLAS-Compat-Symlinks + LD_LIBRARY_PATH für TRT 8.6.x auf CUDA-12-Systemen.
+# Helper: CUDA-Compat-Symlinks + LD_LIBRARY_PATH für TRT 8.6.x auf CUDA-12-Systemen.
 # Das TRT-8.6.1-Python-Wheel (.so) ist in BEIDEN Tarballs (cuda-11 und cuda-12)
-# gegen libcublas.so.11 gelinkt. Auf CUDA-12-Systemen gibt es kein libcublas.so.11
-# (nur .so.12 aus nvidia-cublas-cu12). Fix: Symlinks .so.11 → .so.12 + LD_LIBRARY_PATH.
+# gegen libcublas.so.11 und libcudnn.so.8 gelinkt. Auf CUDA-12-Systemen gibt es diese
+# Versionen nicht (nur .so.12 / .so.9). Fix: Symlinks + LD_LIBRARY_PATH.
 # Wichtig: ldconfig alleine reicht NICHT — ldconfig cached nach ELF-Soname (.so.12),
 # nicht nach Dateinamen (.so.11). LD_LIBRARY_PATH lässt den Linker das Dir nach Dateinamen
 # direkt scannen und findet den Symlink.
@@ -317,6 +317,8 @@ _trt_cublas_compat() {
   local trt_lib_dir="$1"
   [[ $CUDA_MAJOR -lt 12 ]] && return 0
   [[ ! -d "$trt_lib_dir" ]] && return 0
+
+  # --- cuBLAS: libcublas.so.11 → libcublas.so.12 ---
   # libcublas.so.12 finden — erst venv (nvidia-cublas-cu12), dann System
   local cublas_dir=""
   cublas_dir=$(python -c "
@@ -333,44 +335,105 @@ for p in sys.path:
     done
   fi
   if [[ -z "$cublas_dir" ]]; then
-    echo -e "${YELLOW}  ⚠  libcublas.so.12 nicht gefunden — Compat-Symlinks nicht möglich${RESET}"
-    return 0
-  fi
-  # cuBLAS-12-Pfad zu ldconfig hinzufügen (für libnvinfer.so.8 aus cuda-12-Tarball)
-  if ! grep -qxF "$cublas_dir" /etc/ld.so.conf.d/tensorrt.conf 2>/dev/null; then
-    echo "$cublas_dir" >> /etc/ld.so.conf.d/tensorrt.conf
-  fi
-  # Compat-Symlinks .so.11 → .so.12 im TRT-lib-Verzeichnis anlegen
-  local changed=0
-  for lib in libcublas libcublasLt; do
-    local src="$cublas_dir/${lib}.so.12"
-    local dst="$trt_lib_dir/${lib}.so.11"
-    if [[ -f "$src" ]] && [[ ! -e "$dst" ]]; then
-      ln -sf "$src" "$dst" 2>/dev/null || true
-      changed=1
+    echo -e "${YELLOW}  ⚠  libcublas.so.12 nicht gefunden — cuBLAS-Compat-Symlinks nicht möglich${RESET}"
+  else
+    # cuBLAS-12-Pfad zu ldconfig hinzufügen (für libnvinfer.so.8 aus cuda-12-Tarball)
+    if ! grep -qxF "$cublas_dir" /etc/ld.so.conf.d/tensorrt.conf 2>/dev/null; then
+      echo "$cublas_dir" >> /etc/ld.so.conf.d/tensorrt.conf
     fi
-  done
-  if [[ $changed -eq 1 ]]; then
-    echo -e "${CYAN}  → cuBLAS-12-Compat: libcublas.so.11 + libcublasLt.so.11 → .so.12${RESET}"
+    # Compat-Symlinks .so.11 → .so.12 im TRT-lib-Verzeichnis anlegen
+    local changed=0
+    for lib in libcublas libcublasLt; do
+      local src="$cublas_dir/${lib}.so.12"
+      local dst="$trt_lib_dir/${lib}.so.11"
+      if [[ -f "$src" ]] && [[ ! -e "$dst" ]]; then
+        ln -sf "$src" "$dst" 2>/dev/null || true
+        changed=1
+      fi
+    done
+    if [[ $changed -eq 1 ]]; then
+      echo -e "${CYAN}  → cuBLAS-12-Compat: libcublas.so.11 + libcublasLt.so.11 → .so.12${RESET}"
+    fi
   fi
+
+  # --- cuDNN: libcudnn.so.8 → libcudnn.so.9 ---
+  # TRT 8.6.x links against libcudnn.so.8; CUDA-12 systems typically only have .so.9
+  # (from libcudnn9-cuda-12 apt package or nvidia-cudnn-cu12 pip package).
+  local cudnn_dir=""
+  cudnn_dir=$(python -c "
+import os, sys
+for p in sys.path:
+    for ver in ('9', '8'):
+        c = os.path.join(p, 'nvidia', 'cudnn', 'lib', f'libcudnn.so.{ver}')
+        if os.path.isfile(c):
+            print(os.path.dirname(c)); exit()
+" 2>/dev/null || true)
+  if [[ -z "$cudnn_dir" ]]; then
+    for d in /usr/lib/x86_64-linux-gnu /usr/local/cuda/lib64 \
+              /usr/local/cuda-12.0/lib64 /usr/local/cuda-12/lib64; do
+      { [[ -f "$d/libcudnn.so.9" ]] || [[ -f "$d/libcudnn.so.8" ]]; } && \
+        { cudnn_dir="$d"; break; }
+    done
+  fi
+  if [[ -z "$cudnn_dir" ]]; then
+    echo -e "${YELLOW}  ⚠  libcudnn.so.9/8 nicht gefunden — cuDNN-Compat-Symlinks nicht möglich${RESET}"
+    echo -e "${YELLOW}     Tipp: pip install nvidia-cudnn-cu12  oder  apt-get install libcudnn9-cuda-12${RESET}"
+  else
+    # Only create .so.8 compat symlink if .so.8 is missing but .so.9 exists
+    if [[ ! -f "$cudnn_dir/libcudnn.so.8" ]] && [[ -f "$cudnn_dir/libcudnn.so.9" ]]; then
+      local cudnn_changed=0
+      # Main libcudnn.so.8 → libcudnn.so.9
+      if [[ ! -e "$trt_lib_dir/libcudnn.so.8" ]]; then
+        ln -sf "$cudnn_dir/libcudnn.so.9" "$trt_lib_dir/libcudnn.so.8" 2>/dev/null || true
+        cudnn_changed=1
+      fi
+      # cuDNN sub-libraries: names changed between v8 and v9
+      # v8: libcudnn_ops_infer, libcudnn_cnn_infer, libcudnn_adv_infer, etc.
+      # v9: libcudnn_ops, libcudnn_cnn, libcudnn_adv (merged _infer/_train variants)
+      declare -A _cudnn_sublib_map=(
+        ["libcudnn_ops_infer"]="libcudnn_ops"
+        ["libcudnn_ops_train"]="libcudnn_ops"
+        ["libcudnn_cnn_infer"]="libcudnn_cnn"
+        ["libcudnn_cnn_train"]="libcudnn_cnn"
+        ["libcudnn_adv_infer"]="libcudnn_adv"
+        ["libcudnn_adv_train"]="libcudnn_adv"
+      )
+      for v8_name in "${!_cudnn_sublib_map[@]}"; do
+        local v9_name="${_cudnn_sublib_map[$v8_name]}"
+        local v9_src="$cudnn_dir/${v9_name}.so.9"
+        local v8_dst="$trt_lib_dir/${v8_name}.so.8"
+        if [[ -f "$v9_src" ]] && [[ ! -e "$v8_dst" ]]; then
+          ln -sf "$v9_src" "$v8_dst" 2>/dev/null || true
+          cudnn_changed=1
+        fi
+      done
+      unset _cudnn_sublib_map
+      if [[ $cudnn_changed -eq 1 ]]; then
+        echo -e "${CYAN}  → cuDNN-9-Compat: libcudnn.so.8 + Sub-Libs → .so.9${RESET}"
+      fi
+    fi
+    # Ensure cudnn_dir is in ldconfig so the real .so.9 files are found system-wide
+    if ! grep -qxF "$cudnn_dir" /etc/ld.so.conf.d/tensorrt.conf 2>/dev/null; then
+      echo "$cudnn_dir" >> /etc/ld.so.conf.d/tensorrt.conf
+    fi
+  fi
+
   ldconfig 2>/dev/null || true
   # ldconfig builds its cache by ELF soname, NOT by filename.
-  # A symlink named libcublas.so.11 pointing to libcublas.so.12 has the soname
-  # "libcublas.so.12" in its ELF header, so ldconfig does NOT register it as
-  # "libcublas.so.11" in the cache — the dynamic linker can't find it by name.
-  # LD_LIBRARY_PATH makes the dynamic linker scan the directory directly by
-  # filename, which finds the symlink. This export affects the current shell and
-  # all Python subprocesses launched from it.
+  # Symlinks named libcublas.so.11/libcudnn.so.8 pointing to .so.12/.so.9 have the
+  # newer soname in their ELF header — ldconfig does NOT register them under the old
+  # name. LD_LIBRARY_PATH makes the dynamic linker scan the directory directly by
+  # filename, which finds the symlinks.
   export LD_LIBRARY_PATH="$trt_lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
   # Persist in venv activate so LD_LIBRARY_PATH is set for every future session.
   local activate_script="$VENV_DIR/bin/activate"
   if [[ -f "$activate_script" ]] && ! grep -qF "TRT_CUBLAS_COMPAT_LDPATH" "$activate_script"; then
     {
-      printf '\n# TRT 8.6.x cuBLAS compat — LD_LIBRARY_PATH added by setup_venv311_vsr.sh\n'
+      printf '\n# TRT 8.6.x CUDA compat (cuBLAS .so.11→.so.12, cuDNN .so.8→.so.9) — added by setup_venv311_vsr.sh\n'
       printf '# TRT_CUBLAS_COMPAT_LDPATH\n'
       printf 'export LD_LIBRARY_PATH="%s${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"\n' "$trt_lib_dir"
     } >> "$activate_script"
-    echo -e "${CYAN}  → LD_LIBRARY_PATH in venv/bin/activate persistiert (TRT cublas compat)${RESET}"
+    echo -e "${CYAN}  → LD_LIBRARY_PATH in venv/bin/activate persistiert (TRT CUDA compat)${RESET}"
   fi
 }
 
@@ -493,7 +556,7 @@ elif [[ "$GPU_CC_MAJOR" -lt 7 ]]; then
     echo -e "${YELLOW}  ⚠  tensorrt Import fehlgeschlagen!${RESET}"
     # Spezifische Fehlerdiagnose: CUDA-Versionskonflikt (cuda-11-Wheel auf CUDA-12-System)
     _TRT_IMPORT_ERR=$(python -c "import tensorrt" 2>&1 || true)
-    if echo "$_TRT_IMPORT_ERR" | grep -qE "libcublas\.so\.1[01]|libcublasLt\.so\.1[01]|libcufft\.so\.1[01]"; then
+    if echo "$_TRT_IMPORT_ERR" | grep -qE "libcublas\.so\.1[01]|libcublasLt\.so\.1[01]|libcufft\.so\.1[01]|libcudnn\.so\.[89]"; then
       _MISSING_LIB=$(echo "$_TRT_IMPORT_ERR" | grep -oE 'lib[a-zA-Z]+\.so\.[0-9]+' | head -1)
       echo -e "${YELLOW}  Ursache: TRT-Libs für falsche CUDA-Version — System hat CUDA ${CUDA_MAJOR}.${CUDA_MINOR}${RESET}"
       echo -e "${YELLOW}  Fehlende Bibliothek: ${_MISSING_LIB}${RESET}"
