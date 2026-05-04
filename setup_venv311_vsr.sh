@@ -356,80 +356,124 @@ for p in sys.path:
     fi
   fi
 
-  # --- cuDNN: libcudnn.so.8 → libcudnn.so.9 ---
-  # TRT 8.6.x links against libcudnn.so.8; CUDA-12 systems typically only have .so.9
-  # (from libcudnn9-cuda-12 apt package or nvidia-cudnn-cu12 pip package).
-  local cudnn_dir=""
-  cudnn_dir=$(python -c "
+  # --- cuDNN 8: TRT 8.6.x braucht ECHTE libcudnn8 ---
+  # cuDNN 9 ist NICHT ABI-kompatibel mit cuDNN 8 — Symlinks .so.8→.so.9 scheitern
+  # mit "version `libcudnn.so.8' not found (required by libnvinfer_plugin.so.8)".
+  # Ursache: ELF-Versionsymbole (@@CUDNN_8) fehlen in libcudnn.so.9.
+  # Fix: echte libcudnn8 (8.x) installieren, NICHT cuDNN 9 aliasieren.
+  local cudnn8_dir=""
+
+  # 1) Suche echte libcudnn.so.8 im venv pip-Paket (nvidia-cudnn-cu12 v8.x)
+  cudnn8_dir=$(python -c "
 import os, sys
 for p in sys.path:
-    for ver in ('9', '8'):
-        c = os.path.join(p, 'nvidia', 'cudnn', 'lib', f'libcudnn.so.{ver}')
-        if os.path.isfile(c):
-            print(os.path.dirname(c)); exit()
+    c = os.path.join(p, 'nvidia', 'cudnn', 'lib', 'libcudnn.so.8')
+    if os.path.isfile(c):
+        print(os.path.dirname(c)); exit()
 " 2>/dev/null || true)
-  if [[ -z "$cudnn_dir" ]]; then
+
+  # 2) Suche in System-Standardpfaden
+  if [[ -z "$cudnn8_dir" ]]; then
     for d in /usr/lib/x86_64-linux-gnu /usr/local/cuda/lib64 \
               /usr/local/cuda-12.0/lib64 /usr/local/cuda-12/lib64; do
-      { [[ -f "$d/libcudnn.so.9" ]] || [[ -f "$d/libcudnn.so.8" ]]; } && \
-        { cudnn_dir="$d"; break; }
+      [[ -f "$d/libcudnn.so.8" ]] && { cudnn8_dir="$d"; break; }
     done
   fi
-  if [[ -z "$cudnn_dir" ]]; then
-    echo -e "${YELLOW}  ⚠  libcudnn.so.9/8 nicht gefunden — cuDNN-Compat-Symlinks nicht möglich${RESET}"
-    echo -e "${YELLOW}     Tipp: pip install nvidia-cudnn-cu12  oder  apt-get install libcudnn9-cuda-12${RESET}"
-  else
-    # Only create .so.8 compat symlink if .so.8 is missing but .so.9 exists
-    if [[ ! -f "$cudnn_dir/libcudnn.so.8" ]] && [[ -f "$cudnn_dir/libcudnn.so.9" ]]; then
-      local cudnn_changed=0
-      # Main libcudnn.so.8 → libcudnn.so.9
-      if [[ ! -e "$trt_lib_dir/libcudnn.so.8" ]]; then
-        ln -sf "$cudnn_dir/libcudnn.so.9" "$trt_lib_dir/libcudnn.so.8" 2>/dev/null || true
-        cudnn_changed=1
-      fi
-      # cuDNN sub-libraries: names changed between v8 and v9
-      # v8: libcudnn_ops_infer, libcudnn_cnn_infer, libcudnn_adv_infer, etc.
-      # v9: libcudnn_ops, libcudnn_cnn, libcudnn_adv (merged _infer/_train variants)
-      declare -A _cudnn_sublib_map=(
-        ["libcudnn_ops_infer"]="libcudnn_ops"
-        ["libcudnn_ops_train"]="libcudnn_ops"
-        ["libcudnn_cnn_infer"]="libcudnn_cnn"
-        ["libcudnn_cnn_train"]="libcudnn_cnn"
-        ["libcudnn_adv_infer"]="libcudnn_adv"
-        ["libcudnn_adv_train"]="libcudnn_adv"
-      )
-      for v8_name in "${!_cudnn_sublib_map[@]}"; do
-        local v9_name="${_cudnn_sublib_map[$v8_name]}"
-        local v9_src="$cudnn_dir/${v9_name}.so.9"
-        local v8_dst="$trt_lib_dir/${v8_name}.so.8"
-        if [[ -f "$v9_src" ]] && [[ ! -e "$v8_dst" ]]; then
-          ln -sf "$v9_src" "$v8_dst" 2>/dev/null || true
-          cudnn_changed=1
-        fi
-      done
-      unset _cudnn_sublib_map
-      if [[ $cudnn_changed -eq 1 ]]; then
-        echo -e "${CYAN}  → cuDNN-9-Compat: libcudnn.so.8 + Sub-Libs → .so.9${RESET}"
+
+  # 3) Wenn nicht gefunden: pip install nvidia-cudnn-cu12<9 versuchen
+  # nvidia-cudnn-cu12 v8.9.x liefert libcudnn.so.8 — kein apt-Repo nötig
+  if [[ -z "$cudnn8_dir" ]]; then
+    echo -e "${CYAN}  → libcudnn8 nicht gefunden — versuche pip install 'nvidia-cudnn-cu12<9'...${RESET}"
+    if pip install --quiet "nvidia-cudnn-cu12<9" 2>/dev/null; then
+      cudnn8_dir=$(python -c "
+import os, sys, importlib
+# sys.path nach pip-Install neu scannen
+for p in sys.path + [s for s in __import__('site').getsitepackages()]:
+    c = os.path.join(p, 'nvidia', 'cudnn', 'lib', 'libcudnn.so.8')
+    if os.path.isfile(c):
+        print(os.path.dirname(c)); exit()
+" 2>/dev/null || true)
+    fi
+  fi
+
+  # 4) Wenn nicht gefunden: apt-get install libcudnn8 — ggf. NVIDIA-Repo einrichten
+  if [[ -z "$cudnn8_dir" ]]; then
+    echo -e "${CYAN}  → versuche apt-get install libcudnn8...${RESET}"
+    # NVIDIA CUDA apt-Repo einrichten falls libcudnn8 noch nicht im apt-Cache ist
+    if ! apt-cache show libcudnn8 &>/dev/null 2>&1; then
+      local _os_id _os_ver _nvidia_repo_id
+      _os_id=$(. /etc/os-release 2>/dev/null && echo "${ID:-ubuntu}")
+      _os_ver=$(. /etc/os-release 2>/dev/null && echo "${VERSION_ID:-22.04}" | tr -d '.')
+      _nvidia_repo_id="${_os_id}${_os_ver}"  # z.B. ubuntu2204, debian12
+      local _keyring_deb="/tmp/cuda-keyring_1.1-1_all.deb"
+      local _keyring_url="https://developer.download.nvidia.com/compute/cuda/repos/${_nvidia_repo_id}/x86_64/cuda-keyring_1.1-1_all.deb"
+      echo -e "${CYAN}  → Richte NVIDIA CUDA apt-Repo ein (${_nvidia_repo_id})...${RESET}"
+      if wget -q -O "$_keyring_deb" "$_keyring_url" 2>/dev/null || \
+         curl -fsSL -o "$_keyring_deb" "$_keyring_url" 2>/dev/null; then
+        dpkg -i "$_keyring_deb" 2>/dev/null || true
+        apt-get update -qq 2>/dev/null || true
+      else
+        echo -e "${YELLOW}  ⚠  NVIDIA-Repo-Keyring konnte nicht heruntergeladen werden${RESET}"
       fi
     fi
-    # Ensure cudnn_dir is in ldconfig so the real .so.9 files are found system-wide
-    if ! grep -qxF "$cudnn_dir" /etc/ld.so.conf.d/tensorrt.conf 2>/dev/null; then
-      echo "$cudnn_dir" >> /etc/ld.so.conf.d/tensorrt.conf
+    if apt-get install -y --no-install-recommends libcudnn8 2>/dev/null; then
+      for d in /usr/lib/x86_64-linux-gnu /usr/local/cuda/lib64 \
+                /usr/local/cuda-12.0/lib64 /usr/local/cuda-12/lib64; do
+        [[ -f "$d/libcudnn.so.8" ]] && { cudnn8_dir="$d"; break; }
+      done
+    fi
+  fi
+
+  if [[ -z "$cudnn8_dir" ]]; then
+    echo -e "${YELLOW}  ⚠  libcudnn.so.8 (cuDNN 8) nicht gefunden${RESET}"
+    echo -e "${YELLOW}     cuDNN 9 ist NICHT ABI-kompatibel — Symlinks .so.8→.so.9 funktionieren NICHT!${RESET}"
+    echo -e "${YELLOW}     Optionen:${RESET}"
+    echo -e "${YELLOW}       pip install 'nvidia-cudnn-cu12<9'${RESET}"
+    echo -e "${YELLOW}       apt-get install libcudnn8  (NVIDIA CUDA-apt-Repo erforderlich)${RESET}"
+    echo -e "${YELLOW}     Repo-Setup: https://developer.nvidia.com/cuda-downloads → Linux → Deb (network)${RESET}"
+  else
+    # Symlinks im TRT-lib-Verzeichnis auf ECHTE cuDNN-8-Dateien anlegen (oder aktualisieren)
+    local cudnn8_changed=0
+    local _csrc _cdst
+    # Haupt-Lib
+    _csrc="$cudnn8_dir/libcudnn.so.8"
+    _cdst="$trt_lib_dir/libcudnn.so.8"
+    if [[ ! -e "$_cdst" ]] || [[ "$(readlink "$_cdst" 2>/dev/null)" != "$_csrc" ]]; then
+      ln -sf "$_csrc" "$_cdst" 2>/dev/null || true
+      cudnn8_changed=1
+    fi
+    # cuDNN-8-Sub-Bibliotheken (v8 behält die _infer/_train-Suffixe)
+    for _lib in libcudnn_ops_infer libcudnn_ops_train \
+                libcudnn_cnn_infer libcudnn_cnn_train \
+                libcudnn_adv_infer libcudnn_adv_train; do
+      _csrc="$cudnn8_dir/${_lib}.so.8"
+      _cdst="$trt_lib_dir/${_lib}.so.8"
+      if [[ -f "$_csrc" ]] && \
+         ( [[ ! -e "$_cdst" ]] || [[ "$(readlink "$_cdst" 2>/dev/null)" != "$_csrc" ]] ); then
+        ln -sf "$_csrc" "$_cdst" 2>/dev/null || true
+        cudnn8_changed=1
+      fi
+    done
+    if [[ $cudnn8_changed -eq 1 ]]; then
+      echo -e "${CYAN}  → cuDNN-8: Symlinks → echte libcudnn8 (${cudnn8_dir})${RESET}"
+    fi
+    # cuDNN-8-Pfad zu ldconfig hinzufügen
+    if ! grep -qxF "$cudnn8_dir" /etc/ld.so.conf.d/tensorrt.conf 2>/dev/null; then
+      echo "$cudnn8_dir" >> /etc/ld.so.conf.d/tensorrt.conf
     fi
   fi
 
   ldconfig 2>/dev/null || true
   # ldconfig builds its cache by ELF soname, NOT by filename.
-  # Symlinks named libcublas.so.11/libcudnn.so.8 pointing to .so.12/.so.9 have the
-  # newer soname in their ELF header — ldconfig does NOT register them under the old
-  # name. LD_LIBRARY_PATH makes the dynamic linker scan the directory directly by
-  # filename, which finds the symlinks.
+  # Symlinks for libcublas.so.11 (→ real .so.12) and libcudnn.so.8 (→ real libcudnn8)
+  # are found by name — LD_LIBRARY_PATH makes the dynamic linker scan the directory
+  # directly by filename, bypassing the ldconfig soname cache.
   export LD_LIBRARY_PATH="$trt_lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
   # Persist in venv activate so LD_LIBRARY_PATH is set for every future session.
   local activate_script="$VENV_DIR/bin/activate"
   if [[ -f "$activate_script" ]] && ! grep -qF "TRT_CUBLAS_COMPAT_LDPATH" "$activate_script"; then
     {
-      printf '\n# TRT 8.6.x CUDA compat (cuBLAS .so.11→.so.12, cuDNN .so.8→.so.9) — added by setup_venv311_vsr.sh\n'
+      printf '\n# TRT 8.6.x CUDA compat (cuBLAS .so.11→.so.12, libcudnn.so.8→real libcudnn8) — added by setup_venv311_vsr.sh\n'
       printf '# TRT_CUBLAS_COMPAT_LDPATH\n'
       printf 'export LD_LIBRARY_PATH="%s${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"\n' "$trt_lib_dir"
     } >> "$activate_script"
