@@ -61,7 +61,7 @@ def _build_trt_for_vergleich(checkpoint_path: str, width: int, height: int,
     print(f"     Checkpoint : {checkpoint_path}")
     print(f"     Engine     : {engine_path}")
     print(f"     Input      : {width}×{height}  →  SR {width * 3}×{height * 3}")
-    print(f"     ⏳ Bitte warten — kann ~5 Minuten dauern...\n")
+    print(f"     ⏳ Bitte warten — typisch ~5 min, maximal 15 min...\n")
 
     cmd = [
         sys.executable,
@@ -76,16 +76,17 @@ def _build_trt_for_vergleich(checkpoint_path: str, width: int, height: int,
         '--device',     'cuda',
     ]
 
+    _TIMEOUT = 900  # 15 Minuten
     try:
         # Kein capture_output — subprocess-Output erscheint direkt im Terminal
-        result = subprocess.run(cmd, timeout=900)
+        result = subprocess.run(cmd, timeout=_TIMEOUT)
         if result.returncode == 0:
             print(f"\n  ✅ TRT Engine gespeichert: {engine_path}")
             return True
         print(f"\n  ❌ optimize_checkpoint.py fehlgeschlagen (returncode={result.returncode})")
         return False
     except subprocess.TimeoutExpired:
-        print(f"\n  ❌ TRT Build Timeout (>15 min)")
+        print(f"\n  ❌ TRT Build Timeout ({_TIMEOUT // 60} min)")
         return False
     except Exception as e:
         print(f"\n  ❌ TRT Build fehlgeschlagen: {e}")
@@ -490,18 +491,24 @@ class VSRComparator:
             shutil.rmtree(temp_dir)
         temp_dir.mkdir(exist_ok=True)
 
+        # Konfigurierbare Zeitparameter
+        _EXTRACT_OFFSET  = 300   # Start bei 5:00 min im Video
+        _EXTRACT_DURATION = 60   # 1 Minute extrahieren
+        _EXTRACT_TIMEOUT = max(300, _EXTRACT_DURATION * 5)  # Timeout: 5× Videodauer
+
         try:
             # ────────────────────────────────────────────────────────────
             # Phase 1: Frames extrahieren (1 Minute)
             # ────────────────────────────────────────────────────────────
-            print(f"  [1/3] Extracting frames (1 min at 5:00)...")
+            print(f"  [1/3] Extracting frames ({_EXTRACT_DURATION}s at {_EXTRACT_OFFSET//60}:{_EXTRACT_OFFSET%60:02d})...")
             cmd = [
                 'ffmpeg', '-hwaccel', 'cuda', '-loglevel', 'quiet',
-                '-ss', '300', '-t', '60',
+                '-ss', str(_EXTRACT_OFFSET), '-t', str(_EXTRACT_DURATION),
                 '-i', input_video,
                 f'{temp_dir}/frame_%06d.png'
             ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            result = subprocess.run(cmd, capture_output=True, text=True,
+                                    timeout=_EXTRACT_TIMEOUT)
             if result.returncode != 0:
                 print(f"       ❌ Failed to extract frames")
                 return False
@@ -633,7 +640,9 @@ class VSRComparator:
                 '-c:v', 'hevc_nvenc', '-preset', 'medium', '-crf', '18',
                 output_video,
             ]
-            combine_proc = subprocess.Popen(combine_cmd, stdin=subprocess.PIPE)
+            combine_proc = subprocess.Popen(combine_cmd,
+                                            stdin=subprocess.PIPE,
+                                            stderr=subprocess.PIPE)
 
             # ── Inferenz-Schleife ─────────────────────────────────────
             mode       = "TRT" if trt_session else "PyTorch"
@@ -691,16 +700,22 @@ class VSRComparator:
                         elapsed = time_module.time() - t_start
                         fps     = n_done / elapsed if elapsed > 0 else 0
                         remain  = (N - n_done) / fps if fps > 0 else 0
+                        remain_str = (f"~{remain:.0f}s" if remain < 60
+                                      else f"~{remain / 60:.1f} min")
                         print(f"       [{n_done:4d}/{N}]  {mode}  {fps:.1f} fps"
-                              f"  ⏱ noch ~{remain / 60:.1f} min")
+                              f"  ⏱ noch {remain_str}")
 
             # Pipe schließen → ffmpeg beendet die Kodierung
             combine_proc.stdin.close()
-            retcode = combine_proc.wait()
+            _, stderr_bytes = combine_proc.communicate()
+            retcode = combine_proc.returncode
             combine_proc = None
 
             if retcode != 0:
+                stderr_msg = stderr_bytes.decode(errors='replace').strip() if stderr_bytes else ''
                 print(f"       ❌ ffmpeg combine fehlgeschlagen (returncode={retcode})")
+                if stderr_msg:
+                    print(f"          {stderr_msg}")
                 return False
 
             total_sec  = time_module.time() - t_start
