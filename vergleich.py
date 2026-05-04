@@ -30,6 +30,100 @@ C_YELLOW = "\033[93m"
 C_RESET  = "\033[0m"
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# TensorRT: Engine-Cache, Auto-Build (via optimize_checkpoint.py), Inferenz
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _engine_path_for(checkpoint_path: str, width: int, height: int,
+                     precision: str = 'fp16') -> Path:
+    """
+    Gibt den Pfad der gecachten TRT Engine zurück.
+    Format: <checkpoint_dir>/<checkpoint_stem>_trt_<precision>_<W>x<H>.engine
+    Wiederverwendbar: gleicher Checkpoint + gleiche Auflösung → gleiche Engine.
+    """
+    p = Path(checkpoint_path)
+    return p.parent / f"{p.stem}_trt_{precision}_{width}x{height}.engine"
+
+
+def _build_trt_for_vergleich(checkpoint_path: str, width: int, height: int,
+                              engine_path: Path, precision: str = 'fp16') -> bool:
+    """
+    Baut eine TRT Engine via optimize_checkpoint.py als Subprozess.
+    Output läuft direkt auf das Terminal — der User sieht den vollen Build-Fortschritt.
+    Bei Änderungen an optimize_checkpoint.py wirken diese automatisch.
+    """
+    optimize_script = Path(__file__).resolve().parent / 'optimize_checkpoint.py'
+    if not optimize_script.exists():
+        print(f"  ❌ optimize_checkpoint.py nicht gefunden: {optimize_script}")
+        return False
+
+    print(f"\n  🏗️  TRT Engine wird gebaut (einmalig, dann gecacht):")
+    print(f"     Checkpoint : {checkpoint_path}")
+    print(f"     Engine     : {engine_path}")
+    print(f"     Input      : {width}×{height}  →  SR {width * 3}×{height * 3}")
+    print(f"     ⏳ Bitte warten — kann ~5 Minuten dauern...\n")
+
+    cmd = [
+        sys.executable,
+        str(optimize_script),
+        '--checkpoint', checkpoint_path,
+        '--output',     str(engine_path),
+        '--format',     'tensorrt',
+        '--precision',  precision,
+        '--width',      str(width),
+        '--height',     str(height),
+        '--workspace-gb', '2',
+        '--device',     'cuda',
+    ]
+
+    try:
+        # Kein capture_output — subprocess-Output erscheint direkt im Terminal
+        result = subprocess.run(cmd, timeout=900)
+        if result.returncode == 0:
+            print(f"\n  ✅ TRT Engine gespeichert: {engine_path}")
+            return True
+        print(f"\n  ❌ optimize_checkpoint.py fehlgeschlagen (returncode={result.returncode})")
+        return False
+    except subprocess.TimeoutExpired:
+        print(f"\n  ❌ TRT Build Timeout (>15 min)")
+        return False
+    except Exception as e:
+        print(f"\n  ❌ TRT Build fehlgeschlagen: {e}")
+        return False
+
+
+class _TRTSession:
+    """
+    Schlanke TensorRT-Inferenz-Session ohne pycuda.
+
+    Verwendet torch CUDA-Pointer (Tensor.data_ptr()) mit execute_v2 —
+    funktioniert mit TRT 8.x und 9.x ohne zusätzliche Abhängigkeiten.
+    I/O-Typ: float32 (entspricht dem ONNX-Export des Modells).
+    """
+
+    def __init__(self, engine_path: str, input_shape: tuple):
+        import tensorrt as trt
+        _logger  = trt.Logger(trt.Logger.WARNING)
+        _runtime = trt.Runtime(_logger)
+        with open(engine_path, 'rb') as f:
+            self._engine = _runtime.deserialize_cuda_engine(f.read())
+        self._context    = self._engine.create_execution_context()
+        self.input_shape = input_shape          # (1, 7, 3, H, W)
+        B, T, C, H, W   = input_shape
+        self.output_shape = (B, C, H * 3, W * 3)
+
+    def infer(self, frames_tensor: torch.Tensor) -> torch.Tensor:
+        """
+        frames_tensor : (1, 7, 3, H, W)  float32  contiguous  auf CUDA
+        Rückgabe      : (1, 3, H*3, W*3) float32  auf CUDA
+        Kein pycuda — nutzt rohe CUDA-Device-Pointer aus torch.Tensor.
+        """
+        inp = frames_tensor.contiguous().float()
+        out = torch.empty(self.output_shape, dtype=torch.float32, device=inp.device)
+        self._context.execute_v2([inp.data_ptr(), out.data_ptr()])
+        return out
+
+
 def select_gpu(gpu_index: int = None) -> torch.device:
     """Zeigt alle verfügbaren GPUs an und lässt den Nutzer eine auswählen.
 
@@ -312,9 +406,10 @@ def correct_video(input_path: str, output_path: str, correction_type: str) -> bo
 class VSRComparator:
     def __init__(self, checkpoint_path: str, device: str = 'cuda:0'):
         """Initialize VSR model with 24 blocks — optimized for inference"""
-        self.device = torch.device(device)
-        self.available = False
-        self.use_fp16 = False
+        self.device          = torch.device(device)
+        self.available       = False
+        self.use_fp16        = False
+        self.checkpoint_path = checkpoint_path   # für TRT Engine-Cache
 
         try:
             from vsr_plusplus_NEU.core.model_7frame import VSRBidirectional_7frames_3x
@@ -325,6 +420,10 @@ class VSRComparator:
 
             # Let cuDNN auto-select the fastest conv kernels for the fixed input size
             torch.backends.cudnn.benchmark = True
+
+            # Persistieren für TRT Engine-Cache
+            self.n_feats  = n_feats
+            self.n_blocks = n_blocks
 
             print(f"  Loading VSR model (n_blocks={n_blocks}, n_feats={n_feats})...")
             self.model = VSRBidirectional_7frames_3x(n_feats=n_feats, n_blocks=n_blocks)
@@ -366,250 +465,152 @@ class VSRComparator:
             self.available = False
     
     def create_comparison(self, input_video: str, output_video: str) -> bool:
-        """Create split-screen comparison with 7-frame model support"""
-        
+        """
+        Erstellt Split-Screen-Vergleich (FFmpeg-Upscale links | VSR rechts).
+
+        Ablauf:
+          [1/3] Frames extrahieren (1 Minute ab 5:00)
+          [2/3] FFmpeg 3×-Upscale der extrahierten Frames
+          [3/3] VSR-Inferenz + direktes Streaming an ffmpeg-Combine (kein .raw-Temp-File)
+
+        Inferenz-Backend (automatische Auswahl):
+          • TRT  (bevorzugt): Engine wird beim ersten Lauf neben dem Checkpoint gebaut
+                              und bei gleicher Auflösung wiederverwendet.
+          • PyTorch FP16 (Fallback): chunked mini-batch, JIT-trace auf CC < 7.0
+        """
         if not self.available:
             print(f"  ⚠️  Skipping VSR comparison (model unavailable)")
             return False
-        
+
         print(f"\n🎨 VSR COMPARISON:")
-        temp_dir = Path("/tmp/vsr_compare")
-        
+        temp_dir    = Path("/tmp/vsr_compare")
+        combine_proc = None          # Popen-Handle; wird in finally geschlossen
+
         if temp_dir.exists():
             shutil.rmtree(temp_dir)
         temp_dir.mkdir(exist_ok=True)
-        
+
         try:
             # ────────────────────────────────────────────────────────────
-            # Phase 1: Extract frames
+            # Phase 1: Frames extrahieren (1 Minute)
             # ────────────────────────────────────────────────────────────
-            print(f"  [1/5] Extracting frames...")
+            print(f"  [1/3] Extracting frames (1 min at 5:00)...")
             cmd = [
                 'ffmpeg', '-hwaccel', 'cuda', '-loglevel', 'quiet',
-                '-ss', '300', '-t', '2',
+                '-ss', '300', '-t', '60',
                 '-i', input_video,
                 f'{temp_dir}/frame_%06d.png'
             ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             if result.returncode != 0:
                 print(f"       ❌ Failed to extract frames")
                 return False
-            
+
             frames = sorted(temp_dir.glob("frame_*.png"))
             if len(frames) < 7:
-                print(f"       ⚠️  Not enough frames for 7-frame model: {len(frames)} (need 7+)")
+                print(f"       ⚠️  Not enough frames: {len(frames)} (need 7+)")
                 return False
-            
-            print(f"       ✓ Extracted {len(frames)} frames")
 
-            # Detect input dimensions from first frame to derive 3× output size
-            _probe = cv2.imread(str(frames[0]))
-            H_in, W_in = _probe.shape[:2]
+            print(f"       ✓ {len(frames)} frames extracted")
+
+            # Eingabe-Dimensionen aus erstem Frame ableiten
+            _probe      = cv2.imread(str(frames[0]))
+            H_in, W_in  = _probe.shape[:2]
             del _probe
             H_out, W_out = H_in * 3, W_in * 3
-            half_w = W_out // 2
+            half_w       = W_out // 2
             print(f"       Input: {W_in}×{H_in} → Output: {W_out}×{H_out}")
 
             # ────────────────────────────────────────────────────────────
-            # Phase 2: FFmpeg upscale - ONLY the extracted frames segment
+            # TRT Engine: auto-bauen falls nicht vorhanden, dann laden
+            # Engine-Datei liegt neben dem Checkpoint und wird wiederverwendet
+            # solange Checkpoint und Auflösung gleich bleiben.
             # ────────────────────────────────────────────────────────────
-            print(f"  [2/5] FFmpeg upscaling (3x to {W_out}×{H_out})...")
-            print(f"       Processing {len(frames)}-frame segment...")
-            
+            trt_session  = None
+            engine_path  = _engine_path_for(self.checkpoint_path, W_in, H_in)
+            input_shape  = (1, 7, 3, H_in, W_in)
+
+            try:
+                import tensorrt  # noqa: F401 — nur Verfügbarkeit prüfen
+                if not engine_path.exists():
+                    built = _build_trt_for_vergleich(
+                        self.checkpoint_path, W_in, H_in, engine_path
+                    )
+                    if not built:
+                        print(f"  ⚠️  TRT Build fehlgeschlagen — PyTorch-Fallback wird verwendet")
+                if engine_path.exists():
+                    print(f"  🚀 Lade TRT Engine: {engine_path.name}")
+                    trt_session = _TRTSession(str(engine_path), input_shape)
+                    print(f"     ✅ TRT Session bereit")
+            except ImportError:
+                print(f"  ℹ️  tensorrt nicht verfügbar — verwende PyTorch fp16")
+
+            # ────────────────────────────────────────────────────────────
+            # Phase 2: FFmpeg Referenz-Upscale (Lanczos 3×)
+            # ────────────────────────────────────────────────────────────
+            ffmpeg_upscale_path = str(temp_dir / 'ffmpeg_upscale.mkv')
+            print(f"  [2/3] FFmpeg upscaling ({len(frames)} frames → {W_out}×{H_out})...")
             ffmpeg_cmd = [
-                'ffmpeg', '-hwaccel', 'cuda', '-loglevel', 'error',
+                'ffmpeg', '-y', '-hwaccel', 'cuda', '-loglevel', 'error',
                 '-framerate', '25',
                 '-pattern_type', 'glob', '-i', f'{temp_dir}/frame_*.png',
                 '-vf', f'scale={W_out}:{H_out}:flags=lanczos',
                 '-c:v', 'hevc_nvenc', '-preset', 'medium', '-crf', '18',
-                f'{temp_dir}/ffmpeg_upscale.mkv'
+                ffmpeg_upscale_path,
             ]
-            
-            print(f"       FFmpeg input: PNG frames (not re-decoding the full video!)")
-            print(f"       Encoding: hevc_nvenc, preset=medium")
-            
-            start_time = time_module.time()
-            try:
-                result = subprocess.run(
-                    ffmpeg_cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=60
-                )
-                elapsed = time_module.time() - start_time
-                
-                if result.returncode != 0:
-                    print(f"       ❌ FFmpeg failed: {result.stderr}")
-                    return False
-                
-                print(f"       ✓ FFmpeg done ({elapsed:.1f}s)")
-                
-            except subprocess.TimeoutExpired:
-                elapsed = time_module.time() - start_time
-                print(f"       ❌ FFmpeg timeout after {elapsed:.1f}s")
+            t0 = time_module.time()
+            r  = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=300)
+            if r.returncode != 0:
+                print(f"       ❌ FFmpeg failed: {r.stderr}")
                 return False
-            
-            # ────────────────────────────────────────────────────────────
-            # Phase 3: VSR upscale - 7-frame model, fully GPU-batched
-            # ────────────────────────────────────────────────────────────
-            print(f"  [3/5] VSR upscaling (7-frame model, {len(frames)} frames)...")
+            print(f"       ✓ done ({time_module.time() - t0:.1f}s)")
 
-            # --- Optimization 1: load all frames to CPU RAM as numpy (cheap) ---
-            # GPU memory stays O(chunk), not O(N*7) — no OOM on large videos
-            print(f"       Loading {len(frames)} frames to CPU RAM...")
-            cpu_frames = []
-            for fp in frames:
-                bgr = cv2.imread(str(fp))
-                cpu_frames.append(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))  # HWC uint8
-            N = len(cpu_frames)
-            print(f"       {N} frames loaded to RAM")
-
-            # --- Optimization 2: pre-compute all 7-frame window indices (CPU, tiny) ---
+            # ────────────────────────────────────────────────────────────
+            # Phase 3: VSR-Inferenz + Combine via Stdin-Pipe
+            # Kein temporäres .raw-File — Frames werden direkt gestreamt.
+            # ffmpeg liest VSR-Frames aus stdin (pipe:0) während wir inferieren.
+            # ────────────────────────────────────────────────────────────
+            N       = len(frames)
             OFFSETS = [-3, -2, -1, 0, 1, 2, 3]
             all_indices = [
                 [max(0, min(N - 1, i + o)) for o in OFFSETS]
                 for i in range(N)
-            ]  # list[N][7]  — plain ints, no GPU needed yet
+            ]
 
-            # --- Optimization 3 & 4: streaming mini-batch inference ---
-            # Per chunk: only ≤14 unique source frames are transferred to GPU (fp16).
-            # GPU memory usage is constant O(chunk) regardless of video length.
-            # OOM failsafe: on OutOfMemoryError the chunk size is halved and the
-            # whole pass is restarted until CHUNK=1; only then we give up.
-            CHUNK = 8
-            MIN_CHUNK = 1
-            dtype = torch.float16 if self.use_fp16 else torch.float32
+            # Alle PNG-Frames in CPU-RAM laden (random access für 7-frame-Fenster)
+            print(f"  [3/3] VSR inference → ffmpeg combine (streaming, {N} frames)...")
+            print(f"       Loading {N} frames to RAM...")
+            cpu_frames = []
+            for fp in frames:
+                bgr = cv2.imread(str(fp))
+                cpu_frames.append(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+            print(f"       {N} frames loaded")
 
-            # ── torch.jit.trace fallback for CC < 7.0 (torch.compile unavailable) ──
-            # Traced once per unique input resolution; retraced if resolution changes.
-            # self.model (eager) is always kept intact so retracing is always possible.
-            if hasattr(self, '_jit_traced_shape'):
-                H_in, W_in = cpu_frames[0].shape[:2]
-                if self._jit_traced_shape != (H_in, W_in):
-                    print(f"       🔧 Applying torch.jit.trace+freeze (input {H_in}×{W_in})...")
-                    dummy = torch.zeros(1, 7, 3, H_in, W_in, dtype=dtype, device=self.device)
-                    try:
-                        # Suppress TracerWarning for self.last_* diagnostic .item() calls.
-                        # These attributes are pure monitoring side-effects and do not
-                        # affect the output tensor, so the trace is correct.
-                        with torch.no_grad(), warnings.catch_warnings():
-                            warnings.simplefilter("ignore", torch.jit.TracerWarning)
-                            traced = torch.jit.trace(self.model, dummy)
-                            self._jit_model = torch.jit.freeze(traced)
-                        self._jit_traced_shape = (H_in, W_in)
-                        print(f"       ✅ torch.jit.trace+freeze ready")
-                    except Exception as _jit_ex:
-                        print(f"       ⚠️  JIT trace failed ({_jit_ex}), falling back to eager mode")
-                        self._jit_model = self.model
-                        self._jit_traced_shape = (H_in, W_in)  # don't retry
-                infer_model = self._jit_model
-            else:
-                infer_model = self.model
+            # JIT-trace Fallback für CC < 7.0 (kein torch.compile), wenn kein TRT
+            dtype       = torch.float16 if self.use_fp16 else torch.float32
+            infer_model = None
+            if trt_session is None:
+                if hasattr(self, '_jit_traced_shape'):
+                    if self._jit_traced_shape != (H_in, W_in):
+                        print(f"       🔧 Applying torch.jit.trace+freeze ({H_in}×{W_in})...")
+                        dummy = torch.zeros(1, 7, 3, H_in, W_in,
+                                            dtype=dtype, device=self.device)
+                        try:
+                            with torch.no_grad(), warnings.catch_warnings():
+                                warnings.simplefilter("ignore", torch.jit.TracerWarning)
+                                traced = torch.jit.trace(self.model, dummy)
+                                self._jit_model = torch.jit.freeze(traced)
+                            self._jit_traced_shape = (H_in, W_in)
+                            print(f"       ✅ torch.jit.trace+freeze ready")
+                        except Exception as _jit_ex:
+                            print(f"       ⚠️  JIT trace failed ({_jit_ex}), using eager")
+                            self._jit_model = self.model
+                            self._jit_traced_shape = (H_in, W_in)
+                    infer_model = self._jit_model
+                else:
+                    infer_model = self.model
 
-            vsr_frames = []
-            while CHUNK >= MIN_CHUNK:
-                vsr_frames = []
-                oom_hit = False
-                try:
-                    with torch.no_grad():
-                        for start in range(0, N, CHUNK):
-                            end = min(start + CHUNK, N)
-                            batch_indices = all_indices[start:end]
-
-                            # Collect only the unique source frames this chunk needs
-                            needed = sorted({idx for window in batch_indices for idx in window})
-                            idx_map = {g: l for l, g in enumerate(needed)}
-
-                            # Transfer ≤(CHUNK+6) unique frames to GPU as fp16
-                            src = torch.stack([
-                                torch.from_numpy(cpu_frames[i])
-                                     .permute(2, 0, 1)
-                                     .to(dtype=dtype, device=self.device) / 255.0
-                                for i in needed
-                            ])
-
-                            # Build windows: [CHUNK, 7, 3, H, W]
-                            local_idx = torch.tensor(
-                                [[idx_map[g] for g in w] for w in batch_indices],
-                                device=self.device
-                            )
-                            batch_windows = src[local_idx]
-                            del src
-
-                            out = infer_model(batch_windows)   # [CHUNK, 3, H*3, W*3]
-
-                            # uint8 conversion on GPU (no .astype)
-                            out_np = (
-                                out.permute(0, 2, 3, 1)
-                                   .clamp(0.0, 1.0)
-                                   .mul(255)
-                                   .to(torch.uint8)
-                                   .cpu()
-                                   .numpy()
-                            )   # [CHUNK, H*3, W*3, 3]  RGB uint8
-                            del out, batch_windows, local_idx
-                            vsr_frames.extend(out_np)
-                            print(f"       [{end}/{N}] chunk={CHUNK} frames processed...")
-
-                    break  # success – leave retry loop
-
-                except Exception as e:
-                    is_oom = isinstance(e, torch.cuda.OutOfMemoryError) or (
-                        isinstance(e, RuntimeError) and 'out of memory' in str(e).lower()
-                    )
-                    if is_oom:
-                        old_chunk = CHUNK
-                        CHUNK = CHUNK // 2
-                        torch.cuda.empty_cache()
-                        gc.collect()
-                        if CHUNK < MIN_CHUNK:
-                            print(f"       ❌ GPU OOM at CHUNK=1 – not enough VRAM for this video.")
-                            print(f"          Try a shorter clip or a GPU with more VRAM.")
-                            return False
-                        print(f"       {C_YELLOW}⚠ GPU OOM (CHUNK={old_chunk}) → "
-                              f"retrying with CHUNK={CHUNK}...{C_RESET}")
-                        oom_hit = True
-                    else:
-                        print(f"       ❌ VSR inference failed:")
-                        print(f"          Error: {e}")
-                        import traceback
-                        traceback.print_exc()
-                        return False
-
-            print(f"       ✓ VSR done ({len(vsr_frames)} frames, chunk={CHUNK})")
-            
-            # ────────────────────────────────────────────────────────────
-            # Phase 4: Write VSR raw video
-            # ────────────────────────────────────────────────────────────
-            print(f"  [4/5] Writing VSR raw video...")
-            vsr_raw = f'{temp_dir}/vsr_upscale.raw'
-            
-            try:
-                with open(vsr_raw, 'wb') as f:
-                    for i, frame in enumerate(vsr_frames):
-                        if i % max(1, len(vsr_frames)//4) == 0 or i == len(vsr_frames) - 1:
-                            pass  # Silent progress
-                        f.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR).tobytes())
-                
-                file_size_mb = os.path.getsize(vsr_raw) / (1024 * 1024)
-                print(f"       ✓ Raw file: {file_size_mb:.1f} MB")
-            except Exception as e:
-                print(f"       ❌ Failed to write raw frames: {e}")
-                return False
-            
-            # ────────────────────────────────────────────────────────────
-            # Phase 5: Combine split-screen
-            # ────────────────────────────────────────────────────────────
-            # Release all GPU tensors / cached allocations before starting
-            # FFmpeg so it can create a fresh CUDA context for nvenc encode
-            # without hitting CUDA_ERROR_OUT_OF_MEMORY.
-            torch.cuda.empty_cache()
-            gc.collect()
-
-            print(f"  [5/5] Creating split-screen comparison...")
-            # Left half  = left portion of FFmpeg upscale (input 0, x=0)
-            # Right half = right portion of VSR upscale   (input 1, x=half_w)
-            # White divider line at the seam + labels per side
+            # ffmpeg combine-Prozess starten — liest VSR-Frames aus stdin
             filter_complex = (
                 f"[0:v]crop={half_w}:{H_out}:0:0[left];"
                 f"[1:v]crop={half_w}:{H_out}:{half_w}:0[right];"
@@ -622,55 +623,114 @@ class VSRComparator:
                 f":x={half_w + 30}:y=50:box=1:boxcolor=black@0.5[out]"
             )
             combine_cmd = [
-                'ffmpeg', '-y',
-                '-i', f'{temp_dir}/ffmpeg_upscale.mkv',
+                'ffmpeg', '-y', '-loglevel', 'error',
+                '-i', ffmpeg_upscale_path,
                 '-f', 'rawvideo', '-pix_fmt', 'bgr24',
                 '-s', f'{W_out}x{H_out}', '-r', '25',
-                '-i', vsr_raw,
+                '-i', 'pipe:0',
                 '-filter_complex', filter_complex,
                 '-map', '[out]',
                 '-c:v', 'hevc_nvenc', '-preset', 'medium', '-crf', '18',
-                output_video
+                output_video,
             ]
-            print(f"       CMD: {' '.join(combine_cmd)}")
-            
-            start_time = time_module.time()
-            try:
-                result = subprocess.run(
-                    combine_cmd,
-                    timeout=600
-                )
-                elapsed = time_module.time() - start_time
-                
-                if result.returncode != 0:
-                    print(f"       ❌ Combine failed (returncode={result.returncode})")
-                    return False
-                
-                output_size_mb = os.path.getsize(output_video) / (1024 * 1024)
-                print(f"       ✓ Done ({elapsed:.1f}s, {output_size_mb:.1f} MB)")
-                
-            except subprocess.TimeoutExpired:
-                elapsed = time_module.time() - start_time
-                print(f"       ❌ Timeout after {elapsed:.1f}s")
+            combine_proc = subprocess.Popen(combine_cmd, stdin=subprocess.PIPE)
+
+            # ── Inferenz-Schleife ─────────────────────────────────────
+            mode       = "TRT" if trt_session else "PyTorch"
+            CHUNK      = 1 if trt_session else 8
+            t_start    = time_module.time()
+            n_done     = 0
+
+            with torch.no_grad():
+                for chunk_start in range(0, N, CHUNK):
+                    chunk_end     = min(chunk_start + CHUNK, N)
+                    chunk_indices = all_indices[chunk_start:chunk_end]
+
+                    if trt_session:
+                        # TRT: batch=1, float32
+                        window_idx = chunk_indices[0]
+                        window = torch.stack([
+                            torch.from_numpy(cpu_frames[j])
+                                 .permute(2, 0, 1)
+                                 .to(dtype=torch.float32, device=self.device) / 255.0
+                            for j in window_idx
+                        ]).unsqueeze(0)                        # (1, 7, 3, H, W)
+                        out_batch = trt_session.infer(window)  # (1, 3, H*3, W*3)
+                        del window
+                    else:
+                        # PyTorch: chunked mini-batch
+                        needed    = sorted({idx for w in chunk_indices for idx in w})
+                        idx_map   = {g: l for l, g in enumerate(needed)}
+                        src = torch.stack([
+                            torch.from_numpy(cpu_frames[j])
+                                 .permute(2, 0, 1)
+                                 .to(dtype=dtype, device=self.device) / 255.0
+                            for j in needed
+                        ])
+                        local_idx = torch.tensor(
+                            [[idx_map[g] for g in w] for w in chunk_indices],
+                            device=self.device,
+                        )
+                        out_batch = infer_model(src[local_idx])  # (CHUNK, 3, H*3, W*3)
+                        del src, local_idx
+
+                    # uint8-Konvertierung auf GPU, dann als BGR-Bytes in Pipe schreiben
+                    for k in range(out_batch.shape[0]):
+                        rgb = (
+                            out_batch[k].permute(1, 2, 0)
+                                        .clamp(0.0, 1.0).mul(255)
+                                        .to(torch.uint8).cpu().numpy()
+                        )
+                        combine_proc.stdin.write(
+                            cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR).tobytes()
+                        )
+                    del out_batch
+
+                    n_done = chunk_end
+                    if n_done % 50 == 0 or n_done == N:
+                        elapsed = time_module.time() - t_start
+                        fps     = n_done / elapsed if elapsed > 0 else 0
+                        remain  = (N - n_done) / fps if fps > 0 else 0
+                        print(f"       [{n_done:4d}/{N}]  {mode}  {fps:.1f} fps"
+                              f"  ⏱ noch ~{remain / 60:.1f} min")
+
+            # Pipe schließen → ffmpeg beendet die Kodierung
+            combine_proc.stdin.close()
+            retcode = combine_proc.wait()
+            combine_proc = None
+
+            if retcode != 0:
+                print(f"       ❌ ffmpeg combine fehlgeschlagen (returncode={retcode})")
                 return False
-            
-            print(f"  ✅ VSR comparison complete!")
-            print(f"     Output: {output_video}")
-            print(f"     Resolution: {W_out}×{H_out} (split-screen: FFmpeg left | VSR right)")
-            
+
+            total_sec  = time_module.time() - t_start
+            avg_fps    = N / total_sec if total_sec > 0 else 0
+            output_mb  = os.path.getsize(output_video) / (1024 * 1024)
+
+            print(f"\n  ✅ VSR comparison complete!")
+            print(f"     {N} Frames  |  ⌀ {avg_fps:.1f} fps ({mode})"
+                  f"  |  Gesamt {total_sec / 60:.1f} min")
+            print(f"     Output: {output_video}  ({output_mb:.1f} MB)")
+            print(f"     Auflösung: {W_out}×{H_out}  (FFmpeg links | VSR rechts)")
             return True
-        
+
         except KeyboardInterrupt:
-            print(f"\n  ⚠️  User interrupted")
+            print(f"\n  ⚠️  Abgebrochen")
             return False
         except Exception as e:
-            print(f"  ❌ VSR comparison failed: {e}")
+            print(f"  ❌ VSR comparison fehlgeschlagen: {e}")
             import traceback
             traceback.print_exc()
             return False
-        
         finally:
-            # Cleanup
+            # Pipe sauber schließen falls noch offen (z.B. nach Exception)
+            if combine_proc is not None:
+                try:
+                    combine_proc.stdin.close()
+                except Exception:
+                    pass
+                combine_proc.terminate()
+            # Temp-Verzeichnis (PNGs + ffmpeg_upscale.mkv) aufräumen
             if temp_dir.exists():
                 shutil.rmtree(temp_dir, ignore_errors=True)
 
