@@ -412,11 +412,11 @@ def _infer_arch_from_checkpoint(ckpt: dict):
       1. ckpt['model_config']  — explizit gespeichert (neue Checkpoints)
       2. Ableitung aus state_dict-Tensor-Shapes  — funktioniert für alle Checkpoints
       3. Fallback config.py (lokale Datei neben den Skripten)
-      4. Hard-kodierte Defaults (72 / 24)
+      4. Hard-kodierte Defaults (72 / 28)
 
     Gibt (n_feats, n_blocks, quelle) zurück.
     """
-    _DEFAULTS = (72, 24)
+    _DEFAULTS = (72, 28)
 
     # 1. Explizit gespeicherter model_config (neue Checkpoints)
     mc = ckpt.get("model_config", {})
