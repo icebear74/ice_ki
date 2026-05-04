@@ -58,6 +58,49 @@ sys.path.insert(0, str(_REPO_ROOT / "vsr_plusplus_NEU"))
 # Modell laden
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _infer_arch_from_checkpoint(ckpt: dict):
+    """
+    Liest n_feats und n_blocks aus einem geladenen Checkpoint.
+
+    Strategie (Priorität):
+      1. ckpt['model_config']  — explizit gespeichert (neue Checkpoints)
+      2. Ableitung aus state_dict-Tensor-Shapes  — funktioniert für alle Checkpoints
+      3. Fallback config.py (lokale Datei neben den Skripten)
+      4. Hard-kodierte Defaults (72 / 28)
+
+    Gibt (n_feats, n_blocks, quelle) zurück.
+    """
+    _DEFAULTS = (72, 28)
+
+    # 1. Explizit gespeicherter model_config (neue Checkpoints)
+    mc = ckpt.get("model_config", {})
+    if mc.get("N_FEATS") and mc.get("N_BLOCKS"):
+        return int(mc["N_FEATS"]), int(mc["N_BLOCKS"]), "model_config (checkpoint)"
+
+    # 2. Ableitung aus state_dict
+    state = ckpt.get("model_state_dict", ckpt)
+    try:
+        n_feats = int(state["feat_extract.weight"].shape[0])
+        half    = len({k.split(".")[1] for k in state if k.startswith("backward_trunk.")})
+        n_blocks = half * 2
+        return n_feats, n_blocks, "state_dict (abgeleitet)"
+    except Exception:
+        pass
+
+    # 3. config.py
+    try:
+        import config as cfg
+        c = cfg.get_config()
+        nf = int(c.get("N_FEATS",  _DEFAULTS[0]))
+        nb = int(c.get("N_BLOCKS", _DEFAULTS[1]))
+        return nf, nb, "config.py"
+    except Exception:
+        pass
+
+    # 4. Defaults
+    return _DEFAULTS[0], _DEFAULTS[1], "Defaults"
+
+
 def load_model(checkpoint_path: str, device: str):
     """
     Lädt VSRBidirectional_7frames_3x aus einem .pth-Checkpoint.
@@ -72,16 +115,9 @@ def load_model(checkpoint_path: str, device: str):
     print(f"📦 Lade Checkpoint: {ckpt_path}")
     ckpt = torch.load(str(ckpt_path), map_location=device, weights_only=False)
 
-    # Konfig — aus lokalem config.py falls vorhanden, sonst Defaults
-    n_feats, n_blocks = 72, 28
-    try:
-        import config as cfg
-        c = cfg.get_config()
-        n_feats  = c.get("N_FEATS",  n_feats)
-        n_blocks = c.get("N_BLOCKS", n_blocks)
-        print(f"   ✅ config.py: N_FEATS={n_feats}, N_BLOCKS={n_blocks}")
-    except Exception:
-        print(f"   ℹ️  config.py nicht gefunden — Defaults: N_FEATS={n_feats}, N_BLOCKS={n_blocks}")
+    # Architektur-Parameter aus dem Checkpoint lesen
+    n_feats, n_blocks, source = _infer_arch_from_checkpoint(ckpt)
+    print(f"   ✅ Architektur ({source}): N_FEATS={n_feats}, N_BLOCKS={n_blocks}")
 
     from vsr_plusplus_NEU.core.model_7frame import VSRBidirectional_7frames_3x
     model = VSRBidirectional_7frames_3x(n_feats=n_feats, n_blocks=n_blocks).to(device)

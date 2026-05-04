@@ -404,9 +404,52 @@ def correct_video(input_path: str, output_path: str, correction_type: str) -> bo
 # PHASE 3: VSR COMPARISON
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _infer_arch_from_checkpoint(ckpt: dict):
+    """
+    Liest n_feats und n_blocks aus einem geladenen Checkpoint.
+
+    Strategie (Priorität):
+      1. ckpt['model_config']  — explizit gespeichert (neue Checkpoints)
+      2. Ableitung aus state_dict-Tensor-Shapes  — funktioniert für alle Checkpoints
+      3. Fallback config.py (lokale Datei neben den Skripten)
+      4. Hard-kodierte Defaults (72 / 24)
+
+    Gibt (n_feats, n_blocks, quelle) zurück.
+    """
+    _DEFAULTS = (72, 24)
+
+    # 1. Explizit gespeicherter model_config (neue Checkpoints)
+    mc = ckpt.get("model_config", {})
+    if mc.get("N_FEATS") and mc.get("N_BLOCKS"):
+        return int(mc["N_FEATS"]), int(mc["N_BLOCKS"]), "model_config (checkpoint)"
+
+    # 2. Ableitung aus state_dict
+    state = ckpt.get("model_state_dict", ckpt)
+    try:
+        n_feats  = int(state["feat_extract.weight"].shape[0])
+        half     = len({k.split(".")[1] for k in state if k.startswith("backward_trunk.")})
+        n_blocks = half * 2
+        return n_feats, n_blocks, "state_dict (abgeleitet)"
+    except Exception:
+        pass
+
+    # 3. config.py
+    try:
+        import config as cfg
+        c = cfg.get_config()
+        nf = int(c.get("N_FEATS",  _DEFAULTS[0]))
+        nb = int(c.get("N_BLOCKS", _DEFAULTS[1]))
+        return nf, nb, "config.py"
+    except Exception:
+        pass
+
+    # 4. Defaults
+    return _DEFAULTS[0], _DEFAULTS[1], "Defaults"
+
+
 class VSRComparator:
     def __init__(self, checkpoint_path: str, device: str = 'cuda:0'):
-        """Initialize VSR model with 24 blocks — optimized for inference"""
+        """Initialize VSR model — architecture is read from the checkpoint"""
         self.device          = torch.device(device)
         self.available       = False
         self.use_fp16        = False
@@ -415,9 +458,14 @@ class VSRComparator:
         try:
             from vsr_plusplus_NEU.core.model_7frame import VSRBidirectional_7frames_3x
 
-            # Model uses 24 blocks (12 backward + 12 forward)
-            n_blocks = 24
-            n_feats = 72
+            # Load checkpoint to CPU first — avoids doubling GPU peak memory during load
+            # and lets us infer n_feats/n_blocks before constructing the model.
+            print(f"  Loading checkpoint: {checkpoint_path}")
+            ckpt = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+
+            # Architektur-Parameter direkt aus dem Checkpoint lesen
+            n_feats, n_blocks, source = _infer_arch_from_checkpoint(ckpt)
+            print(f"  Architektur ({source}): n_feats={n_feats}, n_blocks={n_blocks}")
 
             # Let cuDNN auto-select the fastest conv kernels for the fixed input size
             torch.backends.cudnn.benchmark = True
@@ -429,10 +477,8 @@ class VSRComparator:
             print(f"  Loading VSR model (n_blocks={n_blocks}, n_feats={n_feats})...")
             self.model = VSRBidirectional_7frames_3x(n_feats=n_feats, n_blocks=n_blocks)
 
-            # Load checkpoint to CPU first — avoids doubling GPU peak memory during load
-            print(f"  Loading checkpoint: {checkpoint_path}")
-            ckpt = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
-            self.model.load_state_dict(ckpt['model_state_dict'])
+            state = ckpt.get("model_state_dict", ckpt)
+            self.model.load_state_dict(state)
             del ckpt  # free CPU RAM immediately
 
             # Move to GPU, switch to fp16 (2× throughput on CUDA), set eval mode
