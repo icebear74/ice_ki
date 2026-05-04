@@ -752,8 +752,12 @@ class VSRComparator:
                               f"  ⏱ noch {remain_str}")
 
             # Pipe schließen → ffmpeg beendet die Kodierung
-            combine_proc.stdin.close()
-            _, stderr_bytes = combine_proc.communicate()
+            # Kein combine_proc.communicate() nach manuellem stdin.close() —
+            # communicate() würde intern nochmal stdin.flush() aufrufen → ValueError.
+            if not combine_proc.stdin.closed:
+                combine_proc.stdin.close()
+            stderr_bytes = combine_proc.stderr.read()
+            combine_proc.wait()
             retcode = combine_proc.returncode
             combine_proc = None
 
