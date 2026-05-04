@@ -306,10 +306,13 @@ fi
 # ============================================================
 # 7. TensorRT installieren (CC-6.0-kompatible Version 8.6.x)
 # ============================================================
-# Helper: cuBLAS-Compat-Symlinks für TRT 8.6.x auf CUDA-12-Systemen.
+# Helper: cuBLAS-Compat-Symlinks + LD_LIBRARY_PATH für TRT 8.6.x auf CUDA-12-Systemen.
 # Das TRT-8.6.1-Python-Wheel (.so) ist in BEIDEN Tarballs (cuda-11 und cuda-12)
 # gegen libcublas.so.11 gelinkt. Auf CUDA-12-Systemen gibt es kein libcublas.so.11
-# (nur .so.12 aus nvidia-cublas-cu12). Fix: Symlinks .so.11 → .so.12 anlegen.
+# (nur .so.12 aus nvidia-cublas-cu12). Fix: Symlinks .so.11 → .so.12 + LD_LIBRARY_PATH.
+# Wichtig: ldconfig alleine reicht NICHT — ldconfig cached nach ELF-Soname (.so.12),
+# nicht nach Dateinamen (.so.11). LD_LIBRARY_PATH lässt den Linker das Dir nach Dateinamen
+# direkt scannen und findet den Symlink.
 _trt_cublas_compat() {
   local trt_lib_dir="$1"
   [[ $CUDA_MAJOR -lt 12 ]] && return 0
@@ -351,6 +354,24 @@ for p in sys.path:
     echo -e "${CYAN}  → cuBLAS-12-Compat: libcublas.so.11 + libcublasLt.so.11 → .so.12${RESET}"
   fi
   ldconfig 2>/dev/null || true
+  # ldconfig builds its cache by ELF soname, NOT by filename.
+  # A symlink named libcublas.so.11 pointing to libcublas.so.12 has the soname
+  # "libcublas.so.12" in its ELF header, so ldconfig does NOT register it as
+  # "libcublas.so.11" in the cache — the dynamic linker can't find it by name.
+  # LD_LIBRARY_PATH makes the dynamic linker scan the directory directly by
+  # filename, which finds the symlink. This export affects the current shell and
+  # all Python subprocesses launched from it.
+  export LD_LIBRARY_PATH="$trt_lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  # Persist in venv activate so LD_LIBRARY_PATH is set for every future session.
+  local activate_script="$VENV_DIR/bin/activate"
+  if [[ -f "$activate_script" ]] && ! grep -qF "TRT_CUBLAS_COMPAT_LDPATH" "$activate_script"; then
+    {
+      printf '\n# TRT 8.6.x cuBLAS compat — LD_LIBRARY_PATH added by setup_venv311_vsr.sh\n'
+      printf '# TRT_CUBLAS_COMPAT_LDPATH\n'
+      printf 'export LD_LIBRARY_PATH="%s${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"\n' "$trt_lib_dir"
+    } >> "$activate_script"
+    echo -e "${CYAN}  → LD_LIBRARY_PATH in venv/bin/activate persistiert (TRT cublas compat)${RESET}"
+  fi
 }
 
 echo -e "\n${CYAN}[7/10] TensorRT installieren...${RESET}"
