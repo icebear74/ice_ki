@@ -1,0 +1,948 @@
+#!/usr/bin/env bash
+# ============================================================
+# setup_venv311_vsr.sh
+# Erstellt eine saubere Python-3.11-venv in ./venv311_vsr/
+# für vsr_plusplus_NEU + dataset_generator_v2 + Modell-Konvertierung
+#
+# Getestete Hardware:
+#   GPU    : Tesla P100-PCIE-16GB (CUDA Capability 6.0)
+#   nvcc   : 12.0 (Toolkit)
+#   Treiber: 580.x (meldet CUDA 13.0 in nvidia-smi — das ist
+#            die vom Treiber maximal unterstützte Version,
+#            nicht die des installierten Toolkits!)
+#
+# Warum Python 3.11 (nicht 3.12)?
+#   Für Python 3.12 waren keine PyTorch-Wheels verfügbar, die auf
+#   der Tesla P100 (CC 6.0, CUDA 12.0) korrekt liefen.
+#   Python 3.11 + cu121-Wheel ist die getestete Kombination.
+#
+# Wichtige P100/CC-6.0-Einschränkungen:
+#   ✗ torch.compile / Triton  → erfordert CC ≥ 7.0
+#   ✗ Flash Attention          → erfordert CC ≥ 7.5
+#   ✗ bfloat16 (nativ)        → erfordert CC ≥ 8.0 (nur float16/fp32)
+#   ✗ TensorRT ≥ 9.0          → erfordert CC ≥ 7.0  (→ 8.6.x verwenden!)
+#   ✓ AMP (float16 / fp32)    → läuft
+#   ✓ TensorRT 8.6.x           → läuft (letztes Release mit CC 6.0-Support)
+# ============================================================
+set -euo pipefail
+
+# ---------- Farben ----------
+GREEN='\033[92m'; CYAN='\033[96m'; RED='\033[91m'
+YELLOW='\033[93m'; BOLD='\033[1m'; RESET='\033[0m'
+
+VENV_DIR="venv311_vsr"
+FORCE=false
+SKIP_TORCH=false
+
+# ---------- Argumente ----------
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --force|-f)   FORCE=true;       shift ;;
+    --no-torch)   SKIP_TORCH=true;  shift ;;
+    -h|--help)
+      echo "Usage: $0 [--force] [--no-torch]"
+      echo "  --force      venv311_vsr/ ohne Rückfrage löschen und neu erstellen"
+      echo "  --no-torch   torch/torchvision überspringen (nur requirements_vsr.txt)"
+      exit 0 ;;
+    *) echo -e "${RED}Unbekannte Option: $1${RESET}"; exit 2 ;;
+  esac
+done
+
+# ---------- Banner ----------
+echo -e "${BOLD}${CYAN}"
+echo "╔════════════════════════════════════════════════════════════╗"
+echo "║  setup_venv311_vsr.sh — Python 3.11 venv für VSR++/P100  ║"
+echo "╚════════════════════════════════════════════════════════════╝"
+echo -e "${RESET}"
+
+# ============================================================
+# 1. Python 3.11 prüfen  (3.12 ist NICHT kompatibel!)
+# ============================================================
+# Warum explizit 3.11?
+#   Für Python 3.12 gab es zum Zeitpunkt der Entwicklung keine
+#   PyTorch-Wheels, die auf der Tesla P100 (CC 6.0, CUDA 12.0)
+#   korrekt liefen. Python 3.11 + cu121-Wheel ist die einzige
+#   getestete, funktionierende Kombination für diesen Server.
+# ============================================================
+echo -e "${CYAN}[1/9] Python 3.11 suchen (3.12+ wird abgelehnt)...${RESET}"
+PY_BIN=""
+for candidate in python3.11 python3 python; do
+  if command -v "$candidate" &>/dev/null; then
+    ver=$("$candidate" -c 'import sys; print("{}.{}".format(*sys.version_info[:2]))' 2>/dev/null || echo "?")
+    minor=$("$candidate" -c 'import sys; print(sys.version_info[1])' 2>/dev/null || echo "0")
+    if [[ "$ver" == "3.11" ]]; then
+      PY_BIN="$candidate"
+      break
+    elif [[ "$minor" -ge 12 ]]; then
+      echo -e "${YELLOW}  Überspringe $candidate ($ver) — für Python ≥ 3.12 fehlen kompatible${RESET}"
+      echo -e "${YELLOW}  PyTorch-Wheels für Tesla P100 (CC 6.0, CUDA 12.0).${RESET}"
+    fi
+  fi
+done
+
+if [[ -z "$PY_BIN" ]]; then
+  echo -e "${RED}✗ Python 3.11 nicht gefunden!${RESET}"
+  echo -e "${YELLOW}  Tipp (Debian/Ubuntu): sudo apt install python3.11 python3.11-venv${RESET}"
+  echo -e "${YELLOW}  Tipp (deadsnakes PPA): sudo add-apt-repository ppa:deadsnakes/ppa${RESET}"
+  echo -e "${RED}  WICHTIG: Python 3.12+ NICHT verwenden — fehlende Wheel-Kompatibilität mit P100.${RESET}"
+  exit 1
+fi
+echo -e "${GREEN}✓ Python 3.11 gefunden: $PY_BIN ($("$PY_BIN" -V 2>&1))${RESET}"
+
+# venv-Modul prüfen
+if ! "$PY_BIN" -m venv --help &>/dev/null; then
+  echo -e "${RED}✗ python3.11-venv fehlt!${RESET}"
+  echo -e "${YELLOW}  Tipp: sudo apt install python3.11-venv${RESET}"
+  exit 1
+fi
+
+# ============================================================
+# 2. CUDA-Version ermitteln (nvcc bevorzugt, Fallback nvidia-smi)
+# ============================================================
+echo -e "\n${CYAN}[2/9] CUDA-Toolkit-Version ermitteln...${RESET}"
+
+NVCC_BIN=""
+NVCC_CUDA=""
+DRIVER_CUDA=""
+CUDA_MAJOR=0
+CUDA_MINOR=0
+
+# nvcc in PATH und in Standard-Installationspfaden suchen
+# nvcc suchen — /usr/local/cuda* zuerst (NVIDIA-Installer), /usr/bin/nvcc ist
+# oft die alte apt-Version (nvidia-cuda-toolkit, z.B. 10.x/11.x) und wird
+# absichtlich ZULETZT geprüft.
+NVCC_SEARCH_PATHS=(
+  /usr/local/cuda/bin/nvcc
+  /usr/local/cuda-12.0/bin/nvcc
+  /usr/local/cuda-12.1/bin/nvcc
+  /usr/local/cuda-12.2/bin/nvcc
+  /usr/local/cuda-12.3/bin/nvcc
+  /usr/local/cuda-12.4/bin/nvcc
+  /usr/local/cuda-11.8/bin/nvcc
+  /usr/local/cuda-11/bin/nvcc
+)
+# dynamisch alle /usr/local/cuda-*/bin/nvcc einbeziehen
+for d in /usr/local/cuda-*/bin/nvcc; do
+  NVCC_SEARCH_PATHS+=("$d")
+done
+# /usr/bin/nvcc (apt nvidia-cuda-toolkit) als letzten Fallback
+NVCC_SEARCH_PATHS+=("$(command -v nvcc 2>/dev/null || true)")
+
+echo -e "  Suche nvcc..."
+for candidate in "${NVCC_SEARCH_PATHS[@]}"; do
+  [[ -z "$candidate" ]] && continue
+  [[ -x "$candidate" ]] || continue
+  NVCC_BIN="$candidate"
+  NVCC_RAW=$("$NVCC_BIN" --version 2>&1 | head -5)
+  echo -e "  ${GREEN}✓ nvcc gefunden: ${NVCC_BIN}${RESET}"
+  echo -e "  ${CYAN}  Version-Output:${RESET}"
+  echo "$NVCC_RAW" | sed 's/^/    /'
+  break
+done
+
+if [[ -n "$NVCC_BIN" ]]; then
+  NVCC_CUDA=$("$NVCC_BIN" --version 2>/dev/null \
+    | grep -oE 'release [0-9]+\.[0-9]+' | head -1 | awk '{print $2}' || true)
+  if [[ -n "$NVCC_CUDA" ]]; then
+    CUDA_MAJOR=$(echo "$NVCC_CUDA" | cut -d'.' -f1)
+    CUDA_MINOR=$(echo "$NVCC_CUDA" | cut -d'.' -f2)
+    echo -e "  ${GREEN}✓ CUDA Toolkit (nvcc): ${NVCC_CUDA}${RESET}"
+  else
+    echo -e "  ${YELLOW}⚠ nvcc gefunden, aber Version nicht parsebar — Ausgabe:${RESET}"
+    "$NVCC_BIN" --version 2>&1 | head -5 | sed 's/^/    /'
+  fi
+else
+  echo -e "  ${YELLOW}⚠ nvcc nicht gefunden (weder in PATH noch in Standard-Pfaden)${RESET}"
+  echo -e "  ${YELLOW}  Gesucht in: /usr/local/cuda*/bin/nvcc, /usr/bin/nvcc${RESET}"
+fi
+
+# nvidia-smi: GPU-Info + Treiber-CUDA anzeigen
+if command -v nvidia-smi &>/dev/null; then
+  DRIVER_CUDA=$(nvidia-smi 2>/dev/null \
+    | grep -iE 'CUDA Version' | grep -oE '[0-9]+\.[0-9]+' | head -1 || true)
+  GPU_NAME=$(nvidia-smi --query-gpu=gpu_name --format=csv,noheader 2>/dev/null \
+    | head -1 || echo "unbekannt")
+  GPU_CC=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null \
+    | head -1 || echo "?")
+  echo -e "  ${GREEN}✓ GPU: ${GPU_NAME} (Compute Capability: ${GPU_CC})${RESET}"
+  if [[ -n "$DRIVER_CUDA" ]]; then
+    echo -e "  ${CYAN}  nvidia-smi CUDA (Treiber-Max): ${DRIVER_CUDA}${RESET}"
+    echo -e "  ${YELLOW}  Hinweis: nvidia-smi zeigt die vom Treiber max. unterstützte CUDA-Version,${RESET}"
+    echo -e "  ${YELLOW}  NICHT die des Toolkits (nvcc). Für Wheels ist nvcc maßgeblich.${RESET}"
+  fi
+  # Falls nvcc nicht gefunden: nvidia-smi-Wert als Fallback für Wheel-Wahl verwenden
+  if [[ $CUDA_MAJOR -eq 0 && -n "$DRIVER_CUDA" ]]; then
+    echo -e "  ${YELLOW}  nvcc nicht gefunden — verwende nvidia-smi-Wert (${DRIVER_CUDA}) für Wheel-Auswahl${RESET}"
+    echo -e "  ${YELLOW}  (nvidia-smi zeigt Treiber-Max, echtes Toolkit könnte niedriger sein)${RESET}"
+    CUDA_MAJOR=$(echo "$DRIVER_CUDA" | cut -d'.' -f1)
+    CUDA_MINOR=$(echo "$DRIVER_CUDA" | cut -d'.' -f2)
+  fi
+else
+  echo -e "  ${YELLOW}⚠ nvidia-smi nicht gefunden — kein NVIDIA-Treiber aktiv?${RESET}"
+fi
+
+# Wheel-Index nach CUDA-Version wählen und Entscheidung erklären
+WHEEL_INDEX=""
+WHEEL_FALLBACK=""
+WHEEL_SRC="${NVCC_CUDA:-nvidia-smi:${DRIVER_CUDA:-?}}"
+if [[ $CUDA_MAJOR -ge 12 && $CUDA_MINOR -ge 8 ]]; then
+  WHEEL_INDEX="https://download.pytorch.org/whl/cu128"
+  WHEEL_FALLBACK="https://download.pytorch.org/whl/cu124"
+  echo -e "  ${CYAN}→ PyTorch-Wheel: cu128 (CUDA ≥ 12.8, Quelle: ${WHEEL_SRC})${RESET}"
+elif [[ $CUDA_MAJOR -ge 12 && $CUDA_MINOR -ge 4 ]]; then
+  WHEEL_INDEX="https://download.pytorch.org/whl/cu124"
+  WHEEL_FALLBACK="https://download.pytorch.org/whl/cu121"
+  echo -e "  ${CYAN}→ PyTorch-Wheel: cu124 (CUDA ≥ 12.4, Quelle: ${WHEEL_SRC})${RESET}"
+elif [[ $CUDA_MAJOR -ge 12 && $CUDA_MINOR -ge 0 ]]; then
+  WHEEL_INDEX="https://download.pytorch.org/whl/cu121"
+  echo -e "  ${CYAN}→ PyTorch-Wheel: cu121 (CUDA 12.0–12.3, Quelle: ${WHEEL_SRC})${RESET}"
+elif [[ $CUDA_MAJOR -eq 11 && $CUDA_MINOR -ge 8 ]]; then
+  WHEEL_INDEX="https://download.pytorch.org/whl/cu118"
+  echo -e "  ${CYAN}→ PyTorch-Wheel: cu118 (CUDA 11.8–11.x, Quelle: ${WHEEL_SRC})${RESET}"
+elif [[ $CUDA_MAJOR -gt 0 ]]; then
+  echo -e "  ${YELLOW}→ CUDA ${CUDA_MAJOR}.${CUDA_MINOR} < 11.8 — CPU-Wheel als Fallback${RESET}"
+else
+  echo -e "  ${RED}→ CUDA nicht erkannt (nvcc und nvidia-smi beide fehlgeschlagen) — CPU-Wheel${RESET}"
+  echo -e "  ${YELLOW}  Prüfe: which nvcc | nvcc --version | nvidia-smi${RESET}"
+  echo -e "  ${YELLOW}  Falls CUDA installiert: export PATH=\$PATH:/usr/local/cuda/bin${RESET}"
+fi
+
+# ============================================================
+# 3. venv anlegen
+# ============================================================
+echo -e "\n${CYAN}[3/9] venv311/ anlegen...${RESET}"
+
+if [[ -d "$VENV_DIR" ]]; then
+  if [[ "$FORCE" == "true" ]]; then
+    echo -e "${YELLOW}  --force: lösche vorhandenes ${VENV_DIR}...${RESET}"
+    rm -rf "$VENV_DIR"
+  else
+    read -r -p "  '${VENV_DIR}' existiert bereits. Löschen und neu erstellen? (j/N): " REPLY
+    echo
+    if [[ "$REPLY" =~ ^[JjYy]$ ]]; then
+      rm -rf "$VENV_DIR"
+    else
+      echo -e "${CYAN}  Verwende vorhandene Umgebung.${RESET}"
+    fi
+  fi
+fi
+
+if [[ ! -d "$VENV_DIR" ]]; then
+  "$PY_BIN" -m venv "$VENV_DIR"
+  echo -e "${GREEN}✓ venv311/ erstellt${RESET}"
+else
+  echo -e "${GREEN}✓ venv311/ vorhanden${RESET}"
+fi
+
+# shellcheck disable=SC1091
+source "$VENV_DIR/bin/activate"
+echo -e "${GREEN}✓ Aktiviert: $(which python) ($(python -V 2>&1))${RESET}"
+
+# ============================================================
+# 4. pip / Build-Tools aktualisieren
+# ============================================================
+echo -e "\n${CYAN}[4/9] pip / setuptools / wheel aktualisieren...${RESET}"
+pip install --upgrade pip setuptools wheel --quiet
+echo -e "${GREEN}✓ pip $(pip --version | awk '{print $2}')${RESET}"
+
+# ============================================================
+# 5. requirements_vsr.txt installieren (ohne torch/torchvision)
+# ============================================================
+echo -e "\n${CYAN}[5/10] requirements_vsr.txt installieren (ohne torch/torchvision)...${RESET}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REQ_FILE="$SCRIPT_DIR/requirements_vsr.txt"
+
+if [[ -f "$REQ_FILE" ]]; then
+  TMP_REQ=$(mktemp)
+  # torch/torchvision/tensorrt werden separat mit versionierten Wheels installiert
+  grep -v -E '^\s*(#|$|torch|torchvision|tensorrt|pycuda)' "$REQ_FILE" > "$TMP_REQ" || true
+  if [[ -s "$TMP_REQ" ]]; then
+    pip install -r "$TMP_REQ"
+    echo -e "${GREEN}✓ requirements_vsr.txt installiert${RESET}"
+  else
+    echo -e "${YELLOW}  Keine weiteren Pakete nach Filter${RESET}"
+  fi
+  rm -f "$TMP_REQ"
+else
+  echo -e "${YELLOW}  requirements_vsr.txt nicht gefunden — übersprungen${RESET}"
+fi
+
+# ============================================================
+# 6. PyTorch installieren
+# ============================================================
+if [[ "$SKIP_TORCH" == "false" ]]; then
+  echo -e "\n${CYAN}[6/10] PyTorch + torchvision installieren...${RESET}"
+  echo -e "${YELLOW}  (kann einige Minuten dauern)${RESET}"
+
+  TORCH_OK=false
+  if [[ -n "$WHEEL_INDEX" ]]; then
+    echo -e "  ${CYAN}→ pip install torch torchvision --index-url ${WHEEL_INDEX}${RESET}"
+    if pip install torch torchvision --index-url "$WHEEL_INDEX"; then
+      TORCH_OK=true
+    elif [[ -n "${WHEEL_FALLBACK:-}" ]]; then
+      echo -e "  ${YELLOW}  Primärer Index fehlgeschlagen — Fallback: ${WHEEL_FALLBACK}${RESET}"
+      if pip install torch torchvision --index-url "$WHEEL_FALLBACK"; then
+        TORCH_OK=true
+      fi
+    fi
+  else
+    echo -e "  ${YELLOW}  Kein CUDA-Wheel — CPU-Version${RESET}"
+    if pip install torch torchvision; then
+      TORCH_OK=true
+    fi
+  fi
+
+  if [[ "$TORCH_OK" == "true" ]]; then
+    echo -e "${GREEN}✓ PyTorch installiert${RESET}"
+    python -c "import torch; print(f'  Version: {torch.__version__}')"
+    python -c "import torch; print(f'  CUDA verfügbar: {torch.cuda.is_available()}')"
+  else
+    echo -e "${RED}✗ PyTorch-Installation fehlgeschlagen!${RESET}"
+  fi
+else
+  echo -e "\n${YELLOW}[6/10] PyTorch übersprungen (--no-torch)${RESET}"
+fi
+
+# ============================================================
+# 7. TensorRT installieren (CC-6.0-kompatible Version 8.6.x)
+# ============================================================
+# Helper: CUDA-Compat-Symlinks + LD_LIBRARY_PATH für TRT 8.6.x auf CUDA-12-Systemen.
+# Das TRT-8.6.1-Python-Wheel (.so) ist in BEIDEN Tarballs (cuda-11 und cuda-12)
+# gegen libcublas.so.11 und libcudnn.so.8 gelinkt. Auf CUDA-12-Systemen gibt es diese
+# Versionen nicht (nur .so.12 / .so.9). Fix: Symlinks + LD_LIBRARY_PATH.
+# Wichtig: ldconfig alleine reicht NICHT — ldconfig cached nach ELF-Soname (.so.12),
+# nicht nach Dateinamen (.so.11). LD_LIBRARY_PATH lässt den Linker das Dir nach Dateinamen
+# direkt scannen und findet den Symlink.
+_trt_cublas_compat() {
+  local trt_lib_dir="$1"
+  [[ $CUDA_MAJOR -lt 12 ]] && return 0
+  [[ ! -d "$trt_lib_dir" ]] && return 0
+
+  # --- cuBLAS: libcublas.so.11 → libcublas.so.12 ---
+  # libcublas.so.12 finden — erst venv (nvidia-cublas-cu12), dann System
+  local cublas_dir=""
+  cublas_dir=$(python -c "
+import os, sys
+for p in sys.path:
+    c = os.path.join(p, 'nvidia', 'cublas', 'lib', 'libcublas.so.12')
+    if os.path.isfile(c):
+        print(os.path.dirname(c)); break
+" 2>/dev/null || true)
+  if [[ -z "$cublas_dir" ]]; then
+    for d in /usr/local/cuda/lib64 /usr/local/cuda-12.0/lib64 \
+              /usr/local/cuda-12/lib64 /usr/lib/x86_64-linux-gnu; do
+      [[ -f "$d/libcublas.so.12" ]] && { cublas_dir="$d"; break; }
+    done
+  fi
+  if [[ -z "$cublas_dir" ]]; then
+    echo -e "${YELLOW}  ⚠  libcublas.so.12 nicht gefunden — cuBLAS-Compat-Symlinks nicht möglich${RESET}"
+  else
+    # cuBLAS-12-Pfad zu ldconfig hinzufügen (für libnvinfer.so.8 aus cuda-12-Tarball)
+    if ! grep -qxF "$cublas_dir" /etc/ld.so.conf.d/tensorrt.conf 2>/dev/null; then
+      echo "$cublas_dir" >> /etc/ld.so.conf.d/tensorrt.conf
+    fi
+    # Compat-Symlinks .so.11 → .so.12 im TRT-lib-Verzeichnis anlegen
+    local changed=0
+    for lib in libcublas libcublasLt; do
+      local src="$cublas_dir/${lib}.so.12"
+      local dst="$trt_lib_dir/${lib}.so.11"
+      if [[ -f "$src" ]] && [[ ! -e "$dst" ]]; then
+        ln -sf "$src" "$dst" 2>/dev/null || true
+        changed=1
+      fi
+    done
+    if [[ $changed -eq 1 ]]; then
+      echo -e "${CYAN}  → cuBLAS-12-Compat: libcublas.so.11 + libcublasLt.so.11 → .so.12${RESET}"
+    fi
+  fi
+
+  # --- cuDNN 8: TRT 8.6.x braucht ECHTE libcudnn8 ---
+  # cuDNN 9 ist NICHT ABI-kompatibel mit cuDNN 8 — Symlinks .so.8→.so.9 scheitern
+  # mit "version `libcudnn.so.8' not found (required by libnvinfer_plugin.so.8)".
+  # Ursache: ELF-Versionsymbole (@@CUDNN_8) fehlen in libcudnn.so.9.
+  # Fix: echte libcudnn8 (8.x) installieren, NICHT cuDNN 9 aliasieren.
+  local cudnn8_dir=""
+
+  # 1) Suche echte libcudnn.so.8 im venv pip-Paket (nvidia-cudnn-cu12 v8.x)
+  cudnn8_dir=$(python -c "
+import os, sys
+for p in sys.path:
+    c = os.path.join(p, 'nvidia', 'cudnn', 'lib', 'libcudnn.so.8')
+    if os.path.isfile(c):
+        print(os.path.dirname(c)); exit()
+" 2>/dev/null || true)
+
+  # 2) Suche in System-Standardpfaden
+  if [[ -z "$cudnn8_dir" ]]; then
+    for d in /usr/lib/x86_64-linux-gnu /usr/local/cuda/lib64 \
+              /usr/local/cuda-12.0/lib64 /usr/local/cuda-12/lib64; do
+      [[ -f "$d/libcudnn.so.8" ]] && { cudnn8_dir="$d"; break; }
+    done
+  fi
+
+  # 3) Wenn nicht gefunden: nvidia-cudnn-cu12<9 in ein separates Zielverzeichnis
+  # installieren — NICHT in die venv (pip install ohne --target würde
+  # nvidia-cudnn-cu12==9.1.0.70 downgraden und torch brechen, weil torch
+  # libcudnn.so.9 aus diesem Paket benötigt).
+  # --target installiert die Wheel-Dateien direkt ins Zielverzeichnis,
+  # ohne die venv-Pakete zu verändern.
+  if [[ -z "$cudnn8_dir" ]]; then
+    local _cudnn8_target="$SCRIPT_DIR/.cudnn8_compat"
+    echo -e "${CYAN}  → libcudnn8 nicht gefunden — versuche pip install --target 'nvidia-cudnn-cu12<9'...${RESET}"
+    mkdir -p "$_cudnn8_target"
+    if pip install --quiet --no-deps --target "$_cudnn8_target" "nvidia-cudnn-cu12<9" 2>/dev/null; then
+      local _c="$_cudnn8_target/nvidia/cudnn/lib/libcudnn.so.8"
+      [[ -f "$_c" ]] && cudnn8_dir="$(dirname "$_c")"
+    fi
+  fi
+
+  # 4) Wenn nicht gefunden: apt-get install libcudnn8 — ggf. NVIDIA-Repo einrichten
+  if [[ -z "$cudnn8_dir" ]]; then
+    echo -e "${CYAN}  → versuche apt-get install libcudnn8...${RESET}"
+    # NVIDIA CUDA apt-Repo einrichten falls libcudnn8 noch nicht im apt-Cache ist
+    if ! apt-cache show libcudnn8 &>/dev/null 2>&1; then
+      local _os_id _os_ver _nvidia_repo_id
+      _os_id=$(. /etc/os-release 2>/dev/null && echo "${ID:-ubuntu}")
+      _os_ver=$(. /etc/os-release 2>/dev/null && echo "${VERSION_ID:-22.04}" | tr -d '.')
+      _nvidia_repo_id="${_os_id}${_os_ver}"  # z.B. ubuntu2204, debian12
+      local _keyring_deb="/tmp/cuda-keyring_1.1-1_all.deb"
+      local _keyring_url="https://developer.download.nvidia.com/compute/cuda/repos/${_nvidia_repo_id}/x86_64/cuda-keyring_1.1-1_all.deb"
+      echo -e "${CYAN}  → Richte NVIDIA CUDA apt-Repo ein (${_nvidia_repo_id})...${RESET}"
+      if wget -q -O "$_keyring_deb" "$_keyring_url" 2>/dev/null || \
+         curl -fsSL -o "$_keyring_deb" "$_keyring_url" 2>/dev/null; then
+        dpkg -i "$_keyring_deb" 2>/dev/null || true
+        apt-get update -qq 2>/dev/null || true
+      else
+        echo -e "${YELLOW}  ⚠  NVIDIA-Repo-Keyring konnte nicht heruntergeladen werden${RESET}"
+      fi
+    fi
+    if apt-get install -y --no-install-recommends libcudnn8 2>/dev/null; then
+      for d in /usr/lib/x86_64-linux-gnu /usr/local/cuda/lib64 \
+                /usr/local/cuda-12.0/lib64 /usr/local/cuda-12/lib64; do
+        [[ -f "$d/libcudnn.so.8" ]] && { cudnn8_dir="$d"; break; }
+      done
+    fi
+  fi
+
+  if [[ -z "$cudnn8_dir" ]]; then
+    echo -e "${YELLOW}  ⚠  libcudnn.so.8 (cuDNN 8) nicht gefunden${RESET}"
+    echo -e "${YELLOW}     cuDNN 9 ist NICHT ABI-kompatibel — Symlinks .so.8→.so.9 funktionieren NICHT!${RESET}"
+    echo -e "${YELLOW}     Optionen:${RESET}"
+    echo -e "${YELLOW}       pip install 'nvidia-cudnn-cu12<9'${RESET}"
+    echo -e "${YELLOW}       apt-get install libcudnn8  (NVIDIA CUDA-apt-Repo erforderlich)${RESET}"
+    echo -e "${YELLOW}     Repo-Setup: https://developer.nvidia.com/cuda-downloads → Linux → Deb (network)${RESET}"
+  else
+    # Symlinks im TRT-lib-Verzeichnis auf ECHTE cuDNN-8-Dateien anlegen (oder aktualisieren)
+    local cudnn8_changed=0
+    local _csrc _cdst
+    # Haupt-Lib
+    _csrc="$cudnn8_dir/libcudnn.so.8"
+    _cdst="$trt_lib_dir/libcudnn.so.8"
+    if [[ ! -e "$_cdst" ]] || [[ "$(readlink "$_cdst" 2>/dev/null)" != "$_csrc" ]]; then
+      ln -sf "$_csrc" "$_cdst" 2>/dev/null || true
+      cudnn8_changed=1
+    fi
+    # cuDNN-8-Sub-Bibliotheken (v8 behält die _infer/_train-Suffixe)
+    for _lib in libcudnn_ops_infer libcudnn_ops_train \
+                libcudnn_cnn_infer libcudnn_cnn_train \
+                libcudnn_adv_infer libcudnn_adv_train; do
+      _csrc="$cudnn8_dir/${_lib}.so.8"
+      _cdst="$trt_lib_dir/${_lib}.so.8"
+      if [[ -f "$_csrc" ]] && \
+         ( [[ ! -e "$_cdst" ]] || [[ "$(readlink "$_cdst" 2>/dev/null)" != "$_csrc" ]] ); then
+        ln -sf "$_csrc" "$_cdst" 2>/dev/null || true
+        cudnn8_changed=1
+      fi
+    done
+    if [[ $cudnn8_changed -eq 1 ]]; then
+      echo -e "${CYAN}  → cuDNN-8: Symlinks → echte libcudnn8 (${cudnn8_dir})${RESET}"
+    fi
+    # cuDNN-8-Pfad zu ldconfig hinzufügen
+    if ! grep -qxF "$cudnn8_dir" /etc/ld.so.conf.d/tensorrt.conf 2>/dev/null; then
+      echo "$cudnn8_dir" >> /etc/ld.so.conf.d/tensorrt.conf
+    fi
+  fi
+
+  ldconfig 2>/dev/null || true
+  # ldconfig builds its cache by ELF soname, NOT by filename.
+  # Symlinks for libcublas.so.11 (→ real .so.12) and libcudnn.so.8 (→ real libcudnn8)
+  # are found by name — LD_LIBRARY_PATH makes the dynamic linker scan the directory
+  # directly by filename, bypassing the ldconfig soname cache.
+  export LD_LIBRARY_PATH="$trt_lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  # Persist in venv activate so LD_LIBRARY_PATH is set for every future session.
+  local activate_script="$VENV_DIR/bin/activate"
+  if [[ -f "$activate_script" ]] && ! grep -qF "TRT_CUBLAS_COMPAT_LDPATH" "$activate_script"; then
+    {
+      printf '\n# TRT 8.6.x CUDA compat (cuBLAS .so.11→.so.12, libcudnn.so.8→real libcudnn8) — added by setup_venv311_vsr.sh\n'
+      printf '# TRT_CUBLAS_COMPAT_LDPATH\n'
+      printf 'export LD_LIBRARY_PATH="%s${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"\n' "$trt_lib_dir"
+    } >> "$activate_script"
+    echo -e "${CYAN}  → LD_LIBRARY_PATH in venv/bin/activate persistiert (TRT CUDA compat)${RESET}"
+  fi
+}
+
+echo -e "\n${CYAN}[7/10] TensorRT installieren...${RESET}"
+
+# Compute Capability der GPU ermitteln
+GPU_CC=$(python -c "
+import torch, sys
+if not torch.cuda.is_available():
+    print('0.0')
+    sys.exit(0)
+cc = torch.cuda.get_device_capability(0)
+print(f'{cc[0]}.{cc[1]}')
+" 2>/dev/null || echo "0.0")
+
+GPU_CC_MAJOR=$(echo "$GPU_CC" | cut -d. -f1)
+
+if [[ "$GPU_CC_MAJOR" -eq 0 ]]; then
+  echo -e "${YELLOW}  ⚠  CUDA nicht verfügbar — TensorRT übersprungen${RESET}"
+elif [[ "$GPU_CC_MAJOR" -lt 7 ]]; then
+  # CC 6.x (z.B. Tesla P100): nur TensorRT 8.6.x unterstützt diese GPU!
+  # TensorRT 9.0+ hat Support für CC < 7.0 fallen gelassen.
+  echo -e "${YELLOW}  GPU CC ${GPU_CC} — TensorRT ≥ 9.0 unterstützt CC < 7.0 NICHT!${RESET}"
+  echo -e "${CYAN}  → TensorRT 8.6.x: lokales Tarball (bevorzugt) oder apt + Python-Bindings${RESET}"
+  # Alle pip-Wheels für tensorrt 8.6.x (PyPI und NGC) sind py2.py3-none-any Stubs
+  # ohne gebündelte Shared Libraries (libnvinfer.so.8 etc.).
+  # Zuverlässige Optionen:
+  #   1. Lokales Tarball (TensorRT-8.6.x.tar.gz) im Repo-Root → extrahieren + Wheel installieren
+  #   2. System-Installation via NVIDIAs CUDA apt-Repo + pip-Bindings
+  TRT_INSTALLED=0
+
+  # Option 1 (bevorzugt): lokales TRT-8.6.x-Tarball im Repo-Root verwenden
+  # CUDA-Version-passendes Tarball bevorzugen (cuda-12 vor cuda-11 auf CUDA-12-System)
+  TRT_TARBALL=""
+  if [[ $CUDA_MAJOR -ge 12 ]]; then
+    TRT_TARBALL=$(ls "$SCRIPT_DIR"/TensorRT-8.6.*cuda-12*.tar.gz 2>/dev/null | head -1)
+  elif [[ $CUDA_MAJOR -eq 11 ]]; then
+    TRT_TARBALL=$(ls "$SCRIPT_DIR"/TensorRT-8.6.*cuda-11*.tar.gz 2>/dev/null | head -1)
+  fi
+  # Fallback: erstes verfügbares TRT-8.6.x-Tarball
+  [[ -z "$TRT_TARBALL" ]] && \
+    TRT_TARBALL=$(ls "$SCRIPT_DIR"/TensorRT-8.6.*.tar.gz 2>/dev/null | head -1)
+  # CUDA-Versionskonflikt beim Fallback: falsches Tarball lieber überspringen als defektes Env anlegen
+  if [[ -n "$TRT_TARBALL" ]]; then
+    if [[ $CUDA_MAJOR -ge 12 ]] && echo "$TRT_TARBALL" | grep -q "cuda-11"; then
+      echo -e "${YELLOW}  ⚠  Kein CUDA-12-Tarball gefunden — vorhandener CUDA-11-Tarball wird übersprungen.${RESET}"
+      echo -e "${YELLOW}     Bitte TensorRT-8.6.1.6.Linux.x86_64-gnu.cuda-12.0.tar.gz ins Repo-Root legen.${RESET}"
+      TRT_TARBALL=""
+    elif [[ $CUDA_MAJOR -eq 11 ]] && echo "$TRT_TARBALL" | grep -q "cuda-12"; then
+      echo -e "${YELLOW}  ⚠  Kein CUDA-11-Tarball gefunden — vorhandener CUDA-12-Tarball wird übersprungen.${RESET}"
+      TRT_TARBALL=""
+    fi
+  fi
+  if [[ -n "$TRT_TARBALL" ]]; then
+    echo -e "${CYAN}  → Lokales Tarball gefunden: $(basename "$TRT_TARBALL")${RESET}"
+    TRT_EXTRACT_DIR="$SCRIPT_DIR/TensorRT-8.6.1.6"
+    _TRT_SRC_MARKER="$TRT_EXTRACT_DIR/.trt_source_tarball"
+    # Prüfe ob bestehendes Verzeichnis aus einem anderen Tarball stammt → re-extrahieren
+    if [[ -d "$TRT_EXTRACT_DIR" ]]; then
+      _TRT_PREV_SRC=""
+      [[ -f "$_TRT_SRC_MARKER" ]] && _TRT_PREV_SRC=$(cat "$_TRT_SRC_MARKER")
+      if [[ "$_TRT_PREV_SRC" != "$(basename "$TRT_TARBALL")" ]]; then
+        echo -e "${CYAN}  → Tarball-Wechsel (${_TRT_PREV_SRC:-unbekannt} → $(basename "$TRT_TARBALL")) — re-extrahiere...${RESET}"
+        rm -rf "$TRT_EXTRACT_DIR"
+      fi
+    fi
+    if [[ ! -d "$TRT_EXTRACT_DIR" ]]; then
+      echo -e "${CYAN}  → Entpacke Tarball...${RESET}"
+      tar -xzf "$TRT_TARBALL" -C "$SCRIPT_DIR"
+      echo "$(basename "$TRT_TARBALL")" > "$TRT_EXTRACT_DIR/.trt_source_tarball"
+    fi
+    # Shared Libraries registrieren — wir KOPIEREN NICHT (cp würde Symlinks zerstören).
+    # Stattdessen: ld.so.conf.d-Eintrag auf das TRT-lib-Verzeichnis setzen.
+    TRT_LIB_DIR="$TRT_EXTRACT_DIR/targets/x86_64-linux-gnu/lib"
+    [[ -d "$TRT_LIB_DIR" ]] || TRT_LIB_DIR="$TRT_EXTRACT_DIR/lib"
+    if [[ -d "$TRT_LIB_DIR" ]]; then
+      # Bereits fälschlich nach /usr/local/lib/ kopierte Nicht-Symlinks entfernen
+      for f in libnvinfer libnvinfer_lean libnvinfer_dispatch libnvinfer_vc_plugin \
+                libnvonnxparser libnvparsers libnvinfer_plugin; do
+        rm -f "/usr/local/lib/${f}.so.8" 2>/dev/null || true
+      done
+      echo -e "${CYAN}  → Registriere TRT-Libs via /etc/ld.so.conf.d/tensorrt.conf${RESET}"
+      echo "$TRT_LIB_DIR" > /etc/ld.so.conf.d/tensorrt.conf
+      ldconfig 2>/dev/null || true
+      _trt_cublas_compat "$TRT_LIB_DIR"
+      TRT_INSTALLED=1
+    fi
+    # Python-Wheel für cp311 installieren
+    TRT_WHL=$(ls "$TRT_EXTRACT_DIR"/python/tensorrt-8.6.*-cp311-*.whl 2>/dev/null | head -1)
+    if [[ -n "$TRT_WHL" ]]; then
+      echo -e "${CYAN}  → Installiere Python-Wheel: $(basename "$TRT_WHL")${RESET}"
+      pip install "$TRT_WHL" onnx --quiet
+      echo -e "${GREEN}✓ TensorRT 8.6.x aus lokalem Tarball installiert${RESET}"
+    else
+      echo -e "${YELLOW}  ⚠  Kein cp311-Wheel im Tarball gefunden — TRT-Wheel nicht installierbar${RESET}"
+      echo -e "${YELLOW}     Bitte komplettes TensorRT-8.6.x-Tarball (CUDA ${CUDA_MAJOR}.x) verwenden.${RESET}"
+    fi
+  else
+    # Option 2: System-Libs via apt (erfordert NVIDIAs CUDA-apt-Repo)
+    if command -v apt-get &>/dev/null; then
+      echo -e "${CYAN}  → Versuche apt-get install libnvinfer8 (TRT 8.6.x System-Libs)...${RESET}"
+      if apt-get install -y --no-install-recommends \
+          libnvinfer8 libnvinfer-plugin8 libnvonnxparser8 \
+          python3-libnvinfer 2>/dev/null; then
+        echo -e "${GREEN}✓ TensorRT 8.6.x System-Libs via apt installiert${RESET}"
+        TRT_INSTALLED=1
+      else
+        echo -e "${YELLOW}  ⚠  apt-get fehlgeschlagen — TRT-apt-Repo nicht konfiguriert?${RESET}"
+      fi
+    fi
+    # KEIN pip install 'tensorrt==8.6.*' hier: alle öffentlich verfügbaren Wheels
+    # (PyPI und NGC) für 8.6.x sind entweder Stubs (keine .so-Dateien) oder
+    # enthalten CUDA-11-Libs, die auf CUDA-12-Systemen nicht funktionieren.
+    # Einzig zuverlässige Installation: lokales Tarball (Option 1) oder apt (oben).
+  fi
+
+  if python -c "import tensorrt as trt; print(f'  TensorRT Version: {trt.__version__}')" 2>/dev/null; then
+    echo -e "${GREEN}✓ tensorrt import erfolgreich${RESET}"
+  else
+    echo -e "${YELLOW}  ⚠  tensorrt Import fehlgeschlagen!${RESET}"
+    # Spezifische Fehlerdiagnose: CUDA-Versionskonflikt (cuda-11-Wheel auf CUDA-12-System)
+    _TRT_IMPORT_ERR=$(python -c "import tensorrt" 2>&1 || true)
+    if echo "$_TRT_IMPORT_ERR" | grep -qE "libcublas\.so\.1[01]|libcublasLt\.so\.1[01]|libcufft\.so\.1[01]|libcudnn\.so\.[89]"; then
+      _MISSING_LIB=$(echo "$_TRT_IMPORT_ERR" | grep -oE 'lib[a-zA-Z]+\.so\.[0-9]+' | head -1)
+      echo -e "${YELLOW}  Ursache: TRT-Libs für falsche CUDA-Version — System hat CUDA ${CUDA_MAJOR}.${CUDA_MINOR}${RESET}"
+      echo -e "${YELLOW}  Fehlende Bibliothek: ${_MISSING_LIB}${RESET}"
+      # Automatischer Tausch: passendes Tarball suchen und Libs ersetzen
+      _FIX_TARBALL=""
+      if [[ $CUDA_MAJOR -ge 12 ]]; then
+        _FIX_TARBALL=$(ls "$SCRIPT_DIR"/TensorRT-8.6.*cuda-12*.tar.gz 2>/dev/null | head -1)
+      elif [[ $CUDA_MAJOR -eq 11 ]]; then
+        _FIX_TARBALL=$(ls "$SCRIPT_DIR"/TensorRT-8.6.*cuda-11*.tar.gz 2>/dev/null | head -1)
+      fi
+      if [[ -n "$_FIX_TARBALL" ]]; then
+        echo -e "${CYAN}  → Korrekter Tarball gefunden: $(basename "$_FIX_TARBALL") — tausche TRT-Libs...${RESET}"
+        _FIX_EXTRACT_DIR="$SCRIPT_DIR/TensorRT-8.6.1.6"
+        rm -rf "$_FIX_EXTRACT_DIR"
+        tar -xzf "$_FIX_TARBALL" -C "$SCRIPT_DIR"
+        echo "$(basename "$_FIX_TARBALL")" > "$_FIX_EXTRACT_DIR/.trt_source_tarball"
+        _FIX_LIB_DIR="$_FIX_EXTRACT_DIR/targets/x86_64-linux-gnu/lib"
+        [[ -d "$_FIX_LIB_DIR" ]] || _FIX_LIB_DIR="$_FIX_EXTRACT_DIR/lib"
+        if [[ -d "$_FIX_LIB_DIR" ]]; then
+          echo "$_FIX_LIB_DIR" > /etc/ld.so.conf.d/tensorrt.conf
+          ldconfig 2>/dev/null || true
+          _trt_cublas_compat "$_FIX_LIB_DIR"
+        fi
+        _FIX_WHL=$(ls "$_FIX_EXTRACT_DIR"/python/tensorrt-8.6.*-cp311-*.whl 2>/dev/null | head -1)
+        if [[ -n "$_FIX_WHL" ]]; then
+          echo -e "${CYAN}  → Re-installiere TRT-Wheel: $(basename "$_FIX_WHL")${RESET}"
+          pip install --force-reinstall "$_FIX_WHL" onnx --quiet
+        fi
+        if python -c "import tensorrt as trt; print(f'  TensorRT Version: {trt.__version__}')" 2>/dev/null; then
+          echo -e "${GREEN}✓ tensorrt import nach Libs-Tausch erfolgreich${RESET}"
+        else
+          echo -e "${YELLOW}  ⚠  Import nach Tausch immer noch fehlgeschlagen: $(python -c 'import tensorrt' 2>&1 || true)${RESET}"
+        fi
+      else
+        # Kein passendes Tarball gefunden → Anleitung ausgeben
+        if [[ $CUDA_MAJOR -ge 12 ]]; then
+          _WANTED_TAR="TensorRT-8.6.1.6.Linux.x86_64-gnu.cuda-12.0.tar.gz"
+        else
+          _WANTED_TAR="TensorRT-8.6.1.6.Linux.x86_64-gnu.cuda-11.8.tar.gz"
+        fi
+        echo -e "${YELLOW}  Kein CUDA-${CUDA_MAJOR}.x-kompatibler TRT-Tarball im Repo-Root gefunden.${RESET}"
+        echo -e "${YELLOW}  Bitte herunterladen und ins Repo-Root legen:${RESET}"
+        echo -e "${YELLOW}    ${_WANTED_TAR}${RESET}"
+        echo -e "${YELLOW}    https://developer.nvidia.com/tensorrt → Archive → 8.6.1 → Linux x86_64 CUDA ${CUDA_MAJOR}.0${RESET}"
+        echo -e "${YELLOW}    Danach Script erneut ausführen.${RESET}"
+        # Kaputtes pip-Wheel entfernen damit kein defektes 'import tensorrt' im venv bleibt
+        if pip show tensorrt &>/dev/null; then
+          echo -e "${CYAN}  → Deinstalliere kaputtes tensorrt-Wheel (CUDA-Versionskonflikt)...${RESET}"
+          pip uninstall -y tensorrt 2>/dev/null || true
+          echo -e "${YELLOW}  ✓ tensorrt entfernt — nach Tarball-Download Script erneut ausführen.${RESET}"
+        fi
+      fi
+    elif [[ "$TRT_INSTALLED" -eq 0 ]]; then
+      echo -e "${YELLOW}     Die pip-Wheels für TRT 8.6.x enthalten KEINE .so-Dateien (py2.py3-none-any Stub).${RESET}"
+      echo -e "${YELLOW}     Manuelle Installation — eine der folgenden Optionen:${RESET}"
+      echo -e "${YELLOW}     Option 1 (lokal): Passendes TRT-8.6.x-Tarball ins Repo-Root legen:${RESET}"
+      echo -e "${YELLOW}       CUDA 12.x: TensorRT-8.6.1.6.Linux.x86_64-gnu.cuda-12.0.tar.gz${RESET}"
+      echo -e "${YELLOW}       CUDA 11.x: TensorRT-8.6.1.6.Linux.x86_64-gnu.cuda-11.8.tar.gz${RESET}"
+      echo -e "${YELLOW}       https://developer.nvidia.com/tensorrt → Archive → 8.6.1${RESET}"
+      echo -e "${YELLOW}     Option 2 (apt): NVIDIAs CUDA-apt-Repo einrichten, dann:${RESET}"
+      echo -e "${YELLOW}       sudo apt-get install libnvinfer8 libnvinfer-plugin8 libnvonnxparser8 python3-libnvinfer${RESET}"
+      echo -e "${YELLOW}     TRT-Optimierung (optimize_checkpoint.py) wird ohne TRT nicht verfügbar sein.${RESET}"
+      # Kaputtes pip-Stub-Wheel entfernen (verursacht irreführende Import-Fehler)
+      if pip show tensorrt &>/dev/null; then
+        echo -e "${CYAN}  → Deinstalliere defektes/unvollständiges tensorrt-Wheel...${RESET}"
+        pip uninstall -y tensorrt 2>/dev/null || true
+        echo -e "${YELLOW}  ✓ tensorrt entfernt — nach Tarball-Download Script erneut ausführen.${RESET}"
+      fi
+    else
+      echo -e "${YELLOW}     Import-Fehler: $_TRT_IMPORT_ERR${RESET}"
+    fi
+  fi
+else
+  # CC ≥ 7.0: aktuelle TensorRT-Version verwenden (9.x, Standard-PyPI)
+  echo -e "${CYAN}  GPU CC ${GPU_CC} — installiere aktuelle tensorrt-Version${RESET}"
+  if pip install tensorrt tensorrt-libs tensorrt-bindings onnx; then
+    echo -e "${GREEN}✓ tensorrt installiert${RESET}"
+    python -c "import tensorrt as trt; print(f'  TensorRT Version: {trt.__version__}')" 2>/dev/null || true
+  else
+    echo -e "${RED}✗ tensorrt Installation fehlgeschlagen!${RESET}"
+  fi
+fi
+
+# ============================================================
+# 8. Kompatibilitäts-Test P100 / CC 6.0
+# ============================================================
+echo -e "\n${CYAN}[8/10] Kompatibilitäts-Test für P100 (CC 6.0)...${RESET}"
+
+COMPAT_PASS=0
+COMPAT_WARN=0
+COMPAT_FAIL=0
+
+run_test() {
+  local label="$1"
+  local code="$2"
+  local severity="${3:-fail}"   # fail | warn | info
+  if python -c "$code" 2>/dev/null; then
+    echo -e "  ${GREEN}✓ ${label}${RESET}"
+    COMPAT_PASS=$((COMPAT_PASS + 1))
+  else
+    if [[ "$severity" == "warn" ]]; then
+      echo -e "  ${YELLOW}⚠ ${label} (erwartet auf P100/CC 6.0)${RESET}"
+      COMPAT_WARN=$((COMPAT_WARN + 1))
+    else
+      echo -e "  ${RED}✗ ${label}${RESET}"
+      COMPAT_FAIL=$((COMPAT_FAIL + 1))
+    fi
+  fi
+}
+
+# Basis-Imports (nur was vsr_plusplus_NEU + dataset_generator_v2 + Konvertierung brauchen)
+run_test "import torch"       "import torch"
+run_test "import torchvision" "import torchvision"
+run_test "import numpy"       "import numpy"
+run_test "import cv2"         "import cv2"
+run_test "import tensorboard" "import tensorboard"
+run_test "import psutil"      "import psutil"
+run_test "import rich"        "import rich"
+run_test "import questionary" "import questionary"
+run_test "import onnx"        "import onnx" warn
+run_test "import tensorrt"    "import tensorrt" warn
+
+# CUDA-Basis
+run_test "torch.cuda.is_available()" \
+  "import torch; assert torch.cuda.is_available(), 'CUDA nicht verfügbar'" fail
+
+# Compute Capability prüfen und dokumentieren
+python -c "
+import torch, sys
+if not torch.cuda.is_available():
+    sys.exit(0)
+cc = torch.cuda.get_device_capability(0)
+name = torch.cuda.get_device_name(0)
+print(f'  GPU erkannt: {name}  (CC {cc[0]}.{cc[1]})')
+if cc < (7, 0):
+    print(f'  → CC {cc[0]}.{cc[1]} < 7.0: torch.compile/Triton NICHT verfügbar (erwartet für P100)')
+    print(f'  → TensorRT: nur 8.6.x kompatibel (9.x hat CC < 7.0 nicht mehr)')
+if cc < (7, 5):
+    print(f'  → CC {cc[0]}.{cc[1]} < 7.5: Flash Attention NICHT verfügbar (erwartet für P100)')
+if cc < (8, 0):
+    print(f'  → CC {cc[0]}.{cc[1]} < 8.0: bfloat16 NICHT nativ verfügbar (float16/fp32 laufen)')
+" 2>/dev/null || true
+
+# TensorRT-Version auf CC-Kompatibilität prüfen
+python -c "
+import sys
+try:
+    import tensorrt as trt
+    import torch
+    if not torch.cuda.is_available():
+        sys.exit(0)
+    cc = torch.cuda.get_device_capability(0)
+    major = int(trt.__version__.split('.')[0])
+    if cc < (7, 0) and major >= 9:
+        print(f'  ✗ tensorrt {trt.__version__} unterstützt CC {cc[0]}.{cc[1]} NICHT (erfordert CC ≥ 7.0)')
+        print(f'    Lösung: pip install \"tensorrt==8.6.*\"')
+        sys.exit(1)
+    print(f'  ✓ tensorrt {trt.__version__} kompatibel mit CC {cc[0]}.{cc[1]}')
+except ImportError:
+    print('  ⚠ tensorrt nicht installiert — Konvertierung zu .engine nicht möglich')
+" 2>/dev/null || COMPAT_WARN=$((COMPAT_WARN + 1))
+
+# FP16 (float16) — läuft auf P100
+run_test "torch FP16 Tensor auf CUDA" "
+import torch
+if not torch.cuda.is_available(): raise SystemExit(0)
+t = torch.randn(4, 4, dtype=torch.float16).cuda()
+assert t.dtype == torch.float16
+"
+
+# bfloat16 — läuft NICHT nativ auf P100 (CC 6.0)
+run_test "torch bfloat16 auf CUDA (CC ≥ 8.0 nötig)" "
+import torch
+if not torch.cuda.is_available(): raise SystemExit(0)
+cc = torch.cuda.get_device_capability(0)
+if cc < (8, 0): raise RuntimeError('CC < 8.0')
+t = torch.randn(4, 4, dtype=torch.bfloat16).cuda()
+" warn
+
+# torch.compile — braucht CC ≥ 7.0
+run_test "torch.compile (CC ≥ 7.0 nötig)" "
+import torch
+if not torch.cuda.is_available(): raise SystemExit(0)
+cc = torch.cuda.get_device_capability(0)
+if cc < (7, 0): raise RuntimeError('CC < 7.0')
+m = torch.nn.Linear(4, 4).cuda()
+cm = torch.compile(m)
+_ = cm(torch.randn(2, 4).cuda())
+" warn
+
+# AMP autocast (FP16) — sollte auf P100 funktionieren
+run_test "AMP autocast (float16)" "
+import torch
+if not torch.cuda.is_available(): raise SystemExit(0)
+m = torch.nn.Linear(16, 16).cuda()
+x = torch.randn(4, 16).cuda()
+with torch.amp.autocast('cuda', dtype=torch.float16):
+    y = m(x)
+assert y.dtype == torch.float16
+"
+
+# GradScaler — AMP-Training-Kernkomponente
+run_test "AMP GradScaler" "
+import torch
+scaler = torch.cuda.amp.GradScaler()
+assert scaler is not None
+"
+
+# Simple Conv2d forward pass (Kern des VSR-Modells)
+run_test "torch.nn.Conv2d forward auf CUDA" "
+import torch
+if not torch.cuda.is_available(): raise SystemExit(0)
+conv = torch.nn.Conv2d(3, 16, 3, padding=1).cuda().half()
+x = torch.randn(1, 3, 64, 64).cuda().half()
+y = conv(x)
+assert y.shape == (1, 16, 64, 64)
+"
+
+# Gradient Checkpointing
+run_test "torch.utils.checkpoint" "
+import torch
+import torch.utils.checkpoint as cp
+lin = torch.nn.Linear(8, 8).cuda()
+x = torch.randn(2, 8, requires_grad=True).cuda()
+out = cp.checkpoint(lin, x, use_reentrant=False)
+out.sum().backward()
+"
+
+# ffmpeg
+echo ""
+if command -v ffmpeg &>/dev/null; then
+  FFVER=$(ffmpeg -version 2>&1 | head -1 | grep -oE 'version [^ ]+' || echo "gefunden")
+  echo -e "  ${GREEN}✓ ffmpeg ${FFVER}${RESET}"
+  COMPAT_PASS=$((COMPAT_PASS + 1))
+else
+  echo -e "  ${RED}✗ ffmpeg fehlt — dataset_generator_v2 benötigt es${RESET}"
+  echo -e "  ${YELLOW}   sudo apt install ffmpeg${RESET}"
+  COMPAT_FAIL=$((COMPAT_FAIL + 1))
+fi
+
+# ============================================================
+# 9. Import-Check aller .py-Dateien im Repo
+# ============================================================
+echo -e "\n${CYAN}[9/10] Import-Check der Projekt-.py-Dateien...${RESET}"
+
+STDLIB="os sys re json math time argparse subprocess threading logging \
+  pathlib typing collections itertools functools hashlib tempfile signal \
+  shutil glob atexit errno queue random select traceback socket datetime \
+  tty termios curses http concurrent io abc copy struct weakref dataclasses \
+  enum contextlib warnings gc platform uuid multiprocessing"
+
+declare -A PIP_MAP=(
+  ["cv2"]="opencv-python"
+  ["PIL"]="Pillow"
+  ["sklearn"]="scikit-learn"
+  ["skimage"]="scikit-image"
+  ["yaml"]="PyYAML"
+)
+SKIP_AUTO=("torch2trt" "tensorrt" "pycuda" "onnxruntime_gpu" "trt" "builtins")
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Nur die relevanten Verzeichnisse und Dateien scannen — NICHT das gesamte Repo
+IMPORTS=$(find \
+    "$REPO_ROOT/vsr_plusplus_NEU" \
+    "$REPO_ROOT/dataset_generator_v2" \
+    "$REPO_ROOT/optimize_checkpoint.py" \
+    -name "*.py" 2>/dev/null \
+  | xargs grep -h -E "^(import|from) [a-zA-Z_][a-zA-Z0-9_]*" 2>/dev/null \
+  | grep -oE "^(import|from) [a-zA-Z_][a-zA-Z0-9_]*" \
+  | awk '{print $2}' | sort -u || true)
+
+LOCAL_PKGS="vsr_plusplus_NEU dataset_generator_v2 config category_utils \
+  generation_plan interactive_selector streaming_extractor video_manager \
+  utils core"
+
+IMPORT_FAIL=0
+while IFS= read -r pkg; do
+  [[ -z "$pkg" ]] && continue
+  # stdlib überspringen
+  is_std=false
+  for s in $STDLIB; do [[ "$pkg" == "$s" ]] && is_std=true && break; done
+  $is_std && continue
+  # lokale Module überspringen
+  is_local=false
+  for l in $LOCAL_PKGS; do [[ "$pkg" == "$l" ]] && is_local=true && break; done
+  $is_local && continue
+
+  if python -c "import $pkg" 2>/dev/null; then
+    ver=$(python -c "import $pkg; print(getattr($pkg,'__version__','ok'))" 2>/dev/null || echo "ok")
+    echo -e "  ${GREEN}✓ $pkg ($ver)${RESET}"
+  else
+    # skip-Liste?
+    is_skip=false
+    for sk in "${SKIP_AUTO[@]}"; do [[ "$pkg" == "$sk" ]] && is_skip=true && break; done
+    if $is_skip; then
+      echo -e "  ${YELLOW}⚠ $pkg — manuelle Installation erforderlich (übersprungen)${RESET}"
+      COMPAT_WARN=$((COMPAT_WARN + 1))
+      continue
+    fi
+    # versuche automatisch zu installieren
+    pip_pkg="${PIP_MAP[$pkg]:-$pkg}"
+    echo -e "  ${YELLOW}⚠ $pkg fehlt — versuche: pip install ${pip_pkg}${RESET}"
+    if pip install "$pip_pkg" --quiet 2>/dev/null; then
+      echo -e "  ${GREEN}  ✓ ${pip_pkg} nachinstalliert${RESET}"
+    else
+      echo -e "  ${RED}  ✗ ${pip_pkg} konnte nicht installiert werden${RESET}"
+      IMPORT_FAIL=$((IMPORT_FAIL + 1))
+    fi
+  fi
+done <<< "$IMPORTS"
+
+# ============================================================
+# 10. Zusammenfassung
+# ============================================================
+echo -e "\n${BOLD}${CYAN}[10/10] Zusammenfassung${RESET}"
+echo -e "─────────────────────────────────────────────────────"
+echo -e "  ${GREEN}✓ Tests bestanden : ${COMPAT_PASS}${RESET}"
+echo -e "  ${YELLOW}⚠ Warnungen       : ${COMPAT_WARN} (P100/CC-6.0-Einschränkungen, erwartet)${RESET}"
+echo -e "  ${RED}✗ Fehler          : $((COMPAT_FAIL + IMPORT_FAIL))${RESET}"
+echo -e "─────────────────────────────────────────────────────"
+
+if [[ $COMPAT_FAIL -eq 0 && $IMPORT_FAIL -eq 0 ]]; then
+  echo -e "\n${BOLD}${GREEN}✓ venv311_vsr/ ist lauffähig!${RESET}"
+  echo -e "${YELLOW}  Warnungen betreffen nur Features, die CC ≥ 7.0 benötigen (P100 = CC 6.0):${RESET}"
+  echo -e "${YELLOW}  • torch.compile / Triton   → deaktiviert (USE_COMPILE = False in config.py)${RESET}"
+  echo -e "${YELLOW}  • bfloat16                 → AMP mit float16 stattdessen (bereits konfiguriert)${RESET}"
+  echo -e "${YELLOW}  • Flash Attention          → wird im Modell nicht verwendet${RESET}"
+  echo -e "${YELLOW}  • TensorRT ≥ 9.0           → tensorrt 8.6.x installiert (CC 6.0-kompatibel)${RESET}"
+  echo ""
+  echo -e "${BOLD}Aktivieren:${RESET}"
+  echo -e "  ${CYAN}source ${VENV_DIR}/bin/activate${RESET}"
+  echo ""
+  echo -e "${BOLD}Training starten:${RESET}"
+  echo -e "  ${CYAN}python vsr_plusplus_NEU/train.py${RESET}"
+  echo ""
+  echo -e "${BOLD}Modell konvertieren:${RESET}"
+  echo -e "  ${CYAN}python optimize_checkpoint.py -c model.pth -o model_fp16.engine -f tensorrt -p fp16${RESET}"
+  echo ""
+  deactivate 2>/dev/null || true
+  exit 0
+else
+  echo -e "\n${BOLD}${RED}✗ Einige Tests fehlgeschlagen — siehe Fehlermeldungen oben.${RESET}"
+  deactivate 2>/dev/null || true
+  exit 1
+fi

@@ -1,0 +1,42 @@
+# requirements_vsr.txt
+# Abhängigkeiten für vsr_plusplus_NEU + dataset_generator_v2 + Modell-Konvertierung
+#
+# Installation via setup_venv311_vsr.sh (empfohlen) oder manuell:
+#   pip install -r requirements_vsr.txt
+#
+# torch + torchvision werden NICHT hier aufgeführt, da das Wheel von der
+# CUDA-Toolkit-Version abhängt. setup_venv311_vsr.sh installiert sie automatisch.
+# Manuell (CUDA 12.0–12.3 / Tesla P100):
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# ==============================================================================
+
+# ── vsr_plusplus_NEU ──────────────────────────────────────────────────────────
+numpy
+opencv-python
+tensorboard          # torch.utils.tensorboard → SummaryWriter
+
+# ── dataset_generator_v2 ─────────────────────────────────────────────────────
+psutil
+rich
+questionary
+
+# ── Modell-Konvertierung (optimize_checkpoint.py) ────────────────────────────
+
+# ONNX-Export + Runtime
+onnx
+onnxruntime-gpu      # GPU-beschleunigte Inferenz mit ONNX-Modellen
+
+# TensorRT Python-Bindings
+# WICHTIG für Tesla P100 (CC 6.0):
+#   TensorRT 9.x hat CC 6.0 fallen gelassen → nur 8.6.x verwenden!
+#   Das Paket muss zur CUDA-Toolkit-Version passen (CUDA 12.0 → tensorrt 8.6.x).
+#
+#   pip install 'tensorrt==8.6.*'
+#
+# Nicht als Constraint eingetragen, damit neuere GPUs (CC ≥ 7.0) tensorrt 9.x
+# verwenden können. setup_venv311_vsr.sh installiert die passende Version automatisch.
+# tensorrt   ← via setup_venv311_vsr.sh installiert
+
+# pycuda — optional, nur für TRT-Engine-Benchmark nach der Konvertierung
+# Ohne pycuda wird der Benchmark übersprungen; die Engine selbst funktioniert trotzdem.
+# pycuda     ← optional: pip install pycuda

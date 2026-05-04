@@ -16,9 +16,75 @@ from pathlib import Path
 import sys
 import shutil
 import os
+import gc
+import warnings
 import torch
 from collections import defaultdict
 import time as time_module
+
+# ANSI colors
+C_GREEN  = "\033[92m"
+C_CYAN   = "\033[96m"
+C_RED    = "\033[91m"
+C_YELLOW = "\033[93m"
+C_RESET  = "\033[0m"
+
+
+def select_gpu(gpu_index: int = None) -> torch.device:
+    """Zeigt alle verfügbaren GPUs an und lässt den Nutzer eine auswählen.
+
+    Args:
+        gpu_index: Vorgegebener GPU-Index (z.B. über --gpu auf der CLI).
+                   Ist er angegeben, wird keine interaktive Auswahl gestartet.
+
+    Returns:
+        torch.device: Ausgewähltes Gerät (z.B. 'cuda:0', 'cuda:1', 'cpu').
+    """
+    if not torch.cuda.is_available():
+        print(f"{C_YELLOW}⚠ Kein CUDA-fähiges Gerät gefunden – läuft auf CPU.{C_RESET}")
+        return torch.device('cpu')
+
+    gpu_count = torch.cuda.device_count()
+
+    # Immer alle GPUs anzeigen
+    print(f"\n{C_CYAN}{'='*60}{C_RESET}")
+    print(f"{C_CYAN}  Verfügbare GPUs:{C_RESET}")
+    print(f"{C_CYAN}{'='*60}{C_RESET}")
+    for i in range(gpu_count):
+        props = torch.cuda.get_device_properties(i)
+        mem_total = props.total_memory / (1024 ** 3)
+        mem_free  = (props.total_memory - torch.cuda.memory_allocated(i)) / (1024 ** 3)
+        cc = f"CC {props.major}.{props.minor}"
+        print(f"  [{i}] {props.name}  –  {mem_total:.1f} GB gesamt, ~{mem_free:.1f} GB frei  ({cc})")
+    print(f"{C_CYAN}{'='*60}{C_RESET}")
+
+    # Vorgegebener Index (--gpu)
+    if gpu_index is not None:
+        if 0 <= gpu_index < gpu_count:
+            name = torch.cuda.get_device_name(gpu_index)
+            print(f"{C_GREEN}✓ Verwende GPU {gpu_index}: {name}  (via --gpu){C_RESET}\n")
+            return torch.device(f'cuda:{gpu_index}')
+        else:
+            print(f"{C_RED}⚠ --gpu {gpu_index} ungültig (nur 0–{gpu_count - 1} verfügbar) – frage interaktiv.{C_RESET}")
+
+    # Nur eine GPU → automatisch
+    if gpu_count == 1:
+        name = torch.cuda.get_device_name(0)
+        print(f"{C_GREEN}✓ GPU erkannt: {name} – wird automatisch verwendet.{C_RESET}\n")
+        return torch.device('cuda:0')
+
+    # Interaktive Auswahl
+    while True:
+        try:
+            raw = input(f"GPU-Index wählen [0–{gpu_count - 1}]: ").strip()
+            idx = int(raw)
+            if 0 <= idx < gpu_count:
+                name = torch.cuda.get_device_name(idx)
+                print(f"{C_GREEN}✓ Verwende GPU {idx}: {name}{C_RESET}\n")
+                return torch.device(f'cuda:{idx}')
+            print(f"{C_RED}Ungültige Eingabe. Bitte eine Zahl zwischen 0 und {gpu_count - 1} eingeben.{C_RESET}")
+        except ValueError:
+            print(f"{C_RED}Ungültige Eingabe. Bitte eine Ganzzahl eingeben.{C_RESET}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -245,27 +311,54 @@ def correct_video(input_path: str, output_path: str, correction_type: str) -> bo
 
 class VSRComparator:
     def __init__(self, checkpoint_path: str, device: str = 'cuda:0'):
-        """Initialize VSR model with 24 blocks"""
+        """Initialize VSR model with 24 blocks — optimized for inference"""
         self.device = torch.device(device)
         self.available = False
-        
+        self.use_fp16 = False
+
         try:
             from vsr_plusplus_NEU.core.model_7frame import VSRBidirectional_7frames_3x
-            
+
             # Model uses 24 blocks (12 backward + 12 forward)
             n_blocks = 24
             n_feats = 72
-            
+
+            # Let cuDNN auto-select the fastest conv kernels for the fixed input size
+            torch.backends.cudnn.benchmark = True
+
             print(f"  Loading VSR model (n_blocks={n_blocks}, n_feats={n_feats})...")
-            self.model = VSRBidirectional_7frames_3x(n_feats=n_feats, n_blocks=n_blocks).to(self.device)
-            
-            # Load checkpoint with weights_only=False for custom classes
+            self.model = VSRBidirectional_7frames_3x(n_feats=n_feats, n_blocks=n_blocks)
+
+            # Load checkpoint to CPU first — avoids doubling GPU peak memory during load
             print(f"  Loading checkpoint: {checkpoint_path}")
-            ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+            ckpt = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
             self.model.load_state_dict(ckpt['model_state_dict'])
-            self.model.eval()
+            del ckpt  # free CPU RAM immediately
+
+            # Move to GPU, switch to fp16 (2× throughput on CUDA), set eval mode
+            self.model = self.model.to(self.device).half().eval()
+            self.use_fp16 = True
+
+            # torch.compile: fuses ops and removes Python overhead (PyTorch >= 2.0)
+            # Triton (the compile backend) requires CUDA Capability >= 7.0.
+            # Tesla P100 is CC 6.0 — skip compile silently on old GPUs.
+            _cc = torch.cuda.get_device_capability(self.device)
+            if _cc[0] >= 7:
+                try:
+                    self.model = torch.compile(self.model, mode='reduce-overhead')
+                    print(f"  ✅ torch.compile enabled (reduce-overhead, CC {_cc[0]}.{_cc[1]})")
+                except Exception:
+                    pass  # graceful fallback on older PyTorch
+            else:
+                # CC < 7.0: torch.compile/Triton not supported.
+                # Fallback: torch.jit.trace + freeze applied lazily on first inference
+                # (shape-dependent; traced once per unique input resolution).
+                self._jit_traced_shape = None  # (H, W) of currently frozen trace; None = not yet traced
+                self._jit_model = None
+                print(f"  ℹ️  torch.compile skipped (CC {_cc[0]}.{_cc[1]} < 7.0) — torch.jit.trace fallback will be used")
+
             self.available = True
-            print(f"  ✅ VSR model loaded successfully")
+            print(f"  ✅ VSR model loaded (fp16, cudnn.benchmark=True)")
         except Exception as e:
             print(f"  ⚠️  VSR model failed to load: {e}")
             import traceback
@@ -308,17 +401,26 @@ class VSRComparator:
                 return False
             
             print(f"       ✓ Extracted {len(frames)} frames")
-            
+
+            # Detect input dimensions from first frame to derive 3× output size
+            _probe = cv2.imread(str(frames[0]))
+            H_in, W_in = _probe.shape[:2]
+            del _probe
+            H_out, W_out = H_in * 3, W_in * 3
+            half_w = W_out // 2
+            print(f"       Input: {W_in}×{H_in} → Output: {W_out}×{H_out}")
+
             # ────────────────────────────────────────────────────────────
             # Phase 2: FFmpeg upscale - ONLY the extracted frames segment
             # ────────────────────────────────────────────────────────────
-            print(f"  [2/5] FFmpeg upscaling (3x to 2160×1728)...")
+            print(f"  [2/5] FFmpeg upscaling (3x to {W_out}×{H_out})...")
             print(f"       Processing {len(frames)}-frame segment...")
             
             ffmpeg_cmd = [
                 'ffmpeg', '-hwaccel', 'cuda', '-loglevel', 'error',
                 '-framerate', '25',
                 '-pattern_type', 'glob', '-i', f'{temp_dir}/frame_*.png',
+                '-vf', f'scale={W_out}:{H_out}:flags=lanczos',
                 '-c:v', 'hevc_nvenc', '-preset', 'medium', '-crf', '18',
                 f'{temp_dir}/ffmpeg_upscale.mkv'
             ]
@@ -348,60 +450,133 @@ class VSRComparator:
                 return False
             
             # ────────────────────────────────────────────────────────────
-            # Phase 3: VSR upscale - 7-frame model with sliding window
+            # Phase 3: VSR upscale - 7-frame model, fully GPU-batched
             # ────────────────────────────────────────────────────────────
             print(f"  [3/5] VSR upscaling (7-frame model, {len(frames)} frames)...")
-            print(f"       Loading frames into 7-frame buffer...")
-            
-            vsr_frames = []
-            
-            # Load all frames first
-            all_frames = []
-            for frame_path in frames:
-                frame = cv2.imread(str(frame_path))
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                all_frames.append(frame)
-            
-            print(f"       Loaded {len(all_frames)} frames")
-            
-            # Process with 7-frame sliding window
-            with torch.no_grad():
-                for i in range(len(all_frames)):
-                    # Build 7-frame window: [center-3, center-2, center-1, center, center+1, center+2, center+3]
-                    center_idx = i
-                    
-                    frame_indices = []
-                    for offset in [-3, -2, -1, 0, 1, 2, 3]:
-                        idx = center_idx + offset
-                        # Clamp to valid range
-                        if idx < 0:
-                            idx = 0
-                        elif idx >= len(all_frames):
-                            idx = len(all_frames) - 1
-                        frame_indices.append(idx)
-                    
-                    # Stack 7 frames: shape (3, 504, 720) each → (3, 504, 5040) stacked
-                    frame_stack = np.concatenate([all_frames[idx] for idx in frame_indices], axis=2)
-                    frame_t = torch.from_numpy(frame_stack).float().permute(2, 0, 1).unsqueeze(0) / 255.0
-                    
-                    if i % max(1, len(all_frames)//4) == 0 or i == len(all_frames) - 1:
-                        print(f"       [{i+1}/{len(all_frames)}] Processing frame {i+1}...")
-                    
+
+            # --- Optimization 1: load all frames to CPU RAM as numpy (cheap) ---
+            # GPU memory stays O(chunk), not O(N*7) — no OOM on large videos
+            print(f"       Loading {len(frames)} frames to CPU RAM...")
+            cpu_frames = []
+            for fp in frames:
+                bgr = cv2.imread(str(fp))
+                cpu_frames.append(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))  # HWC uint8
+            N = len(cpu_frames)
+            print(f"       {N} frames loaded to RAM")
+
+            # --- Optimization 2: pre-compute all 7-frame window indices (CPU, tiny) ---
+            OFFSETS = [-3, -2, -1, 0, 1, 2, 3]
+            all_indices = [
+                [max(0, min(N - 1, i + o)) for o in OFFSETS]
+                for i in range(N)
+            ]  # list[N][7]  — plain ints, no GPU needed yet
+
+            # --- Optimization 3 & 4: streaming mini-batch inference ---
+            # Per chunk: only ≤14 unique source frames are transferred to GPU (fp16).
+            # GPU memory usage is constant O(chunk) regardless of video length.
+            # OOM failsafe: on OutOfMemoryError the chunk size is halved and the
+            # whole pass is restarted until CHUNK=1; only then we give up.
+            CHUNK = 8
+            MIN_CHUNK = 1
+            dtype = torch.float16 if self.use_fp16 else torch.float32
+
+            # ── torch.jit.trace fallback for CC < 7.0 (torch.compile unavailable) ──
+            # Traced once per unique input resolution; retraced if resolution changes.
+            # self.model (eager) is always kept intact so retracing is always possible.
+            if hasattr(self, '_jit_traced_shape'):
+                H_in, W_in = cpu_frames[0].shape[:2]
+                if self._jit_traced_shape != (H_in, W_in):
+                    print(f"       🔧 Applying torch.jit.trace+freeze (input {H_in}×{W_in})...")
+                    dummy = torch.zeros(1, 7, 3, H_in, W_in, dtype=dtype, device=self.device)
                     try:
-                        # Model input: (1, 21, H, W) - 7 frames * 3 channels
-                        vsr_output = self.model(frame_t.to(self.device))
-                        # Output: (1, 3, H*3, W*3)
-                        vsr_output = (vsr_output.squeeze(0).permute(1, 2, 0) * 255).cpu().numpy().astype(np.uint8)
-                        vsr_frames.append(vsr_output)
-                    except Exception as e:
-                        print(f"       ❌ VSR inference failed on frame {i}:")
-                        print(f"          Input shape: {frame_t.shape} (expected: 1, 21, H, W)")
+                        # Suppress TracerWarning for self.last_* diagnostic .item() calls.
+                        # These attributes are pure monitoring side-effects and do not
+                        # affect the output tensor, so the trace is correct.
+                        with torch.no_grad(), warnings.catch_warnings():
+                            warnings.simplefilter("ignore", torch.jit.TracerWarning)
+                            traced = torch.jit.trace(self.model, dummy)
+                            self._jit_model = torch.jit.freeze(traced)
+                        self._jit_traced_shape = (H_in, W_in)
+                        print(f"       ✅ torch.jit.trace+freeze ready")
+                    except Exception as _jit_ex:
+                        print(f"       ⚠️  JIT trace failed ({_jit_ex}), falling back to eager mode")
+                        self._jit_model = self.model
+                        self._jit_traced_shape = (H_in, W_in)  # don't retry
+                infer_model = self._jit_model
+            else:
+                infer_model = self.model
+
+            vsr_frames = []
+            while CHUNK >= MIN_CHUNK:
+                vsr_frames = []
+                oom_hit = False
+                try:
+                    with torch.no_grad():
+                        for start in range(0, N, CHUNK):
+                            end = min(start + CHUNK, N)
+                            batch_indices = all_indices[start:end]
+
+                            # Collect only the unique source frames this chunk needs
+                            needed = sorted({idx for window in batch_indices for idx in window})
+                            idx_map = {g: l for l, g in enumerate(needed)}
+
+                            # Transfer ≤(CHUNK+6) unique frames to GPU as fp16
+                            src = torch.stack([
+                                torch.from_numpy(cpu_frames[i])
+                                     .permute(2, 0, 1)
+                                     .to(dtype=dtype, device=self.device) / 255.0
+                                for i in needed
+                            ])
+
+                            # Build windows: [CHUNK, 7, 3, H, W]
+                            local_idx = torch.tensor(
+                                [[idx_map[g] for g in w] for w in batch_indices],
+                                device=self.device
+                            )
+                            batch_windows = src[local_idx]
+                            del src
+
+                            out = infer_model(batch_windows)   # [CHUNK, 3, H*3, W*3]
+
+                            # uint8 conversion on GPU (no .astype)
+                            out_np = (
+                                out.permute(0, 2, 3, 1)
+                                   .clamp(0.0, 1.0)
+                                   .mul(255)
+                                   .to(torch.uint8)
+                                   .cpu()
+                                   .numpy()
+                            )   # [CHUNK, H*3, W*3, 3]  RGB uint8
+                            del out, batch_windows, local_idx
+                            vsr_frames.extend(out_np)
+                            print(f"       [{end}/{N}] chunk={CHUNK} frames processed...")
+
+                    break  # success – leave retry loop
+
+                except Exception as e:
+                    is_oom = isinstance(e, torch.cuda.OutOfMemoryError) or (
+                        isinstance(e, RuntimeError) and 'out of memory' in str(e).lower()
+                    )
+                    if is_oom:
+                        old_chunk = CHUNK
+                        CHUNK = CHUNK // 2
+                        torch.cuda.empty_cache()
+                        gc.collect()
+                        if CHUNK < MIN_CHUNK:
+                            print(f"       ❌ GPU OOM at CHUNK=1 – not enough VRAM for this video.")
+                            print(f"          Try a shorter clip or a GPU with more VRAM.")
+                            return False
+                        print(f"       {C_YELLOW}⚠ GPU OOM (CHUNK={old_chunk}) → "
+                              f"retrying with CHUNK={CHUNK}...{C_RESET}")
+                        oom_hit = True
+                    else:
+                        print(f"       ❌ VSR inference failed:")
                         print(f"          Error: {e}")
                         import traceback
                         traceback.print_exc()
                         return False
-            
-            print(f"       ✓ VSR done ({len(vsr_frames)} frames processed)")
+
+            print(f"       ✓ VSR done ({len(vsr_frames)} frames, chunk={CHUNK})")
             
             # ────────────────────────────────────────────────────────────
             # Phase 4: Write VSR raw video
@@ -425,36 +600,50 @@ class VSRComparator:
             # ────────────────────────────────────────────────────────────
             # Phase 5: Combine split-screen
             # ────────────────────────────────────────────────────────────
+            # Release all GPU tensors / cached allocations before starting
+            # FFmpeg so it can create a fresh CUDA context for nvenc encode
+            # without hitting CUDA_ERROR_OUT_OF_MEMORY.
+            torch.cuda.empty_cache()
+            gc.collect()
+
             print(f"  [5/5] Creating split-screen comparison...")
+            # Left half  = left portion of FFmpeg upscale (input 0, x=0)
+            # Right half = right portion of VSR upscale   (input 1, x=half_w)
+            # White divider line at the seam + labels per side
+            filter_complex = (
+                f"[0:v]crop={half_w}:{H_out}:0:0[left];"
+                f"[1:v]crop={half_w}:{H_out}:{half_w}:0[right];"
+                f"[left][right]hstack[combined];"
+                f"[combined]"
+                f"drawbox=x={half_w - 2}:y=0:w=4:h={H_out}:color=white:t=fill,"
+                f"drawtext=text='FFmpeg Upscale (x3)':fontsize=60:fontcolor=white"
+                f":x=50:y=50:box=1:boxcolor=black@0.5,"
+                f"drawtext=text='VSR Model (x3)':fontsize=60:fontcolor=white"
+                f":x={half_w + 30}:y=50:box=1:boxcolor=black@0.5[out]"
+            )
             combine_cmd = [
-                'ffmpeg', '-hwaccel', 'cuda', '-loglevel', 'error',
+                'ffmpeg', '-y',
                 '-i', f'{temp_dir}/ffmpeg_upscale.mkv',
-                '-f', 'rawvideo', '-pix_fmt', 'bgr24', '-s', '2160x1728', '-r', '25',
+                '-f', 'rawvideo', '-pix_fmt', 'bgr24',
+                '-s', f'{W_out}x{H_out}', '-r', '25',
                 '-i', vsr_raw,
-                '-filter_complex', '''
-                    [0:v]crop=1080:1728:0:0[left];
-                    [1:v]crop=1080:1728:1080:0[right];
-                    [left][right]hstack=spacing=2[combined];
-                    [combined]drawtext=text='FFmpeg Upscale (x3)':fontsize=60:fontcolor=white:x=50:y=50:box=1:boxcolor=black@0.5,
-                    drawtext=text='VSR Model (x3)':fontsize=60:fontcolor=white:x=1130:y=50:box=1:boxcolor=black@0.5[out]
-                ''',
+                '-filter_complex', filter_complex,
                 '-map', '[out]',
                 '-c:v', 'hevc_nvenc', '-preset', 'medium', '-crf', '18',
                 output_video
             ]
+            print(f"       CMD: {' '.join(combine_cmd)}")
             
             start_time = time_module.time()
             try:
                 result = subprocess.run(
                     combine_cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=60
+                    timeout=600
                 )
                 elapsed = time_module.time() - start_time
                 
                 if result.returncode != 0:
-                    print(f"       ❌ Combine failed: {result.stderr}")
+                    print(f"       ❌ Combine failed (returncode={result.returncode})")
                     return False
                 
                 output_size_mb = os.path.getsize(output_video) / (1024 * 1024)
@@ -467,7 +656,7 @@ class VSRComparator:
             
             print(f"  ✅ VSR comparison complete!")
             print(f"     Output: {output_video}")
-            print(f"     Resolution: 2880×1728 (split-screen)")
+            print(f"     Resolution: {W_out}×{H_out} (split-screen: FFmpeg left | VSR right)")
             
             return True
         
@@ -490,8 +679,8 @@ class VSRComparator:
 # MAIN WORKFLOW
 # ═══════════════════════════════════════════════════════════════════════════
 
-def process_video(video_path: str, output_video: str = None, apply_corrections: bool = True, 
-                  use_vsr: bool = False, vsr_checkpoint: str = None):
+def process_video(video_path: str, output_video: str = None, apply_corrections: bool = True,
+                  use_vsr: bool = False, vsr_checkpoint: str = None, device: str = 'cuda:0'):
     """Complete workflow: Analyze → Correct → Compare"""
     
     print(f"\n{'='*80}")
@@ -521,7 +710,7 @@ def process_video(video_path: str, output_video: str = None, apply_corrections: 
         # Still do VSR comparison if requested (for reference)
         if use_vsr and vsr_checkpoint:
             print("🎨 VSR COMPARISON (reference):")
-            comparator = VSRComparator(vsr_checkpoint)
+            comparator = VSRComparator(vsr_checkpoint, device=device)
             if not output_video:
                 output_video = str(video_path).replace('.mkv', '_VSR_COMPARISON.mkv')
             return comparator.create_comparison(video_path, output_video)
@@ -550,7 +739,7 @@ def process_video(video_path: str, output_video: str = None, apply_corrections: 
     # Phase 3: VSR Comparison (optional)
     if use_vsr and vsr_checkpoint and Path(vsr_checkpoint).exists():
         comparison_video = str(video_path).replace('.mkv', '_COMPARISON_SPLIT.mkv')
-        comparator = VSRComparator(vsr_checkpoint)
+        comparator = VSRComparator(vsr_checkpoint, device=device)
         comparator.create_comparison(output_video, comparison_video)
     
     print()
@@ -566,53 +755,86 @@ Usage: python vergleich.py <video_path> [output_path] [options]
 Options:
   --no-correct          Dry-run (analyze only)
   --vsr <checkpoint>    Enable VSR comparison (requires checkpoint.pth)
-  --gpu <index>         GPU device (default: 0)
+  --gpu <index>         GPU device index (default: interaktive Auswahl)
 
 Examples:
   # Analyze and correct, save to custom output
   python vergleich.py input.mkv output.mkv
-  
+
   # Analyze only (dry-run)
   python vergleich.py input.mkv --no-correct
-  
+
   # With VSR comparison
   python vergleich.py input.mkv output.mkv --vsr checkpoint_best.pth
-  
-  # VSR comparison without correction
-  python vergleich.py input.mkv output_comparison.mkv --no-correct --vsr checkpoint_best.pth
+
+  # VSR comparison, GPU 1 direkt angeben (ohne interaktive Auswahl)
+  python vergleich.py input.mkv output.mkv --vsr checkpoint_best.pth --gpu 1
         """)
         sys.exit(1)
-    
+
     video_path = sys.argv[1]
     output_video = None
     apply_corrections = '--no-correct' not in sys.argv
-    use_vsr = '--vsr' in sys.argv
+    # --checkpoint is accepted as an alias for --vsr
+    use_vsr = '--vsr' in sys.argv or '--checkpoint' in sys.argv
     vsr_checkpoint = None
-    
+
     # Parse output path (if provided and not an option)
     if len(sys.argv) > 2 and not sys.argv[2].startswith('--'):
         output_video = sys.argv[2]
-    
+
     if use_vsr:
+        flag = '--vsr' if '--vsr' in sys.argv else '--checkpoint'
         try:
-            idx = sys.argv.index('--vsr')
+            idx = sys.argv.index(flag)
             vsr_checkpoint = sys.argv[idx + 1]
         except (IndexError, ValueError):
-            print("❌ --vsr requires checkpoint path")
+            print(f"❌ {flag} requires checkpoint path")
             sys.exit(1)
-    
+
+    # Parse --gpu <index>
+    gpu_index = None
+    if '--gpu' in sys.argv:
+        try:
+            gpu_index = int(sys.argv[sys.argv.index('--gpu') + 1])
+        except (IndexError, ValueError):
+            print("❌ --gpu requires an integer index")
+            sys.exit(1)
+
     if not Path(video_path).exists():
         print(f"❌ File not found: {video_path}")
         sys.exit(1)
-    
+
+    # GPU-Auswahl (interaktiv oder via --gpu)
+    device = select_gpu(gpu_index)
+    device_str = str(device)  # z.B. 'cuda:0'
+
+    # Wiederholungsbefehl ausgeben
+    args = list(sys.argv)
+    # Alias --checkpoint → --vsr normalisieren, damit der Hinweis korrekt ist
+    if '--checkpoint' in args:
+        args[args.index('--checkpoint')] = '--vsr'
+    # --gpu bereits vorhanden? Wert aktualisieren; sonst anhängen
+    if '--gpu' in args:
+        args[args.index('--gpu') + 1] = str(device.index if device.type == 'cuda' else 0)
+    elif device.type == 'cuda':
+        args.extend(['--gpu', str(device.index if device.index is not None else 0)])
+    print(f"{C_CYAN}💡 Nächstes Mal ohne Auswahl:{C_RESET}")
+    # Pfade mit Leerzeichen oder Sonderzeichen in Anführungszeichen
+    quoted = []
+    for a in args:
+        quoted.append(f'"{a}"' if (' ' in a or '(' in a or ')' in a) else a)
+    print(f"   {' '.join(quoted)}\n")
+
     success = process_video(
         video_path,
         output_video=output_video,
         apply_corrections=apply_corrections,
         use_vsr=use_vsr,
-        vsr_checkpoint=vsr_checkpoint
+        vsr_checkpoint=vsr_checkpoint,
+        device=device_str,
     )
-    
+
     sys.exit(0 if success else 1)
 
 

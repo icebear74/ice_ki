@@ -84,3 +84,9 @@ ice_brain/certs/
 *.crt
 *.key
 ice_brain/models/*
+
+# TensorRT installation archive + extracted directory (large binaries, not committed)
+TensorRT-*.tar.gz
+TensorRT-*/
+# cuDNN 8 compat libs extracted by setup_venv311_vsr.sh (large binaries, not committed)
+.cudnn8_compat/
