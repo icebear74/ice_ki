@@ -380,19 +380,19 @@ for p in sys.path:
     done
   fi
 
-  # 3) Wenn nicht gefunden: pip install nvidia-cudnn-cu12<9 versuchen
-  # nvidia-cudnn-cu12 v8.9.x liefert libcudnn.so.8 — kein apt-Repo nötig
+  # 3) Wenn nicht gefunden: nvidia-cudnn-cu12<9 in ein separates Zielverzeichnis
+  # installieren — NICHT in die venv (pip install ohne --target würde
+  # nvidia-cudnn-cu12==9.1.0.70 downgraden und torch brechen, weil torch
+  # libcudnn.so.9 aus diesem Paket benötigt).
+  # --target installiert die Wheel-Dateien direkt ins Zielverzeichnis,
+  # ohne die venv-Pakete zu verändern.
   if [[ -z "$cudnn8_dir" ]]; then
-    echo -e "${CYAN}  → libcudnn8 nicht gefunden — versuche pip install 'nvidia-cudnn-cu12<9'...${RESET}"
-    if pip install --quiet "nvidia-cudnn-cu12<9" 2>/dev/null; then
-      cudnn8_dir=$(python -c "
-import os, sys, importlib
-# sys.path nach pip-Install neu scannen
-for p in sys.path + [s for s in __import__('site').getsitepackages()]:
-    c = os.path.join(p, 'nvidia', 'cudnn', 'lib', 'libcudnn.so.8')
-    if os.path.isfile(c):
-        print(os.path.dirname(c)); exit()
-" 2>/dev/null || true)
+    local _cudnn8_target="$SCRIPT_DIR/.cudnn8_compat"
+    echo -e "${CYAN}  → libcudnn8 nicht gefunden — versuche pip install --target 'nvidia-cudnn-cu12<9'...${RESET}"
+    mkdir -p "$_cudnn8_target"
+    if pip install --quiet --no-deps --target "$_cudnn8_target" "nvidia-cudnn-cu12<9" 2>/dev/null; then
+      local _c="$_cudnn8_target/nvidia/cudnn/lib/libcudnn.so.8"
+      [[ -f "$_c" ]] && cudnn8_dir="$(dirname "$_c")"
     fi
   fi
 
