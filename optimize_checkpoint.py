@@ -312,7 +312,9 @@ def _build_trt_engine(onnx_path: str, engine_path: str,
             fixed = tuple(input_shape) if input_shape is not None else tuple(
                 abs(d) for d in inp_tensor.shape)
             ok = profile.set_shape(inp_name, min=fixed, opt=fixed, max=fixed)
-            if not ok:
+            # TRT 8.6.x: set_shape() gibt None zurück (C++ void → Python None),
+            # kein bool. Nur explizites False als Fehler werten.
+            if ok is False:
                 print(f"   ❌ set_shape für '{inp_name}' fehlgeschlagen — shape={fixed}")
                 return False
             idx = config.add_optimization_profile(profile)
