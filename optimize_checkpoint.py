@@ -304,15 +304,22 @@ def _build_trt_engine(onnx_path: str, engine_path: str,
 
             print(f"   ONNX gelesen — {network.num_layers} Layer")
 
-            # Optimization Profile für dynamische Batch-Dimension ("frames")
-            if input_shape is not None:
-                profile = builder.create_optimization_profile()
-                profile.set_shape("frames",
-                                  min=input_shape,
-                                  opt=input_shape,
-                                  max=input_shape)
-                config.add_optimization_profile(profile)
-                print(f"   ✅ Optimization Profile gesetzt: {input_shape}")
+            # Optimization Profile — immer erforderlich wenn dynamic_axes im ONNX gesetzt sind
+            # Echten TRT-Input-Namen aus dem geparsten Netzwerk lesen (nicht "frames" hardcoden)
+            profile = builder.create_optimization_profile()
+            inp_tensor = network.get_input(0)
+            inp_name = inp_tensor.name
+            fixed = tuple(input_shape) if input_shape is not None else tuple(
+                abs(d) for d in inp_tensor.shape)
+            ok = profile.set_shape(inp_name, min=fixed, opt=fixed, max=fixed)
+            if not ok:
+                print(f"   ❌ set_shape für '{inp_name}' fehlgeschlagen — shape={fixed}")
+                return False
+            idx = config.add_optimization_profile(profile)
+            if idx < 0:
+                print(f"   ❌ add_optimization_profile fehlgeschlagen (idx={idx})")
+                return False
+            print(f"   ✅ Optimization Profile gesetzt [{inp_name}]: {fixed}")
 
             # Engine bauen (kann mehrere Minuten dauern)
             print("   ⏳ Kompiliere Engine (kann einige Minuten dauern)...")
