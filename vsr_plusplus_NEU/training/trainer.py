@@ -10,6 +10,7 @@ Coordinates all training components:
 - Interactive GUI
 """
 
+import math
 import time
 import os
 import json
@@ -645,6 +646,24 @@ class VSRTrainer:
                 # Scale loss for accumulation
                 loss = loss / current_accum_steps
             
+            # NaN/Inf guard: if the loss is not finite, discard this entire
+            # accumulation window.  Calling backward() on a NaN/Inf loss produces
+            # NaN gradients; without a GradScaler (use_amp=False) those go straight
+            # into optimizer.step(), corrupting exp_avg and all model weights.
+            # With a scaler the step would be skipped anyway, but the gradients
+            # from an earlier sub-step in the same accumulation window would still
+            # be dirtied by clip_grad_norm_ (see Bug 1 fix in clip_gradients).
+            # Discarding here is the cleanest solution in both cases.
+            if not torch.isfinite(loss):
+                self.train_logger.log_event(
+                    f"⚠️  NaN/Inf loss at step {self.global_step} "
+                    f"(accum {accum_counter+1}/{current_accum_steps}) — "
+                    f"skipping batch, zeroing gradients"
+                )
+                self.optimizer.zero_grad()
+                accum_counter = 0
+                continue
+
             # Backward pass with gradient scaling
             if self.scaler is not None:
                 self.scaler.scale(loss).backward()
@@ -666,7 +685,21 @@ class VSRTrainer:
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
                 else:
-                    self.optimizer.step()
+                    # No GradScaler: manually verify all gradients are finite before
+                    # stepping.  A NaN gradient that slips through (e.g. from a bad
+                    # batch on a future code path) would otherwise corrupt exp_avg and
+                    # all model weights permanently.
+                    has_bad_grad = any(
+                        p.grad is not None and not torch.isfinite(p.grad).all()
+                        for p in self.model.parameters()
+                    )
+                    if has_bad_grad:
+                        self.train_logger.log_event(
+                            f"⚠️  NaN/Inf gradient at step {self.global_step} "
+                            f"(no-scaler path) — skipping optimizer step"
+                        )
+                    else:
+                        self.optimizer.step()
                 
                 # Extract AdamW momentum (exp_avg) for GUI
                 adam_momentum = self._get_adam_momentum()
@@ -1390,7 +1423,9 @@ class VSRTrainer:
             self.ema_loss = {}
             for key in loss_dict:
                 val = loss_dict[key]
-                self.ema_loss[key] = val.item() if torch.is_tensor(val) else val
+                raw_val = val.item() if torch.is_tensor(val) else val
+                # Only seed the EMA with finite values; skip contaminated initial batches.
+                self.ema_loss[key] = raw_val if math.isfinite(raw_val) else 0.0
         
         # Update EMA
         smoothed = {}
@@ -1398,6 +1433,14 @@ class VSRTrainer:
             val = loss_dict[key]
             raw_val = val.item() if torch.is_tensor(val) else val
             
+            # NaN/Inf guard: a single bad value would contaminate the EMA
+            # permanently (NaN * alpha + finite * (1-alpha) = NaN forever).
+            # Keep the previous smoothed value instead so the display stays
+            # meaningful and the EMA can recover once the loss is finite again.
+            if not math.isfinite(raw_val):
+                smoothed[key] = self.ema_loss[key]
+                continue
+
             # EMA formula: smoothed = alpha * smoothed_prev + (1 - alpha) * current
             self.ema_loss[key] = self.ema_factor * self.ema_loss[key] + (1 - self.ema_factor) * raw_val
             smoothed[key] = self.ema_loss[key]
@@ -1491,7 +1534,6 @@ class VSRTrainer:
         so it produces legible readings (typically 0.4–0.8 during healthy
         training) in all existing display widgets without any re-scaling.
         """
-        import math
         total_snr = 0.0
         count = 0
 

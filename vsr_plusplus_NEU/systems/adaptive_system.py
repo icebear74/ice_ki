@@ -12,6 +12,7 @@ Enhanced adaptive system with:
 - Plateau detection
 """
 
+import math
 import torch
 import numpy as np
 
@@ -130,6 +131,11 @@ class AdaptiveSystem:
     
     def _update_ema_loss(self, l1_loss_value):
         """Update EMA of L1 loss for smooth tracking"""
+        # NaN/Inf guard: a bad loss value must never contaminate the EMA.
+        # Once NaN enters (NaN * alpha + finite * (1-alpha) = NaN), it can
+        # never recover.  Simply skip the update and keep the previous value.
+        if not math.isfinite(l1_loss_value):
+            return
         if self.ema_l1_loss is None:
             self.ema_l1_loss = l1_loss_value
         else:
@@ -206,6 +212,11 @@ class AdaptiveSystem:
             else:
                 sharpness_ratio = 1.0
         
+        # NaN/Inf sharpness_ratio (from NaN model output) must not trigger
+        # aggressive mode or update the L1 EMA.
+        if not math.isfinite(sharpness_ratio):
+            return 1.0  # treat as neutral (no intervention)
+
         # Update EMA with L1 loss if provided
         if current_l1_loss is not None:
             self._update_ema_loss(current_l1_loss)
@@ -507,12 +518,25 @@ class AdaptiveSystem:
         # without this guard, total_norm becomes NaN, which poisons clip_value
         # and disables clipping entirely — accelerating the explosion.
         total_norm = 0.0
+        has_bad_grads = False
         for p in model.parameters():
             if p.grad is not None:
                 pn = p.grad.data.norm(2).item()
                 if np.isfinite(pn):
                     total_norm += pn ** 2
+                else:
+                    has_bad_grads = True
         total_norm = total_norm ** 0.5
+
+        # NaN/Inf guard: if ANY gradient is non-finite, do NOT call clip_grad_norm_.
+        # torch.nn.utils.clip_grad_norm_() recomputes the norm internally (without
+        # filtering), so if even one gradient is NaN, its internal total_norm becomes
+        # NaN → clip_coef = NaN → every parameter.grad *= NaN, spreading corruption
+        # to all previously finite gradients.  The GradScaler will detect the bad
+        # gradients via found_inf (set during unscale_()) and skip optimizer.step()
+        # anyway, so skipping clipping here is safe and avoids the contamination.
+        if has_bad_grads:
+            return total_norm, self.clip_value
 
         # Only record finite norms so the history stays clean.
         if np.isfinite(total_norm):
@@ -567,6 +591,14 @@ class AdaptiveSystem:
             self.ema_quality = None
             self.best_quality = 0.0
             return
+
+        # NaN/Inf guard: a non-finite loss (from a bad batch) must never seed or
+        # update the EMA.  NaN * alpha + finite * (1-alpha) = NaN forever, and
+        # NaN comparisons always return False — making the plateau counter tick up
+        # on every step and eventually triggering an unwanted safety reset.
+        if not math.isfinite(loss):
+            return
+
         # Initialize EMA on first call
         if self.ema_loss is None:
             self.ema_loss = loss
