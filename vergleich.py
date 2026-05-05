@@ -6,8 +6,6 @@ Complete Video Processing Pipeline with VSR Comparison
 - Auto-corrects via YADIF deinterlacing or fps=25 deduplication
 - Generates split-screen VSR comparison
 - 7-frame VSR model support
-- ONNX inference (onnxruntime-gpu), PyTorch fp16 fallback
-- Sliding-Window frame cache: max ~7 frames in RAM at any time
 """
 
 import cv2
@@ -33,78 +31,98 @@ C_RESET  = "\033[0m"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# ONNX: Export-Cache, Inferenz via onnxruntime
+# TensorRT: Engine-Cache, Auto-Build (via optimize_checkpoint.py), Inferenz
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _onnx_path_for(checkpoint_path: str) -> Path:
+def _engine_path_for(checkpoint_path: str, width: int, height: int,
+                     precision: str = 'fp16') -> Path:
     """
-    Gibt den Pfad der gecachten ONNX-Datei zurück.
-    Format: <checkpoint_dir>/<checkpoint_stem>.onnx
-    Auflösungs-unabhängig dank dynamic_axes.
+    Gibt den Pfad der gecachten TRT Engine zurück.
+    Format: <checkpoint_dir>/<checkpoint_stem>_trt_<precision>_<W>x<H>.engine
+    Wiederverwendbar: gleicher Checkpoint + gleiche Auflösung → gleiche Engine.
     """
     p = Path(checkpoint_path)
-    return p.parent / f"{p.stem}.onnx"
+    return p.parent / f"{p.stem}_trt_{precision}_{width}x{height}.engine"
 
 
-def _build_onnx_for_vergleich(model: torch.nn.Module, onnx_path: Path) -> bool:
+def _build_trt_for_vergleich(checkpoint_path: str, width: int, height: int,
+                              engine_path: Path, precision: str = 'fp16') -> bool:
     """
-    Exportiert das Modell (fp32, CPU) einmalig als ONNX mit dynamic_axes.
-    Gecacht neben dem Checkpoint — wird bei gleicher Architektur wiederverwendet.
+    Baut eine TRT Engine via optimize_checkpoint.py als Subprozess.
+    Output läuft direkt auf das Terminal — der User sieht den vollen Build-Fortschritt.
+    Bei Änderungen an optimize_checkpoint.py wirken diese automatisch.
     """
+    optimize_script = Path(__file__).resolve().parent / 'optimize_checkpoint.py'
+    if not optimize_script.exists():
+        print(f"  ❌ optimize_checkpoint.py nicht gefunden: {optimize_script}")
+        return False
+
+    print(f"\n  🏗️  TRT Engine wird gebaut (einmalig, dann gecacht):")
+    print(f"     Checkpoint : {checkpoint_path}")
+    print(f"     Engine     : {engine_path}")
+    print(f"     Input      : {width}×{height}  →  SR {width * 3}×{height * 3}")
+    print(f"     ⏳ Bitte warten — typisch ~5 min, maximal 15 min...\n")
+
+    cmd = [
+        sys.executable,
+        str(optimize_script),
+        '--checkpoint', checkpoint_path,
+        '--output',     str(engine_path),
+        '--format',     'tensorrt',
+        '--precision',  precision,
+        '--width',      str(width),
+        '--height',     str(height),
+        '--workspace-gb', '2',
+        '--device',     'cuda',
+    ]
+
+    _TIMEOUT = 900  # 15 Minuten
     try:
-        model.eval()
-        dummy = torch.zeros(1, 7, 3, 64, 64, dtype=torch.float32)
-        with torch.no_grad():
-            torch.onnx.export(
-                model, dummy, str(onnx_path),
-                input_names=['frames'],
-                output_names=['sr'],
-                dynamic_axes={
-                    'frames': {0: 'batch', 3: 'h', 4: 'w'},
-                    'sr':     {0: 'batch', 2: 'sh', 3: 'sw'},
-                },
-                opset_version=17,
-                do_constant_folding=True,
-                verbose=False,
-            )
-        print(f"  ✅ ONNX gespeichert: {onnx_path.name}")
-        return True
+        # Kein capture_output — subprocess-Output erscheint direkt im Terminal
+        result = subprocess.run(cmd, timeout=_TIMEOUT)
+        if result.returncode == 0:
+            print(f"\n  ✅ TRT Engine gespeichert: {engine_path}")
+            return True
+        print(f"\n  ❌ optimize_checkpoint.py fehlgeschlagen (returncode={result.returncode})")
+        return False
+    except subprocess.TimeoutExpired:
+        print(f"\n  ❌ TRT Build Timeout ({_TIMEOUT // 60} min)")
+        return False
     except Exception as e:
-        print(f"  ❌ ONNX Export fehlgeschlagen: {e}")
-        import traceback; traceback.print_exc()
+        print(f"\n  ❌ TRT Build fehlgeschlagen: {e}")
         return False
 
 
-class _ONNXSession:
+class _TRTSession:
     """
-    onnxruntime-Inferenz-Session (CUDAExecutionProvider bevorzugt, CPU Fallback).
-    I/O-Typ: float32.
+    Schlanke TensorRT-Inferenz-Session ohne pycuda.
+
+    Verwendet torch CUDA-Pointer (Tensor.data_ptr()) mit execute_v2 —
+    funktioniert mit TRT 8.x und 9.x ohne zusätzliche Abhängigkeiten.
+    I/O-Typ: float32 (entspricht dem ONNX-Export des Modells).
     """
 
-    def __init__(self, onnx_path: str, device: torch.device):
-        import onnxruntime as ort
-        device_id = device.index if (device.type == 'cuda' and device.index is not None) else 0
-        providers = [
-            ('CUDAExecutionProvider', {'device_id': device_id}),
-            'CPUExecutionProvider',
-        ]
-        opts = ort.SessionOptions()
-        opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        self._sess       = ort.InferenceSession(onnx_path, sess_options=opts,
-                                                providers=providers)
-        self._input_name = self._sess.get_inputs()[0].name
-        self._device     = device
-        ep = self._sess.get_providers()[0]
-        print(f"     ONNX Session EP: {ep}")
+    def __init__(self, engine_path: str, input_shape: tuple):
+        import tensorrt as trt
+        _logger  = trt.Logger(trt.Logger.WARNING)
+        _runtime = trt.Runtime(_logger)
+        with open(engine_path, 'rb') as f:
+            self._engine = _runtime.deserialize_cuda_engine(f.read())
+        self._context    = self._engine.create_execution_context()
+        self.input_shape = input_shape          # (1, 7, 3, H, W)
+        B, T, C, H, W   = input_shape
+        self.output_shape = (B, C, H * 3, W * 3)
 
     def infer(self, frames_tensor: torch.Tensor) -> torch.Tensor:
         """
-        frames_tensor : (1, 7, 3, H, W)  float32 oder float16  (CPU oder CUDA)
-        Rückgabe      : (1, 3, H*3, W*3) float32 auf self._device
+        frames_tensor : (1, 7, 3, H, W)  float32  contiguous  auf CUDA
+        Rückgabe      : (1, 3, H*3, W*3) float32  auf CUDA
+        Kein pycuda — nutzt rohe CUDA-Device-Pointer aus torch.Tensor.
         """
-        inp = frames_tensor.float().cpu().numpy()
-        out = self._sess.run(None, {self._input_name: inp})[0]
-        return torch.from_numpy(out).to(self._device)
+        inp = frames_tensor.contiguous().float()
+        out = torch.empty(self.output_shape, dtype=torch.float32, device=inp.device)
+        self._context.execute_v2([inp.data_ptr(), out.data_ptr()])
+        return out
 
 
 def select_gpu(gpu_index: int = None) -> torch.device:
@@ -386,99 +404,38 @@ def correct_video(input_path: str, output_path: str, correction_type: str) -> bo
 # PHASE 3: VSR COMPARISON
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _infer_arch_from_checkpoint(ckpt: dict):
-    """
-    Liest n_feats und n_blocks aus einem geladenen Checkpoint.
-
-    Strategie (Priorität):
-      1. ckpt['model_config']  — explizit gespeichert (neue Checkpoints)
-      2. Ableitung aus state_dict-Tensor-Shapes  — funktioniert für alle Checkpoints
-      3. Fallback config.py (lokale Datei neben den Skripten)
-      4. Hard-kodierte Defaults (72 / 28)
-
-    Gibt (n_feats, n_blocks, quelle) zurück.
-    """
-    _DEFAULTS = (72, 28)
-
-    # 1. Explizit gespeicherter model_config (neue Checkpoints)
-    mc = ckpt.get("model_config", {})
-    if mc.get("N_FEATS") and mc.get("N_BLOCKS"):
-        return int(mc["N_FEATS"]), int(mc["N_BLOCKS"]), "model_config (checkpoint)"
-
-    # 2. Ableitung aus state_dict
-    state = ckpt.get("model_state_dict", ckpt)
-    try:
-        n_feats  = int(state["feat_extract.weight"].shape[0])
-        half     = len({k.split(".")[1] for k in state if k.startswith("backward_trunk.")})
-        n_blocks = half * 2
-        return n_feats, n_blocks, "state_dict (abgeleitet)"
-    except Exception:
-        pass
-
-    # 3. config.py
-    try:
-        import config as cfg
-        c = cfg.get_config()
-        nf = int(c.get("N_FEATS",  _DEFAULTS[0]))
-        nb = int(c.get("N_BLOCKS", _DEFAULTS[1]))
-        return nf, nb, "config.py"
-    except Exception:
-        pass
-
-    # 4. Defaults
-    return _DEFAULTS[0], _DEFAULTS[1], "Defaults"
-
-
 class VSRComparator:
     def __init__(self, checkpoint_path: str, device: str = 'cuda:0'):
-        """Initialize VSR model — architecture is read from the checkpoint"""
+        """Initialize VSR model with 24 blocks — optimized for inference"""
         self.device          = torch.device(device)
         self.available       = False
         self.use_fp16        = False
-        self.checkpoint_path = checkpoint_path
-        self._onnx_session   = None
+        self.checkpoint_path = checkpoint_path   # für TRT Engine-Cache
 
         try:
             from vsr_plusplus_NEU.core.model_7frame import VSRBidirectional_7frames_3x
 
-            # Load checkpoint to CPU first — avoids doubling GPU peak memory during load
-            # and lets us infer n_feats/n_blocks before constructing the model.
-            print(f"  Loading checkpoint: {checkpoint_path}")
-            ckpt = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
-
-            # Architektur-Parameter direkt aus dem Checkpoint lesen
-            n_feats, n_blocks, source = _infer_arch_from_checkpoint(ckpt)
-            print(f"  Architektur ({source}): n_feats={n_feats}, n_blocks={n_blocks}")
+            # Model uses 24 blocks (12 backward + 12 forward)
+            n_blocks = 24
+            n_feats = 72
 
             # Let cuDNN auto-select the fastest conv kernels for the fixed input size
             torch.backends.cudnn.benchmark = True
 
+            # Persistieren für TRT Engine-Cache
             self.n_feats  = n_feats
             self.n_blocks = n_blocks
 
             print(f"  Loading VSR model (n_blocks={n_blocks}, n_feats={n_feats})...")
             self.model = VSRBidirectional_7frames_3x(n_feats=n_feats, n_blocks=n_blocks)
 
-            state = ckpt.get("model_state_dict", ckpt)
-            self.model.load_state_dict(state)
+            # Load checkpoint to CPU first — avoids doubling GPU peak memory during load
+            print(f"  Loading checkpoint: {checkpoint_path}")
+            ckpt = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+            self.model.load_state_dict(ckpt['model_state_dict'])
             del ckpt  # free CPU RAM immediately
 
-            # ── ONNX Export (einmalig, gecacht neben dem Checkpoint) ──────
-            # Modell ist jetzt fp32 auf CPU — idealer Zeitpunkt für den Export.
-            onnx_path = _onnx_path_for(checkpoint_path)
-            if not onnx_path.exists():
-                print(f"  📦 Exportiere ONNX (einmalig, dann gecacht): {onnx_path.name}")
-                _build_onnx_for_vergleich(self.model, onnx_path)
-
-            if onnx_path.exists():
-                try:
-                    self._onnx_session = _ONNXSession(str(onnx_path), self.device)
-                    print(f"  ✅ ONNX Session bereit")
-                except Exception as _ort_ex:
-                    print(f"  ⚠️  ONNX laden fehlgeschlagen ({_ort_ex}) — PyTorch-Fallback")
-            # ─────────────────────────────────────────────────────────────
-
-            # Move to GPU, switch to fp16 (PyTorch-Fallback)
+            # Move to GPU, switch to fp16 (2× throughput on CUDA), set eval mode
             self.model = self.model.to(self.device).half().eval()
             self.use_fp16 = True
 
@@ -496,7 +453,7 @@ class VSRComparator:
                 # CC < 7.0: torch.compile/Triton not supported.
                 # Fallback: torch.jit.trace + freeze applied lazily on first inference
                 # (shape-dependent; traced once per unique input resolution).
-                self._jit_traced_shape = None
+                self._jit_traced_shape = None  # (H, W) of currently frozen trace; None = not yet traced
                 self._jit_model = None
                 print(f"  ℹ️  torch.compile skipped (CC {_cc[0]}.{_cc[1]} < 7.0) — torch.jit.trace fallback will be used")
 
@@ -515,16 +472,12 @@ class VSRComparator:
         Ablauf:
           [1/3] Frames extrahieren (1 Minute ab 5:00)
           [2/3] FFmpeg 3×-Upscale der extrahierten Frames
-          [3/3] VSR-Inferenz (Sliding-Window) + direktes Streaming an ffmpeg-Combine
+          [3/3] VSR-Inferenz + direktes Streaming an ffmpeg-Combine (kein .raw-Temp-File)
 
         Inferenz-Backend (automatische Auswahl):
-          • ONNX (bevorzugt): gecacht neben dem Checkpoint; CUDAExecutionProvider
-          • PyTorch FP16 (Fallback): JIT-trace auf CC < 7.0
-
-        Speicher-Strategie:
-          Frames werden NICHT alle auf einmal in den RAM geladen.
-          Stattdessen: Sliding-Window-Cache — jeweils nur die 7 Frames des
-          aktuellen Fensters im Speicher, ältere werden sofort eviktet.
+          • TRT  (bevorzugt): Engine wird beim ersten Lauf neben dem Checkpoint gebaut
+                              und bei gleicher Auflösung wiederverwendet.
+          • PyTorch FP16 (Fallback): chunked mini-batch, JIT-trace auf CC < 7.0
         """
         if not self.available:
             print(f"  ⚠️  Skipping VSR comparison (model unavailable)")
@@ -576,6 +529,30 @@ class VSRComparator:
             print(f"       Input: {W_in}×{H_in} → Output: {W_out}×{H_out}")
 
             # ────────────────────────────────────────────────────────────
+            # TRT Engine: auto-bauen falls nicht vorhanden, dann laden
+            # Engine-Datei liegt neben dem Checkpoint und wird wiederverwendet
+            # solange Checkpoint und Auflösung gleich bleiben.
+            # ────────────────────────────────────────────────────────────
+            trt_session  = None
+            engine_path  = _engine_path_for(self.checkpoint_path, W_in, H_in)
+            input_shape  = (1, 7, 3, H_in, W_in)
+
+            try:
+                import tensorrt  # noqa: F401 — nur Verfügbarkeit prüfen
+                if not engine_path.exists():
+                    built = _build_trt_for_vergleich(
+                        self.checkpoint_path, W_in, H_in, engine_path
+                    )
+                    if not built:
+                        print(f"  ⚠️  TRT Build fehlgeschlagen — PyTorch-Fallback wird verwendet")
+                if engine_path.exists():
+                    print(f"  🚀 Lade TRT Engine: {engine_path.name}")
+                    trt_session = _TRTSession(str(engine_path), input_shape)
+                    print(f"     ✅ TRT Session bereit")
+            except ImportError:
+                print(f"  ℹ️  tensorrt nicht verfügbar — verwende PyTorch fp16")
+
+            # ────────────────────────────────────────────────────────────
             # Phase 2: FFmpeg Referenz-Upscale (Lanczos 3×)
             # ────────────────────────────────────────────────────────────
             ffmpeg_upscale_path = str(temp_dir / 'ffmpeg_upscale.mkv')
@@ -596,22 +573,30 @@ class VSRComparator:
             print(f"       ✓ done ({time_module.time() - t0:.1f}s)")
 
             # ────────────────────────────────────────────────────────────
-            # Phase 3: VSR-Inferenz (Sliding-Window) + Combine via Stdin-Pipe
-            #
-            # Frames werden NICHT bulk-geladen. Stattdessen: ein Frame-Cache
-            # der nur die für das aktuelle 7-Frame-Fenster benötigten Frames hält.
-            # Frames, die nicht mehr benötigt werden, werden sofort eviktet.
+            # Phase 3: VSR-Inferenz + Combine via Stdin-Pipe
+            # Kein temporäres .raw-File — Frames werden direkt gestreamt.
+            # ffmpeg liest VSR-Frames aus stdin (pipe:0) während wir inferieren.
             # ────────────────────────────────────────────────────────────
             N       = len(frames)
             OFFSETS = [-3, -2, -1, 0, 1, 2, 3]
+            all_indices = [
+                [max(0, min(N - 1, i + o)) for o in OFFSETS]
+                for i in range(N)
+            ]
 
-            # Inferenz-Backend bestimmen
-            onnx_session = self._onnx_session
-            dtype        = torch.float16 if self.use_fp16 else torch.float32
+            # Alle PNG-Frames in CPU-RAM laden (random access für 7-frame-Fenster)
+            print(f"  [3/3] VSR inference → ffmpeg combine (streaming, {N} frames)...")
+            print(f"       Loading {N} frames to RAM...")
+            cpu_frames = []
+            for fp in frames:
+                bgr = cv2.imread(str(fp))
+                cpu_frames.append(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+            print(f"       {N} frames loaded")
 
-            # JIT-trace für PyTorch-Fallback auf CC < 7.0
+            # JIT-trace Fallback für CC < 7.0 (kein torch.compile), wenn kein TRT
+            dtype       = torch.float16 if self.use_fp16 else torch.float32
             infer_model = None
-            if onnx_session is None:
+            if trt_session is None:
                 if hasattr(self, '_jit_traced_shape'):
                     if self._jit_traced_shape != (H_in, W_in):
                         print(f"       🔧 Applying torch.jit.trace+freeze ({H_in}×{W_in})...")
@@ -631,9 +616,6 @@ class VSRComparator:
                     infer_model = self._jit_model
                 else:
                     infer_model = self.model
-
-            mode = "ONNX" if onnx_session else "PyTorch"
-            print(f"  [3/3] VSR inference → ffmpeg combine (sliding-window, {N} frames, {mode})...")
 
             # ffmpeg combine-Prozess starten — liest VSR-Frames aus stdin
             filter_complex = (
@@ -662,80 +644,70 @@ class VSRComparator:
                                             stdin=subprocess.PIPE,
                                             stderr=subprocess.PIPE)
 
-            # ── Sliding-Window Frame-Cache ────────────────────────────
-            # Nur die für das aktuelle Fenster benötigten Frames im Speicher.
-            _frame_cache: dict = {}  # idx → np.ndarray (H, W, 3) RGB uint8
-
-            def _load_frame(idx: int) -> np.ndarray:
-                if idx not in _frame_cache:
-                    bgr = cv2.imread(str(frames[idx]))
-                    _frame_cache[idx] = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-                return _frame_cache[idx]
-
-            def _evict_before(min_keep: int) -> None:
-                for k in [k for k in list(_frame_cache) if k < min_keep]:
-                    del _frame_cache[k]
-
-            # ── Inferenz-Schleife ──────────────────────────────────────
-            t_start = time_module.time()
+            # ── Inferenz-Schleife ─────────────────────────────────────
+            mode       = "TRT" if trt_session else "PyTorch"
+            CHUNK      = 1 if trt_session else 8
+            t_start    = time_module.time()
+            n_done     = 0
 
             with torch.no_grad():
-                for i in range(N):
-                    window_idx = [max(0, min(N - 1, i + o)) for o in OFFSETS]
+                for chunk_start in range(0, N, CHUNK):
+                    chunk_end     = min(chunk_start + CHUNK, N)
+                    chunk_indices = all_indices[chunk_start:chunk_end]
 
-                    # Benötigte Frames laden (Cache-Hit falls schon vorhanden)
-                    for j in window_idx:
-                        _load_frame(j)
-
-                    # Input-Tensor aus Cache aufbauen: (1, 7, 3, H, W)
-                    if onnx_session:
-                        inp_dtype = torch.float32
+                    if trt_session:
+                        # TRT: batch=1, float32
+                        window_idx = chunk_indices[0]
+                        window = torch.stack([
+                            torch.from_numpy(cpu_frames[j])
+                                 .permute(2, 0, 1)
+                                 .to(dtype=torch.float32, device=self.device) / 255.0
+                            for j in window_idx
+                        ]).unsqueeze(0)                        # (1, 7, 3, H, W)
+                        out_batch = trt_session.infer(window)  # (1, 3, H*3, W*3)
+                        del window
                     else:
-                        inp_dtype = dtype
-                    window = torch.stack([
-                        torch.from_numpy(_frame_cache[j])
-                             .permute(2, 0, 1)
-                             .to(dtype=inp_dtype, device=self.device) / 255.0
-                        for j in window_idx
-                    ]).unsqueeze(0)  # (1, 7, 3, H, W)
+                        # PyTorch: chunked mini-batch
+                        needed    = sorted({idx for w in chunk_indices for idx in w})
+                        idx_map   = {g: l for l, g in enumerate(needed)}
+                        src = torch.stack([
+                            torch.from_numpy(cpu_frames[j])
+                                 .permute(2, 0, 1)
+                                 .to(dtype=dtype, device=self.device) / 255.0
+                            for j in needed
+                        ])
+                        local_idx = torch.tensor(
+                            [[idx_map[g] for g in w] for w in chunk_indices],
+                            device=self.device,
+                        )
+                        out_batch = infer_model(src[local_idx])  # (CHUNK, 3, H*3, W*3)
+                        del src, local_idx
 
-                    # Inferenz
-                    if onnx_session:
-                        out = onnx_session.infer(window)   # (1, 3, H*3, W*3) float32
-                    else:
-                        out = infer_model(window)          # (1, 3, H*3, W*3)
-                    del window
+                    # uint8-Konvertierung auf GPU, dann als BGR-Bytes in Pipe schreiben
+                    for k in range(out_batch.shape[0]):
+                        rgb = (
+                            out_batch[k].permute(1, 2, 0)
+                                        .clamp(0.0, 1.0).mul(255)
+                                        .to(torch.uint8).cpu().numpy()
+                        )
+                        combine_proc.stdin.write(
+                            cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR).tobytes()
+                        )
+                    del out_batch
 
-                    # uint8 → BGR-Bytes → Pipe
-                    rgb = (
-                        out[0].permute(1, 2, 0)
-                              .clamp(0.0, 1.0).mul(255)
-                              .to(torch.uint8).cpu().numpy()
-                    )
-                    combine_proc.stdin.write(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR).tobytes())
-                    del out
-
-                    # Frames evikten, die nicht mehr benötigt werden.
-                    # Nächste Iteration braucht frühestens max(0, i+1-3).
-                    _evict_before(max(0, i - 2))
-
-                    if (i + 1) % 50 == 0 or (i + 1) == N:
-                        elapsed    = time_module.time() - t_start
-                        fps        = (i + 1) / elapsed if elapsed > 0 else 0
-                        remain     = (N - (i + 1)) / fps if fps > 0 else 0
+                    n_done = chunk_end
+                    if n_done % 50 == 0 or n_done == N:
+                        elapsed = time_module.time() - t_start
+                        fps     = n_done / elapsed if elapsed > 0 else 0
+                        remain  = (N - n_done) / fps if fps > 0 else 0
                         remain_str = (f"~{remain:.0f}s" if remain < 60
                                       else f"~{remain / 60:.1f} min")
-                        cached     = len(_frame_cache)
-                        print(f"       [{i + 1:4d}/{N}]  {mode}  {fps:.1f} fps"
-                              f"  ⏱ noch {remain_str}  (cache: {cached} frames)")
+                        print(f"       [{n_done:4d}/{N}]  {mode}  {fps:.1f} fps"
+                              f"  ⏱ noch {remain_str}")
 
             # Pipe schließen → ffmpeg beendet die Kodierung
-            # Kein combine_proc.communicate() nach manuellem stdin.close() —
-            # communicate() würde intern nochmal stdin.flush() aufrufen → ValueError.
-            if not combine_proc.stdin.closed:
-                combine_proc.stdin.close()
-            stderr_bytes = combine_proc.stderr.read()
-            combine_proc.wait()
+            combine_proc.stdin.close()
+            _, stderr_bytes = combine_proc.communicate()
             retcode = combine_proc.returncode
             combine_proc = None
 
