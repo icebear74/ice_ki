@@ -67,7 +67,7 @@ class AdaptiveSystem:
         # Aggressive mode
         self.aggressive_mode = False
         self.aggressive_counter = 0
-        self.aggressive_max_steps = 20000  # Increased from 5000 for longer adaptation
+        self.aggressive_max_steps = 5000  # Keep aggressive phase short; a small model collapses under prolonged pressure
         
         # Thresholds
         self.extreme_grad_threshold = 0.025
@@ -81,14 +81,14 @@ class AdaptiveSystem:
         self.l1_unstable_threshold = 0.045  # L1 above this is "unstable"
         
         # Update frequencies — increased to reduce oscillation frequency
-        self.aggressive_update_frequency = 25  # was 10
-        self.normal_update_frequency = 100     # was 50
+        self.aggressive_update_frequency = 50   # was 25; slower weight changes prevent gradient explosion on small models
+        self.normal_update_frequency = 150      # was 100; gentler normal-mode updates
         
         # Plateau detection
         self.best_loss = float('inf')
         self.plateau_counter = 0
-        self.plateau_patience = 500  # Increased to avoid false plateau detection on crop introduction
-        self.plateau_safety_threshold = 2000  # Force reset if plateau counter exceeds this
+        self.plateau_patience = 1000  # Raised from 500: a small model converges slowly; triggering Aggressive Mode at 500 steps is premature and leads to gradient explosion
+        self.plateau_safety_threshold = 1500  # Lowered from 2000: trigger safety reset sooner when genuinely stuck
         
         # Enhanced plateau detection
         self.best_quality = 0.0
@@ -258,14 +258,14 @@ class AdaptiveSystem:
             # Start cooldown
             self.is_in_cooldown = True
             self.cooldown_steps = self.cooldown_duration
-            # Boost gradient and perceptual strongly to break L1-dominance and
-            # force the model to learn sharpness/detail instead of copying LR.
-            # grad=0.40 + ms=0.15 + perc=0.15 = 0.70 → l1=0.30 (well above 0.10 floor).
+            # Boost gradient and perceptual to break L1-dominance, but keep the
+            # push moderate so a small/reduced model doesn't suffer gradient explosion.
+            # grad=0.30 + ms=0.15 + perc=0.08 = 0.53 → l1=0.47 (still dominant).
             # If these targets are ever changed, ensure their sum stays < 0.90
             # so that l1_weight remains positive after the floor clamp below.
-            target_grad = 0.40
+            target_grad = 0.30
             target_ms = 0.15
-            target_perc = 0.15
+            target_perc = 0.08
             assert target_grad + target_ms + target_perc < 1.0, (
                 f"Aggressive-mode loss targets sum to "
                 f"{target_grad + target_ms + target_perc:.2f} >= 1.0; "
@@ -384,7 +384,7 @@ class AdaptiveSystem:
         if self.aggressive_mode:
             update_freq = self.aggressive_update_frequency
             min_measurements = 2
-            adjustment_factor = 1.15
+            adjustment_factor = 1.08  # was 1.15; gentler per-step push prevents rapid weight escalation on small models
             blur_threshold = self.aggressive_blur_threshold
             
             self.aggressive_counter += 1
@@ -438,8 +438,10 @@ class AdaptiveSystem:
         
         # Adjust weights based on sharpness
         if avg_sharpness < blur_threshold:
-            # Image is blurry, boost gradient
-            target_grad = min(0.5, self.grad_weight * adjustment_factor)
+            # Image is blurry, boost gradient.
+            # Cap at 0.35 in aggressive mode (was 0.5) to avoid overwhelming a small model.
+            max_grad = 0.35 if self.aggressive_mode else 0.50
+            target_grad = min(max_grad, self.grad_weight * adjustment_factor)
             target_ms = min(0.2, self.ms_weight)
             target_l1 = max(0.3, 1.0 - target_grad - target_ms)
             # FIX 2: Start cooldown ONLY if not already in cooldown
