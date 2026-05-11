@@ -81,6 +81,34 @@ DIARIZATION_MIN_DURATION_ON  = float(os.getenv("DIARIZATION_MIN_DURATION_ON",  "
 DIARIZATION_MIN_DURATION_OFF = float(os.getenv("DIARIZATION_MIN_DURATION_OFF", "0.1"))
 CLUSTERING_THRESHOLD         = float(os.getenv("CLUSTERING_THRESHOLD",         "0.7"))
 
+# Precision-first segment quality gates
+MIN_AUTO_MATCH_DURATION_S = float(os.getenv("MIN_AUTO_MATCH_DURATION_S", "1.8"))
+MIN_LEARNING_DURATION_S   = float(os.getenv("MIN_LEARNING_DURATION_S", "2.2"))
+OVERLAP_GUARD_MS          = int(os.getenv("OVERLAP_GUARD_MS", "120"))
+
+
+def _clamp(v: float, lo: float = 0.0, hi: float = 1.0) -> float:
+    return max(lo, min(hi, v))
+
+
+def _derive_speaker_confidence(
+    duration_s: float,
+    no_speech_prob: float,
+    transcript_len: int,
+    is_overlap: bool,
+) -> float:
+    duration_score = _clamp(duration_s / max(MIN_LEARNING_DURATION_S, 0.1))
+    no_speech_score = _clamp(1.0 - no_speech_prob)
+    text_score = _clamp(transcript_len / 35.0)
+    overlap_penalty = 0.55 if is_overlap else 1.0
+    return _clamp((0.5 * duration_score + 0.35 * no_speech_score + 0.15 * text_score) * overlap_penalty)
+
+
+def _derive_match_confidence(match_distance: float | None) -> float | None:
+    if match_distance is None:
+        return None
+    return _clamp(1.0 - (float(match_distance) / max(SUGGEST_THRESHOLD, 1e-6)))
+
 # DeepFilterNet noise suppression
 DEEPFILTER_ENABLED = os.getenv("DEEPFILTER_ENABLED", "true").lower() in ("1", "true", "yes")
 # NOTE: DeepFilterNet hardcodes cuda:0 internally; DEEPFILTER_DEVICE is kept for
@@ -813,6 +841,7 @@ def scan_video(
         conn = get_connection()
         segments_stored = 0
         segments_updated = 0
+        recently_seen_segments: list[dict] = []
         try:
             while True:
                 seg = seg_queue.get()
@@ -833,6 +862,20 @@ def scan_video(
                     except Exception as exc:
                         logger.warning("Transcription failed: %s", exc)
 
+                # Heuristic overlap detection: mark segment as overlap when another
+                # recent segment (different speaker label) intersects in time.
+                is_overlap = False
+                for prev in recently_seen_segments:
+                    if prev["end_ms"] + OVERLAP_GUARD_MS < seg["start_ms"]:
+                        continue
+                    overlap_ms = min(prev["end_ms"], seg["end_ms"]) - max(prev["start_ms"], seg["start_ms"])
+                    if overlap_ms > OVERLAP_GUARD_MS and prev["speaker_label"] != seg["speaker_label"]:
+                        is_overlap = True
+                        break
+                recently_seen_segments.append(seg)
+                if len(recently_seen_segments) > 32:
+                    recently_seen_segments = recently_seen_segments[-32:]
+
                 # Quality heuristic: flag segments likely to contain laughter,
                 # noise, or too little speech for a reliable voice embedding.
                 duration_s = (seg["end_ms"] - seg["start_ms"]) / 1000.0
@@ -840,6 +883,19 @@ def scan_video(
                     no_speech_prob > 0.45
                     or duration_s < 1.2
                     or len(transcript.strip()) < 5
+                )
+                speaker_confidence = _derive_speaker_confidence(
+                    duration_s=duration_s,
+                    no_speech_prob=no_speech_prob,
+                    transcript_len=len(transcript.strip()),
+                    is_overlap=is_overlap,
+                )
+                learning_eligible = (
+                    bool(seg["embedding"])
+                    and not is_low_quality
+                    and not is_overlap
+                    and duration_s >= MIN_LEARNING_DURATION_S
+                    and speaker_confidence >= 0.60
                 )
                 if is_low_quality:
                     logger.info(
@@ -852,7 +908,7 @@ def scan_video(
                 # Multi-vector identity search against latest supervectors
                 match_result = {"status": "unknown", "identity_id": None,
                                 "sample_id": None, "distance": None}
-                if seg["embedding"]:
+                if seg["embedding"] and learning_eligible and duration_s >= MIN_AUTO_MATCH_DURATION_S:
                     match_result = find_nearest_identity(
                         conn,
                         seg["embedding"],
@@ -871,6 +927,17 @@ def scan_video(
                             match_result.get("sample_id"),
                             match_result.get("sample_context", ""),
                         )
+                elif seg["embedding"]:
+                    logger.info(
+                        "[%s–%s] %s → auto-match skipped (eligible=%s, overlap=%s, low_quality=%s, duration=%.2fs)",
+                        seg["start_ms"], seg["end_ms"], seg["speaker_label"],
+                        learning_eligible, is_overlap, is_low_quality, duration_s,
+                    )
+
+                if not learning_eligible and match_result["status"] != "unknown":
+                    match_result = {"status": "unknown", "identity_id": None, "sample_id": None, "distance": None}
+
+                match_confidence = _derive_match_confidence(match_result.get("distance"))
 
                 emb_bytes = vector_to_bytes(seg["embedding"]) if seg["embedding"] else None
 
@@ -904,6 +971,10 @@ def scan_video(
                             embedding=emb_bytes,
                             transcript=transcript,
                             is_low_quality=is_low_quality,
+                            is_overlap=is_overlap,
+                            learning_eligible=learning_eligible,
+                            speaker_confidence=speaker_confidence,
+                            match_confidence=match_confidence,
                         )
                         segments_updated += 1
                         logger.debug(
@@ -931,6 +1002,18 @@ def scan_video(
                         transcript=transcript,
                         is_suggestion=(match_result["status"] == "suggest"),
                         is_low_quality=is_low_quality,
+                        is_overlap=is_overlap,
+                        learning_eligible=learning_eligible,
+                        speaker_confidence=speaker_confidence,
+                        match_confidence=match_confidence,
+                        assignment_source=(
+                            "suggested" if match_result["status"] == "suggest" else
+                            "auto" if match_result["status"] == "matched" else
+                            "unassigned"
+                        ),
+                        auto_identity_id=match_result.get("identity_id"),
+                        auto_matched_sample_id=match_result.get("sample_id"),
+                        auto_match_distance=match_result.get("distance"),
                     )
                     segments_stored += 1
 

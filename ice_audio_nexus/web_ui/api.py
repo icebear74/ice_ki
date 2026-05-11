@@ -17,6 +17,7 @@ import asyncio
 import io
 import json
 import logging
+import uuid
 import os
 import re
 import subprocess
@@ -74,6 +75,7 @@ from db.database import (
     get_segment_embedding,
     get_segment,
     list_processed_episodes,
+    run_episode_probe_matching,
     # Vector stats
     get_identity_vector_stats,
     get_group_vector_stats,
@@ -755,6 +757,8 @@ def api_assign_segment(
       context      – optional context string for the new voice_sample
       add_sample   – bool; if True, extract embedding from segment and store
                      it as a new voice_sample for the identity (multi-vector)
+      force_add_sample – bool; allows storing samples even if segment is marked
+                         as not learning-eligible (manual override)
       extract_tts  – bool; if True (and add_sample is True), extract a clean
                      16-kHz mono WAV snippet for TTS dataset creation
     """
@@ -776,8 +780,12 @@ def api_assign_segment(
 
         context     = data.get("context", "")
         add_sample  = bool(data.get("add_sample", False))
+        force_add_sample = bool(data.get("force_add_sample", False))
         extract_tts = bool(data.get("extract_tts", False))
         embedding   = data.get("embedding", [])
+        segment_row = get_segment(conn, segment_id)
+        if segment_row is None:
+            raise HTTPException(status_code=404, detail="Segment not found")
 
         # If the caller didn't supply an embedding, try to load the one that
         # the scanner persisted in episode_segments for this segment.
@@ -786,8 +794,18 @@ def api_assign_segment(
 
         new_sample_id = None
         if add_sample and embedding and len(embedding) == 512:
+            if not segment_row.get("learning_eligible") and not force_add_sample:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Segment is not learning-eligible. Set force_add_sample=true to override manually.",
+                )
             new_sample_id = add_voice_sample(
-                conn, identity_id, embedding, context, is_confirmed=True
+                conn,
+                identity_id,
+                embedding,
+                context,
+                is_confirmed=True,
+                is_low_quality=not bool(segment_row.get("learning_eligible")),
             )
 
         update_segment_identity(
@@ -801,7 +819,7 @@ def api_assign_segment(
         # TTS extraction: extract a clean WAV snippet for dataset building
         tts_path = None
         if extract_tts and add_sample and new_sample_id is not None:
-            seg = get_segment(conn, segment_id)
+            seg = segment_row
             if seg and seg.get("video_path"):
                 try:
                     tts_path = _extract_tts_snippet(
@@ -818,6 +836,31 @@ def api_assign_segment(
 
         return JSONResponse({"status": "ok", "identity_id": identity_id,
                              "sample_id": new_sample_id, "tts_wav_path": tts_path})
+    finally:
+        conn.close()
+
+
+@app.post("/api/episodes/probe_match")
+def api_probe_match_episode(data: dict = Body(...)) -> JSONResponse:
+    series = (data.get("series") or "").strip()
+    episode = (data.get("episode") or "").strip()
+    if not series or not episode:
+        raise HTTPException(status_code=400, detail="series and episode are required")
+    identity_id = data.get("identity_id")
+    if identity_id is not None:
+        identity_id = int(identity_id)
+    run_label = data.get("run_label") or f"probe-{uuid.uuid4().hex[:8]}"
+
+    conn = get_connection()
+    try:
+        summary = run_episode_probe_matching(
+            conn,
+            series_name=series,
+            episode_title=episode,
+            target_identity_id=identity_id,
+            run_label=run_label,
+        )
+        return JSONResponse({"status": "ok", "summary": summary})
     finally:
         conn.close()
 

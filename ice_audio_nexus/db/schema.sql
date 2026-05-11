@@ -88,12 +88,25 @@ CREATE TABLE IF NOT EXISTS episode_segments (
     end_ms            INT NOT NULL COMMENT 'Endzeit in Millisekunden',
     speaker_label     VARCHAR(100) COMMENT 'Temp. Diarization-Label (SPEAKER_01)',
     identity_id       INT          COMMENT 'Zugeordnete Identität (NULL = unbekannt)',
+    auto_identity_id  INT          COMMENT 'Automatische Sprecherhypothese (getrennt von manueller Bestätigung)',
     matched_sample_id INT          COMMENT 'Welches voice_sample den Match auslöste',
+    auto_matched_sample_id INT     COMMENT 'Welches voice_sample die Auto-Hypothese auslöste',
     match_distance    FLOAT        COMMENT 'Cosinus-Distanz (VECTOR_DISTANCE)',
+    auto_match_distance FLOAT      COMMENT 'Cosinus-Distanz der Auto-Hypothese',
+    match_confidence  FLOAT        COMMENT 'Abgeleitete Match-Sicherheit (0.0–1.0)',
+    speaker_confidence FLOAT       COMMENT 'Abgeleitete Segment-/Sprecherqualität (0.0–1.0)',
     transcript        TEXT         COMMENT 'Whisper-Transkript des Segments',
     confidence        FLOAT        COMMENT 'Konfidenz-Score (0.0–1.0)',
     is_suggestion     BOOLEAN NOT NULL DEFAULT FALSE
                       COMMENT 'TRUE = Vorschlag, Nutzer-Bestätigung ausstehend',
+    is_low_quality    BOOLEAN NOT NULL DEFAULT FALSE
+                      COMMENT 'TRUE = zu kurz/rauschig/unsicher',
+    is_overlap        BOOLEAN NOT NULL DEFAULT FALSE
+                      COMMENT 'TRUE = überlappte bzw. problematische Sprecherbereiche',
+    learning_eligible BOOLEAN NOT NULL DEFAULT FALSE
+                      COMMENT 'TRUE = Segment darf für automatisches Lernen genutzt werden',
+    assignment_source VARCHAR(20) NOT NULL DEFAULT 'unassigned'
+                      COMMENT 'unassigned|auto|suggested|manual',
     created_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                                          ON UPDATE CURRENT_TIMESTAMP,
@@ -102,4 +115,25 @@ CREATE TABLE IF NOT EXISTS episode_segments (
     INDEX idx_episode  (series_name, episode_title),
     INDEX idx_timeline (series_name, episode_title, start_ms),
     INDEX idx_identity (identity_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================
+-- 5. episode_probe_matches
+--    Letzte Episode-interne Probe-Matching-Ergebnisse pro Segment.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS episode_probe_matches (
+    segment_id        INT PRIMARY KEY,
+    probe_identity_id INT          COMMENT 'Vorgeschlagene Identität im Testlauf',
+    probe_distance    FLOAT        COMMENT 'Distanz im Testlauf',
+    probe_confidence  FLOAT        COMMENT 'Abgeleitete Testlauf-Sicherheit (0.0–1.0)',
+    probe_status      VARCHAR(20) NOT NULL DEFAULT 'untested'
+                      COMMENT 'matched|uncertain|excluded|untested',
+    exclusion_reason  VARCHAR(255) COMMENT 'Warum ausgeschlossen/unsicher',
+    run_label         VARCHAR(64)  COMMENT 'Freie Kennung des letzten Probe-Laufs',
+    updated_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                                        ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (segment_id)        REFERENCES episode_segments(id) ON DELETE CASCADE,
+    FOREIGN KEY (probe_identity_id) REFERENCES identities(id)       ON DELETE SET NULL,
+    INDEX idx_probe_identity (probe_identity_id),
+    INDEX idx_probe_status (probe_status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

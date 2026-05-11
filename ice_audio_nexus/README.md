@@ -11,9 +11,10 @@ Zuweisung trainiert das System für die nächste Episode.
        │
        ├─ FFmpeg extrahiert Audio (16 kHz Mono WAV)
        ├─ pyannote.audio erkennt Sprechwechsel  →  Segmente (start_ms / end_ms / SPEAKER_xx)
+       ├─ Overlap-/Qualitäts-Heuristik markiert problematische Bereiche
        ├─ pyannote/embedding erzeugt VECTOR(512) pro Segment
        ├─ faster-whisper transkribiert jeden Abschnitt
-       └─ Alle Daten landen in MariaDB  →  episode_segments
+       └─ Alle Daten landen in MariaDB  →  episode_segments (+ Probe-Matching Metadaten)
 
 2.  Web-UI öffnen  (http://localhost:8765)
        │
@@ -88,7 +89,12 @@ Standardwerte: `MATCH_THRESHOLD=0.25`, `SUGGEST_THRESHOLD=0.45` (via `.env` anpa
 | identity_id        | INT FK       | → identities.id (nach Zuweisung)                      |
 | matched_sample_id  | INT FK       | → voice_samples.id (welcher Vektor hat gematcht?)     |
 | match_distance     | FLOAT        | Cosinus-Distanz des besten Treffers                    |
+| auto_identity_id / auto_match_distance | INT/FLOAT | Getrennte automatische Hypothese (auch bei manueller Bestätigung nachvollziehbar) |
+| match_confidence / speaker_confidence | FLOAT | Abgeleitete Match-/Segmentqualität (0.0–1.0) |
 | is_suggestion      | BOOL         | True = Vorschlag, Nutzerbestätigung ausstehend         |
+| is_overlap         | BOOL         | Überlappte/problematische Sprecherbereiche             |
+| learning_eligible  | BOOL         | Darf das Segment fürs Auto-Lernen genutzt werden?      |
+| assignment_source  | VARCHAR(20)  | `unassigned`, `auto`, `suggested`, `manual`            |
 | transcript         | TEXT         | Whisper-Transkript des Segments                        |
 
 ### `voice_samples`
@@ -98,6 +104,9 @@ Standardwerte: `MATCH_THRESHOLD=0.25`, `SUGGEST_THRESHOLD=0.45` (via `.env` anpa
 | embedding    | VECTOR(512)  | 512-dim Float32 Vektor (für VECTOR_DISTANCE)   |
 | context      | VARCHAR(255) | z. B. „TNG Season 1" – Kontext der Aufnahme    |
 | is_confirmed | BOOLEAN      | Durch Nutzer manuell bestätigt                  |
+
+### `episode_probe_matches`
+Persistiert den letzten **Episode-internen Testlauf** pro Segment (`matched`, `uncertain`, `excluded`) inkl. Grund/Confidence.
 
 ## Schnellstart
 
@@ -146,5 +155,27 @@ Der `/stream`-Endpunkt nutzt `h264_nvenc` wenn verfügbar, sonst `libx264` als F
   - ✅ Erkannte Sprecher
   - ⚠ Vorschläge (Distanz etwas höher, Bestätigung empfohlen)
   - ❓ Unbekannte Sprecher
+  - ⤫ Overlap / 🚫 nicht lerngeeignete Segmente klar markiert
+- **Episode-Testlauf („🧪 Testlauf gleiche Episode“)**
+  - nutzt manuell bestätigte, lerngeeignete Segmente als Evidenz
+  - bewertet offene Segmente derselben Episode ohne Voll-Rescan neu
+  - zeigt pro Segment: Match / Unsicher / Ausgeschlossen inkl. Begründung
 - **Zuweisungs-Panel**: Identität wählen/neu anlegen + optional Vektor in DB speichern
 
+## Precision-first Verhalten (neu)
+
+- **Hohe Precision vor Recall**: kurze/überlappte/schwache Segmente werden restriktiv behandelt.
+- **Auto-Matches nur bei brauchbarer Evidenz** (`learning_eligible=true`).
+- **Auto-Lernen getrennt von manueller Bestätigung**:
+  - manuelle Zuweisungen setzen `assignment_source=manual`
+  - Auto-Hypothesen bleiben separat (`auto_*` Felder)
+- Nicht lerngeeignete Segmente können nur mit explizitem Override als Sample gespeichert werden.
+
+## Migration / Reset
+
+Da bestehende Daten verworfen werden dürfen, ist ein Neustart unkompliziert:
+
+1. Web-UI stoppen
+2. Tabellen via `ensure_schema()` aktualisieren (beim nächsten Start automatisch)
+3. Optional: `episode_segments`, `episode_probe_matches`, `voice_samples` leeren
+4. Episoden neu scannen und dann in der UI iterativ zuweisen + Probe-Matching nutzen

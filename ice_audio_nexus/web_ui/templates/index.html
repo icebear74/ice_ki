@@ -235,6 +235,7 @@
     .speaker-card.active { border-color: var(--accent); }
     .speaker-card.suggestion { border-color: var(--warn); }
     .speaker-card.low-quality { border-color: rgba(210,153,34,.5); background: rgba(210,153,34,.05); }
+    .speaker-card.overlap { border-color: rgba(248,81,73,.55); background: rgba(248,81,73,.05); }
 
     .sc-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
     .sc-label   { font-weight: 600; font-size: 13px; }
@@ -245,6 +246,12 @@
     .tag-suggest    { background: rgba(210,153,34,.2); color: var(--warn); }
     .tag-unknown    { background: rgba(248,81,73,.15); color: var(--danger); }
     .tag-lowquality { background: rgba(210,153,34,.2); color: var(--warn); }
+    .tag-overlap    { background: rgba(248,81,73,.18); color: var(--danger); }
+    .tag-learning   { background: rgba(63,185,80,.18); color: var(--accent2); }
+    .tag-no-learning{ background: rgba(248,81,73,.12); color: var(--danger); }
+    .tag-probe-match { background: rgba(63,185,80,.2); color: var(--accent2); }
+    .tag-probe-uncertain { background: rgba(210,153,34,.2); color: var(--warn); }
+    .tag-probe-excluded { background: rgba(248,81,73,.15); color: var(--danger); }
     .sc-transcript  { color: var(--text-muted); font-size: 11px; margin-top: 4px; font-style: italic; line-height: 1.4; }
 
     /* Confidence percentage badge – colour-coded by tier */
@@ -605,6 +612,20 @@
 
     <!-- Tab: Segmente -->
     <div id="tab-segments" class="tab-content active">
+      <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:10px;">
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+          <button class="btn btn-ghost" style="font-size:11px;padding:5px 10px;" onclick="setSegmentFilter('all')">Alle</button>
+          <button class="btn btn-ghost" style="font-size:11px;padding:5px 10px;" onclick="setSegmentFilter('unassigned')">Nur unzugeordnet</button>
+          <button class="btn btn-ghost" style="font-size:11px;padding:5px 10px;" onclick="setSegmentFilter('learning')">Nur lerngeeignet</button>
+          <button class="btn btn-ghost" style="font-size:11px;padding:5px 10px;" onclick="setSegmentFilter('probe_candidates')">Probe-Kandidaten</button>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+          <button id="btn-probe-episode" class="btn btn-warn" style="font-size:11px;padding:5px 10px;" onclick="runEpisodeProbeMatch()">
+            🧪 Testlauf gleiche Episode
+          </button>
+          <span id="probe-summary" style="font-size:11px;color:var(--text-muted);"></span>
+        </div>
+      </div>
       <div id="segments-list">
         <div class="empty-state">Lade eine Episode, um Segmente zu sehen.</div>
       </div>
@@ -815,6 +836,7 @@ let _totalDuration = 0;    // seconds: full video duration from /api/probe
 let _hasWebPreview   = false; // true when a .web.mp4 preview is available
 let _hasCleanPreview = false; // true when a .clean.web.mp4 DeepFilter variant exists
 let _activeAudioTrack = 0;   // 0 = original, 1 = clean
+let _segmentFilter    = "all";
 
 const player      = document.getElementById("player");
 const overlay     = document.getElementById("speaker-overlay");
@@ -1577,6 +1599,7 @@ async function loadEpisode() {
       .catch(() => {});
   }
 
+  document.getElementById("probe-summary").textContent = "";
   await fetchSegments();
   await loadIdentities();
 }
@@ -1601,7 +1624,22 @@ function renderSegments() {
     list.innerHTML = '<div class="empty-state">Keine Segmente für diese Episode.</div>';
     return;
   }
-  list.innerHTML = segments.map(seg => segCard(seg)).join("");
+  const filtered = segments.filter(seg => {
+    if (_segmentFilter === "unassigned") return !seg.identity_id;
+    if (_segmentFilter === "learning") return !!seg.learning_eligible;
+    if (_segmentFilter === "probe_candidates") {
+      return seg.probe_status === "matched" || seg.probe_status === "uncertain";
+    }
+    return true;
+  });
+  list.innerHTML = filtered.length
+    ? filtered.map(seg => segCard(seg)).join("")
+    : '<div class="empty-state">Keine Segmente für diesen Filter.</div>';
+}
+
+function setSegmentFilter(mode) {
+  _segmentFilter = mode || "all";
+  renderSegments();
 }
 
 function confBadge(distance) {
@@ -1619,6 +1657,9 @@ function segCard(seg) {
 
   if (seg.is_low_quality) {
     cardClass += " low-quality";
+  }
+  if (seg.is_overlap) {
+    cardClass += " overlap";
   }
 
   if (seg.identity_id) {
@@ -1642,6 +1683,27 @@ function segCard(seg) {
   const lowQualityTag = seg.is_low_quality
     ? `<span class="match-tag tag-lowquality" title="Niedrige Qualität – möglicherweise Lachen, Rauschen oder zu kurz">⚠️ Geringe Qualität</span>`
     : "";
+  const overlapTag = seg.is_overlap
+    ? `<span class="match-tag tag-overlap" title="Überlappte Sprecheraktivität erkannt">⤫ Overlap</span>`
+    : "";
+  const learnTag = seg.learning_eligible
+    ? `<span class="match-tag tag-learning" title="Für automatisches Lernen geeignet">🧠 Lerngeeignet</span>`
+    : `<span class="match-tag tag-no-learning" title="Nicht fürs Auto-Lernen geeignet">🚫 Nicht lerngeeignet</span>`;
+
+  let probeTag = "";
+  if (seg.probe_status === "matched") {
+    const p = seg.probe_confidence != null ? `${Math.round(seg.probe_confidence * 100)}%` : "—";
+    probeTag = `<span class="match-tag tag-probe-match" title="Testlauf: würde automatisch zugeordnet werden">🧪 Probe: Match ${p}</span>`;
+  } else if (seg.probe_status === "uncertain") {
+    probeTag = `<span class="match-tag tag-probe-uncertain" title="${esc(seg.exclusion_reason || 'Unsicher')}">🧪 Probe: Unsicher</span>`;
+  } else if (seg.probe_status === "excluded") {
+    probeTag = `<span class="match-tag tag-probe-excluded" title="${esc(seg.exclusion_reason || 'Ausgeschlossen')}">🧪 Probe: Ausgeschlossen</span>`;
+  }
+
+  const speakerConf = seg.speaker_confidence != null
+    ? `<span class="conf-badge ${seg.speaker_confidence >= 0.75 ? "conf-high" : seg.speaker_confidence >= 0.55 ? "conf-medium" : "conf-low"}"
+       title="Sprecherqualität">${Math.round(seg.speaker_confidence * 100)}%</span>`
+    : "";
 
   const transcript = seg.transcript
     ? `<div class="sc-transcript">"${esc(seg.transcript.slice(0,120))}${seg.transcript.length>120?"…":""}"</div>`
@@ -1653,9 +1715,9 @@ function segCard(seg) {
          onclick="selectSegment(${seg.id})">
       <div class="sc-header">
         <span class="sc-label">${esc(label)}</span>
-        <span style="display:flex;align-items:center;gap:6px;">${badge}<span class="sc-time">${start}</span></span>
+        <span style="display:flex;align-items:center;gap:6px;">${speakerConf}${badge}<span class="sc-time">${start}</span></span>
       </div>
-      ${lowQualityTag ? `<div class="sc-match">${lowQualityTag}</div>` : ""}
+      <div class="sc-match">${[lowQualityTag, overlapTag, learnTag, probeTag].filter(Boolean).join(" ")}</div>
       ${matchHtml}
       ${transcript}
     </div>
@@ -1703,6 +1765,7 @@ player.addEventListener("timeupdate", () => {
 function selectSegment(segId) {
   const seg = segments.find(s => s.id === segId);
   if (!seg) return;
+  currentSeg = seg;
 
   // ── Toggle assignment panel ──────────────────────────────────────────
   const panelEl = document.getElementById("assign-panel-" + segId);
@@ -1747,11 +1810,23 @@ function buildAssignPanel(seg) {
         (z.B. Lachen, Rauschen oder zu kurze Aufnahme). Es kann trotzdem als Sample gespeichert werden,
         wird aber standardmäßig beim Supervector ignoriert.
        </div>` : "";
+  const overlapNote = seg.is_overlap
+    ? `<div style="color:var(--danger);font-size:11px;margin-bottom:8px;padding:6px 8px;background:rgba(248,81,73,0.12);border-radius:4px;border-left:3px solid var(--danger);">
+        ⤫ <strong>Overlap erkannt</strong> – Überlappte Sprecherbereiche sind für Auto-Lernen gesperrt
+        und werden nur manuell mit Override als Sample gespeichert.
+       </div>` : "";
+  const learningNote = !seg.learning_eligible
+    ? `<div style="color:var(--text-muted);font-size:11px;margin-bottom:8px;">
+        🚫 Dieses Segment ist aktuell <strong>nicht lerngeeignet</strong>.
+        Für Sample-Speicherung ist eine manuelle Override-Bestätigung nötig.
+       </div>` : "";
 
   return `
     <div class="assign-panel">
       <h4>🎯 Sprecher zuweisen – Segment ${seg.id}</h4>
       ${lowQualityNote}
+      ${overlapNote}
+      ${learningNote}
       ${suggestionNote}
       <div>Bestehende Identität:</div>
       <select id="ap-identity-${seg.id}">
@@ -1786,6 +1861,7 @@ function buildAssignPanel(seg) {
 
       <div class="row" style="margin-top:8px;">
         <button class="btn btn-success" onclick="applyAssign(${seg.id})">✓ Zuweisen</button>
+        <button class="btn btn-warn" onclick="runEpisodeProbeMatch(${seg.id})">🧪 Testlauf gleiche Episode</button>
         <button class="btn btn-ghost"   onclick="cancelAssign(${seg.id})">Abbrechen</button>
       </div>
     </div>
@@ -1810,14 +1886,16 @@ async function applyAssign(segId) {
   }
 
   // Warn user before saving a low-quality segment as a voice sample
-  if (addSample && seg && seg.is_low_quality) {
+  let forceAddSample = false;
+  if (addSample && seg && (seg.is_low_quality || seg.is_overlap || !seg.learning_eligible)) {
     const confirmed = window.confirm(
-      "⚠️ Dieses Segment wurde als qualitativ minderwertig eingestuft " +
-      "(z.B. Lachen, Rauschen oder zu kurze Aufnahme).\n\n" +
-      "Es wird beim Erstellen von Supervektoren standardmäßig ignoriert.\n\n" +
-      "Trotzdem als Voice-Sample speichern?"
+      "⚠️ Dieses Segment ist nicht als lerngeeignet markiert " +
+      "(z.B. Overlap, kurze Dauer, Rauschen).\n\n" +
+      "Es wird beim automatischen Lernen/Supervektor standardmäßig ausgeschlossen.\n\n" +
+      "Trotzdem als Voice-Sample speichern (manueller Override)?"
     );
     if (!confirmed) return;
+    forceAddSample = true;
   }
 
   const addTts = document.getElementById("ap-tts-" + segId)?.checked;
@@ -1827,6 +1905,7 @@ async function applyAssign(segId) {
     new_name:    newName  || undefined,
     context:     context  || "",
     add_sample:  addSample,
+    force_add_sample: forceAddSample,
     extract_tts: addTts && addSample,
     segment_id:  segId,
   };
@@ -1846,6 +1925,55 @@ async function applyAssign(segId) {
     const err = await resp.json().catch(() => ({}));
     toast("Fehler: " + (err.detail || resp.statusText), "error");
   }
+}
+
+async function runEpisodeProbeMatch(segId = null) {
+  if (!seriesName || !episodeTitle) {
+    toast("Bitte zuerst eine Episode laden.", "warn");
+    return;
+  }
+  let identityId = null;
+  if (segId != null) {
+    identityId = parseInt(document.getElementById("ap-identity-" + segId)?.value) || null;
+    if (!identityId) {
+      const seg = segments.find(s => s.id === segId);
+      identityId = seg?.identity_id || null;
+    }
+  } else if (currentSeg?.identity_id) {
+    identityId = currentSeg.identity_id;
+  }
+
+  const btn = document.getElementById("btn-probe-episode");
+  const oldTxt = btn ? btn.textContent : "";
+  if (btn) { btn.disabled = true; btn.textContent = "⏳ Testlauf…"; }
+
+  const resp = await fetch("/api/episodes/probe_match", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({
+      series: seriesName,
+      episode: episodeTitle,
+      identity_id: identityId || undefined,
+    }),
+  });
+
+  if (btn) { btn.disabled = false; btn.textContent = oldTxt; }
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    toast("Testlauf fehlgeschlagen: " + (err.detail || resp.statusText), "error");
+    return;
+  }
+
+  const data = await resp.json();
+  const s = data.summary || {};
+  document.getElementById("probe-summary").textContent =
+    `Anker: ${s.anchors || 0} · Match: ${s.matched || 0} · Unsicher: ${s.uncertain || 0} · Ausgeschlossen: ${s.excluded || 0}`;
+  toast(
+    (s.message ? `${s.message} ` : "") +
+    `Testlauf fertig (${s.matched || 0} Match, ${s.uncertain || 0} unsicher, ${s.excluded || 0} ausgeschlossen)`,
+    s.matched ? "success" : "warn"
+  );
+  await fetchSegments();
 }
 
 /* -------------------------------------------------------------------- */
@@ -1893,11 +2021,13 @@ function updateOverlay(nowMs) {
     const pct = Math.round((1 - active.match_distance) * 100);
     const ctx = active.matched_sample_context ? ` · via „${active.matched_sample_context}"` : "";
     const prefix = active.is_suggestion ? "⚠ Vorschlag · " : "";
-    ovMatch.textContent = `${prefix}${pct}%${ctx}`;
+    const src = active.assignment_source ? ` · ${active.assignment_source}` : "";
+    ovMatch.textContent = `${prefix}${pct}%${ctx}${src}`;
   } else if (active.is_suggestion) {
     ovMatch.textContent = "⚠ Vorschlag – Bestätigung ausstehend";
   } else {
-    ovMatch.textContent = "";
+    const quality = active.speaker_confidence != null ? `Qualität ${Math.round(active.speaker_confidence * 100)}%` : "";
+    ovMatch.textContent = quality;
   }
 
   document.querySelectorAll(".speaker-card").forEach(c => c.classList.remove("active"));

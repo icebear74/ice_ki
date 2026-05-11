@@ -175,23 +175,59 @@ _DDL = [
         speaker_label   VARCHAR(100) COMMENT 'Temporary diarization label (SPEAKER_01)',
         embedding       VECTOR(512) NULL COMMENT 'Raw speaker embedding from diarization',
         identity_id     INT DEFAULT NULL,
+        auto_identity_id INT DEFAULT NULL
+                        COMMENT 'Automatic hypothesis identity (kept separate from manual confirmation)',
         matched_sample_id INT DEFAULT NULL COMMENT 'Which voice_sample triggered the match',
+        auto_matched_sample_id INT DEFAULT NULL
+                        COMMENT 'Automatic hypothesis sample that triggered auto matching',
         match_distance  FLOAT DEFAULT NULL COMMENT 'Cosine distance of the winning match',
+        auto_match_distance FLOAT DEFAULT NULL
+                        COMMENT 'Cosine distance of automatic hypothesis',
+        match_confidence FLOAT DEFAULT NULL
+                        COMMENT 'Derived confidence for current match hypothesis (0.0-1.0)',
+        speaker_confidence FLOAT DEFAULT NULL
+                        COMMENT 'Derived segment quality confidence (0.0-1.0)',
         transcript      TEXT,
         confidence      FLOAT DEFAULT NULL,
         is_suggestion   BOOLEAN NOT NULL DEFAULT FALSE
                         COMMENT 'True = proposed match (slightly high distance), needs user confirmation',
         is_low_quality  BOOLEAN NOT NULL DEFAULT FALSE
                         COMMENT 'True = heuristically flagged as laughter/noise/short utterance',
+        is_overlap      BOOLEAN NOT NULL DEFAULT FALSE
+                        COMMENT 'True = segment overlaps with nearby speaker activity',
+        learning_eligible BOOLEAN NOT NULL DEFAULT FALSE
+                        COMMENT 'True = segment can be used for automatic speaker learning',
+        assignment_source VARCHAR(20) NOT NULL DEFAULT 'unassigned'
+                        COMMENT 'unassigned|auto|suggested|manual',
         tts_wav_path    TEXT NULL COMMENT 'Path to extracted TTS WAV snippet (if exported)',
         created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-                                           ON UPDATE CURRENT_TIMESTAMP,
+                                            ON UPDATE CURRENT_TIMESTAMP,
         FOREIGN KEY (identity_id)       REFERENCES identities(id)    ON DELETE SET NULL,
         FOREIGN KEY (matched_sample_id) REFERENCES voice_samples(id) ON DELETE SET NULL,
         INDEX idx_seg_episode  (series_name, episode_title),
         INDEX idx_seg_identity (identity_id),
         INDEX idx_seg_video    (video_path(512))
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+
+    # 8. Episode probe matching results (latest run per segment)
+    """
+    CREATE TABLE IF NOT EXISTS episode_probe_matches (
+        segment_id        INT PRIMARY KEY,
+        probe_identity_id INT DEFAULT NULL,
+        probe_distance    FLOAT DEFAULT NULL,
+        probe_confidence  FLOAT DEFAULT NULL,
+        probe_status      VARCHAR(20) NOT NULL DEFAULT 'untested'
+                          COMMENT 'matched|uncertain|excluded|untested',
+        exclusion_reason  VARCHAR(255) DEFAULT NULL,
+        run_label         VARCHAR(64) DEFAULT NULL,
+        updated_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                                         ON UPDATE CURRENT_TIMESTAMP,
+        FOREIGN KEY (segment_id)        REFERENCES episode_segments(id) ON DELETE CASCADE,
+        FOREIGN KEY (probe_identity_id) REFERENCES identities(id)       ON DELETE SET NULL,
+        INDEX idx_probe_identity (probe_identity_id),
+        INDEX idx_probe_status (probe_status)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
 ]
@@ -649,6 +685,81 @@ def ensure_schema() -> None:
                 COMMENT 'True = heuristically flagged as laughter/noise/short utterance'
             """
         )
+        cur.execute(
+            """
+            ALTER TABLE episode_segments
+            ADD COLUMN IF NOT EXISTS is_overlap BOOLEAN NOT NULL DEFAULT FALSE
+                COMMENT 'True = segment overlaps with nearby speaker activity'
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE episode_segments
+            ADD COLUMN IF NOT EXISTS learning_eligible BOOLEAN NOT NULL DEFAULT FALSE
+                COMMENT 'True = segment can be used for automatic speaker learning'
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE episode_segments
+            ADD COLUMN IF NOT EXISTS speaker_confidence FLOAT DEFAULT NULL
+                COMMENT 'Derived segment quality confidence (0.0-1.0)'
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE episode_segments
+            ADD COLUMN IF NOT EXISTS match_confidence FLOAT DEFAULT NULL
+                COMMENT 'Derived confidence for current match hypothesis (0.0-1.0)'
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE episode_segments
+            ADD COLUMN IF NOT EXISTS assignment_source VARCHAR(20) NOT NULL DEFAULT 'unassigned'
+                COMMENT 'unassigned|auto|suggested|manual'
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE episode_segments
+            ADD COLUMN IF NOT EXISTS auto_identity_id INT NULL
+                COMMENT 'Automatic hypothesis identity (kept separate from manual confirmation)'
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE episode_segments
+            ADD COLUMN IF NOT EXISTS auto_matched_sample_id INT NULL
+                COMMENT 'Automatic hypothesis sample that triggered auto matching'
+            """
+        )
+        cur.execute(
+            """
+            ALTER TABLE episode_segments
+            ADD COLUMN IF NOT EXISTS auto_match_distance FLOAT DEFAULT NULL
+                COMMENT 'Cosine distance of automatic hypothesis'
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS episode_probe_matches (
+                segment_id        INT PRIMARY KEY,
+                probe_identity_id INT DEFAULT NULL,
+                probe_distance    FLOAT DEFAULT NULL,
+                probe_confidence  FLOAT DEFAULT NULL,
+                probe_status      VARCHAR(20) NOT NULL DEFAULT 'untested',
+                exclusion_reason  VARCHAR(255) DEFAULT NULL,
+                run_label         VARCHAR(64) DEFAULT NULL,
+                updated_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                                                 ON UPDATE CURRENT_TIMESTAMP,
+                FOREIGN KEY (segment_id)        REFERENCES episode_segments(id) ON DELETE CASCADE,
+                FOREIGN KEY (probe_identity_id) REFERENCES identities(id)       ON DELETE SET NULL,
+                INDEX idx_probe_identity (probe_identity_id),
+                INDEX idx_probe_status (probe_status)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+            """
+        )
 
         # voice_samples: add is_active column if missing
         cur.execute(
@@ -672,6 +783,40 @@ def ensure_schema() -> None:
             ALTER TABLE voice_samples
             ADD COLUMN IF NOT EXISTS is_low_quality BOOLEAN NOT NULL DEFAULT FALSE
                 COMMENT 'True = heuristically flagged as laughter/noise/short utterance; excluded from supervectors'
+            """
+        )
+
+        # Backfill assignment/match metadata for pre-existing rows.
+        cur.execute(
+            """
+            UPDATE episode_segments
+            SET assignment_source = CASE
+                WHEN identity_id IS NULL THEN 'unassigned'
+                WHEN is_suggestion = TRUE THEN 'suggested'
+                ELSE 'manual'
+            END
+            WHERE assignment_source IS NULL OR assignment_source = '' OR assignment_source = 'unassigned'
+            """
+        )
+        cur.execute(
+            """
+            UPDATE episode_segments
+            SET auto_identity_id = identity_id
+            WHERE auto_identity_id IS NULL AND identity_id IS NOT NULL
+            """
+        )
+        cur.execute(
+            """
+            UPDATE episode_segments
+            SET auto_matched_sample_id = matched_sample_id
+            WHERE auto_matched_sample_id IS NULL AND matched_sample_id IS NOT NULL
+            """
+        )
+        cur.execute(
+            """
+            UPDATE episode_segments
+            SET auto_match_distance = match_distance
+            WHERE auto_match_distance IS NULL AND match_distance IS NOT NULL
             """
         )
 
@@ -1670,8 +1815,9 @@ def upsert_segment(conn: mariadb.Connection, **kwargs) -> int:
     _ALLOWED_COLS = (
         "series_name", "episode_title", "video_path", "start_ms", "end_ms",
         "speaker_label", "embedding", "identity_id", "matched_sample_id",
-        "match_distance", "transcript", "confidence", "is_suggestion",
-        "is_low_quality",
+        "match_distance", "transcript", "confidence", "is_suggestion", "is_low_quality",
+        "is_overlap", "learning_eligible", "speaker_confidence", "match_confidence",
+        "assignment_source", "auto_identity_id", "auto_matched_sample_id", "auto_match_distance",
     )
     data = {k: v for k, v in kwargs.items() if k in _ALLOWED_COLS}
     if "match_distance" in data:
@@ -1722,27 +1868,52 @@ def update_segment_match(
     embedding: bytes | None = None,
     transcript: str | None = None,
     is_low_quality: bool = False,
+    is_overlap: bool = False,
+    learning_eligible: bool = False,
+    speaker_confidence: float | None = None,
+    match_confidence: float | None = None,
 ) -> None:
     """Update only the auto-detected fields; preserve manual identity assignments."""
     match_distance = _sanitize_float(match_distance)
+    speaker_confidence = _sanitize_float(speaker_confidence)
+    match_confidence = _sanitize_float(match_confidence)
+    assignment_source = "suggested" if is_suggestion and identity_id is not None else (
+        "auto" if identity_id is not None else "unassigned"
+    )
     cur = conn.cursor()
     if embedding is not None and transcript is not None:
         cur.execute(
             """UPDATE episode_segments
-               SET identity_id = ?, matched_sample_id = ?, match_distance = ?,
-                   is_suggestion = ?, embedding = ?, transcript = ?, is_low_quality = ?
-               WHERE id = ?""",
-            (identity_id, matched_sample_id, match_distance, is_suggestion,
-             embedding, transcript, is_low_quality, segment_id),
+                SET identity_id = ?, matched_sample_id = ?, match_distance = ?,
+                    auto_identity_id = ?, auto_matched_sample_id = ?, auto_match_distance = ?,
+                    match_confidence = ?, is_suggestion = ?, embedding = ?, transcript = ?,
+                    is_low_quality = ?, is_overlap = ?, learning_eligible = ?,
+                    speaker_confidence = ?, assignment_source = ?
+                WHERE id = ?""",
+            (
+                identity_id, matched_sample_id, match_distance,
+                identity_id, matched_sample_id, match_distance,
+                match_confidence, is_suggestion, embedding, transcript,
+                is_low_quality, is_overlap, learning_eligible,
+                speaker_confidence, assignment_source, segment_id,
+            ),
         )
     else:
         cur.execute(
             """UPDATE episode_segments
-               SET identity_id = ?, matched_sample_id = ?, match_distance = ?,
-                   is_suggestion = ?, is_low_quality = ?
-               WHERE id = ?""",
-            (identity_id, matched_sample_id, match_distance, is_suggestion,
-             is_low_quality, segment_id),
+                SET identity_id = ?, matched_sample_id = ?, match_distance = ?,
+                    auto_identity_id = ?, auto_matched_sample_id = ?, auto_match_distance = ?,
+                    match_confidence = ?, is_suggestion = ?, is_low_quality = ?,
+                    is_overlap = ?, learning_eligible = ?, speaker_confidence = ?,
+                    assignment_source = ?
+                WHERE id = ?""",
+            (
+                identity_id, matched_sample_id, match_distance,
+                identity_id, matched_sample_id, match_distance,
+                match_confidence, is_suggestion, is_low_quality,
+                is_overlap, learning_eligible, speaker_confidence,
+                assignment_source, segment_id,
+            ),
         )
     conn.commit()
 
@@ -1760,8 +1931,8 @@ def update_segment_identity(
     cur.execute(
         """UPDATE episode_segments
            SET identity_id = ?, matched_sample_id = ?,
-               match_distance = ?, is_suggestion = ?
-           WHERE id = ?""",
+               match_distance = ?, is_suggestion = ?, assignment_source = 'manual'
+            WHERE id = ?""",
         (identity_id, matched_sample_id, match_distance, is_suggestion, segment_id),
     )
     conn.commit()
@@ -1801,7 +1972,8 @@ def get_segment(conn: mariadb.Connection, segment_id: int) -> dict | None:
         SELECT es.id, es.series_name, es.episode_title, es.video_path,
                es.start_ms, es.end_ms, es.speaker_label,
                es.identity_id, i.name AS identity_name,
-               es.transcript, es.is_low_quality, es.tts_wav_path
+               es.transcript, es.is_low_quality, es.is_overlap,
+               es.learning_eligible, es.assignment_source, es.tts_wav_path
         FROM episode_segments es
         LEFT JOIN identities i ON i.id = es.identity_id
         WHERE es.id = ?
@@ -1851,10 +2023,19 @@ def get_episode_segments(
             es.identity_id, i.name AS identity_name,
             es.matched_sample_id, vs.context AS matched_sample_context,
             es.match_distance, es.transcript, es.confidence, es.is_suggestion,
-            es.is_low_quality, es.tts_wav_path
+            es.is_low_quality, es.is_overlap, es.learning_eligible,
+            es.speaker_confidence, es.match_confidence, es.assignment_source,
+            es.auto_identity_id, ai.name AS auto_identity_name,
+            es.auto_match_distance,
+            pm.probe_identity_id, pi.name AS probe_identity_name,
+            pm.probe_status, pm.probe_confidence, pm.probe_distance, pm.exclusion_reason,
+            es.tts_wav_path
         FROM episode_segments es
         LEFT JOIN identities i    ON i.id  = es.identity_id
+        LEFT JOIN identities ai   ON ai.id = es.auto_identity_id
         LEFT JOIN voice_samples vs ON vs.id = es.matched_sample_id
+        LEFT JOIN episode_probe_matches pm ON pm.segment_id = es.id
+        LEFT JOIN identities pi   ON pi.id = pm.probe_identity_id
         WHERE es.series_name = ? AND es.episode_title = ?
         ORDER BY es.start_ms
         """,
@@ -1862,3 +2043,175 @@ def get_episode_segments(
     )
     cols = [d[0] for d in cur.description]
     return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def _cosine_distance(vec_a: list[float], vec_b: list[float]) -> float:
+    a = np.array(vec_a, dtype=np.float32)
+    b = np.array(vec_b, dtype=np.float32)
+    denom = float(np.linalg.norm(a) * np.linalg.norm(b))
+    if denom <= 1e-8:
+        return 1.0
+    sim = float(np.dot(a, b) / denom)
+    sim = max(-1.0, min(1.0, sim))
+    return 1.0 - sim
+
+
+def _distance_to_confidence(distance: float | None, threshold: float = 0.45) -> float | None:
+    if distance is None:
+        return None
+    if threshold <= 1e-6:
+        return 0.0
+    conf = 1.0 - (float(distance) / float(threshold))
+    return max(0.0, min(1.0, conf))
+
+
+def run_episode_probe_matching(
+    conn: mariadb.Connection,
+    series_name: str,
+    episode_title: str,
+    target_identity_id: int | None = None,
+    match_threshold: float = 0.22,
+    suggest_threshold: float = 0.34,
+    min_margin: float = 0.08,
+    run_label: str | None = None,
+) -> dict:
+    """
+    Re-evaluate unassigned/non-manual segments within one episode using only
+    manually confirmed, learning-eligible evidence from the same episode.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, identity_id, assignment_source, embedding, is_low_quality, is_overlap,
+               learning_eligible
+        FROM episode_segments
+        WHERE series_name = ? AND episode_title = ?
+        ORDER BY start_ms
+        """,
+        (series_name, episode_title),
+    )
+    rows = cur.fetchall()
+    cols = [d[0] for d in cur.description]
+    segments = [dict(zip(cols, row)) for row in rows]
+
+    anchors_by_identity: dict[int, list[list[float]]] = {}
+    for seg in segments:
+        if seg["assignment_source"] != "manual":
+            continue
+        if seg["identity_id"] is None or seg["embedding"] is None:
+            continue
+        if not bool(seg["learning_eligible"]):
+            continue
+        identity_id = int(seg["identity_id"])
+        if target_identity_id is not None and identity_id != target_identity_id:
+            continue
+        anchors_by_identity.setdefault(identity_id, []).append(bytes_to_vector(seg["embedding"]))
+
+    if not anchors_by_identity:
+        return {
+            "run_label": run_label,
+            "anchors": 0,
+            "matched": 0,
+            "uncertain": 0,
+            "excluded": 0,
+            "message": "No manual learning-eligible anchors available for this episode.",
+        }
+
+    centroids: dict[int, list[float]] = {}
+    for identity_id, vectors in anchors_by_identity.items():
+        centroid = calculate_robust_supervector(vectors, outlier_ratio=0.15)
+        if centroid:
+            centroids[identity_id] = centroid
+
+    if not centroids:
+        return {
+            "run_label": run_label,
+            "anchors": 0,
+            "matched": 0,
+            "uncertain": 0,
+            "excluded": 0,
+            "message": "No usable centroids could be computed from manual anchors.",
+        }
+
+    summary = {"matched": 0, "uncertain": 0, "excluded": 0}
+    for seg in segments:
+        seg_id = int(seg["id"])
+        assignment_source = seg["assignment_source"] or "unassigned"
+        seg_identity_id = seg["identity_id"]
+        reason: str | None = None
+        probe_status = "excluded"
+        probe_identity_id: int | None = None
+        probe_distance: float | None = None
+        probe_confidence: float | None = None
+
+        if assignment_source == "manual":
+            reason = "manual_confirmed"
+        elif seg["embedding"] is None:
+            reason = "missing_embedding"
+        elif bool(seg["is_overlap"]):
+            reason = "overlap_excluded"
+        elif bool(seg["is_low_quality"]):
+            reason = "low_quality_excluded"
+        elif not bool(seg["learning_eligible"]):
+            reason = "learning_ineligible"
+        elif target_identity_id is not None and seg_identity_id not in (None, target_identity_id):
+            reason = "already_assigned_other_identity"
+        else:
+            distances: list[tuple[int, float]] = []
+            seg_vec = bytes_to_vector(seg["embedding"])
+            for identity_id, centroid in centroids.items():
+                dist = _cosine_distance(seg_vec, centroid)
+                distances.append((identity_id, dist))
+            distances.sort(key=lambda x: x[1])
+            if not distances:
+                reason = "no_centroid_candidates"
+            else:
+                best_id, best_dist = distances[0]
+                second_dist = distances[1][1] if len(distances) > 1 else None
+                margin_ok = second_dist is None or (second_dist - best_dist) >= min_margin
+                probe_identity_id = best_id
+                probe_distance = best_dist
+                probe_confidence = _distance_to_confidence(best_dist, suggest_threshold)
+                if best_dist <= match_threshold and margin_ok:
+                    probe_status = "matched"
+                    reason = None
+                else:
+                    probe_status = "uncertain"
+                    reason = "distance_or_margin_uncertain"
+
+        cur.execute(
+            """
+            INSERT INTO episode_probe_matches
+                (segment_id, probe_identity_id, probe_distance, probe_confidence,
+                 probe_status, exclusion_reason, run_label)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+                probe_identity_id = VALUES(probe_identity_id),
+                probe_distance = VALUES(probe_distance),
+                probe_confidence = VALUES(probe_confidence),
+                probe_status = VALUES(probe_status),
+                exclusion_reason = VALUES(exclusion_reason),
+                run_label = VALUES(run_label),
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                seg_id,
+                probe_identity_id,
+                _sanitize_float(probe_distance),
+                _sanitize_float(probe_confidence),
+                probe_status,
+                reason,
+                run_label,
+            ),
+        )
+        summary[probe_status] += 1
+
+    conn.commit()
+    return {
+        "run_label": run_label,
+        "anchors": int(sum(len(v) for v in anchors_by_identity.values())),
+        "anchor_identities": len(anchors_by_identity),
+        "matched": summary["matched"],
+        "uncertain": summary["uncertain"],
+        "excluded": summary["excluded"],
+    }
