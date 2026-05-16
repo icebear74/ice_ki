@@ -55,6 +55,7 @@ templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 
 
 def _probe_nvenc() -> bool:
+    """Return True only when a real NVENC test-encode succeeds."""
     try:
         r = subprocess.run(
             ["ffmpeg", "-hide_banner", "-encoders"],
@@ -63,8 +64,32 @@ def _probe_nvenc() -> bool:
             timeout=5,
             check=False,
         )
-        return "h264_nvenc" in r.stdout
+        if "h264_nvenc" not in r.stdout:
+            return False
     except Exception:
+        return False
+
+    # Encoder listed – now verify it actually works with a tiny null-source encode.
+    try:
+        r2 = subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "color=black:s=64x64:r=1",
+                "-t", "0.1",
+                "-c:v", "h264_nvenc",
+                "-f", "null", "-",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        if r2.returncode != 0:
+            logger.warning("NVENC test-encode failed (rc=%d): %s", r2.returncode, r2.stderr.strip())
+            return False
+        return True
+    except Exception as exc:
+        logger.warning("NVENC test-encode exception: %s", exc)
         return False
 
 
@@ -332,54 +357,107 @@ def api_probe(video_id: int) -> JSONResponse:
     return JSONResponse({"duration": _probe_duration(str(candidate))})
 
 
-@app.get("/stream/{video_id}")
-async def stream_video(video_id: int, t: float = 0.0) -> StreamingResponse:
-    candidate = _resolve_video_id_path(video_id)
+def _build_stream_cmd(
+    input_path: str,
+    seek: float,
+    use_nvenc: bool,
+) -> list[str]:
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
-    if t > 0:
-        cmd += ["-ss", f"{t:.3f}"]
-    if _NVENC_AVAILABLE:
+    if seek > 0:
+        cmd += ["-ss", f"{seek:.3f}"]
+    if use_nvenc:
         video_codec = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "23"]
     else:
         video_codec = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "23"]
     cmd += [
-        "-i",
-        str(candidate),
+        "-i", input_path,
         *video_codec,
-        "-profile:v",
-        "baseline",
-        "-level",
-        "3.1",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "128k",
-        "-ac",
-        "2",
-        "-movflags",
-        "frag_keyframe+empty_moov+default_base_moof",
-        "-f",
-        "mp4",
+        "-profile:v", "baseline",
+        "-level", "3.1",
+        "-c:a", "aac",
+        "-b:a", "128k",
+        "-ac", "2",
+        "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+        "-f", "mp4",
         "pipe:1",
     ]
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=500, detail="FFmpeg not found on this server") from exc
+    return cmd
+
+
+@app.get("/stream/{video_id}")
+async def stream_video(video_id: int, t: float = 0.0) -> StreamingResponse:
+    candidate = _resolve_video_id_path(video_id)
+
+    codecs_to_try: list[bool] = [True, False] if _NVENC_AVAILABLE else [False]
+    proc: asyncio.subprocess.Process | None = None
+
+    for use_nvenc in codecs_to_try:
+        cmd = _build_stream_cmd(str(candidate), t, use_nvenc)
+        encoder_name = "h264_nvenc" if use_nvenc else "libx264"
+        try:
+            candidate_proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=500, detail="FFmpeg not found on this server") from exc
+
+        # Give ffmpeg up to 2 s to either start producing output or exit with an error.
+        try:
+            first_chunk = await asyncio.wait_for(candidate_proc.stdout.read(65536), timeout=2.0)  # type: ignore[union-attr]
+        except asyncio.TimeoutError:
+            first_chunk = b""
+
+        if candidate_proc.returncode is not None and candidate_proc.returncode != 0:
+            # Process already exited – read stderr for logging and try next codec.
+            stderr_out = b""
+            try:
+                stderr_out = await asyncio.wait_for(candidate_proc.stderr.read(4096), timeout=1.0)  # type: ignore[union-attr]
+            except asyncio.TimeoutError:
+                pass
+            logger.error(
+                "ffmpeg exited immediately with %s (rc=%d): %s",
+                encoder_name,
+                candidate_proc.returncode,
+                stderr_out.decode(errors="replace").strip(),
+            )
+            try:
+                candidate_proc.kill()
+            except ProcessLookupError:
+                pass
+            await candidate_proc.wait()
+            continue
+
+        # Process is alive (or produced output) – use it.
+        logger.info("Streaming %s with encoder=%s", candidate.name, encoder_name)
+        proc = candidate_proc
+        initial_data = first_chunk
+        break
+
+    if proc is None:
+        raise HTTPException(status_code=502, detail="Stream startup failed for all available encoders")
 
     async def _iter():
-        assert proc.stdout
+        assert proc is not None
+        assert proc.stdout is not None
+        assert proc.stderr is not None
         try:
+            if initial_data:
+                yield initial_data
             while True:
                 chunk = await proc.stdout.read(65536)
                 if not chunk:
                     break
                 yield chunk
         finally:
+            # Drain stderr so the process can exit cleanly.
+            try:
+                stderr_tail = await asyncio.wait_for(proc.stderr.read(4096), timeout=1.0)
+                if stderr_tail:
+                    logger.warning("ffmpeg stderr tail: %s", stderr_tail.decode(errors="replace").strip())
+            except asyncio.TimeoutError:
+                pass
             try:
                 proc.kill()
             except ProcessLookupError:

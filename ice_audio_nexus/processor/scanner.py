@@ -197,11 +197,13 @@ def scan_video(
     sample_fps: float = 4.0,
     min_clear_seconds: float = 2.0,
     min_face_area_ratio: float = 0.04,
-    min_sharpness: float = 40.0,
-    min_stability: float = 0.18,
+    min_sharpness: float = 70.0,
+    min_stability: float = 0.30,
     track_max_gap_ms: int = 600,
     iou_threshold: float = 0.30,
     descriptor_threshold: float = 0.72,
+    min_neighbors: int = 8,
+    min_face_size_px: int = 60,
 ) -> dict:
     try:
         import cv2
@@ -281,8 +283,8 @@ def scan_video(
         faces = face_detector.detectMultiScale(
             gray,
             scaleFactor=1.1,
-            minNeighbors=5,
-            minSize=(36, 36),
+            minNeighbors=min_neighbors,
+            minSize=(min_face_size_px, min_face_size_px),
         )
 
         frame_detections: list[Detection] = []
@@ -292,6 +294,10 @@ def scan_video(
             fw = int(min(fw, w - x))
             fh = int(min(fh, h - y))
             if fw <= 0 or fh <= 0:
+                continue
+            # Skip detections with extreme aspect ratios – real faces are roughly square.
+            aspect = fw / fh
+            if aspect < 0.5 or aspect > 2.0:
                 continue
             crop = frame[y : y + fh, x : x + fw]
             if crop.size == 0:
@@ -481,8 +487,10 @@ def main() -> None:
     parser.add_argument("--fps", type=float, default=float(os.getenv("FACE_SCAN_FPS", "4.0")))
     parser.add_argument("--min-clear-seconds", type=float, default=float(os.getenv("FACE_MIN_CLEAR_SECONDS", "2.0")))
     parser.add_argument("--min-face-area-ratio", type=float, default=float(os.getenv("FACE_MIN_AREA_RATIO", "0.04")))
-    parser.add_argument("--min-sharpness", type=float, default=float(os.getenv("FACE_MIN_SHARPNESS", "40.0")))
-    parser.add_argument("--min-stability", type=float, default=float(os.getenv("FACE_MIN_STABILITY", "0.18")))
+    parser.add_argument("--min-sharpness", type=float, default=float(os.getenv("FACE_MIN_SHARPNESS", "70.0")))
+    parser.add_argument("--min-stability", type=float, default=float(os.getenv("FACE_MIN_STABILITY", "0.30")))
+    parser.add_argument("--min-neighbors", type=int, default=int(os.getenv("FACE_MIN_NEIGHBORS", "8")))
+    parser.add_argument("--min-face-size-px", type=int, default=int(os.getenv("FACE_MIN_SIZE_PX", "60")))
     args = parser.parse_args()
 
     result = scan_video(
@@ -495,6 +503,8 @@ def main() -> None:
         min_face_area_ratio=args.min_face_area_ratio,
         min_sharpness=args.min_sharpness,
         min_stability=args.min_stability,
+        min_neighbors=args.min_neighbors,
+        min_face_size_px=args.min_face_size_px,
     )
     logger.info("Scan completed: %s", result)
 
