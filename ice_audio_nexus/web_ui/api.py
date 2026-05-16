@@ -31,6 +31,7 @@ from db.database import (  # noqa: E402
     create_role,
     ensure_schema,
     get_connection,
+    get_video,
     get_track,
     list_actors,
     list_face_samples,
@@ -96,19 +97,26 @@ if FACE_DATA_DIR.exists():
 
 
 def _resolve_video_path(path: str) -> Path:
-    candidate_input = Path(path)
-    candidate = candidate_input.resolve() if candidate_input.is_absolute() else (VIDEO_DIR / path).resolve()
+    candidate = Path(path).resolve()
     if candidate.suffix.lower() not in _VIDEO_EXTENSIONS:
         raise HTTPException(status_code=403, detail="File type not allowed")
     allowed = any(candidate == root or candidate.is_relative_to(root) for root in _STREAM_ROOTS)
-    if not allowed and candidate_input.is_absolute() and candidate.exists():
-        _STREAM_ROOTS.append(candidate.parent.resolve())
-        allowed = True
     if not allowed:
         raise HTTPException(status_code=403, detail="Access to this path is not allowed")
     if not candidate.exists():
         raise HTTPException(status_code=404, detail="Video not found")
     return candidate
+
+
+def _resolve_video_id_path(video_id: int) -> Path:
+    conn = get_connection()
+    try:
+        video = get_video(conn, video_id)
+    finally:
+        conn.close()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+    return _resolve_video_path(str(video["video_path"]))
 
 
 def _probe_duration(path: str) -> float:
@@ -318,15 +326,15 @@ def api_rematch(payload: dict = Body(default={})) -> JSONResponse:
         conn.close()
 
 
-@app.get("/api/probe")
-def api_probe(path: str) -> JSONResponse:
-    candidate = _resolve_video_path(path)
+@app.get("/api/probe/{video_id}")
+def api_probe(video_id: int) -> JSONResponse:
+    candidate = _resolve_video_id_path(video_id)
     return JSONResponse({"duration": _probe_duration(str(candidate))})
 
 
-@app.get("/stream")
-async def stream_video(path: str, t: float = 0.0) -> StreamingResponse:
-    candidate = _resolve_video_path(path)
+@app.get("/stream/{video_id}")
+async def stream_video(video_id: int, t: float = 0.0) -> StreamingResponse:
+    candidate = _resolve_video_id_path(video_id)
     cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
     if t > 0:
         cmd += ["-ss", f"{t:.3f}"]
@@ -381,7 +389,7 @@ async def stream_video(path: str, t: float = 0.0) -> StreamingResponse:
     return StreamingResponse(_iter(), media_type="video/mp4", headers={"Cache-Control": "no-cache"})
 
 
-@app.get("/video")
-def serve_video_file(path: str) -> FileResponse:
-    candidate = _resolve_video_path(path)
+@app.get("/video/{video_id}")
+def serve_video_file(video_id: int) -> FileResponse:
+    candidate = _resolve_video_id_path(video_id)
     return FileResponse(str(candidate), media_type="video/mp4", headers={"Cache-Control": "no-cache"})

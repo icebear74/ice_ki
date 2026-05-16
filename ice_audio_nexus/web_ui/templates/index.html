@@ -145,7 +145,7 @@
           <div class="row"><strong>${prod.title}</strong><span class="pill">${prod.production_type}</span></div>
           <div class="small" style="margin-top:6px;">
             ${prod.videos.map(v => `
-              <div class="item" onclick="selectVideo(${v.id}, '${encodeURIComponent(v.video_path)}', event)">
+              <div class="item" onclick="selectVideo(${v.id}, event)">
                 <div class="row"><span>${v.title}</span><span class="pill">${v.scan_status}</span></div>
                 <div class="small">${v.episode_code || '—'} · clear ${v.clear_track_count}/${v.track_count}</div>
               </div>
@@ -155,15 +155,15 @@
       `).join('');
     }
 
-    async function selectVideo(videoId, encodedPath, event) {
+    async function selectVideo(videoId, event) {
       event.stopPropagation();
       document.querySelectorAll('#library .item').forEach(x => x.classList.remove('active'));
       if (event.currentTarget) event.currentTarget.classList.add('active');
 
-      const path = decodeURIComponent(encodedPath);
-      currentVideo = { id: videoId, path };
-      document.getElementById('videoMeta').textContent = `${path}`;
-      player.src = `/stream?path=${encodeURIComponent(path)}`;
+      const selected = libraryData.flatMap(p => p.videos).find(v => v.id === videoId);
+      currentVideo = { id: videoId, path: selected?.video_path || '' };
+      document.getElementById('videoMeta').textContent = `${currentVideo.path}`;
+      player.src = `/stream/${videoId}`;
       await player.play().catch(() => {});
       await loadTracks();
       await loadOverlay();

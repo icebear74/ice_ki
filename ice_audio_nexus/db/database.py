@@ -978,6 +978,27 @@ def list_videos(conn: mariadb.Connection, production_id: int | None = None) -> l
     ]
 
 
+def get_video(conn: mariadb.Connection, video_id: int) -> dict[str, Any] | None:
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, production_id, title, episode_code, video_path, duration_ms, scan_status "
+        "FROM videos WHERE id=?",
+        (video_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        return None
+    return {
+        "id": int(row[0]),
+        "production_id": row[1],
+        "title": row[2],
+        "episode_code": row[3],
+        "video_path": row[4],
+        "duration_ms": row[5],
+        "scan_status": row[6],
+    }
+
+
 def list_productions(conn: mariadb.Connection) -> list[dict[str, Any]]:
     cur = conn.cursor()
     cur.execute(
