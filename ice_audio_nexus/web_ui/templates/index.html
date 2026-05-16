@@ -40,6 +40,15 @@
     .meta { color: var(--muted); font-size: 12px; }
     .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
     .thumb { width: 100%; border-radius: 8px; border: 1px solid var(--line); background: #020617; min-height: 120px; object-fit: cover; }
+    .thumb-wrap { position: relative; }
+    .thumb-wrap .remove-btn {
+      display: none; position: absolute; top: 3px; right: 3px;
+      background: rgba(239,68,68,.85); color: #fff; border: none;
+      border-radius: 50%; width: 20px; height: 20px; font-size: 12px;
+      line-height: 20px; text-align: center; cursor: pointer; padding: 0;
+    }
+    .thumb-wrap:hover .remove-btn { display: block; }
+    .thumb-caption { font-size: 10px; color: var(--muted); text-align: center; margin-top: 2px; }
     .status-assigned { color: var(--ok); }
     .status-candidate { color: var(--accent); }
     .status-background { color: var(--warn); }
@@ -67,6 +76,21 @@
       <div class="toolbar">
         <button onclick="jumpToTrackStart()">Jump to selected track</button>
         <span id="videoMeta" class="meta">No video selected</span>
+      </div>
+      <div class="toolbar" style="gap:6px; padding-top:4px;">
+        <label style="display:flex;align-items:center;gap:4px;font-size:12px;">
+          <input type="checkbox" id="filterClear" onchange="loadTracks()" />
+          Clear only
+        </label>
+        <select id="filterStatus" onchange="loadTracks()" style="font-size:12px;padding:4px 6px;">
+          <option value="">All status</option>
+          <option value="candidate">Candidate</option>
+          <option value="assigned">Assigned</option>
+          <option value="background">Background</option>
+          <option value="unknown">Unknown</option>
+          <option value="ignored">Ignored</option>
+        </select>
+        <span id="trackCount" class="meta" style="margin-left:auto;font-size:11px;"></span>
       </div>
       <div id="tracks" class="scroll"></div>
     </section>
@@ -190,7 +214,15 @@
 
     async function loadTracks() {
       if (!currentVideo) return;
-      currentTracks = await jsonFetch(`/api/videos/${currentVideo.id}/tracks`);
+      const clearOnly = document.getElementById('filterClear').checked;
+      const status = document.getElementById('filterStatus').value;
+      let url = `/api/videos/${currentVideo.id}/tracks`;
+      const params = [];
+      if (clearOnly) params.push('clear_only=true');
+      if (status) params.push(`status=${encodeURIComponent(status)}`);
+      if (params.length) url += '?' + params.join('&');
+      currentTracks = await jsonFetch(url);
+      document.getElementById('trackCount').textContent = `${currentTracks.length} tracks`;
       renderTracks();
       if (selectedTrack) {
         const newSel = currentTracks.find(t => t.id === selectedTrack.id);
@@ -229,18 +261,41 @@
       requestAnimationFrame(drawOverlay);
     }
 
+    async function removeDetection(detectionId) {
+      if (!selectedTrack) return;
+      try {
+        await jsonFetch(`/api/detections/${detectionId}`, { method: 'DELETE' });
+      } catch (e) {
+        alert('Failed to remove detection: ' + e.message);
+        return;
+      }
+      // Reload just this track's detail view
+      await selectTrack(selectedTrack.id);
+    }
+
     async function selectTrack(trackId) {
       selectedTrack = await jsonFetch(`/api/tracks/${trackId}`);
       renderTracks();
       const d = selectedTrack;
       const repSrc = d.representative_image_path ? `/faces/${d.representative_image_path}` : '';
-      const thumbs = (d.detections || []).slice(0, 6).map(x => `<img class="thumb" src="/faces/${x.crop_image_path}" />`).join('');
+      const thumbsHtml = (d.detections || []).map(x => {
+        const conf = x.confidence != null ? `conf ${(x.confidence).toFixed(2)}` : '';
+        const sharp = x.sharpness != null ? `sh ${(x.sharpness).toFixed(1)}` : '';
+        const caption = [conf, sharp].filter(Boolean).join(' · ');
+        return `
+          <div class="thumb-wrap">
+            <img class="thumb" src="/faces/${x.crop_image_path}" title="${caption}" />
+            <button class="remove-btn" onclick="removeDetection(${x.id})" title="Aus Cluster entfernen">×</button>
+            ${caption ? `<div class="thumb-caption">${caption}</div>` : ''}
+          </div>`;
+      }).join('');
       document.getElementById('trackDetails').innerHTML = `
         <div class="row"><strong>Track #${d.id}</strong><span class="pill ${statusClass(d.status)}">${d.status}</span></div>
         <div class="small">Time: ${msToClock(d.start_ms)} → ${msToClock(d.end_ms)} (${d.frame_count} frames)</div>
         <div class="small">Actor: ${d.assigned_actor_name || '—'} | Match: ${d.match_actor_name || '—'} (${(d.match_score||0).toFixed(2)})</div>
+        <div class="small" style="margin-top:4px;">q=${(d.quality_score||0).toFixed(2)} · conf=${(d.mean_confidence||0).toFixed(2)} · ${d.detections?.length||0} detections</div>
         ${repSrc ? `<img class="thumb" src="${repSrc}" style="margin-top:8px;" />` : '<div class="small">No representative image</div>'}
-        <div class="grid" style="margin-top:8px;">${thumbs || ''}</div>
+        <div class="grid" style="margin-top:8px;">${thumbsHtml || ''}</div>
       `;
     }
 

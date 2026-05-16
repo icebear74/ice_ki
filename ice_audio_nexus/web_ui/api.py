@@ -42,6 +42,7 @@ from db.database import (  # noqa: E402
     list_video_tracks,
     list_videos,
     rematch_tracks,
+    unlink_detection_from_track,
     update_track_status,
 )
 
@@ -330,6 +331,26 @@ def api_face_samples(actor_id: int | None = None) -> JSONResponse:
     conn = get_connection()
     try:
         return JSONResponse(list_face_samples(conn, actor_id=actor_id))
+    finally:
+        conn.close()
+
+
+@app.delete("/api/detections/{detection_id}")
+def api_unlink_detection(detection_id: int) -> JSONResponse:
+    """Unlink a single face detection from its track (sets track_id = NULL).
+
+    Use this to remove an outlier face crop from a cluster without deleting
+    the underlying image or detection record.
+    """
+    conn = get_connection()
+    try:
+        updated = unlink_detection_from_track(conn, detection_id)
+        if not updated:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Detection {detection_id} not found or not linked to any track",
+            )
+        return JSONResponse({"ok": True, "detection_id": detection_id})
     finally:
         conn.close()
 

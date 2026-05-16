@@ -400,6 +400,20 @@ def assign_detection_to_track(conn: mariadb.Connection, detection_id: int, track
     conn.commit()
 
 
+def unlink_detection_from_track(conn: mariadb.Connection, detection_id: int) -> bool:
+    """Remove a detection from its track (sets track_id = NULL).
+
+    Returns True if a row was updated, False if detection_id did not exist.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE face_detections SET track_id=NULL WHERE id=? AND track_id IS NOT NULL",
+        (detection_id,),
+    )
+    conn.commit()
+    return cur.rowcount > 0
+
+
 def create_face_sample(
     conn: mariadb.Connection,
     *,
