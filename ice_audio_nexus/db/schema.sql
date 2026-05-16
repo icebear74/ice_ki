@@ -1,11 +1,5 @@
--- ============================================================
--- ice_nexus_db – MariaDB 11.7 Schema (Multi-Vector Identity)
--- KI-basierte Audio-Analyse & Personenidentifikation
--- ============================================================
--- Verwendung: mariadb -u root -p < db/schema.sql
--- Die Tabellenerstellung erfolgt automatisch beim ersten Start
--- via db/database.py (CREATE TABLE IF NOT EXISTS).
--- ============================================================
+-- ice_audio_nexus visual-first Step-1 schema
+-- Optional manual bootstrap (the app also auto-creates this schema on startup).
 
 CREATE DATABASE IF NOT EXISTS ice_nexus_db
   CHARACTER SET utf8mb4
@@ -13,93 +7,142 @@ CREATE DATABASE IF NOT EXISTS ice_nexus_db
 
 USE ice_nexus_db;
 
--- ============================================================
--- 1. actors
---    Biometrische Stimm-Ebene – der echte Schauspieler/Sprecher.
---    Eine Person (z.B. Patrick Stewart) besitzt mehrere
---    Identitäten (Picard, Professor X) je nach Kontext.
--- ============================================================
 CREATE TABLE IF NOT EXISTS actors (
-    id         INT AUTO_INCREMENT PRIMARY KEY,
-    name       VARCHAR(255) NOT NULL COMMENT 'z.B. Patrick Stewart',
-    created_at TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
-                                     ON UPDATE CURRENT_TIMESTAMP,
+    id          INT AUTO_INCREMENT PRIMARY KEY,
+    name        VARCHAR(255) NOT NULL,
+    description TEXT NULL,
+    created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     UNIQUE KEY uq_actor_name (name)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- ============================================================
--- 2. identities
---    Anker-Tabelle für eine Rolle / einen Charakter.
---    Verknüpft einen Actor mit einem Kontext-Filter
---    (z.B. actor=Patrick Stewart + context='Star Trek%' → Picard).
---    Enthält KEINEN Vektor – die Vektoren sind in voice_samples.
---    Eine Identität kann beliebig viele Vektoren besitzen
---    (Multi-Vector-Ansatz für Alterungsschutz).
--- ============================================================
-CREATE TABLE IF NOT EXISTS identities (
-    id             INT AUTO_INCREMENT PRIMARY KEY,
-    name           VARCHAR(255) NOT NULL COMMENT 'z.B. Jean-Luc Picard',
-    description    TEXT                  COMMENT 'Optionale Beschreibung',
-    actor_id       INT          DEFAULT NULL COMMENT 'Fremdschlüssel auf actors',
-    context_filter VARCHAR(255) DEFAULT NULL
-                   COMMENT 'SQL LIKE-Muster für Kontext-Zuordnung, z.B. Star Trek%',
-    created_at     TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at     TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
-                                         ON UPDATE CURRENT_TIMESTAMP,
-    UNIQUE KEY uq_identity_name (name),
-    FOREIGN KEY (actor_id) REFERENCES actors(id) ON DELETE SET NULL,
-    INDEX idx_identity_actor (actor_id)
+CREATE TABLE IF NOT EXISTS productions (
+    id              INT AUTO_INCREMENT PRIMARY KEY,
+    title           VARCHAR(255) NOT NULL,
+    production_type ENUM('series','movie','other') NOT NULL DEFAULT 'series',
+    season_label    VARCHAR(64) NULL,
+    metadata_json   LONGTEXT NULL,
+    created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_production_title (title)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- ============================================================
--- 3. voice_samples
---    N Vektoren pro Identität – eine Person kann viele
---    Stimmproben aus verschiedenen Kontexten haben
---    (z.B. TNG 1990, Picard-Serie 2022).
---    VECTOR(512) = Float32-Vektoren (~2KB) – Standard für PyAnnote.
--- ============================================================
-CREATE TABLE IF NOT EXISTS voice_samples (
-    id           INT AUTO_INCREMENT PRIMARY KEY,
-    identity_id  INT          NOT NULL COMMENT 'Fremdschlüssel auf identities',
-    embedding    VECTOR(512)  NOT NULL COMMENT 'PyAnnote Float32-Embedding (512-dim)',
-    context      VARCHAR(255)          COMMENT 'z.B. TNG Season 1, Picard S3E02',
-    is_confirmed BOOLEAN      NOT NULL DEFAULT FALSE COMMENT 'Durch Nutzer bestätigt?',
-    created_at   TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at   TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
-                                       ON UPDATE CURRENT_TIMESTAMP,
-    FOREIGN KEY (identity_id) REFERENCES identities(id) ON DELETE CASCADE,
-    INDEX idx_vs_identity (identity_id),
-    VECTOR INDEX vec_idx (embedding) COMMENT 'MariaDB 11.7 Vektor-Index für schnelle Ähnlichkeitssuche'
+CREATE TABLE IF NOT EXISTS roles (
+    id          INT AUTO_INCREMENT PRIMARY KEY,
+    name        VARCHAR(255) NOT NULL,
+    description TEXT NULL,
+    created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_role_name (name)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- ============================================================
--- 4. episode_segments
---    Timeline der erkannten Sprecher pro Episode.
---    Jeder Eintrag enthält das beste VECTOR_DISTANCE-Ergebnis
---    sowie die Referenz auf das auslösende voice_sample.
--- ============================================================
-CREATE TABLE IF NOT EXISTS episode_segments (
-    id                INT AUTO_INCREMENT PRIMARY KEY,
-    series_name       VARCHAR(255) COMMENT 'Serienname',
-    episode_title     VARCHAR(255) COMMENT 'Episodentitel',
-    video_path        TEXT         COMMENT 'Pfad zur Quelldatei',
-    start_ms          INT NOT NULL COMMENT 'Startzeit in Millisekunden',
-    end_ms            INT NOT NULL COMMENT 'Endzeit in Millisekunden',
-    speaker_label     VARCHAR(100) COMMENT 'Temp. Diarization-Label (SPEAKER_01)',
-    identity_id       INT          COMMENT 'Zugeordnete Identität (NULL = unbekannt)',
-    matched_sample_id INT          COMMENT 'Welches voice_sample den Match auslöste',
-    match_distance    FLOAT        COMMENT 'Cosinus-Distanz (VECTOR_DISTANCE)',
-    transcript        TEXT         COMMENT 'Whisper-Transkript des Segments',
-    confidence        FLOAT        COMMENT 'Konfidenz-Score (0.0–1.0)',
-    is_suggestion     BOOLEAN NOT NULL DEFAULT FALSE
-                      COMMENT 'TRUE = Vorschlag, Nutzer-Bestätigung ausstehend',
-    created_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-                                         ON UPDATE CURRENT_TIMESTAMP,
-    FOREIGN KEY (identity_id)       REFERENCES identities(id)    ON DELETE SET NULL,
-    FOREIGN KEY (matched_sample_id) REFERENCES voice_samples(id) ON DELETE SET NULL,
-    INDEX idx_episode  (series_name, episode_title),
-    INDEX idx_timeline (series_name, episode_title, start_ms),
-    INDEX idx_identity (identity_id)
+CREATE TABLE IF NOT EXISTS actor_roles (
+    id            INT AUTO_INCREMENT PRIMARY KEY,
+    actor_id      INT NOT NULL,
+    production_id INT NULL,
+    role_id       INT NOT NULL,
+    notes         TEXT NULL,
+    created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (actor_id) REFERENCES actors(id) ON DELETE CASCADE,
+    FOREIGN KEY (production_id) REFERENCES productions(id) ON DELETE CASCADE,
+    FOREIGN KEY (role_id) REFERENCES roles(id) ON DELETE CASCADE,
+    UNIQUE KEY uq_actor_role (actor_id, production_id, role_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS videos (
+    id              INT AUTO_INCREMENT PRIMARY KEY,
+    production_id   INT NULL,
+    title           VARCHAR(255) NOT NULL,
+    episode_code    VARCHAR(64) NULL,
+    video_path      TEXT NOT NULL,
+    duration_ms     INT NULL,
+    scan_status     ENUM('pending','scanning','completed','failed') NOT NULL DEFAULT 'pending',
+    last_scanned_at TIMESTAMP NULL,
+    metadata_json   LONGTEXT NULL,
+    created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (production_id) REFERENCES productions(id) ON DELETE SET NULL,
+    UNIQUE KEY uq_video_path (video_path(512))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS face_tracks (
+    id                   INT AUTO_INCREMENT PRIMARY KEY,
+    video_id             INT NOT NULL,
+    start_ms             INT NOT NULL,
+    end_ms               INT NOT NULL,
+    frame_count          INT NOT NULL,
+    mean_face_area       FLOAT NULL,
+    mean_sharpness       FLOAT NULL,
+    mean_confidence      FLOAT NULL,
+    stability_score      FLOAT NULL,
+    quality_score        FLOAT NULL,
+    relevance_score      FLOAT NULL,
+    is_clear             BOOLEAN NOT NULL DEFAULT FALSE,
+    status               ENUM('candidate','assigned','ignored','unknown','background') NOT NULL DEFAULT 'candidate',
+    assigned_actor_id    INT NULL,
+    assigned_role_id     INT NULL,
+    assignment_source    ENUM('manual','rematch','system') NULL,
+    match_actor_id       INT NULL,
+    match_score          FLOAT NULL,
+    representative_image_path TEXT NULL,
+    embedding_json       LONGTEXT NULL,
+    metadata_json        LONGTEXT NULL,
+    created_at           TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at           TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE,
+    FOREIGN KEY (assigned_actor_id) REFERENCES actors(id) ON DELETE SET NULL,
+    FOREIGN KEY (assigned_role_id) REFERENCES roles(id) ON DELETE SET NULL,
+    FOREIGN KEY (match_actor_id) REFERENCES actors(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS face_detections (
+    id               INT AUTO_INCREMENT PRIMARY KEY,
+    video_id         INT NOT NULL,
+    track_id         INT NULL,
+    frame_index      INT NOT NULL,
+    timestamp_ms     INT NOT NULL,
+    bbox_x           INT NOT NULL,
+    bbox_y           INT NOT NULL,
+    bbox_w           INT NOT NULL,
+    bbox_h           INT NOT NULL,
+    confidence       FLOAT NULL,
+    sharpness        FLOAT NULL,
+    crop_image_path  TEXT NULL,
+    embedding_json   LONGTEXT NULL,
+    metadata_json    LONGTEXT NULL,
+    created_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE,
+    FOREIGN KEY (track_id) REFERENCES face_tracks(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS face_samples (
+    id              INT AUTO_INCREMENT PRIMARY KEY,
+    actor_id        INT NOT NULL,
+    source_track_id INT NULL,
+    image_path      TEXT NULL,
+    embedding_json  LONGTEXT NOT NULL,
+    quality_score   FLOAT NULL,
+    is_confirmed    BOOLEAN NOT NULL DEFAULT TRUE,
+    notes           VARCHAR(255) NULL,
+    created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (actor_id) REFERENCES actors(id) ON DELETE CASCADE,
+    FOREIGN KEY (source_track_id) REFERENCES face_tracks(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS overlay_events (
+    id               INT AUTO_INCREMENT PRIMARY KEY,
+    video_id         INT NOT NULL,
+    track_id         INT NOT NULL,
+    timestamp_ms     INT NOT NULL,
+    bbox_x           INT NOT NULL,
+    bbox_y           INT NOT NULL,
+    bbox_w           INT NOT NULL,
+    bbox_h           INT NOT NULL,
+    label            VARCHAR(255) NULL,
+    status           VARCHAR(32) NOT NULL,
+    confidence       FLOAT NULL,
+    created_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE,
+    FOREIGN KEY (track_id) REFERENCES face_tracks(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

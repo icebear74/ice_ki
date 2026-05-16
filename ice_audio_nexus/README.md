@@ -1,150 +1,78 @@
-# ice_audio_nexus
+# ice_audio_nexus (Step-1 visual person discovery)
 
-KI-basiertes System zur **automatischen Sprecheridentifikation** in Serien und Filmen.  
-Der Scanner analysiert Videos, die Web-UI ermöglicht die manuelle Zuweisung — und jede
-Zuweisung trainiert das System für die nächste Episode.
+`ice_audio_nexus` was rewritten from a voice-first prototype to a **face-first Step-1 pipeline**.
 
-## Workflow: Vom Video zur Datenbank
+## Step-1 goal
 
-```
-1.  scanner.py ausführen
-       │
-       ├─ FFmpeg extrahiert Audio (16 kHz Mono WAV)
-       ├─ pyannote.audio erkennt Sprechwechsel  →  Segmente (start_ms / end_ms / SPEAKER_xx)
-       ├─ pyannote/embedding erzeugt VECTOR(512) pro Segment
-       ├─ faster-whisper transkribiert jeden Abschnitt
-       └─ Alle Daten landen in MariaDB  →  episode_segments
+For each video the scanner now:
 
-2.  Web-UI öffnen  (http://localhost:8765)
-       │
-       ├─ Bibliothek zeigt automatisch alle gescannten Serien/Folgen
-       │    (Quelle: episode_segments.video_path aus der DB)
-       ├─ Folge auswählen → Video startet, Segmentliste erscheint rechts
-       ├─ Klick auf Segment → Video springt zur Stelle, Zuweisung öffnet sich
-       └─ Identität zuweisen (neu anlegen oder bestehende wählen)
-              │
-              └─ Optionales Häkchen „Vektor als neues Sample speichern"
-                   → speichert VECTOR(512) in voice_samples
-                   → dieser Vektor wird ab sofort für alle neuen Scans genutzt
-```
+1. samples frames (default `4 FPS`)
+2. detects faces
+3. builds short local tracks
+4. promotes only **clear tracks** (high precision, low noise)
+5. stores detections, tracks, representative crops, embeddings/descriptors and review metadata
 
-**Wie kommen Vektoren in die Datenbank?**
+This phase is intentionally person-centric and review-driven. Full role/speaker resolution is left for later phases.
 
-| Schritt | Was passiert |
-|---------|-------------|
-| Scanner läuft | `episode_segments.embedding`-Spalte wird mit dem Sprachvektor gefüllt |
-| Nutzer weist Identität zu | `episode_segments.identity_id` wird gesetzt |
-| Häkchen „Vektor speichern" | Vektor wird in `voice_samples` übernommen → ab jetzt für Auto-Matching aktiv |
-| Nächster Scan | System sucht via `VECTOR_DISTANCE` in allen `voice_samples` → automatische Erkennung |
+## Core model (visual-first)
 
----
+- `actors`: real persons
+- `productions`, `videos`: source catalog
+- `roles`, `actor_roles`: optional role/context mapping for later expansion
+- `face_detections`: per-frame detections + bbox + crop + descriptor
+- `face_tracks`: aggregated local tracks + quality/relevance status + assignment/match fields
+- `face_samples`: reusable confirmed face samples per actor (incremental learning)
+- `overlay_events`: precomputed label/bbox timeline for browser video overlay
 
-## Architektur
+## Incremental learning behavior
 
-```
-ice_audio_nexus/
-├── setup_env.sh          # Komplettes Python-Setup (Pascal P100/P4 kompatibel)
-├── .env.example          # Vorlage für Zugangsdaten
-│
-├── db/
-│   └── database.py       # MariaDB 11.7 – Schema, VECTOR(512) Suche, Library-Query
-│
-├── processor/
-│   └── scanner.py        # FFmpeg + pyannote.audio + faster-whisper → MariaDB
-│
-└── web_ui/
-    ├── api.py             # FastAPI: /api/library, /stream, /api/segments, ...
-    └── templates/
-        └── index.html    # Interaktive UI: Bibliothek, Videoplayer, Segment-Zuweisung
-```
+- Assigning a track to an actor can auto-create a new `face_sample`.
+- New samples let the system learn appearance changes (beard, haircuts, lighting, pose).
+- `POST /api/rematch` re-evaluates tracks against confirmed actor samples.
 
-## Multi-Vektor-Identitätssystem
-
-Eine **Identität** (z. B. „Jean-Luc Picard") kann beliebig viele **Voice Samples** besitzen.
-Jedes Sample speichert einen eigenen `VECTOR(512)` mit Kontext-Metadaten
-(z. B. `TNG Season 1`, `Picard S3E02`).
-
-```
-VECTOR_DISTANCE(neuer_vektor, alle voice_samples)
-  → kleinste Distanz ermitteln
-
-  dist < MATCH_THRESHOLD   → ✅ Erkannt  – Identität wird automatisch zugewiesen
-  dist < SUGGEST_THRESHOLD → ⚠  Vorschlag – Nutzer muss im Web-UI bestätigen
-  dist ≥ SUGGEST_THRESHOLD → ❓ Unbekannt – manuell zuweisen
-```
-
-Standardwerte: `MATCH_THRESHOLD=0.25`, `SUGGEST_THRESHOLD=0.45` (via `.env` anpassbar).
-
-## Datenbank-Schema
-
-### `episode_segments`
-| Spalte             | Typ          | Beschreibung                                           |
-|--------------------|--------------|--------------------------------------------------------|
-| series_name        | VARCHAR(255) | Serienname (z. B. „The Big Bang Theory")              |
-| episode_title      | VARCHAR(255) | Folgenkürzel (z. B. „S01E01")                         |
-| video_path         | TEXT         | Absoluter Pfad zur Videodatei – wird von der UI genutzt |
-| start_ms / end_ms  | INT          | Zeitstempel in Millisekunden                           |
-| speaker_label      | VARCHAR(100) | Temporäres Diarization-Label (SPEAKER_01)              |
-| identity_id        | INT FK       | → identities.id (nach Zuweisung)                      |
-| matched_sample_id  | INT FK       | → voice_samples.id (welcher Vektor hat gematcht?)     |
-| match_distance     | FLOAT        | Cosinus-Distanz des besten Treffers                    |
-| is_suggestion      | BOOL         | True = Vorschlag, Nutzerbestätigung ausstehend         |
-| transcript         | TEXT         | Whisper-Transkript des Segments                        |
-
-### `voice_samples`
-| Spalte       | Typ          | Beschreibung                                    |
-|--------------|--------------|-------------------------------------------------|
-| identity_id  | INT FK       | → identities.id                                |
-| embedding    | VECTOR(512)  | 512-dim Float32 Vektor (für VECTOR_DISTANCE)   |
-| context      | VARCHAR(255) | z. B. „TNG Season 1" – Kontext der Aufnahme    |
-| is_confirmed | BOOLEAN      | Durch Nutzer manuell bestätigt                  |
-
-## Schnellstart
+## Scanner usage
 
 ```bash
-# 1. Umgebung einrichten (Pascal GPU: P100/P4 – CUDA 11.8)
 cd ice_audio_nexus
-chmod +x setup_env.sh && ./setup_env.sh
-
-# 2. Konfiguration anlegen
-cp .env.example .env
-# → .env editieren: DB_HOST, DB_USER, DB_PASSWORD, DB_NAME, VIDEO_DIR, HF_TOKEN
-
-# 3. Web-UI starten (Tabellen werden automatisch angelegt)
 source venv/bin/activate
-uvicorn web_ui.api:app --host 0.0.0.0 --port 8765
 
-# 4. Video scannen (einmalig pro Episode)
 python -m processor.scanner \
-    --video /mnt/data/video/serie/The\ Big\ Bang\ Theory/S01/S01E01_Pilot.mkv \
-    --series "The Big Bang Theory"
-# Episode wird automatisch aus dem Dateinamen erkannt (S01E01)
-
-# 5. Browser öffnen und Sprecher zuweisen
-#    http://server-ip:8765
-#    → Serie wählen → Folge wählen → Segment anklicken → Identität zuweisen
+  --video /absolute/path/to/video.mkv \
+  --production "The Big Bang Theory" \
+  --title "S05E01 The Skank Reflex Analysis"
 ```
 
-## Hardware-Setup
+Useful options:
 
-| GPU          | Aufgabe                         | Env-Variable           |
-|--------------|---------------------------------|------------------------|
-| Tesla P4 8GB | Speaker Diarization (pyannote)  | `DIARIZATION_DEVICE=cuda:0`  |
-| Tesla P100   | Transkription (faster-whisper)  | `TRANSCRIPTION_DEVICE=cuda:1` |
+- `--fps` (default `4.0`)
+- `--min-clear-seconds` (default `2.0`)
+- `--min-face-area-ratio` (default `0.04`)
+- `--min-sharpness` (default `40.0`)
+- `--min-stability` (default `0.18`)
 
-FFmpeg (CUDA) wird für Audio-Extraktion und Video-Streaming verwendet.  
-Der `/stream`-Endpunkt nutzt `h264_nvenc` wenn verfügbar, sonst `libx264` als Fallback.
+## Web UI
 
-## Web-UI – Funktionen
+Start server:
 
-- **Bibliothek-Dropdown** – zeigt alle gescannten Serien/Staffeln/Folgen direkt aus der DB
-  - ✓ grün markiert = bereits gescannt und bereit zur Bearbeitung
-- **▶ Video-Player** mit live Speaker-Overlay (Name + Match-Prozent)
-- **Klick auf Segment** → Video springt sofort zur passenden Stelle
-- **Farbige Timeline** aller Segmente (klickbar)
-- **Segment-Sidebar** (unabhängig scrollbar, verschiebt das Video nicht):
-  - ✅ Erkannte Sprecher
-  - ⚠ Vorschläge (Distanz etwas höher, Bestätigung empfohlen)
-  - ❓ Unbekannte Sprecher
-- **Zuweisungs-Panel**: Identität wählen/neu anlegen + optional Vektor in DB speichern
+```bash
+uvicorn web_ui.api:app --host 0.0.0.0 --port 8765
+```
 
+UI provides:
+
+- browse productions/videos
+- inspect discovered tracks and representative crops
+- assign track to existing actor or create new actor (+ optional role)
+- mark track as unknown/background/ignored
+- precomputed video overlay (bbox + label)
+- re-match button for post-assignment re-evaluation
+
+## Environment
+
+Minimal required env keys:
+
+- `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`
+- `VIDEO_DIR` (root for allowed video streaming)
+- optional: `FACE_DATA_DIR` (defaults to `data/faces`)
+
+See `.env.example` for defaults and thresholds.
