@@ -281,6 +281,19 @@ def scan_video(
     sampled_frames = 0
     detection_count = 0
 
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    total_sample_frames = max(1, total_frames // frame_step) if total_frames > 0 else None
+    duration_s_est = (total_frames / native_fps) if (native_fps > 0 and total_frames > 0) else None
+    _last_pct_reported = -1  # tracks last reported percentage milestone
+
+    if duration_s_est:
+        logger.info(
+            "Starting scan: %s | duration ~%.0fs | ~%d frames to sample at %.1f fps",
+            source.name, duration_s_est, total_sample_frames or 0, sample_fps,
+        )
+    else:
+        logger.info("Starting scan: %s | sampling at %.1f fps", source.name, sample_fps)
+
     while True:
         ok, frame = cap.read()
         if not ok:
@@ -381,6 +394,29 @@ def scan_video(
             t.append(det)
             active_tracks.append(t)
 
+        # Progress reporting every 5 % of the video (or every 50 sampled frames as fallback)
+        if total_sample_frames:
+            pct = int(sampled_frames * 100 / total_sample_frames)
+            pct_milestone = (pct // 5) * 5
+            if pct_milestone > _last_pct_reported:
+                _last_pct_reported = pct_milestone
+                elapsed_s = timestamp_ms / 1000.0
+                logger.info(
+                    "[%d%%] %.0fs / %.0fs | faces detected so far: %d | active tracks: %d | finished tracks: %d",
+                    pct_milestone,
+                    elapsed_s,
+                    duration_s_est or 0.0,
+                    detection_count,
+                    len(active_tracks),
+                    len(finished_tracks),
+                )
+        elif sampled_frames % 50 == 0:
+            elapsed_s = timestamp_ms / 1000.0
+            logger.info(
+                "[frame %d sampled] %.0fs elapsed | faces detected: %d | active tracks: %d",
+                sampled_frames, elapsed_s, detection_count, len(active_tracks),
+            )
+
     cap.release()
     finished_tracks.extend(active_tracks)
 
@@ -475,6 +511,16 @@ def scan_video(
     rebuild_overlay_for_video(conn, video_id)
     set_video_scan_status(conn, video_id, "completed")
     conn.close()
+
+    logger.info(
+        "Scan finished: %s | sampled %d frames | %d face detections | %d tracks (%d clear / %d background)",
+        source.name,
+        sampled_frames,
+        detection_count,
+        persisted_tracks,
+        clear_tracks,
+        persisted_tracks - clear_tracks,
+    )
 
     return {
         "production_id": production_id,
