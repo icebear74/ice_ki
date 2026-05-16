@@ -424,7 +424,7 @@ def api_rescan_video(video_id: int, payload: dict = Body(default={})) -> JSONRes
         "min_face_area_ratio": float(payload.get("min_face_area_ratio", os.getenv("FACE_MIN_AREA_RATIO", "0.04"))),
         "min_sharpness": float(payload.get("min_sharpness", os.getenv("FACE_MIN_SHARPNESS", "70.0"))),
         "min_stability": float(payload.get("min_stability", os.getenv("FACE_MIN_STABILITY", "0.30"))),
-        "min_neighbors": int(payload.get("min_neighbors", os.getenv("FACE_MIN_NEIGHBORS", "8"))),
+        "dnn_confidence": float(payload.get("dnn_confidence", os.getenv("FACE_DNN_CONFIDENCE", "0.50"))),
         "min_face_size_px": int(payload.get("min_face_size_px", os.getenv("FACE_MIN_SIZE_PX", "60"))),
     }
 
@@ -474,7 +474,7 @@ def api_scan_directory(payload: dict = Body(...)) -> JSONResponse:
         rescan (bool): re-scan already-completed videos (default: false).
         recursive (bool): search sub-directories (default: false).
         fps, min_clear_seconds, min_face_area_ratio, min_sharpness,
-        min_stability, min_neighbors, min_face_size_px — scanner tunables.
+        min_stability, dnn_confidence, min_face_size_px — scanner tunables.
     """
     directory = (payload.get("directory") or "").strip()
     if not directory:
@@ -504,7 +504,7 @@ def api_scan_directory(payload: dict = Body(...)) -> JSONResponse:
         "min_face_area_ratio": float(payload.get("min_face_area_ratio", os.getenv("FACE_MIN_AREA_RATIO", "0.04"))),
         "min_sharpness": float(payload.get("min_sharpness", os.getenv("FACE_MIN_SHARPNESS", "70.0"))),
         "min_stability": float(payload.get("min_stability", os.getenv("FACE_MIN_STABILITY", "0.30"))),
-        "min_neighbors": int(payload.get("min_neighbors", os.getenv("FACE_MIN_NEIGHBORS", "8"))),
+        "dnn_confidence": float(payload.get("dnn_confidence", os.getenv("FACE_DNN_CONFIDENCE", "0.50"))),
         "min_face_size_px": int(payload.get("min_face_size_px", os.getenv("FACE_MIN_SIZE_PX", "60"))),
     }
 

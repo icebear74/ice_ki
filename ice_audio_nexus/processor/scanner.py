@@ -15,6 +15,8 @@ import argparse
 import logging
 import os
 import re
+import shutil
+import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -160,7 +162,110 @@ def _safe_relpath(path: Path, root: Path) -> str:
         return str(path.resolve())
 
 
-def _build_face_descriptor(crop_bgr: np.ndarray) -> np.ndarray:
+# ---------------------------------------------------------------------------
+# DNN face detector (OpenCV ResNet-SSD, much more accurate than Haar cascade)
+# ---------------------------------------------------------------------------
+_DNN_PROTOTXT_URL = (
+    "https://raw.githubusercontent.com/opencv/opencv/4.x/"
+    "samples/dnn/face_detector/deploy.prototxt"
+)
+_DNN_MODEL_URL = (
+    "https://raw.githubusercontent.com/opencv/opencv_3rdparty/"
+    "dnn_samples_face_detector_20180205_fp16/"
+    "res10_300x300_ssd_iter_140000_fp16.caffemodel"
+)
+_DNN_PROTOTXT_NAME = "face_deploy.prototxt"
+_DNN_MODEL_NAME = "res10_300x300_ssd_fp16.caffemodel"
+
+
+def _get_dnn_face_detector(models_dir: Path):
+    """Load (downloading once) the OpenCV ResNet-SSD DNN face detector.
+
+    Tries to use the CUDA backend (GPU) first; falls back to CPU if not
+    available (standard opencv-python-headless has no CUDA support).
+    Returns the ``cv2.dnn_Net`` object.
+    """
+    import cv2
+
+    models_dir.mkdir(parents=True, exist_ok=True)
+    prototxt = models_dir / _DNN_PROTOTXT_NAME
+    caffemodel = models_dir / _DNN_MODEL_NAME
+
+    if not prototxt.exists():
+        logger.info("Downloading DNN face-detector prototxt to %s …", prototxt)
+        try:
+            urllib.request.urlretrieve(_DNN_PROTOTXT_URL, prototxt)
+        except Exception as exc:
+            raise RuntimeError(f"Could not download DNN prototxt: {exc}") from exc
+
+    if not caffemodel.exists():
+        logger.info(
+            "Downloading DNN face-detector model (~2 MB) to %s …", caffemodel
+        )
+        try:
+            urllib.request.urlretrieve(_DNN_MODEL_URL, caffemodel)
+        except Exception as exc:
+            raise RuntimeError(f"Could not download DNN model: {exc}") from exc
+
+    net = cv2.dnn.readNetFromCaffe(str(prototxt), str(caffemodel))
+
+    # Attempt GPU (CUDA) backend – only works if OpenCV was compiled with CUDA.
+    gpu_ok = False
+    try:
+        if hasattr(cv2, "cuda") and cv2.cuda.getCudaEnabledDeviceCount() > 0:
+            net.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA)
+            net.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA)
+            gpu_ok = True
+    except Exception:
+        pass
+
+    if gpu_ok:
+        logger.info("Face detector: CUDA backend active (GPU accelerated ✓)")
+    else:
+        net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
+        net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+        logger.info(
+            "Face detector: CPU backend "
+            "(for GPU: install opencv-python with CUDA support)"
+        )
+
+    return net
+
+
+def _dnn_detect_faces(
+    net,
+    frame: np.ndarray,
+    min_confidence: float,
+    min_size_px: int,
+) -> list[tuple[int, int, int, int, float]]:
+    """Run the DNN face detector on *frame*.
+
+    Returns a list of ``(x, y, w, h, confidence)`` tuples for every detected
+    face that passes the confidence and minimum-size filters.
+    """
+    import cv2
+
+    h, w = frame.shape[:2]
+    blob = cv2.dnn.blobFromImage(frame, 1.0, (300, 300), (104.0, 177.0, 123.0))
+    net.setInput(blob)
+    raw = net.forward()  # shape (1, 1, N, 7)
+
+    results: list[tuple[int, int, int, int, float]] = []
+    for i in range(raw.shape[2]):
+        confidence = float(raw[0, 0, i, 2])
+        if confidence < min_confidence:
+            continue
+        box = raw[0, 0, i, 3:7] * np.array([w, h, w, h], dtype=np.float32)
+        x1, y1, x2, y2 = box.astype(int)
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(w, x2), min(h, y2)
+        fw, fh = x2 - x1, y2 - y1
+        if fw < min_size_px or fh < min_size_px:
+            continue
+        results.append((x1, y1, fw, fh, confidence))
+    return results
+
+
     import cv2
 
     gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
@@ -217,7 +322,7 @@ def scan_video(
     track_max_gap_ms: int = 600,
     iou_threshold: float = 0.30,
     descriptor_threshold: float = 0.72,
-    min_neighbors: int = 8,
+    dnn_confidence: float = 0.50,
     min_face_size_px: int = 60,
 ) -> dict:
     try:
@@ -236,6 +341,13 @@ def scan_video(
     data_root = Path(os.getenv("FACE_DATA_DIR", "data/faces")).resolve()
     crops_root = data_root / "crops" / source.stem
     reps_root = data_root / "tracks" / source.stem
+
+    # Remove stale image data on every (re-)scan so the disk stays in sync with the DB.
+    for stale_dir in (crops_root, reps_root):
+        if stale_dir.exists():
+            shutil.rmtree(stale_dir)
+            logger.info("Removed stale scan images: %s", stale_dir)
+
     crops_root.mkdir(parents=True, exist_ok=True)
     reps_root.mkdir(parents=True, exist_ok=True)
 
@@ -268,12 +380,15 @@ def scan_video(
         native_fps = 25.0
     frame_step = max(1, int(round(native_fps / max(sample_fps, 0.5))))
 
-    cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-    face_detector = cv2.CascadeClassifier(cascade_path)
-    if face_detector.empty():
+    # Load DNN face detector (downloads model once on first run).
+    models_dir = data_root / "models"
+    try:
+        face_net = _get_dnn_face_detector(models_dir)
+    except Exception as exc:
         set_video_scan_status(conn, video_id, "failed")
         conn.close()
-        raise RuntimeError(f"Could not load face detector cascade: {cascade_path}")
+        cap.release()
+        raise RuntimeError(f"Could not load DNN face detector: {exc}") from exc
 
     active_tracks: list[Track] = []
     finished_tracks: list[Track] = []
@@ -309,18 +424,10 @@ def scan_video(
         frame_area = float(w * h)
         timestamp_ms = int((frame_index / native_fps) * 1000.0)
 
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = face_detector.detectMultiScale(
-            gray,
-            scaleFactor=1.1,
-            minNeighbors=min_neighbors,
-            minSize=(min_face_size_px, min_face_size_px),
-        )
+        raw_faces = _dnn_detect_faces(face_net, frame, dnn_confidence, min_face_size_px)
 
         frame_detections: list[Detection] = []
-        for i, (x, y, fw, fh) in enumerate(faces):
-            x = int(max(0, x))
-            y = int(max(0, y))
+        for i, (x, y, fw, fh, conf) in enumerate(raw_faces):
             fw = int(min(fw, w - x))
             fh = int(min(fh, h - y))
             if fw <= 0 or fh <= 0:
@@ -344,7 +451,7 @@ def scan_video(
                 frame_index=frame_index,
                 timestamp_ms=timestamp_ms,
                 bbox=(x, y, fw, fh),
-                confidence=0.92,
+                confidence=conf,
                 sharpness=sharpness,
                 area_ratio=area_ratio,
                 embedding=descriptor,
@@ -666,7 +773,12 @@ def main() -> None:
     parser.add_argument("--min-face-area-ratio", type=float, default=float(os.getenv("FACE_MIN_AREA_RATIO", "0.04")))
     parser.add_argument("--min-sharpness", type=float, default=float(os.getenv("FACE_MIN_SHARPNESS", "70.0")))
     parser.add_argument("--min-stability", type=float, default=float(os.getenv("FACE_MIN_STABILITY", "0.30")))
-    parser.add_argument("--min-neighbors", type=int, default=int(os.getenv("FACE_MIN_NEIGHBORS", "8")))
+    parser.add_argument(
+        "--dnn-confidence",
+        type=float,
+        default=float(os.getenv("FACE_DNN_CONFIDENCE", "0.50")),
+        help="Minimum DNN detection confidence 0..1 (higher = fewer false positives, default: 0.50)",
+    )
     parser.add_argument("--min-face-size-px", type=int, default=int(os.getenv("FACE_MIN_SIZE_PX", "60")))
     args = parser.parse_args()
 
@@ -676,7 +788,7 @@ def main() -> None:
         min_face_area_ratio=args.min_face_area_ratio,
         min_sharpness=args.min_sharpness,
         min_stability=args.min_stability,
-        min_neighbors=args.min_neighbors,
+        dnn_confidence=args.dnn_confidence,
         min_face_size_px=args.min_face_size_px,
     )
 
