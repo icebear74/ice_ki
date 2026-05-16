@@ -1,31 +1,12 @@
 """
-ice_audio_nexus – processor/scanner.py
----------------------------------------
-Analyses a video file using:
-  • FFmpeg v8 (CUDA) for audio extraction
-  • DeepFilterNet 3 for noise suppression   (Tesla P100 / cuda:0 – temporary, freed before Whisper)
-  • pyannote.audio for speaker diarization  (Tesla P4   / cuda:1)
-  • faster-whisper for transcription         (Tesla P100 / cuda:0)
+Step-1 visual person discovery scanner.
 
-For each detected segment it searches MariaDB using VECTOR_DISTANCE against
-ALL stored voice_samples and:
-  - distance < MATCH_THRESHOLD   → confirmed match (identity assigned)
-  - distance < SUGGEST_THRESHOLD → stores segment with is_suggestion=True
-                                   (web UI will prompt the user)
-  - otherwise                    → stored as unknown (speaker_label only)
-
-Usage (Series – episode auto-detected from filename):
-    python -m processor.scanner --video /path/to/S01E01-Episode.mkv \
-                                 --series "Star Trek TNG"
-
-Usage (Series – episode provided explicitly):
-    python -m processor.scanner --video /path/to/episode.mkv \
-                                 --series "Star Trek TNG" \
-                                 --episode "The Inner Light"
-
-Usage (Movie – no SxxExx pattern in filename):
-    python -m processor.scanner --video /path/to/X-Men.mkv \
-                                 --series "X-Men"
+Pipeline:
+1. Sample frames (default 4 FPS)
+2. Detect faces
+3. Build local tracks with IoU + descriptor similarity
+4. Promote only clear tracks (high precision)
+5. Persist detections, tracks, representative crops and overlay data
 """
 
 from __future__ import annotations
@@ -33,975 +14,459 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import queue
 import re
-import subprocess
-import tempfile
-import threading
+from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
-
 from dotenv import load_dotenv
 
-# Load .env from the project root (parent of the processor package), so the
-# script works regardless of the current working directory.
-load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+# Load .env from project root
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s – %(message)s",
+from db.database import (  # noqa: E402
+    assign_detection_to_track,
+    clear_video_scan_data,
+    create_face_detection,
+    create_face_track,
+    ensure_schema,
+    get_connection,
+    rebuild_overlay_for_video,
+    set_video_scan_status,
+    upsert_production_and_video,
 )
 
-# Thresholds (can be overridden via .env)
-MATCH_THRESHOLD   = float(os.getenv("MATCH_THRESHOLD",   "0.25"))
-SUGGEST_THRESHOLD = float(os.getenv("SUGGEST_THRESHOLD", "0.45"))
-# Minimum cosine-distance gap required between the best match and the closest
-# sample from a *different* identity.  Raises this bar prevents two similar-
-# sounding characters (e.g. Sheldon vs Leonard) from collapsing onto the same
-# identity.  Increase if you still see false merges; decrease if valid matches
-# get downgraded to "suggest".
-MIN_MARGIN        = float(os.getenv("MIN_MARGIN",         "0.07"))
-
-# GPU assignments (override in .env – see .env.example for all options)
-#
-# Layout:
-#   cuda:0  P100 (16 GB) – DeepFilterNet (temporary, freed before Whisper loads)
-#                        + faster-whisper transcription (permanent during scan)
-#   cuda:1  P4   ( 8 GB) – pyannote diarization
-#
-# DeepFilterNet hardcodes "cuda" → cuda:0 internally and ignores set_device().
-# Running it sequentially and freeing it completely before Whisper loads keeps
-# the P100 VRAM usage well within budget (~100 MB DF vs ~4 GB Whisper).
-DIARIZATION_DEVICE   = os.getenv("DIARIZATION_DEVICE",   "cuda:1")
-TRANSCRIPTION_DEVICE = os.getenv("TRANSCRIPTION_DEVICE", "cuda:0")
-
-# Diarization tuning parameters (configurable via .env)
-DIARIZATION_MIN_DURATION_ON  = float(os.getenv("DIARIZATION_MIN_DURATION_ON",  "0.3"))
-DIARIZATION_MIN_DURATION_OFF = float(os.getenv("DIARIZATION_MIN_DURATION_OFF", "0.1"))
-CLUSTERING_THRESHOLD         = float(os.getenv("CLUSTERING_THRESHOLD",         "0.7"))
-
-# DeepFilterNet noise suppression
-DEEPFILTER_ENABLED = os.getenv("DEEPFILTER_ENABLED", "true").lower() in ("1", "true", "yes")
-# NOTE: DeepFilterNet hardcodes cuda:0 internally; DEEPFILTER_DEVICE is kept for
-# documentation/logging only and has no effect on actual device placement.
-DEEPFILTER_DEVICE  = os.getenv("DEEPFILTER_DEVICE", "cuda:0")
-# Audio is processed in chunks to avoid OOM for long episodes.  The GRU layers
-# in DeepFilterNet3 allocate O(frames) VRAM; a 21-minute episode at 48 kHz
-# needs ~10 GiB in one pass.  30-second chunks keep peak VRAM under ~1 GiB per
-# chunk while the model weights stay loaded between chunks.
-DEEPFILTER_CHUNK_SECS = int(os.getenv("DEEPFILTER_CHUNK_SECS", "30"))
-
-# ---------------------------------------------------------------------------
-# Configurable temporary file directories
-# ---------------------------------------------------------------------------
-# AUDIO_TMP_DIR – where extracted / DeepFilter-cleaned WAV files are written.
-#                 Defaults to the OS temp directory (tempfile.gettempdir()).
-# VIDEO_TMP_DIR – where web-preview MP4 transcodes are written.
-#                 Defaults to the same directory as the source video file.
-#                 Set to a fast scratch disk (e.g. /mnt/nvme/tmp) to avoid
-#                 writing large MP4 files next to the originals.
-_audio_tmp_env = os.getenv("AUDIO_TMP_DIR", "").strip()
-_video_tmp_env = os.getenv("VIDEO_TMP_DIR", "").strip()
-
-AUDIO_TMP_DIR: str | None = _audio_tmp_env if _audio_tmp_env else None   # None → system tmp
-VIDEO_TMP_DIR: str | None = _video_tmp_env if _video_tmp_env else None   # None → beside source
-
-if AUDIO_TMP_DIR:
-    os.makedirs(AUDIO_TMP_DIR, exist_ok=True)
-    logger.info("Audio temp dir: %s", AUDIO_TMP_DIR)
-if VIDEO_TMP_DIR:
-    os.makedirs(VIDEO_TMP_DIR, exist_ok=True)
-    logger.info("Video temp dir: %s", VIDEO_TMP_DIR)
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 
-# ---------------------------------------------------------------------------
-# Audio extraction via FFmpeg (CUDA)
-# ---------------------------------------------------------------------------
-
-def extract_audio(video_path: str, output_wav: str) -> None:
-    """
-    Extract a mono 48 kHz PCM WAV from the video using FFmpeg CUDA acceleration.
-
-    48 kHz is DeepFilterNet's native rate, so ``apply_deepfilter`` can feed
-    the file directly to ``load_audio`` without any intermediate resampling
-    step.  When DeepFilterNet is disabled ``_fallback_to_16k`` downsamples
-    from 48 kHz to 16 kHz before handing audio to Whisper / pyannote.
-    """
-    cmd = [
-        "ffmpeg", "-y",
-        "-hwaccel", "cuda",           # CUDA hardware-accelerated decoding
-        "-i", video_path,
-        "-vn",                         # drop video stream
-        "-acodec", "pcm_s16le",        # PCM 16-bit little-endian
-        "-ac", "1",                    # mono
-        "-ar", "48000",                # 48 kHz – DeepFilterNet's native rate
-        output_wav,
-    ]
-    logger.info("Extracting audio (48 kHz): %s", " ".join(cmd))
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(f"FFmpeg failed:\n{result.stderr}")
-    logger.info("Audio extracted → %s", output_wav)
+def _clamp(value: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, value))
 
 
+def _cosine_similarity(vec_a: np.ndarray, vec_b: np.ndarray) -> float:
+    denom = float(np.linalg.norm(vec_a) * np.linalg.norm(vec_b))
+    if denom < 1e-9:
+        return -1.0
+    return float(np.dot(vec_a, vec_b) / denom)
 
-# ---------------------------------------------------------------------------
-# DeepFilterNet noise suppression (optional pre-processing step)
-# ---------------------------------------------------------------------------
 
-def apply_deepfilter(input_wav: str, output_wav: str) -> None:
-    """
-    Run DeepFilterNet 3 noise suppression on *input_wav* and write the
-    cleaned audio to *output_wav* at 16 kHz (the standard rate for Whisper
-    and pyannote.audio).
+def _iou(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    x1 = max(ax, bx)
+    y1 = max(ay, by)
+    x2 = min(ax + aw, bx + bw)
+    y2 = min(ay + ah, by + bh)
+    inter = max(0, x2 - x1) * max(0, y2 - y1)
+    if inter <= 0:
+        return 0.0
+    union = aw * ah + bw * bh - inter
+    if union <= 0:
+        return 0.0
+    return inter / union
 
-    *input_wav* is expected at **48 kHz** (DeepFilterNet's native rate), which
-    is what ``extract_audio`` produces.
 
-    **Device note**: DeepFilterNet hardcodes ``"cuda"`` (→ ``cuda:0``) in its
-    own device-selection logic and ignores ``torch.cuda.set_device()``.  There
-    is therefore no point in trying to steer it to another device.  This
-    function is always called *sequentially* before Whisper is loaded so that
-    the two models never share P100 VRAM simultaneously.  DeepFilterNet is
-    fully deleted (``del model, df_state`` + ``empty_cache``) before control
-    returns to the caller, leaving the GPU free for the main pipeline.
+def _probe_duration_ms(path: str) -> int | None:
+    import json
+    import subprocess
 
-    Falls back silently to a raw 16-kHz copy if the library is missing or
-    processing fails, so the rest of the pipeline is never blocked.
-    """
     try:
-        import torch
-        from df.enhance import enhance, init_df, load_audio, save_audio
-    except ImportError:
-        logger.warning(
-            "deepfilternet not installed – skipping noise suppression. "
-            "Run: pip install deepfilternet"
-        )
-        _fallback_to_16k(input_wav, output_wav)
-        return
-
-    cuda_available = torch.cuda.is_available()
-    tmp_enhanced: str | None = None
-    try:
-        # DF picks cuda:0 on its own; no set_device needed.
-        model, df_state, _ = init_df()
-
-        # df_state.sr() always returns a plain int; use it directly to avoid
-        # torchaudio version skew where load_audio() may return AudioMetaData
-        # as the second element instead of an int (torchaudio ≥0.13 API change).
-        sr: int = int(df_state.sr())
-        audio, _ = load_audio(input_wav, sr=sr)
-        # audio must remain on CPU – DF's Rust-backed df_state.analysis()
-        # calls .numpy() on it and will raise if it is on a CUDA device.
-        #
-        # Process in DEEPFILTER_CHUNK_SECS-second chunks to stay within VRAM.
-        # DeepFilterNet3's GRU layers allocate O(frames) memory; a ~21-minute
-        # episode at 48 kHz needs ~10 GiB in one pass which OOMs on the P100.
-        # Chunks keep peak activation memory under ~1 GiB each while the model
-        # weights remain loaded for the full run.
-        #
-        # Disable cuDNN for the enhance() call: the P100 (Pascal CC 6.0)
-        # does not support the RNN/GRU kernels that DeepFilterNet3 uses,
-        # causing CUDNN_STATUS_NOT_SUPPORTED.  The non-cuDNN path is slower
-        # but correct on all CUDA architectures.
-        chunk_samples = DEEPFILTER_CHUNK_SECS * sr
-        total_samples = audio.shape[-1]
-        enhanced_parts: list = []
-        with torch.backends.cudnn.flags(enabled=False):
-            for offset in range(0, total_samples, chunk_samples):
-                chunk = audio[..., offset : offset + chunk_samples]
-                enh_chunk = enhance(model, df_state, chunk)
-                enhanced_parts.append(enh_chunk.cpu())
-                if cuda_available:
-                    torch.cuda.empty_cache()
-        enhanced = torch.cat(enhanced_parts, dim=-1)
-        del enhanced_parts
-
-        # enhance() returns a CPU tensor.
-        tmp_fd, tmp_enhanced = tempfile.mkstemp(suffix=".enhanced.wav", dir=AUDIO_TMP_DIR)
-        os.close(tmp_fd)
-        save_audio(tmp_enhanced, enhanced, sr)
-
-        # Release P100 VRAM completely before Whisper / pyannote load.
-        del enhanced, audio, model, df_state
-        if cuda_available:
-            torch.cuda.empty_cache()
-
-        # ── Downsample to 16 kHz for Whisper / pyannote ───────────────────────
-        result = subprocess.run(
+        out = subprocess.run(
             [
-                "ffmpeg", "-y", "-i", tmp_enhanced,
-                "-ar", "16000", "-ac", "1",
-                "-acodec", "pcm_s16le",
-                output_wav,
-            ],
-            capture_output=True, text=True,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"FFmpeg downsample to 16 kHz failed:\n{result.stderr}")
-
-        logger.info(
-            "DeepFilterNet applied on cuda:0 (48kHz→16kHz, %ds chunks): %s → %s",
-            DEEPFILTER_CHUNK_SECS, input_wav, output_wav,
-        )
-    except Exception as exc:
-        logger.warning("DeepFilterNet processing failed (non-fatal): %s", exc)
-        _fallback_to_16k(input_wav, output_wav)
-    finally:
-        if tmp_enhanced and os.path.exists(tmp_enhanced):
-            try:
-                os.unlink(tmp_enhanced)
-            except OSError:
-                pass
-
-
-def _fallback_to_16k(input_wav: str, output_wav: str) -> None:
-    """Downsample *input_wav* to 16 kHz and write to *output_wav* via FFmpeg."""
-    result = subprocess.run(
-        [
-            "ffmpeg", "-y", "-i", input_wav,
-            "-ar", "16000", "-ac", "1",
-            "-acodec", "pcm_s16le",
-            output_wav,
-        ],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        # Last resort: plain copy (may be wrong sample rate but unblocks pipeline)
-        import shutil
-        shutil.copy2(input_wav, output_wav)
-
-
-def _probe_duration(path: str) -> float:
-    """Return the duration of *path* in seconds via ffprobe, or 0.0 on error.
-
-    Both the format-level and stream-level durations are checked; the largest
-    value is returned so that containers with a missing or wrong format
-    duration (e.g. MKV files without a segment-duration header) are handled
-    correctly.
-    """
-    try:
-        result = subprocess.run(
-            [
-                "ffprobe", "-v", "error",
-                "-print_format", "json",
+                "ffprobe",
+                "-v",
+                "error",
+                "-print_format",
+                "json",
                 "-show_format",
                 "-show_streams",
                 path,
             ],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
         )
-        import json as _json
-        data = _json.loads(result.stdout)
-        duration = float(data.get("format", {}).get("duration", 0) or 0)
-        for stream in data.get("streams", []):
-            try:
-                s_dur = float(stream.get("duration", 0) or 0)
-                if s_dur > duration:
-                    duration = s_dur
-            except (TypeError, ValueError):
-                pass
-        return duration
+        data = json.loads(out.stdout or "{}")
     except Exception:
-        return 0.0
-
-
-def transcode_web_preview(
-    video_path: str,
-    output_mp4: str,
-    clean_audio_path: str | None = None,
-) -> None:
-    """
-    Transcode *video_path* to a browser-ready H.264/AAC MP4 file stored at
-    *output_mp4*.  The file is written with -movflags +faststart so the moov
-    atom sits at the front – this lets the browser seek freely without
-    downloading the whole file first.
-
-    Output is capped at 480p (width scaled to keep aspect ratio) so the file
-    stays small.  Audio is kept as stereo AAC 128k so voice sync works
-    correctly in the Web UI.
-
-    *clean_audio_path* is accepted but ignored here (kept for API compatibility);
-    the clean variant is generated separately by :func:`transcode_clean_preview`.
-    """
-    # Each tuple: (extra_input_flags, codec_args)
-    # -hwaccel cuda accelerates decoding on GPU but can silently truncate output
-    # for some codecs/formats on older drivers.  It is therefore only used for
-    # the NVENC variant where the GPU pipeline is already required; the CPU
-    # libx264 fallback uses software decoding to guarantee a full-length output.
-    _codec_variants: list[tuple[list[str], list[str]]] = [
-        (["-hwaccel", "cuda"], ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "28"]),
-        ([],                   ["-c:v", "libx264",    "-preset", "fast", "-crf", "28"]),
-    ]
-
-    src_duration = _probe_duration(video_path)
-    last_stderr = ""
-
-    for hw_flags, codec_args in _codec_variants:
-        cmd = [
-            "ffmpeg", "-y",
-            *hw_flags,
-            "-i", video_path,
-            "-map", "0:v:0",               # first video stream only
-            "-map", "0:a:0",               # first audio stream only
-            *codec_args,
-            "-profile:v", "baseline", "-level", "3.1",
-            "-vf", "scale=-2:480",                 # scale to 480p, keep aspect ratio
-            "-c:a", "aac", "-b:a", "128k", "-ac", "2",
-            "-movflags", "+faststart",             # moov atom at front → seekable
-            output_mp4,
-        ]
-        logger.info(
-            "Transcoding web preview (%s): %s → %s", codec_args[1], video_path, output_mp4
-        )
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            last_stderr = result.stderr
-            logger.warning(
-                "Codec %s failed (will try fallback): %s",
-                codec_args[1],
-                last_stderr.splitlines()[-5:],
-            )
-            continue
-
-        # Guard against silent truncation: verify the output covers at least
-        # 95 % of the source duration.  CUDA decoders can exit with code 0
-        # while having produced only a partial file.
-        if src_duration > 0:
-            out_duration = _probe_duration(output_mp4)
-            if out_duration < src_duration * 0.95:
-                logger.warning(
-                    "Web preview truncated (%.1fs vs %.1fs src); retrying with next codec",
-                    out_duration, src_duration,
-                )
-                try:
-                    os.unlink(output_mp4)
-                except OSError:
-                    pass
-                continue
-
-        logger.info("Web preview ready → %s", output_mp4)
-        return
-
-    raise RuntimeError(
-        f"FFmpeg web-preview transcode failed for all codec variants:\n{last_stderr}"
-    )
-
-
-def transcode_clean_preview(
-    web_preview_path: str,
-    clean_audio_path: str,
-    output_mp4: str,
-) -> None:
-    """
-    Build a second browser-ready preview that carries the DeepFilterNet-cleaned
-    audio instead of the original.
-
-    The video stream is copied bit-for-bit from the already-transcoded
-    *web_preview_path* (no re-encode), so this operation is extremely fast
-    (I/O-bound only).  The clean audio is encoded to AAC 128 k stereo.
-
-    Browsers (including Chromium/Edge) do not implement the
-    ``HTMLMediaElement.audioTracks`` API for embedded ``<video>`` elements.
-    The standard workaround is to serve two separate files and switch
-    ``player.src`` at runtime – this function produces the second file.
-    """
-    src_duration = _probe_duration(web_preview_path)
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", web_preview_path,   # source 0: already-transcoded video (H.264/AAC)
-        "-i", clean_audio_path,   # source 1: DeepFilter cleaned WAV
-        "-map", "0:v:0",          # copy video stream unchanged
-        "-map", "1:a:0",          # replace audio with clean track
-        "-c:v", "copy",           # video: no re-encode
-        "-c:a", "aac", "-b:a", "128k", "-ac", "2",
-        "-movflags", "+faststart",
-        output_mp4,
-    ]
-    logger.info("Transcoding clean preview: %s → %s", web_preview_path, output_mp4)
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"FFmpeg clean-preview transcode failed:\n{result.stderr}"
-        )
-    if src_duration > 0:
-        out_duration = _probe_duration(output_mp4)
-        if out_duration < src_duration * 0.95:
-            try:
-                os.unlink(output_mp4)
-            except OSError:
-                pass
-            raise RuntimeError(
-                f"Clean preview truncated ({out_duration:.1f}s vs {src_duration:.1f}s src)"
-            )
-    logger.info("Clean preview ready → %s", output_mp4)
-
-
-# ---------------------------------------------------------------------------
-# Diarization
-# ---------------------------------------------------------------------------
-
-def _iter_diarization_segments(audio_path: str):
-    """
-    Internal generator.  Runs the full diarization pipeline on *audio_path*,
-    then yields one segment dict per speaker turn as embeddings are extracted.
-
-    Per-segment speaker embeddings are computed via ``Inference.crop()`` with
-    ``window="whole"`` (same quality as the original implementation).  Because
-    segments are yielded one-by-one, a consumer thread can start transcribing
-    while embedding extraction for later segments is still in progress on the
-    diarization GPU (cuda:1 / P4).
-
-    Yields dicts: {start_ms, end_ms, speaker_label, embedding}
-    """
-    try:
-        import torch
-        from pyannote.audio import Pipeline, Model, Inference
-        from pyannote.audio.pipelines.utils.hook import ProgressHook
-        from pyannote.core import Segment as _PyannoteSegment
-    except ImportError as exc:
-        raise ImportError(
-            f"pyannote.audio dependency missing ({exc}). Run setup_env.sh first."
-        ) from exc
-
-    hf_token = os.getenv("HF_TOKEN")
-    pipeline = Pipeline.from_pretrained(
-        "pyannote/speaker-diarization-3.1",
-        use_auth_token=hf_token,
-    )
-    device = torch.device(DIARIZATION_DEVICE if torch.cuda.is_available() else "cpu")
-    pipeline = pipeline.to(device)
-    logger.info("Diarization device: %s", device)
-
-    # Apply configurable tuning parameters when the pipeline exposes them
-    try:
-        params = pipeline.parameters(instantiated=True)
-        if hasattr(params, "clustering") and hasattr(params.clustering, "threshold"):
-            params.clustering.threshold = CLUSTERING_THRESHOLD
-        if hasattr(params, "segmentation") and hasattr(params.segmentation, "min_duration_on"):
-            params.segmentation.min_duration_on  = DIARIZATION_MIN_DURATION_ON
-            params.segmentation.min_duration_off = DIARIZATION_MIN_DURATION_OFF
-    except Exception as _p:
-        logger.debug("Could not set diarization tuning params: %s", _p)
-
-    with ProgressHook() as hook:
-        diarization = pipeline(audio_path, hook=hook)
-
-    # Load embedding model once; all per-segment crops share the same instance.
-    inference = None
-    try:
-        emb_model = Model.from_pretrained("pyannote/embedding", token=hf_token)
-        emb_model = emb_model.to(device)
-        inference = Inference(emb_model, window="whole")
-    except Exception:
-        logger.warning("Could not load embedding model; embeddings will be empty.")
-
-    count = 0
-    for turn, _, speaker in diarization.itertracks(yield_label=True):
-        start_ms = int(turn.start * 1000)
-        end_ms   = int(turn.end   * 1000)
-
-        embedding: list[float] = []
-        if inference is not None:
-            try:
-                emb = inference.crop(audio_path, _PyannoteSegment(turn.start, turn.end))
-                # Replace NaN / ±inf (produced by very short segments) with 0.0
-                # so MariaDB VECTOR does not reject the row.
-                emb_clean = np.where(np.isfinite(emb), emb, 0.0)
-                embedding = emb_clean.flatten().tolist()
-                # Pad or truncate to exactly 512 dimensions
-                if len(embedding) < 512:
-                    embedding = embedding + [0.0] * (512 - len(embedding))
-                else:
-                    embedding = embedding[:512]
-            except Exception as exc:
-                logger.debug("Embedding extraction failed for %s: %s", speaker, exc)
-
-        count += 1
-        yield {
-            "start_ms":      start_ms,
-            "end_ms":        end_ms,
-            "speaker_label": speaker,
-            "embedding":     embedding,
-        }
-
-    logger.info("Diarization complete: %d segments", count)
-
-
-def run_diarization(audio_path: str) -> list[dict]:
-    """
-    Run pyannote.audio speaker diarization on *audio_path*.
-    Returns a list of dicts: {start_ms, end_ms, speaker_label, embedding}
-    """
-    return list(_iter_diarization_segments(audio_path))
-
-
-# ---------------------------------------------------------------------------
-# Transcription (model cached per process to avoid repeated loading)
-# ---------------------------------------------------------------------------
-
-_whisper_model = None  # module-level cache
-
-
-def _get_whisper_model(model_size: str = "large-v3-turbo"):
-    """Return a cached WhisperModel instance (loaded once per process)."""
-    global _whisper_model
-    if _whisper_model is None:
+        return None
+    duration = float(data.get("format", {}).get("duration", 0) or 0)
+    for stream in data.get("streams", []):
         try:
-            from faster_whisper import WhisperModel
-        except ImportError as exc:
-            raise ImportError(
-                "faster-whisper is not installed. Run setup_env.sh first."
-            ) from exc
-        device = "cuda" if TRANSCRIPTION_DEVICE.startswith("cuda") else "cpu"
-        # CTranslate2 requires tensor-core FP16 support (Volta+, compute ≥7.0).
-        # Older CUDA GPUs like Tesla P4/P100 (Pascal, compute 6.x) only support
-        # float32 efficiently.  CPU falls back to int8.
-        if device == "cuda":
-            compute_type_candidates = ["float16", "float32"]
-        else:
-            compute_type_candidates = ["int8"]
-        last_exc: Exception | None = None
-        for compute_type in compute_type_candidates:
-            try:
-                _whisper_model = WhisperModel(model_size, device=device, compute_type=compute_type)
-                logger.info("Whisper loaded with compute_type=%s on %s", compute_type, device)
-                break
-            except (ValueError, RuntimeError) as exc:
-                logger.warning(
-                    "Whisper compute_type=%s not supported on %s, trying next: %s",
-                    compute_type, device, exc,
-                )
-                last_exc = exc
-        else:
-            raise RuntimeError(
-                f"Could not load Whisper model on {device}: {last_exc}"
-            ) from last_exc
-    return _whisper_model
+            duration = max(duration, float(stream.get("duration", 0) or 0))
+        except (TypeError, ValueError):
+            pass
+    if duration <= 0:
+        return None
+    return int(duration * 1000.0)
 
 
-def transcribe_segment(
-    audio_source: "str | np.ndarray",
-    start_s: float,
-    end_s: float,
-    sample_rate: int = 16000,
-    model_size: str = "large-v3-turbo",
-) -> tuple[str, float]:
-    """
-    Transcribe a single audio segment using faster-whisper.
-    Returns a tuple of (detected_text, max_no_speech_prob).
+def _parse_episode_code(title_or_path: str) -> str | None:
+    m = re.search(r"(S\d{1,2}E\d{1,2})", title_or_path, re.IGNORECASE)
+    return m.group(1).upper() if m else None
 
-    *audio_source* may be:
-      - a ``np.ndarray`` (float32, 16 kHz) covering the *whole episode* – the
-        segment [start_s, end_s] is sliced in-memory (no subprocess), or
-      - a ``str`` file path – a temporary WAV is extracted via FFmpeg (legacy
-        fallback, used when the in-memory array is unavailable).
 
-    Language is fixed to German to avoid misidentification during non-speech
-    segments (laughter, noise, music) and to prevent hallucinations.
-    """
-    model = _get_whisper_model(model_size)
+def _parse_production_from_path(path: Path) -> str:
+    if path.parent.name:
+        return path.parent.name
+    return "Unknown Production"
 
-    if isinstance(audio_source, np.ndarray):
-        # Fast path: slice episode array in-memory – no FFmpeg subprocess needed.
-        start_sample = int(start_s * sample_rate)
-        end_sample   = int(end_s   * sample_rate)
-        audio_chunk  = audio_source[start_sample:end_sample]
-        whisper_segments, _ = model.transcribe(
-            audio_chunk,
-            beam_size=5,
-            language="de",
-            task="transcribe",
-        )
-        seg_list = list(whisper_segments)
-        text = " ".join(seg.text.strip() for seg in seg_list)
-        no_speech_prob = max((seg.no_speech_prob for seg in seg_list), default=0.0)
-        return text, no_speech_prob
 
-    # Legacy path: file path – use FFmpeg to carve out the segment.
-    # Create a temp file in the configured audio-tmp directory, close it,
-    # let FFmpeg write to it, then clean it up in finally.
-    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".wav", dir=AUDIO_TMP_DIR)
-    os.close(tmp_fd)
+def _safe_relpath(path: Path, root: Path) -> str:
     try:
-        cmd = [
-            "ffmpeg", "-y",
-            "-ss", str(start_s), "-to", str(end_s),
-            "-i", audio_source,
-            "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
-            tmp_path,
-        ]
-        subprocess.run(cmd, capture_output=True, check=True)
-        whisper_segments, _ = model.transcribe(
-            tmp_path,
-            beam_size=5,
-            language="de",
-            task="transcribe",
-        )
-        # Materialise the generator so we can iterate twice (text + no_speech_prob)
-        seg_list = list(whisper_segments)
-        text = " ".join(seg.text.strip() for seg in seg_list)
-        # Use the highest no_speech_prob across all sub-segments as the quality
-        # indicator; default to 0.0 when Whisper provides no segments at all.
-        no_speech_prob = max((seg.no_speech_prob for seg in seg_list), default=0.0)
-        return text, no_speech_prob
-    finally:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
+        return str(path.resolve().relative_to(root.resolve()))
+    except ValueError:
+        return str(path.resolve())
 
 
-# ---------------------------------------------------------------------------
-# Main scan pipeline
-# ---------------------------------------------------------------------------
+def _build_face_descriptor(crop_bgr: np.ndarray) -> np.ndarray:
+    import cv2
+
+    gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
+    small = cv2.resize(gray, (16, 8), interpolation=cv2.INTER_AREA)
+    desc = small.astype(np.float32).reshape(-1) / 255.0
+    norm = np.linalg.norm(desc)
+    if norm > 1e-9:
+        desc = desc / norm
+    return desc
+
+
+@dataclass
+class Detection:
+    frame_index: int
+    timestamp_ms: int
+    bbox: tuple[int, int, int, int]
+    confidence: float
+    sharpness: float
+    area_ratio: float
+    embedding: np.ndarray
+    crop_path: str
+    db_id: int | None = None
+
+
+@dataclass
+class Track:
+    detections: list[Detection] = field(default_factory=list)
+    last_ts_ms: int = 0
+
+    def append(self, detection: Detection) -> None:
+        self.detections.append(detection)
+        self.last_ts_ms = detection.timestamp_ms
+
+    @property
+    def first_ts_ms(self) -> int:
+        return self.detections[0].timestamp_ms
+
+    @property
+    def last_bbox(self) -> tuple[int, int, int, int]:
+        return self.detections[-1].bbox
+
 
 def scan_video(
     video_path: str,
-    series_name: str,
-    episode_title: str,
-    transcribe: bool = True,
-    model_size: str = "large-v3-turbo",
-    update_mode: bool = True,
-) -> None:
-    """
-    Full pipeline:
-      1. Extract native-rate mono WAV from video (FFmpeg CUDA, no forced downsampling)
-      2. Sequential pre-processing:
-           a. DeepFilterNet noise suppression on cuda:0 (P100) – temporary, fully
-              freed before Whisper loads (~100 MB VRAM, then empty_cache)
-           b. Whisper model pre-load on cuda:0 (P100)
-      3. Load cleaned 16-kHz audio into memory
-      4. Diarize speakers on cuda:1 (P4 – background thread / producer)
-      5. For each segment: transcribe (cuda:0 / P100 – main thread / consumer)
-                           look up in MariaDB (multi-vector VECTOR_DISTANCE)
-      6. Store / update results in episode_segments
+    *,
+    production: str | None = None,
+    title: str | None = None,
+    episode_code: str | None = None,
+    sample_fps: float = 4.0,
+    min_clear_seconds: float = 2.0,
+    min_face_area_ratio: float = 0.04,
+    min_sharpness: float = 40.0,
+    min_stability: float = 0.18,
+    track_max_gap_ms: int = 600,
+    iou_threshold: float = 0.30,
+    descriptor_threshold: float = 0.72,
+) -> dict:
+    try:
+        import cv2
+    except ImportError as exc:
+        raise RuntimeError("OpenCV not installed. Install opencv-python-headless.") from exc
 
-    Update mode (update_mode=True):
-      - If a segment already exists at the same timecode it is UPDATED, not
-        duplicated.
-      - Segments that were manually assigned by the user are preserved;
-        auto-detected identity assignments are refreshed using the latest
-        supervectors.
+    source = Path(video_path).resolve()
+    if not source.exists():
+        raise FileNotFoundError(f"Video not found: {source}")
 
-    GPU utilisation:
-      cuda:0  P100 (16 GB): DeepFilter (brief, freed) → Whisper (persistent)
-      cuda:1  P4  ( 8 GB):  pyannote diarization (producer thread)
-    """
-    from db.database import (
-        ensure_schema,
-        get_connection,
-        find_nearest_identity,
-        upsert_segment,
-        get_existing_segment,
-        update_segment_match,
-        vector_to_bytes,
-    )
+    production_name = production or _parse_production_from_path(source)
+    video_title = title or source.stem
+    ep_code = episode_code or _parse_episode_code(source.name)
+    duration_ms = _probe_duration_ms(str(source))
+
+    data_root = Path(os.getenv("FACE_DATA_DIR", "data/faces")).resolve()
+    crops_root = data_root / "crops" / source.stem
+    reps_root = data_root / "tracks" / source.stem
+    crops_root.mkdir(parents=True, exist_ok=True)
+    reps_root.mkdir(parents=True, exist_ok=True)
 
     ensure_schema()
+    conn = get_connection()
+    production_id, video_id = upsert_production_and_video(
+        conn,
+        production_title=production_name,
+        video_title=video_title,
+        video_path=str(source),
+        episode_code=ep_code,
+        duration_ms=duration_ms,
+        production_meta={"scanner": "visual-step1"},
+        video_meta={"sample_fps": sample_fps},
+    )
 
-    # Derive the web-preview paths: configured VIDEO_TMP_DIR or same directory
-    # as the source video (original behaviour).
-    video_stem = os.path.splitext(os.path.basename(video_path))[0]
-    if VIDEO_TMP_DIR:
-        web_preview_path   = os.path.join(VIDEO_TMP_DIR, video_stem + ".web.mp4")
-        clean_preview_path = os.path.join(VIDEO_TMP_DIR, video_stem + ".clean.web.mp4")
-    else:
-        web_preview_path   = os.path.splitext(video_path)[0] + ".web.mp4"
-        clean_preview_path = os.path.splitext(video_path)[0] + ".clean.web.mp4"
+    logger.info("Scanning video_id=%s (%s)", video_id, source)
+    set_video_scan_status(conn, video_id, "scanning")
+    clear_video_scan_data(conn, video_id)
 
-    with tempfile.NamedTemporaryFile(suffix=".wav", dir=AUDIO_TMP_DIR, delete=False) as tmp:
-        audio_path = tmp.name
+    cap = cv2.VideoCapture(str(source))
+    if not cap.isOpened():
+        set_video_scan_status(conn, video_id, "failed")
+        conn.close()
+        raise RuntimeError(f"Could not open video: {source}")
 
-    # DeepFilterNet output goes to a separate temp file so the original raw WAV
-    # is preserved and the cleaned copy can be cleaned up independently.
-    clean_audio_path = audio_path + ".clean.wav"
+    native_fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+    if native_fps <= 0:
+        native_fps = 25.0
+    frame_step = max(1, int(round(native_fps / max(sample_fps, 0.5))))
 
-    try:
-        # ── Step 1: Extract audio ──────────────────────────────────────────────
-        extract_audio(video_path, audio_path)
+    cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+    face_detector = cv2.CascadeClassifier(cascade_path)
+    if face_detector.empty():
+        set_video_scan_status(conn, video_id, "failed")
+        conn.close()
+        raise RuntimeError(f"Could not load face detector cascade: {cascade_path}")
 
-        # ── Step 2: Pre-processing – DeepFilter (cuda:0, brief), then Whisper preload ─
-        #
-        # DeepFilterNet hardcodes "cuda" → cuda:0 and ignores set_device().
-        # Run it sequentially and free it completely before loading Whisper so
-        # the two models never share P100 VRAM simultaneously.
-        #
-        # NOTE: transcode_web_preview and transcode_clean_preview are called
-        # AFTER DeepFilter so that clean_audio_path already exists.
+    active_tracks: list[Track] = []
+    finished_tracks: list[Track] = []
+    frame_index = -1
+    sampled_frames = 0
+    detection_count = 0
 
-        if DEEPFILTER_ENABLED:
-            logger.info("DeepFilterNet: noise suppression on %s", DEEPFILTER_DEVICE)
-            try:
-                apply_deepfilter(audio_path, clean_audio_path)
-            except Exception as exc:
-                logger.error("DeepFilterNet failed (non-fatal): %s", exc)
-                _fallback_to_16k(audio_path, clean_audio_path)
-        else:
-            logger.warning(
-                "DeepFilterNet disabled (DEEPFILTER_ENABLED=false) – "
-                "downsampling raw audio to 16 kHz for pipeline"
-            )
-            _fallback_to_16k(audio_path, clean_audio_path)
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        frame_index += 1
+        if frame_index % frame_step != 0:
+            continue
 
-        # Generate the browser-ready previews now that clean_audio_path exists.
-        # stem.web.mp4       = original audio (seekable, for all browsers)
-        # stem.clean.web.mp4 = DeepFilter clean audio (video stream copied, no re-encode)
-        # Both are non-fatal if they fail.
-        if not os.path.exists(web_preview_path):
-            try:
-                transcode_web_preview(video_path, web_preview_path)
-            except Exception as exc:
-                logger.warning("Web preview transcode failed (non-fatal): %s", exc)
+        sampled_frames += 1
+        h, w = frame.shape[:2]
+        if h <= 0 or w <= 0:
+            continue
+        frame_area = float(w * h)
+        timestamp_ms = int((frame_index / native_fps) * 1000.0)
 
-        if os.path.exists(web_preview_path) and not os.path.exists(clean_preview_path):
-            try:
-                transcode_clean_preview(web_preview_path, clean_audio_path, clean_preview_path)
-            except Exception as exc:
-                logger.warning("Clean preview transcode failed (non-fatal): %s", exc)
-
-        if transcribe:
-            logger.info("Pre-loading Whisper model on %s", TRANSCRIPTION_DEVICE)
-            try:
-                _get_whisper_model(model_size)
-                logger.info("Whisper model pre-loaded on %s", TRANSCRIPTION_DEVICE)
-            except Exception as exc:
-                logger.warning("Whisper pre-load failed (will retry per segment): %s", exc)
-
-        # ── Step 3: Load cleaned audio into memory ─────────────────────────────
-        audio_for_pipeline = clean_audio_path  # always exists (copy if DeepFilter off)
-        audio_data: np.ndarray | None = None
-        sample_rate: int = 16000
-        try:
-            import soundfile as sf
-            audio_data, sample_rate = sf.read(
-                audio_for_pipeline, dtype="float32", always_2d=False
-            )
-            logger.info(
-                "Episode audio loaded into memory: %d samples @ %d Hz (%.1f s)",
-                len(audio_data), sample_rate, len(audio_data) / sample_rate,
-            )
-        except Exception as exc:
-            logger.warning(
-                "soundfile load failed – will fall back to per-segment FFmpeg: %s", exc
-            )
-
-        # ── Steps 4-6: Diarize (P4 producer) + Transcribe/Store (P100 consumer) ──
-        #
-        # 64-slot queue: large enough that the producer is never blocked yet
-        # small enough to bound memory for very long episodes.
-
-        _SEGMENT_QUEUE_SIZE = 64
-        seg_queue: queue.Queue = queue.Queue(maxsize=_SEGMENT_QUEUE_SIZE)
-        producer_exc: list[Exception] = []
-
-        def _diarize_producer() -> None:
-            try:
-                for seg in _iter_diarization_segments(audio_for_pipeline):
-                    seg_queue.put(seg)
-            except Exception as exc:  # noqa: BLE001
-                logger.error("Diarization producer failed: %s", exc)
-                producer_exc.append(exc)
-            finally:
-                seg_queue.put(None)  # sentinel – always sent, even on error
-
-        producer = threading.Thread(
-            target=_diarize_producer, daemon=True, name="diarize-P4"
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = face_detector.detectMultiScale(
+            gray,
+            scaleFactor=1.1,
+            minNeighbors=5,
+            minSize=(36, 36),
         )
-        producer.start()
 
-        # Consumer: transcription on P100 + DB writes (main thread)
-        conn = get_connection()
-        segments_stored = 0
-        segments_updated = 0
-        try:
-            while True:
-                seg = seg_queue.get()
-                if seg is None:
-                    break
+        frame_detections: list[Detection] = []
+        for i, (x, y, fw, fh) in enumerate(faces):
+            x = int(max(0, x))
+            y = int(max(0, y))
+            fw = int(min(fw, w - x))
+            fh = int(min(fh, h - y))
+            if fw <= 0 or fh <= 0:
+                continue
+            crop = frame[y : y + fh, x : x + fw]
+            if crop.size == 0:
+                continue
+            sharpness = float(cv2.Laplacian(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), cv2.CV_64F).var())
+            area_ratio = (fw * fh) / frame_area
+            descriptor = _build_face_descriptor(crop)
 
-                transcript = ""
-                no_speech_prob = 0.0
-                if transcribe and seg["embedding"]:
-                    try:
-                        transcript, no_speech_prob = transcribe_segment(
-                            audio_data if audio_data is not None else audio_for_pipeline,
-                            seg["start_ms"] / 1000.0,
-                            seg["end_ms"]   / 1000.0,
-                            sample_rate=sample_rate,
-                            model_size=model_size,
-                        )
-                    except Exception as exc:
-                        logger.warning("Transcription failed: %s", exc)
+            crop_name = f"f{frame_index:08d}_d{i:02d}.jpg"
+            crop_path = crops_root / crop_name
+            cv2.imwrite(str(crop_path), crop)
 
-                # Quality heuristic: flag segments likely to contain laughter,
-                # noise, or too little speech for a reliable voice embedding.
-                duration_s = (seg["end_ms"] - seg["start_ms"]) / 1000.0
-                is_low_quality = (
-                    no_speech_prob > 0.45
-                    or duration_s < 1.2
-                    or len(transcript.strip()) < 5
-                )
-                if is_low_quality:
-                    logger.info(
-                        "[%s–%s] %s → marked is_low_quality "
-                        "(no_speech_prob=%.2f, duration=%.2fs, text_len=%d)",
-                        seg["start_ms"], seg["end_ms"], seg["speaker_label"],
-                        no_speech_prob, duration_s, len(transcript.strip()),
-                    )
+            det = Detection(
+                frame_index=frame_index,
+                timestamp_ms=timestamp_ms,
+                bbox=(x, y, fw, fh),
+                confidence=0.92,
+                sharpness=sharpness,
+                area_ratio=area_ratio,
+                embedding=descriptor,
+                crop_path=_safe_relpath(crop_path, data_root),
+            )
+            det.db_id = create_face_detection(
+                conn,
+                video_id=video_id,
+                frame_index=frame_index,
+                timestamp_ms=timestamp_ms,
+                bbox_x=x,
+                bbox_y=y,
+                bbox_w=fw,
+                bbox_h=fh,
+                confidence=det.confidence,
+                sharpness=sharpness,
+                crop_image_path=det.crop_path,
+                embedding=descriptor.astype(float).tolist(),
+                metadata={"area_ratio": area_ratio},
+            )
+            frame_detections.append(det)
+            detection_count += 1
 
-                # Multi-vector identity search against latest supervectors
-                match_result = {"status": "unknown", "identity_id": None,
-                                "sample_id": None, "distance": None}
-                if seg["embedding"]:
-                    match_result = find_nearest_identity(
-                        conn,
-                        seg["embedding"],
-                        match_threshold=MATCH_THRESHOLD,
-                        suggest_threshold=SUGGEST_THRESHOLD,
-                        min_margin=MIN_MARGIN,
-                    )
-                    if match_result["status"] != "unknown":
-                        logger.info(
-                            "[%s–%s] %s → %s (dist=%.3f, status=%s, via sample %s '%s')",
-                            seg["start_ms"], seg["end_ms"],
-                            seg["speaker_label"],
-                            match_result.get("identity_name"),
-                            match_result.get("distance", 0),
-                            match_result["status"],
-                            match_result.get("sample_id"),
-                            match_result.get("sample_context", ""),
-                        )
+        for track in list(active_tracks):
+            if timestamp_ms - track.last_ts_ms > track_max_gap_ms:
+                finished_tracks.append(track)
+                active_tracks.remove(track)
 
-                emb_bytes = vector_to_bytes(seg["embedding"]) if seg["embedding"] else None
+        unmatched = frame_detections[:]
+        for det in frame_detections:
+            best_track = None
+            best_score = -1.0
+            for track in active_tracks:
+                iou = _iou(track.last_bbox, det.bbox)
+                sim = _cosine_similarity(track.detections[-1].embedding, det.embedding)
+                score = 0.7 * iou + 0.3 * max(0.0, sim)
+                if iou >= iou_threshold and sim >= descriptor_threshold and score > best_score:
+                    best_score = score
+                    best_track = track
+            if best_track is not None:
+                best_track.append(det)
+                if det in unmatched:
+                    unmatched.remove(det)
 
-                # ── Update mode: check for an existing segment at this timecode ──
-                existing = None
-                if update_mode:
-                    existing = get_existing_segment(
-                        conn, series_name, episode_title,
-                        seg["start_ms"], seg["end_ms"],
-                    )
+        for det in unmatched:
+            t = Track()
+            t.append(det)
+            active_tracks.append(t)
 
-                if existing is not None:
-                    # Preserve any manual identity assignment the user made; only
-                    # refresh auto-detected (non-manual) assignments.
-                    # A segment is considered manually assigned when is_suggestion
-                    # was FALSE and identity_id was set – meaning the user confirmed
-                    # or assigned it via the Web UI.
-                    has_manual = (
-                        existing["identity_id"] is not None
-                        and not existing["is_suggestion"]
-                    )
-                    if not has_manual:
-                        # No manual assignment – safe to overwrite with fresh match
-                        update_segment_match(
-                            conn,
-                            segment_id=existing["id"],
-                            identity_id=match_result.get("identity_id"),
-                            matched_sample_id=match_result.get("sample_id"),
-                            match_distance=match_result.get("distance"),
-                            is_suggestion=(match_result["status"] == "suggest"),
-                            embedding=emb_bytes,
-                            transcript=transcript,
-                            is_low_quality=is_low_quality,
-                        )
-                        segments_updated += 1
-                        logger.debug(
-                            "[%s–%s] updated existing segment %s",
-                            seg["start_ms"], seg["end_ms"], existing["id"],
-                        )
-                    else:
-                        logger.debug(
-                            "[%s–%s] segment %s has manual assignment – skipped",
-                            seg["start_ms"], seg["end_ms"], existing["id"],
-                        )
-                else:
-                    upsert_segment(
-                        conn,
-                        series_name=series_name,
-                        episode_title=episode_title,
-                        video_path=video_path,
-                        start_ms=seg["start_ms"],
-                        end_ms=seg["end_ms"],
-                        speaker_label=seg["speaker_label"],
-                        embedding=emb_bytes,
-                        identity_id=match_result.get("identity_id"),
-                        matched_sample_id=match_result.get("sample_id"),
-                        match_distance=match_result.get("distance"),
-                        transcript=transcript,
-                        is_suggestion=(match_result["status"] == "suggest"),
-                        is_low_quality=is_low_quality,
-                    )
-                    segments_stored += 1
+    cap.release()
+    finished_tracks.extend(active_tracks)
 
-        finally:
-            conn.close()
+    persisted_tracks = 0
+    clear_tracks = 0
 
-        producer.join()
-        if producer_exc:
-            logger.error("Diarization failed: %s", producer_exc[0])
-            raise producer_exc[0]
+    for track_idx, track in enumerate(finished_tracks, start=1):
+        if not track.detections:
+            continue
+        duration_s = (track.detections[-1].timestamp_ms - track.detections[0].timestamp_ms) / 1000.0
+        mean_area = float(np.mean([d.area_ratio for d in track.detections]))
+        mean_sharpness_val = float(np.mean([d.sharpness for d in track.detections]))
+        mean_conf = float(np.mean([d.confidence for d in track.detections]))
+        frame_count = len(track.detections)
 
-        logger.info(
-            "Scan complete – %d new segments stored, %d existing segments updated.",
-            segments_stored, segments_updated,
+        ious = []
+        for i in range(1, frame_count):
+            ious.append(_iou(track.detections[i - 1].bbox, track.detections[i].bbox))
+        stability = float(np.mean(ious)) if ious else 0.0
+
+        quality_score = (
+            0.35 * _clamp(mean_area / max(min_face_area_ratio, 1e-6), 0.0, 1.0)
+            + 0.35 * _clamp(mean_sharpness_val / max(min_sharpness, 1.0), 0.0, 1.0)
+            + 0.30 * _clamp(stability / max(min_stability, 1e-6), 0.0, 1.0)
         )
-    finally:
-        for path in (audio_path, clean_audio_path):
-            try:
-                if os.path.exists(path):
-                    os.unlink(path)
-            except OSError:
-                pass
+        relevance_score = (
+            0.50 * _clamp(duration_s / max(min_clear_seconds, 1e-6), 0.0, 1.0)
+            + 0.20 * _clamp(frame_count / max(sample_fps * min_clear_seconds, 1.0), 0.0, 1.0)
+            + 0.30 * _clamp(mean_area / max(min_face_area_ratio, 1e-6), 0.0, 1.0)
+        )
+        is_clear = (
+            duration_s >= min_clear_seconds
+            and mean_area >= min_face_area_ratio
+            and mean_sharpness_val >= min_sharpness
+            and stability >= min_stability
+            and frame_count >= int(sample_fps * min_clear_seconds)
+        )
+        status = "candidate" if is_clear else "background"
+        if is_clear:
+            clear_tracks += 1
 
+        best_det = max(
+            track.detections,
+            key=lambda d: (d.sharpness * (0.5 + d.area_ratio)),
+        )
+        rep_src = data_root / best_det.crop_path
+        rep_name = f"track_{track_idx:05d}.jpg"
+        rep_path = reps_root / rep_name
+        try:
+            rep_img = cv2.imread(str(rep_src))
+            if rep_img is not None:
+                cv2.imwrite(str(rep_path), rep_img)
+                rep_rel = _safe_relpath(rep_path, data_root)
+            else:
+                rep_rel = best_det.crop_path
+        except Exception:
+            rep_rel = best_det.crop_path
 
-# ---------------------------------------------------------------------------
-# CLI entry point
-# ---------------------------------------------------------------------------
+        track_embedding = np.mean(np.array([d.embedding for d in track.detections]), axis=0)
+        track_id = create_face_track(
+            conn,
+            video_id=video_id,
+            start_ms=track.detections[0].timestamp_ms,
+            end_ms=track.detections[-1].timestamp_ms,
+            frame_count=frame_count,
+            mean_face_area=mean_area,
+            mean_sharpness=mean_sharpness_val,
+            mean_confidence=mean_conf,
+            stability_score=stability,
+            quality_score=quality_score,
+            relevance_score=relevance_score,
+            is_clear=is_clear,
+            status=status,
+            representative_image_path=rep_rel,
+            embedding=track_embedding.astype(float).tolist(),
+            metadata={
+                "duration_seconds": duration_s,
+                "global_rule": "step1_clear_track_rule",
+                "thresholds": {
+                    "min_clear_seconds": min_clear_seconds,
+                    "min_face_area_ratio": min_face_area_ratio,
+                    "min_sharpness": min_sharpness,
+                    "min_stability": min_stability,
+                },
+            },
+        )
+        persisted_tracks += 1
+        for det in track.detections:
+            if det.db_id is not None:
+                assign_detection_to_track(conn, det.db_id, track_id)
 
-def parse_filename(filename: str) -> str:
-    """
-    Extract episode code from *filename*.
+    rebuild_overlay_for_video(conn, video_id)
+    set_video_scan_status(conn, video_id, "completed")
+    conn.close()
 
-    Recognises patterns like S01E01, s01e01, S1E1, etc.
-    Returns a normalised string such as "S01E01", or "Movie" if no pattern
-    is found (indicating a film rather than a series episode).
-    """
-    match = re.search(r"[Ss](\d+)[Ee](\d+)", filename)
-    if match:
-        return f"S{int(match.group(1)):02d}E{int(match.group(2)):02d}"
-    return "Movie"
+    return {
+        "production_id": production_id,
+        "video_id": video_id,
+        "video_path": str(source),
+        "sampled_frames": sampled_frames,
+        "detections": detection_count,
+        "tracks": persisted_tracks,
+        "clear_tracks": clear_tracks,
+        "sample_fps": sample_fps,
+    }
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="ice_audio_nexus scanner – diarize & identify speakers in a video"
-    )
-    parser.add_argument("--video",   required=True, help="Path to the video file")
-    parser.add_argument("--series",  required=True, help="Series or movie title (e.g. 'Star Trek TNG')")
-    parser.add_argument("--episode", default=None,
-                        help="Episode title or code (optional – auto-detected from filename; "
-                             "defaults to 'Movie' if no SxxExx pattern is found)")
-    parser.add_argument("--no-transcribe", action="store_true",
-                        help="Skip Whisper transcription (faster)")
-    parser.add_argument("--model", default="large-v3-turbo",
-                        help="Whisper model size (default: large-v3-turbo)")
-    parser.add_argument("--no-update-mode", action="store_true",
-                        help="Disable update mode (always insert new rows, never deduplicate)")
+    parser = argparse.ArgumentParser(description="Step-1 visual face/track scanner")
+    parser.add_argument("--video", required=True, help="Absolute path to source video")
+    parser.add_argument("--production", help="Production title (series/movie)")
+    parser.add_argument("--title", help="Video/episode title")
+    parser.add_argument("--episode-code", help="Optional episode code (e.g. S01E01)")
+    parser.add_argument("--fps", type=float, default=float(os.getenv("FACE_SCAN_FPS", "4.0")))
+    parser.add_argument("--min-clear-seconds", type=float, default=float(os.getenv("FACE_MIN_CLEAR_SECONDS", "2.0")))
+    parser.add_argument("--min-face-area-ratio", type=float, default=float(os.getenv("FACE_MIN_AREA_RATIO", "0.04")))
+    parser.add_argument("--min-sharpness", type=float, default=float(os.getenv("FACE_MIN_SHARPNESS", "40.0")))
+    parser.add_argument("--min-stability", type=float, default=float(os.getenv("FACE_MIN_STABILITY", "0.18")))
     args = parser.parse_args()
 
-    # Auto-detect episode from filename when not provided explicitly
-    episode_title = args.episode or parse_filename(os.path.basename(args.video))
-    logger.info("Series: %s | Episode: %s", args.series, episode_title)
-
-    scan_video(
+    result = scan_video(
         video_path=args.video,
-        series_name=args.series,
-        episode_title=episode_title,
-        transcribe=not args.no_transcribe,
-        model_size=args.model,
-        update_mode=not args.no_update_mode,
+        production=args.production,
+        title=args.title,
+        episode_code=args.episode_code,
+        sample_fps=args.fps,
+        min_clear_seconds=args.min_clear_seconds,
+        min_face_area_ratio=args.min_face_area_ratio,
+        min_sharpness=args.min_sharpness,
+        min_stability=args.min_stability,
     )
+    logger.info("Scan completed: %s", result)
 
 
 if __name__ == "__main__":

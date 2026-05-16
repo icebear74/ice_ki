@@ -1,1864 +1,995 @@
 """
-ice_audio_nexus – database.py
-Auto-creates all required tables in MariaDB 11.7 on first run.
-
-Schema (Multi-Vector Identity + Actor/Role/Production):
-  actors           – real-world persons (actors and/or voice/dubbing actors)
-  roles            – fictional characters / personas (e.g. 'Jean-Luc Picard')
-  productions      – movies or TV series (e.g. 'Star Trek TNG')
-  voice_castings   – links production + role + physical actor + voice actor + language
-  identities       – voice recognition profile linked to a voice actor
-  voice_samples    – n rows per identity; each holds a VECTOR(512) embedding
-  episode_segments – timeline of detected speaker segments per episode
+ice_audio_nexus – visual-first Step-1 persistence layer.
 """
 
+from __future__ import annotations
+
+import json
 import math
 import os
-import struct
-import logging
+from typing import Any
 
 import mariadb
-import numpy as np
 from dotenv import load_dotenv
 
 load_dotenv()
 
-logger = logging.getLogger(__name__)
 
-
-def _sanitize_float(v: float | None) -> float | None:
-    """Convert NaN or Inf to None so MariaDB does not raise NotSupportedError."""
-    if v is None:
-        return None
-    try:
-        if math.isnan(v) or math.isinf(v):
-            return None
-    except TypeError:
-        return None
-    return v
-
-# ---------------------------------------------------------------------------
-# DDL
-# ---------------------------------------------------------------------------
-
-_DDL = [
-    # 0. Actors – real-world persons (actors and/or voice/dubbing actors)
+DDL_STATEMENTS: list[str] = [
     """
     CREATE TABLE IF NOT EXISTS actors (
         id          INT AUTO_INCREMENT PRIMARY KEY,
         name        VARCHAR(255) NOT NULL,
-        description TEXT,
-        image_blob  MEDIUMBLOB NULL  COMMENT 'Profile photo stored as JPEG bytes',
-        image_mime  VARCHAR(50)  NULL DEFAULT 'image/jpeg',
+        description TEXT NULL,
         created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-                                       ON UPDATE CURRENT_TIMESTAMP,
+        updated_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         UNIQUE KEY uq_actor_name (name)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
-
-    # 1. Roles – fictional characters / personas
+    """
+    CREATE TABLE IF NOT EXISTS productions (
+        id              INT AUTO_INCREMENT PRIMARY KEY,
+        title           VARCHAR(255) NOT NULL,
+        production_type ENUM('series','movie','other') NOT NULL DEFAULT 'series',
+        season_label    VARCHAR(64) NULL,
+        metadata_json   LONGTEXT NULL,
+        created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_production_title (title)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
     """
     CREATE TABLE IF NOT EXISTS roles (
         id          INT AUTO_INCREMENT PRIMARY KEY,
         name        VARCHAR(255) NOT NULL,
-        description TEXT,
-        image_blob  MEDIUMBLOB NULL  COMMENT 'Character image stored as JPEG bytes',
-        image_mime  VARCHAR(50)  NULL DEFAULT 'image/jpeg',
+        description TEXT NULL,
+        created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         UNIQUE KEY uq_role_name (name)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
-
-    # 2. Productions – movies or TV series
     """
-    CREATE TABLE IF NOT EXISTS productions (
-        id    INT AUTO_INCREMENT PRIMARY KEY,
-        title VARCHAR(255) NOT NULL,
-        year  YEAR NULL,
-        type  ENUM('Movie','Series') NOT NULL DEFAULT 'Series',
-        UNIQUE KEY uq_production_title (title)
+    CREATE TABLE IF NOT EXISTS actor_roles (
+        id            INT AUTO_INCREMENT PRIMARY KEY,
+        actor_id      INT NOT NULL,
+        production_id INT NULL,
+        role_id       INT NOT NULL,
+        notes         TEXT NULL,
+        created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (actor_id) REFERENCES actors(id) ON DELETE CASCADE,
+        FOREIGN KEY (production_id) REFERENCES productions(id) ON DELETE CASCADE,
+        FOREIGN KEY (role_id) REFERENCES roles(id) ON DELETE CASCADE,
+        UNIQUE KEY uq_actor_role (actor_id, production_id, role_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
-
-    # 3. Voice castings – who plays whom in which production/language
-    #    actor_id       = physical/on-screen actor (e.g. Patrick Stewart)
-    #    voice_actor_id = dubbing voice actor (e.g. Rolf Schult for German dub)
-    #    In the original language actor_id == voice_actor_id
     """
-    CREATE TABLE IF NOT EXISTS voice_castings (
+    CREATE TABLE IF NOT EXISTS videos (
         id              INT AUTO_INCREMENT PRIMARY KEY,
-        production_id   INT NOT NULL,
-        role_id         INT NOT NULL,
-        actor_id        INT NOT NULL,
-        voice_actor_id  INT NOT NULL,
-        language        VARCHAR(10) NOT NULL DEFAULT 'de'
-                        COMMENT 'BCP-47 language tag, e.g. de, en',
-        FOREIGN KEY (production_id)  REFERENCES productions(id) ON DELETE CASCADE,
-        FOREIGN KEY (role_id)        REFERENCES roles(id)       ON DELETE CASCADE,
-        FOREIGN KEY (actor_id)       REFERENCES actors(id)      ON DELETE CASCADE,
-        FOREIGN KEY (voice_actor_id) REFERENCES actors(id)      ON DELETE CASCADE,
-        UNIQUE KEY uq_casting (production_id, role_id, language)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """,
-
-    # 4. Identity anchor – voice recognition profile (one per voice actor or character voice)
-    #    NOTE: must be created BEFORE supervector_groups (which has a FK to this table)
-    """
-    CREATE TABLE IF NOT EXISTS identities (
-        id               INT AUTO_INCREMENT PRIMARY KEY,
-        name             VARCHAR(255) NOT NULL,
-        description      TEXT,
-        actor_id         INT DEFAULT NULL
-                         COMMENT 'Legacy link to actors.id (physical actor)',
-        voice_actor_id   INT DEFAULT NULL
-                         COMMENT 'The voice actor whose voice this identity represents',
-        voice_casting_id INT DEFAULT NULL
-                         COMMENT 'Optional link to the specific voice_casting entry (role+production) this identity represents',
-        context_filter   VARCHAR(255) DEFAULT NULL
-                         COMMENT 'SQL LIKE pattern for context matching, e.g. Star Trek%',
-        created_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-                                             ON UPDATE CURRENT_TIMESTAMP,
-        UNIQUE KEY uq_identity_name (name),
-        FOREIGN KEY (actor_id)         REFERENCES actors(id)        ON DELETE SET NULL,
-        FOREIGN KEY (voice_actor_id)   REFERENCES actors(id)        ON DELETE SET NULL,
-        FOREIGN KEY (voice_casting_id) REFERENCES voice_castings(id) ON DELETE SET NULL,
-        INDEX idx_identity_actor         (actor_id),
-        INDEX idx_identity_voice_actor   (voice_actor_id),
-        INDEX idx_identity_voice_casting (voice_casting_id)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """,
-
-    # 5. Supervector groups – named subsets of voice samples that form one supervector
-    #    NOTE: identities (index 4) must exist first for the FK constraint
-    """
-    CREATE TABLE IF NOT EXISTS supervector_groups (
-        id          INT AUTO_INCREMENT PRIMARY KEY,
-        identity_id INT NOT NULL,
-        name        VARCHAR(255) NOT NULL COMMENT 'e.g. TNG Staffel 1-7 or Picard Serie',
-        created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (identity_id) REFERENCES identities(id) ON DELETE CASCADE,
-        INDEX idx_svgroup_identity (identity_id)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """,
-
-    # 6. Voice samples – many per identity, each with its own 512-dim vector
-    """
-    CREATE TABLE IF NOT EXISTS voice_samples (
-        id          INT AUTO_INCREMENT PRIMARY KEY,
-        identity_id INT NOT NULL,
-        embedding   VECTOR(512) NOT NULL,
-        context     VARCHAR(255) DEFAULT NULL COMMENT 'e.g. TNG Season 1, Picard S3E02, SUPERVECTOR',
-        is_confirmed BOOLEAN NOT NULL DEFAULT FALSE,
-        is_active   BOOLEAN NOT NULL DEFAULT TRUE
-                    COMMENT 'FALSE = deactivated (e.g. replaced by supervector)',
-        is_low_quality BOOLEAN NOT NULL DEFAULT FALSE
-                    COMMENT 'True = heuristically flagged as laughter/noise/short utterance; excluded from supervectors',
-        created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-                                       ON UPDATE CURRENT_TIMESTAMP,
-        FOREIGN KEY (identity_id) REFERENCES identities(id) ON DELETE CASCADE,
-        INDEX idx_vs_identity (identity_id),
-        INDEX idx_vs_active (is_active)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-    """,
-
-    # 7. Episode segments – speaker timeline with link to matched identity
-    """
-    CREATE TABLE IF NOT EXISTS episode_segments (
-        id              INT AUTO_INCREMENT PRIMARY KEY,
-        series_name     VARCHAR(255),
-        episode_title   VARCHAR(255),
-        video_path      TEXT,
-        start_ms        INT NOT NULL,
-        end_ms          INT NOT NULL,
-        speaker_label   VARCHAR(100) COMMENT 'Temporary diarization label (SPEAKER_01)',
-        embedding       VECTOR(512) NULL COMMENT 'Raw speaker embedding from diarization',
-        identity_id     INT DEFAULT NULL,
-        matched_sample_id INT DEFAULT NULL COMMENT 'Which voice_sample triggered the match',
-        match_distance  FLOAT DEFAULT NULL COMMENT 'Cosine distance of the winning match',
-        transcript      TEXT,
-        confidence      FLOAT DEFAULT NULL,
-        is_suggestion   BOOLEAN NOT NULL DEFAULT FALSE
-                        COMMENT 'True = proposed match (slightly high distance), needs user confirmation',
-        is_low_quality  BOOLEAN NOT NULL DEFAULT FALSE
-                        COMMENT 'True = heuristically flagged as laughter/noise/short utterance',
-        tts_wav_path    TEXT NULL COMMENT 'Path to extracted TTS WAV snippet (if exported)',
+        production_id   INT NULL,
+        title           VARCHAR(255) NOT NULL,
+        episode_code    VARCHAR(64) NULL,
+        video_path      TEXT NOT NULL,
+        duration_ms     INT NULL,
+        scan_status     ENUM('pending','scanning','completed','failed') NOT NULL DEFAULT 'pending',
+        last_scanned_at TIMESTAMP NULL,
+        metadata_json   LONGTEXT NULL,
         created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-                                           ON UPDATE CURRENT_TIMESTAMP,
-        FOREIGN KEY (identity_id)       REFERENCES identities(id)    ON DELETE SET NULL,
-        FOREIGN KEY (matched_sample_id) REFERENCES voice_samples(id) ON DELETE SET NULL,
-        INDEX idx_seg_episode  (series_name, episode_title),
-        INDEX idx_seg_identity (identity_id),
-        INDEX idx_seg_video    (video_path(512))
+        updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        FOREIGN KEY (production_id) REFERENCES productions(id) ON DELETE SET NULL,
+        UNIQUE KEY uq_video_path (video_path(512)),
+        INDEX idx_video_prod (production_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS face_tracks (
+        id                   INT AUTO_INCREMENT PRIMARY KEY,
+        video_id             INT NOT NULL,
+        start_ms             INT NOT NULL,
+        end_ms               INT NOT NULL,
+        frame_count          INT NOT NULL,
+        mean_face_area       FLOAT NULL,
+        mean_sharpness       FLOAT NULL,
+        mean_confidence      FLOAT NULL,
+        stability_score      FLOAT NULL,
+        quality_score        FLOAT NULL,
+        relevance_score      FLOAT NULL,
+        is_clear             BOOLEAN NOT NULL DEFAULT FALSE,
+        status               ENUM('candidate','assigned','ignored','unknown','background') NOT NULL DEFAULT 'candidate',
+        assigned_actor_id    INT NULL,
+        assigned_role_id     INT NULL,
+        assignment_source    ENUM('manual','rematch','system') NULL,
+        match_actor_id       INT NULL,
+        match_score          FLOAT NULL,
+        representative_image_path TEXT NULL,
+        embedding_json       LONGTEXT NULL,
+        metadata_json        LONGTEXT NULL,
+        created_at           TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at           TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE,
+        FOREIGN KEY (assigned_actor_id) REFERENCES actors(id) ON DELETE SET NULL,
+        FOREIGN KEY (assigned_role_id) REFERENCES roles(id) ON DELETE SET NULL,
+        FOREIGN KEY (match_actor_id) REFERENCES actors(id) ON DELETE SET NULL,
+        INDEX idx_track_video (video_id),
+        INDEX idx_track_actor (assigned_actor_id),
+        INDEX idx_track_match (match_actor_id),
+        INDEX idx_track_clear (is_clear, status)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS face_detections (
+        id               INT AUTO_INCREMENT PRIMARY KEY,
+        video_id         INT NOT NULL,
+        track_id         INT NULL,
+        frame_index      INT NOT NULL,
+        timestamp_ms     INT NOT NULL,
+        bbox_x           INT NOT NULL,
+        bbox_y           INT NOT NULL,
+        bbox_w           INT NOT NULL,
+        bbox_h           INT NOT NULL,
+        confidence       FLOAT NULL,
+        sharpness        FLOAT NULL,
+        crop_image_path  TEXT NULL,
+        embedding_json   LONGTEXT NULL,
+        metadata_json    LONGTEXT NULL,
+        created_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE,
+        FOREIGN KEY (track_id) REFERENCES face_tracks(id) ON DELETE SET NULL,
+        INDEX idx_det_video_time (video_id, timestamp_ms),
+        INDEX idx_det_track (track_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS face_samples (
+        id              INT AUTO_INCREMENT PRIMARY KEY,
+        actor_id        INT NOT NULL,
+        source_track_id INT NULL,
+        image_path      TEXT NULL,
+        embedding_json  LONGTEXT NOT NULL,
+        quality_score   FLOAT NULL,
+        is_confirmed    BOOLEAN NOT NULL DEFAULT TRUE,
+        notes           VARCHAR(255) NULL,
+        created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        FOREIGN KEY (actor_id) REFERENCES actors(id) ON DELETE CASCADE,
+        FOREIGN KEY (source_track_id) REFERENCES face_tracks(id) ON DELETE SET NULL,
+        INDEX idx_sample_actor (actor_id, is_confirmed)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS overlay_events (
+        id               INT AUTO_INCREMENT PRIMARY KEY,
+        video_id         INT NOT NULL,
+        track_id         INT NOT NULL,
+        timestamp_ms     INT NOT NULL,
+        bbox_x           INT NOT NULL,
+        bbox_y           INT NOT NULL,
+        bbox_w           INT NOT NULL,
+        bbox_h           INT NOT NULL,
+        label            VARCHAR(255) NULL,
+        status           VARCHAR(32) NOT NULL,
+        confidence       FLOAT NULL,
+        created_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE,
+        FOREIGN KEY (track_id) REFERENCES face_tracks(id) ON DELETE CASCADE,
+        INDEX idx_overlay_video_time (video_id, timestamp_ms)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
 ]
 
-# ---------------------------------------------------------------------------
-# Connection helpers
-# ---------------------------------------------------------------------------
 
-def _get_conn_params() -> dict:
+def _conn_params() -> dict[str, Any]:
     return {
-        "host":     os.getenv("DB_HOST", "localhost"),
-        "port":     int(os.getenv("DB_PORT", "3306")),
-        "user":     os.getenv("DB_USER"),
+        "host": os.getenv("DB_HOST", "localhost"),
+        "port": int(os.getenv("DB_PORT", "3306")),
+        "user": os.getenv("DB_USER"),
         "password": os.getenv("DB_PASSWORD"),
         "database": os.getenv("DB_NAME", "ice_nexus_db"),
     }
 
 
 def get_connection() -> mariadb.Connection:
-    params = _get_conn_params()
-    return mariadb.connect(**params)
+    return mariadb.connect(**_conn_params())
 
 
-# ---------------------------------------------------------------------------
-# Vector math helpers
-# ---------------------------------------------------------------------------
-
-def normalize_vector(vec: list[float]) -> list[float]:
-    """L2-normalize *vec* to unit length. Returns the original list if norm ≈ 0."""
-    arr = np.array(vec, dtype=np.float32)
-    norm = float(np.linalg.norm(arr))
-    if norm < 1e-6:
-        return vec
-    return (arr / norm).tolist()
-
-
-def compute_adaptive_clusters_for_identity(
-    conn: "mariadb.Connection",
-    identity_id: int,
-    distance_threshold: float = 0.35,
-    min_samples_for_clustering: int = 4,
-    outlier_ratio: float = 0.15,
-) -> list[list[int]]:
-    """
-    Fetch all free, non-low-quality, active samples for *identity_id* and
-    group them into adaptive clusters using AgglomerativeClustering.
-
-    Algorithm:
-      1. L2-normalise every vector.
-      2. Remove the worst *outlier_ratio* fraction (distance to provisional mean).
-      3. If fewer than *min_samples_for_clustering* samples remain → single group.
-      4. Otherwise run AgglomerativeClustering (average linkage, cosine
-         distance, no upper limit on cluster count) with *distance_threshold*.
-         Samples whose average pairwise cosine distance to an existing cluster
-         exceeds the threshold automatically open a new "Expert Cluster".
-
-    *distance_threshold* is a **cosine distance** (0 = identical, 2 = opposite).
-    Typical same-speaker intra-session distance: 0.05–0.15; across episodes:
-    0.10–0.30.  The default of 0.35 allows grouping speaker samples from
-    different recording contexts while still separating genuinely distinct
-    voice characteristics.
-
-    Only clusters with **≥ 2 source samples** are returned; single-sample
-    "clusters" remain as free samples so they can be grouped in a future run
-    once more similar samples arrive.  If every cluster is a singleton (i.e.
-    the threshold is still too tight for this identity) the function falls
-    back to a single group containing all filtered samples.
-
-    Returns a list of sample-ID lists – one sublist per cluster.
-    An empty list means no eligible samples exist for this identity.
-    """
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT id, embedding FROM voice_samples
-        WHERE identity_id = ?
-          AND (context IS NULL OR context != 'SUPERVECTOR')
-          AND used_in_group_id IS NULL
-          AND is_low_quality = FALSE
-          AND is_active = TRUE
-        ORDER BY created_at
-        """,
-        (identity_id,),
-    )
-    rows = cur.fetchall()
-    cur.close()
-
-    if not rows:
-        return []
-
-    valid_ids: list[int] = []
-    raw_vecs: list[list[float]] = []
-    for row in rows:
-        vec = np.frombuffer(row[1], dtype=np.float32)
-        if vec.shape[0] == 512:
-            valid_ids.append(row[0])
-            raw_vecs.append(normalize_vector(vec.tolist()))
-
-    if not valid_ids:
-        return []
-
-    data = np.array(raw_vecs, dtype=np.float32)
-
-    # Phase 1: outlier rejection
-    mean_v = np.mean(data, axis=0)
-    distances = np.linalg.norm(data - mean_v, axis=1)
-    num_to_keep = max(1, int(len(data) * (1.0 - outlier_ratio)))
-    keep_idx = np.argsort(distances)[:num_to_keep]
-    filtered_data = data[keep_idx]
-    filtered_ids = [valid_ids[i] for i in keep_idx]
-
-    if len(filtered_ids) < min_samples_for_clustering:
-        # Not enough samples for multi-centroid clustering → single group
-        return [filtered_ids]
-
-    # Phase 2: adaptive clustering
-    # NOTE: sklearn is an optional dependency. The lazy import here provides a
-    # graceful fallback to single-cluster behaviour when sklearn is not installed.
-    try:
-        from sklearn.cluster import AgglomerativeClustering  # type: ignore[import]
-    except ImportError:
-        logger.warning(
-            "scikit-learn not available – falling back to single-cluster supervector"
-        )
-        return [filtered_ids]
-
-    # distance_threshold is a cosine distance (0..2 for unit vectors).
-    # sklearn ≥1.2 uses the 'metric' keyword; older versions use 'affinity'.
-    try:
-        clustering = AgglomerativeClustering(
-            n_clusters=None,
-            distance_threshold=distance_threshold,
-            metric="cosine",
-            linkage="average",
-            compute_full_tree=True,
-        )
-    except TypeError:
-        # sklearn < 1.2 compatibility
-        clustering = AgglomerativeClustering(
-            n_clusters=None,
-            distance_threshold=distance_threshold,
-            affinity="cosine",
-            linkage="average",
-            compute_full_tree=True,
-        )
-    labels = clustering.fit_predict(filtered_data)
-
-    cluster_map: dict[int, list[int]] = {}
-    for sample_id, label in zip(filtered_ids, labels):
-        cluster_map.setdefault(int(label), []).append(sample_id)
-
-    # Keep only clusters with ≥ 2 source samples – a single-sample "cluster" is
-    # just an isolated outlier that did not merge with anything.  Those samples
-    # stay free and can be grouped in future runs once more similar samples arrive.
-    # Exception: if *every* cluster is a singleton (threshold still too tight for
-    # this identity), fall back to a single group so at least one supervector is
-    # created.
-    real_clusters = [ids for ids in cluster_map.values() if len(ids) >= 2]
-    if not real_clusters:
-        # All singletons → single group fallback
-        return [filtered_ids]
-    return real_clusters
-
-
-def validate_clusters(
-    conn: "mariadb.Connection",
-    identity_id: int,
-) -> list[dict]:
-    """
-    Cross-validate the active supervector clusters for *identity_id*.
-
-    **Internal cross-validation** (``hit_rate_pct``):
-    For each supervector group (cluster centroid), compute what fraction of
-    the source samples that were used to create it are *correctly* identified
-    as closest to that centroid when compared against **all** other active
-    supervector centroids for the same identity.
-
-    **Segment coverage** (``segment_coverage_pct``, ``segment_count``):
-    For every episode segment assigned to this identity (with a valid
-    embedding), find the nearest centroid.  The *segment_coverage_pct* for a
-    cluster is the fraction of all such segments that map to it.  A cluster
-    with high coverage represents many real occurrences of the speaker in the
-    episode data – not just the training samples.
-
-    Returns a list of dicts, one per group::
-
-        {
-          "group_id":              int,
-          "group_name":            str,
-          "sample_count":          int,
-          "hit_rate_pct":          float,   # 0-100 %  (internal cross-val)
-          "context_distribution":  {context_str: pct_float, …},
-          "segment_coverage_pct":  float | None,  # 0-100 %, None if no segments
-          "segment_count":         int,     # segments nearest to this centroid
-          "total_segments":        int,     # total segments for this identity
-        }
-    """
-    cur = conn.cursor()
-
-    # Fetch all active supervector centroids for this identity
-    cur.execute(
-        """
-        SELECT vs.id, vs.embedding, sg.id AS group_id, sg.name AS group_name
-        FROM voice_samples vs
-        JOIN supervector_groups sg ON sg.id = vs.supervector_group_id
-        WHERE vs.identity_id = ?
-          AND vs.context = 'SUPERVECTOR'
-          AND vs.is_active = TRUE
-        ORDER BY sg.id
-        """,
-        (identity_id,),
-    )
-    sv_rows = cur.fetchall()
-    if not sv_rows:
-        cur.close()
-        return []
-
-    sv_centroids: list[dict] = []
-    for row in sv_rows:
-        vec = np.frombuffer(row[1], dtype=np.float32)
-        if vec.shape[0] == 512:
-            sv_centroids.append({
-                "sv_sample_id": row[0],
-                "embedding":    np.array(normalize_vector(vec.tolist()), dtype=np.float32),
-                "group_id":     row[2],
-                "group_name":   row[3],
-            })
-
-    if not sv_centroids:
-        cur.close()
-        return []
-
-    centroid_matrix = np.stack([c["embedding"] for c in sv_centroids], axis=0)
-    group_ids_order = [c["group_id"] for c in sv_centroids]
-
-    # ── Internal cross-validation ─────────────────────────────────────────
-    results: list[dict] = []
-    for centroid_info in sv_centroids:
-        group_id   = centroid_info["group_id"]
-        group_name = centroid_info["group_name"]
-
-        # Fetch the source samples that were merged into this group
-        cur.execute(
-            """
-            SELECT id, embedding, context
-            FROM voice_samples
-            WHERE used_in_group_id = ?
-            ORDER BY created_at
-            """,
-            (group_id,),
-        )
-        src_rows = cur.fetchall()
-
-        if not src_rows:
-            results.append({
-                "group_id":             group_id,
-                "group_name":           group_name,
-                "sample_count":         0,
-                "hit_rate_pct":         0.0,
-                "context_distribution": {},
-            })
-            continue
-
-        hits = 0
-        valid_count = 0
-        contexts: dict[str, int] = {}
-
-        for src_row in src_rows:
-            src_raw = np.frombuffer(src_row[1], dtype=np.float32)
-            if src_raw.shape[0] != 512:
-                continue
-            src_emb = np.array(normalize_vector(src_raw.tolist()), dtype=np.float32)
-
-            # Euclidean distance on L2-normalised vectors ≈ cosine distance
-            dists = np.linalg.norm(centroid_matrix - src_emb, axis=1)
-            nearest_group_id = group_ids_order[int(np.argmin(dists))]
-
-            if nearest_group_id == group_id:
-                hits += 1
-
-            valid_count += 1
-            ctx = src_row[2] or "unknown"
-            contexts[ctx] = contexts.get(ctx, 0) + 1
-
-        hit_rate = (hits / valid_count * 100.0) if valid_count > 0 else 0.0
-        total_ctx = sum(contexts.values())
-        ctx_dist = (
-            {k: round(v / total_ctx * 100.0, 1) for k, v in contexts.items()}
-            if total_ctx > 0
-            else {}
-        )
-
-        results.append({
-            "group_id":             group_id,
-            "group_name":           group_name,
-            "sample_count":         valid_count,
-            "hit_rate_pct":         round(hit_rate, 1),
-            "context_distribution": ctx_dist,
-        })
-
-    # ── Segment coverage ─────────────────────────────────────────────────
-    # Map each cluster to how many episode segments nearest to it.
-    # Segments come from episode_segments.embedding (diarization embeddings).
-    cur.execute(
-        """
-        SELECT embedding
-        FROM episode_segments
-        WHERE identity_id = ?
-          AND embedding IS NOT NULL
-        """,
-        (identity_id,),
-    )
-    seg_rows = cur.fetchall()
-    cur.close()
-
-    seg_hits: dict[int, int] = {c["group_id"]: 0 for c in sv_centroids}
-    total_segments = 0
-    for seg_row in seg_rows:
-        seg_raw = np.frombuffer(seg_row[0], dtype=np.float32)
-        if seg_raw.shape[0] != 512:
-            continue
-        seg_emb = np.array(normalize_vector(seg_raw.tolist()), dtype=np.float32)
-        dists = np.linalg.norm(centroid_matrix - seg_emb, axis=1)
-        nearest_gid = group_ids_order[int(np.argmin(dists))]
-        seg_hits[nearest_gid] = seg_hits.get(nearest_gid, 0) + 1
-        total_segments += 1
-
-    # Merge segment coverage into results
-    for r in results:
-        gid = r["group_id"]
-        count = seg_hits.get(gid, 0)
-        r["segment_count"]        = count
-        r["total_segments"]       = total_segments
-        r["segment_coverage_pct"] = (
-            round(count / total_segments * 100.0, 1)
-            if total_segments > 0 else None
-        )
-
-    return results
-
-
-def calculate_robust_supervector(
-    embeddings: list[list[float]],
-    outlier_ratio: float = 0.2,
-) -> list[float] | None:
-    """
-    Compute a robust centroid from *embeddings* by:
-      1. L2-normalizing every vector.
-      2. Computing the provisional mean.
-      3. Sorting samples by Euclidean distance to the mean and
-         discarding the worst *outlier_ratio* fraction.
-      4. Re-computing the centroid on the remaining samples.
-      5. L2-normalizing the result.
-
-    Returns None when *embeddings* is empty.
-    """
-    if not embeddings:
+def _to_json(value: Any | None) -> str | None:
+    if value is None:
         return None
-    data = np.array([normalize_vector(e) for e in embeddings], dtype=np.float32)
-    mean_v = np.mean(data, axis=0)
-    distances = np.linalg.norm(data - mean_v, axis=1)
-    num_to_keep = max(1, int(len(data) * (1 - outlier_ratio)))
-    idx_to_keep = np.argsort(distances)[:num_to_keep]
-    final_centroid = np.mean(data[idx_to_keep], axis=0)
-    return normalize_vector(final_centroid.tolist())
+    return json.dumps(value, ensure_ascii=False)
 
 
-# ---------------------------------------------------------------------------
-# Schema bootstrap
-# ---------------------------------------------------------------------------
+def _from_json(value: str | None, fallback: Any) -> Any:
+    if not value:
+        return fallback
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return fallback
+
+
+def _sanitize_float(value: float | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        if math.isnan(value) or math.isinf(value):
+            return None
+    except TypeError:
+        return None
+    return float(value)
+
 
 def ensure_schema() -> None:
-    """Create all tables if they do not exist yet. Called on application start."""
     conn = get_connection()
     try:
         cur = conn.cursor()
-        for ddl in _DDL:
+        for ddl in DDL_STATEMENTS:
             cur.execute(ddl)
-
-        # ── Migrate pre-existing tables ──────────────────────────────────────
-        # supervector_groups table (new in this version)
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS supervector_groups (
-                id          INT AUTO_INCREMENT PRIMARY KEY,
-                identity_id INT NOT NULL,
-                name        VARCHAR(255) NOT NULL,
-                created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (identity_id) REFERENCES identities(id) ON DELETE CASCADE,
-                INDEX idx_svgroup_identity (identity_id)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-            """
-        )
-        # voice_samples: supervector group membership columns
-        cur.execute(
-            """
-            ALTER TABLE voice_samples
-            ADD COLUMN IF NOT EXISTS supervector_group_id INT NULL
-                COMMENT 'If set, this IS the supervector sample for that group'
-            """
-        )
-        cur.execute(
-            """
-            ALTER TABLE voice_samples
-            ADD COLUMN IF NOT EXISTS used_in_group_id INT NULL
-                COMMENT 'If set, this sample was merged into this supervector group'
-            """
-        )
-        # actors: add new columns if missing
-        for col_sql in [
-            "ALTER TABLE actors ADD COLUMN IF NOT EXISTS description TEXT NULL",
-            "ALTER TABLE actors ADD COLUMN IF NOT EXISTS image_blob MEDIUMBLOB NULL COMMENT 'Profile photo stored as JPEG bytes'",
-            "ALTER TABLE actors ADD COLUMN IF NOT EXISTS image_mime VARCHAR(50) NULL DEFAULT 'image/jpeg'",
-        ]:
-            cur.execute(col_sql)
-
-        # identities: add voice_actor_id if missing
-        cur.execute(
-            """
-            ALTER TABLE identities
-            ADD COLUMN IF NOT EXISTS voice_actor_id INT NULL
-                COMMENT 'The voice actor whose voice this identity represents'
-            """
-        )
-        # identities: add voice_casting_id if missing
-        cur.execute(
-            """
-            ALTER TABLE identities
-            ADD COLUMN IF NOT EXISTS voice_casting_id INT NULL
-                COMMENT 'Optional link to the specific voice_casting entry this identity represents'
-            """
-        )
-
-        # episode_segments: add embedding column if missing
-        cur.execute(
-            """
-            ALTER TABLE episode_segments
-            ADD COLUMN IF NOT EXISTS embedding VECTOR(512) NULL
-                COMMENT 'Raw speaker embedding from diarization'
-            """
-        )
-        # episode_segments: add tts_wav_path column if missing
-        cur.execute(
-            """
-            ALTER TABLE episode_segments
-            ADD COLUMN IF NOT EXISTS tts_wav_path TEXT NULL
-                COMMENT 'Path to extracted TTS WAV snippet (if exported)'
-            """
-        )
-        # episode_segments: add is_low_quality column if missing
-        cur.execute(
-            """
-            ALTER TABLE episode_segments
-            ADD COLUMN IF NOT EXISTS is_low_quality BOOLEAN NOT NULL DEFAULT FALSE
-                COMMENT 'True = heuristically flagged as laughter/noise/short utterance'
-            """
-        )
-
-        # voice_samples: add is_active column if missing
-        cur.execute(
-            """
-            ALTER TABLE voice_samples
-            ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE
-                COMMENT 'FALSE = deactivated (e.g. replaced by supervector)'
-            """
-        )
-        # voice_samples: ensure context column is long enough
-        cur.execute(
-            """
-            ALTER TABLE voice_samples
-            MODIFY COLUMN context VARCHAR(255) DEFAULT NULL
-                COMMENT 'e.g. TNG Season 1, Picard S3E02, SUPERVECTOR'
-            """
-        )
-        # voice_samples: add is_low_quality column if missing
-        cur.execute(
-            """
-            ALTER TABLE voice_samples
-            ADD COLUMN IF NOT EXISTS is_low_quality BOOLEAN NOT NULL DEFAULT FALSE
-                COMMENT 'True = heuristically flagged as laughter/noise/short utterance; excluded from supervectors'
-            """
-        )
-
         conn.commit()
-        logger.info("Database schema verified / created.")
     finally:
         conn.close()
 
 
-# ---------------------------------------------------------------------------
-# Vector serialisation helpers (MariaDB VECTOR uses raw IEEE 754 float32)
-# ---------------------------------------------------------------------------
-
-def vector_to_bytes(embedding: list[float]) -> bytes:
-    """Encode a Python list of floats → raw bytes for VECTOR(512) column."""
-    return struct.pack(f"{len(embedding)}f", *embedding)
-
-
-def bytes_to_vector(raw: bytes) -> list[float]:
-    """Decode raw bytes from VECTOR(512) column → Python list of floats."""
-    n = len(raw) // 4
-    return list(struct.unpack(f"{n}f", raw))
-
-
-# ---------------------------------------------------------------------------
-# Identity CRUD
-# ---------------------------------------------------------------------------
-
-def list_identities(conn: mariadb.Connection) -> list[dict]:
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT i.id, i.name, i.description,
-               COUNT(vs.id) AS sample_count,
-               i.voice_actor_id,
-               a.name AS voice_actor_name,
-               i.voice_casting_id,
-               vc.language AS casting_language,
-               r.name  AS casting_role_name,
-               p.title AS casting_production_title
-        FROM identities i
-        LEFT JOIN voice_samples vs ON vs.identity_id = i.id
-            AND (vs.context IS NULL OR vs.context != 'SUPERVECTOR')
-        LEFT JOIN actors a ON a.id = i.voice_actor_id
-        LEFT JOIN voice_castings vc ON vc.id = i.voice_casting_id
-        LEFT JOIN roles       r ON r.id  = vc.role_id
-        LEFT JOIN productions p ON p.id  = vc.production_id
-        GROUP BY i.id
-        ORDER BY i.name
-    """)
-    cols = [d[0] for d in cur.description]
-    return [dict(zip(cols, row)) for row in cur.fetchall()]
-
-
-def get_identity(conn: mariadb.Connection, identity_id: int) -> dict | None:
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT id, name, description, voice_actor_id, voice_casting_id "
-        "FROM identities WHERE id = ?",
-        (identity_id,),
-    )
-    row = cur.fetchone()
-    if row is None:
-        return None
-    return {
-        "id": row[0], "name": row[1], "description": row[2],
-        "voice_actor_id": row[3], "voice_casting_id": row[4],
-    }
-
-
-def create_identity(conn: mariadb.Connection, name: str, description: str = "",
-                    voice_actor_id: int | None = None,
-                    voice_casting_id: int | None = None) -> int:
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO identities (name, description, voice_actor_id, voice_casting_id) "
-        "VALUES (?, ?, ?, ?)",
-        (name, description, voice_actor_id, voice_casting_id),
-    )
-    conn.commit()
-    return cur.lastrowid
-
-
-def update_identity(conn: mariadb.Connection, identity_id: int, name: str, description: str,
-                    voice_actor_id: int | None = None,
-                    voice_casting_id: int | None = None) -> None:
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE identities SET name = ?, description = ?, voice_actor_id = ?, "
-        "voice_casting_id = ? WHERE id = ?",
-        (name, description, voice_actor_id, voice_casting_id, identity_id),
-    )
-    conn.commit()
-
-
-def delete_identity(conn: mariadb.Connection, identity_id: int) -> None:
-    """Delete an identity and all its voice samples (CASCADE handles samples)."""
-    cur = conn.cursor()
-    cur.execute("DELETE FROM identities WHERE id = ?", (identity_id,))
-    conn.commit()
-
-
-# ---------------------------------------------------------------------------
-# Supervector management
-# ---------------------------------------------------------------------------
-
-def refresh_supervectors(conn: mariadb.Connection) -> dict:
-    """
-    Adaptive multi-centroid supervector mode: for every identity, delete ALL
-    existing supervector groups (full revert), then re-cluster the free,
-    non-low-quality samples using distance-based AgglomerativeClustering.
-
-    • If an identity has fewer than 4 eligible samples a single robust
-      supervector is created (existing behaviour).
-    • Otherwise an unlimited number of clusters is formed automatically –
-      every group of samples whose intra-cluster cosine distance exceeds the
-      threshold (default 0.35) opens a new "Expert Cluster".
-
-    Returns a summary dict::
-
-        {identity_name: {"samples": int, "clusters": int}, …}
-    """
-    from datetime import date
-    today = date.today()
-
-    cur = conn.cursor()
-    summary: dict = {}
-    try:
-        cur.execute("SELECT id, name FROM identities ORDER BY name")
-        identities_list = cur.fetchall()
-    finally:
-        cur.close()
-
-    for identity_id, identity_name in identities_list:
-        try:
-            # 1. Revert all existing supervectors so samples are free again
-            revert_supervectors(conn, identity_id)
-
-            # 2. Compute adaptive clusters
-            clusters = compute_adaptive_clusters_for_identity(conn, identity_id)
-            if not clusters:
-                continue
-
-            total_samples = 0
-            num_clusters  = len(clusters)
-            for i, cluster_sample_ids in enumerate(clusters, 1):
-                if num_clusters > 1:
-                    cluster_name = f"Auto {today} – Cluster {i}/{num_clusters}"
-                else:
-                    cluster_name = f"Auto {today}"
-                try:
-                    create_named_supervector(
-                        conn, identity_id, cluster_name, cluster_sample_ids
-                    )
-                    total_samples += len(cluster_sample_ids)
-                except Exception as exc:
-                    logger.warning(
-                        "Auto-supervector skipped for %s cluster %d: %s",
-                        identity_name, i, exc,
-                    )
-
-            if total_samples > 0:
-                summary[identity_name] = {
-                    "samples":  total_samples,
-                    "clusters": num_clusters,
-                }
-        except Exception as exc:
-            logger.warning(
-                "refresh_supervectors: identity '%s' failed: %s",
-                identity_name, exc,
-            )
-
-    return summary
-
-
-def revert_supervectors(conn: mariadb.Connection, identity_id: int) -> int:
-    """
-    Revert ALL supervector groups for *identity_id*: delete every supervector
-    sample and reactivate all original source samples.
-
-    Returns the total number of reactivated samples.
-    """
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            "SELECT id FROM supervector_groups WHERE identity_id = ?",
-            (identity_id,),
-        )
-        group_ids = [row[0] for row in cur.fetchall()]
-    finally:
-        cur.close()
-
-    total = 0
-    for gid in group_ids:
-        total += revert_supervector_group(conn, gid)
-    return total
-
-
-def get_identity_vector_stats(
+def upsert_production_and_video(
     conn: mariadb.Connection,
-    identity_id: int,
-) -> dict:
-    """
-    Compute variance and per-sample distance-to-centroid for the active,
-    non-supervector, non-low-quality samples of *identity_id*.
-
-    Returns:
-        {
-          avg_distance:     float  – mean Euclidean distance to the centroid
-                                     (on L2-normalized vectors ≈ cosine metric),
-          variance:         float  – variance of those distances,
-          sample_distances: list[{id: int, distance: float}]
-        }
-    """
+    production_title: str,
+    video_title: str,
+    video_path: str,
+    *,
+    production_type: str = "series",
+    episode_code: str | None = None,
+    duration_ms: int | None = None,
+    production_meta: dict[str, Any] | None = None,
+    video_meta: dict[str, Any] | None = None,
+) -> tuple[int, int]:
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT id, embedding
-        FROM voice_samples
-        WHERE identity_id = ?
-          AND is_active = TRUE
-          AND (context IS NULL OR context != 'SUPERVECTOR')
-          AND is_low_quality = FALSE
-        ORDER BY created_at
+        INSERT INTO productions (title, production_type, metadata_json)
+        VALUES (?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+            production_type = VALUES(production_type),
+            metadata_json = VALUES(metadata_json)
         """,
-        (identity_id,),
+        (production_title, production_type, _to_json(production_meta)),
     )
-    rows = cur.fetchall()
-    cur.close()
+    conn.commit()
+    cur.execute("SELECT id FROM productions WHERE title=?", (production_title,))
+    production_id = int(cur.fetchone()[0])
 
-    if not rows:
-        return {"avg_distance": 0.0, "variance": 0.0, "sample_distances": []}
-
-    ids: list[int] = []
-    vecs: list[list[float]] = []
-    for row in rows:
-        vec = np.frombuffer(row[1], dtype=np.float32)
-        if vec.shape[0] == 512:
-            ids.append(row[0])
-            vecs.append(normalize_vector(vec.tolist()))
-
-    if not vecs:
-        return {"avg_distance": 0.0, "variance": 0.0, "sample_distances": []}
-
-    data = np.array(vecs, dtype=np.float32)
-    centroid = np.mean(data, axis=0)
-    dists = np.linalg.norm(data - centroid, axis=1)
-
-    sample_distances = [
-        {"id": sid, "distance": float(d)}
-        for sid, d in zip(ids, dists)
-    ]
-    return {
-        "avg_distance": float(np.mean(dists)),
-        "variance": float(np.var(dists)),
-        "sample_distances": sample_distances,
-    }
+    cur.execute(
+        """
+        INSERT INTO videos (production_id, title, episode_code, video_path, duration_ms, metadata_json)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+            production_id = VALUES(production_id),
+            title = VALUES(title),
+            episode_code = VALUES(episode_code),
+            duration_ms = VALUES(duration_ms),
+            metadata_json = VALUES(metadata_json)
+        """,
+        (
+            production_id,
+            video_title,
+            episode_code,
+            video_path,
+            duration_ms,
+            _to_json(video_meta),
+        ),
+    )
+    conn.commit()
+    cur.execute("SELECT id FROM videos WHERE video_path=?", (video_path,))
+    video_id = int(cur.fetchone()[0])
+    return production_id, video_id
 
 
-# ---------------------------------------------------------------------------
-# Actor CRUD
-# ---------------------------------------------------------------------------
-
-def list_actors(conn: mariadb.Connection, production_id: int | None = None) -> list[dict]:
+def set_video_scan_status(conn: mariadb.Connection, video_id: int, status: str) -> None:
     cur = conn.cursor()
-    if production_id is not None:
-        cur.execute(
-            """
-            SELECT a.id, a.name, a.description,
-                   (a.image_blob IS NOT NULL) AS has_image,
-                   COUNT(DISTINCT i.id) AS identity_count,
-                   (COUNT(DISTINCT vc.id) > 0) AS in_production
-            FROM actors a
-            LEFT JOIN identities i ON i.voice_actor_id = a.id
-            LEFT JOIN voice_castings vc
-                   ON (vc.actor_id = a.id OR vc.voice_actor_id = a.id)
-                  AND vc.production_id = ?
-            GROUP BY a.id
-            ORDER BY in_production DESC, a.name
-            """,
-            (production_id,),
-        )
-    else:
-        cur.execute("""
-            SELECT a.id, a.name, a.description,
-                   (a.image_blob IS NOT NULL) AS has_image,
-                   COUNT(i.id) AS identity_count
-            FROM actors a
-            LEFT JOIN identities i ON i.voice_actor_id = a.id
-            GROUP BY a.id
-            ORDER BY a.name
-        """)
-    cols = [d[0] for d in cur.description]
-    return [dict(zip(cols, row)) for row in cur.fetchall()]
+    cur.execute("UPDATE videos SET scan_status=? WHERE id=?", (status, video_id))
+    conn.commit()
 
 
-def get_actor(conn: mariadb.Connection, actor_id: int) -> dict | None:
+def clear_video_scan_data(conn: mariadb.Connection, video_id: int) -> None:
+    cur = conn.cursor()
+    cur.execute("DELETE FROM overlay_events WHERE video_id=?", (video_id,))
+    cur.execute("DELETE FROM face_detections WHERE video_id=?", (video_id,))
+    cur.execute("DELETE FROM face_tracks WHERE video_id=?", (video_id,))
+    conn.commit()
+
+
+def create_face_track(
+    conn: mariadb.Connection,
+    *,
+    video_id: int,
+    start_ms: int,
+    end_ms: int,
+    frame_count: int,
+    mean_face_area: float | None,
+    mean_sharpness: float | None,
+    mean_confidence: float | None,
+    stability_score: float | None,
+    quality_score: float | None,
+    relevance_score: float | None,
+    is_clear: bool,
+    status: str,
+    representative_image_path: str | None,
+    embedding: list[float] | None,
+    metadata: dict[str, Any] | None = None,
+) -> int:
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, name, description, (image_blob IS NOT NULL) AS has_image, created_at, updated_at "
-        "FROM actors WHERE id = ?",
-        (actor_id,),
+        """
+        INSERT INTO face_tracks (
+            video_id, start_ms, end_ms, frame_count,
+            mean_face_area, mean_sharpness, mean_confidence,
+            stability_score, quality_score, relevance_score,
+            is_clear, status, representative_image_path, embedding_json, metadata_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            video_id,
+            start_ms,
+            end_ms,
+            frame_count,
+            _sanitize_float(mean_face_area),
+            _sanitize_float(mean_sharpness),
+            _sanitize_float(mean_confidence),
+            _sanitize_float(stability_score),
+            _sanitize_float(quality_score),
+            _sanitize_float(relevance_score),
+            bool(is_clear),
+            status,
+            representative_image_path,
+            _to_json(embedding),
+            _to_json(metadata),
+        ),
     )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def create_face_detection(
+    conn: mariadb.Connection,
+    *,
+    video_id: int,
+    frame_index: int,
+    timestamp_ms: int,
+    bbox_x: int,
+    bbox_y: int,
+    bbox_w: int,
+    bbox_h: int,
+    confidence: float | None,
+    sharpness: float | None,
+    crop_image_path: str | None,
+    embedding: list[float] | None,
+    track_id: int | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> int:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO face_detections (
+            video_id, track_id, frame_index, timestamp_ms,
+            bbox_x, bbox_y, bbox_w, bbox_h,
+            confidence, sharpness, crop_image_path, embedding_json, metadata_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            video_id,
+            track_id,
+            frame_index,
+            timestamp_ms,
+            bbox_x,
+            bbox_y,
+            bbox_w,
+            bbox_h,
+            _sanitize_float(confidence),
+            _sanitize_float(sharpness),
+            crop_image_path,
+            _to_json(embedding),
+            _to_json(metadata),
+        ),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def assign_detection_to_track(conn: mariadb.Connection, detection_id: int, track_id: int) -> None:
+    cur = conn.cursor()
+    cur.execute("UPDATE face_detections SET track_id=? WHERE id=?", (track_id, detection_id))
+    conn.commit()
+
+
+def create_face_sample(
+    conn: mariadb.Connection,
+    *,
+    actor_id: int,
+    source_track_id: int | None,
+    image_path: str | None,
+    embedding: list[float],
+    quality_score: float | None,
+    is_confirmed: bool = True,
+    notes: str | None = None,
+) -> int:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO face_samples (actor_id, source_track_id, image_path, embedding_json, quality_score, is_confirmed, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            actor_id,
+            source_track_id,
+            image_path,
+            _to_json(embedding),
+            _sanitize_float(quality_score),
+            bool(is_confirmed),
+            notes,
+        ),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def rebuild_overlay_for_video(conn: mariadb.Connection, video_id: int) -> None:
+    cur = conn.cursor()
+    cur.execute("DELETE FROM overlay_events WHERE video_id=?", (video_id,))
+    cur.execute(
+        """
+        SELECT
+            d.track_id,
+            d.timestamp_ms,
+            d.bbox_x, d.bbox_y, d.bbox_w, d.bbox_h,
+            t.status,
+            COALESCE(a1.name, a2.name, CONCAT('Track #', t.id)) AS label,
+            COALESCE(t.match_score, t.quality_score)
+        FROM face_detections d
+        JOIN face_tracks t ON t.id = d.track_id
+        LEFT JOIN actors a1 ON a1.id = t.assigned_actor_id
+        LEFT JOIN actors a2 ON a2.id = t.match_actor_id
+        WHERE d.video_id = ? AND d.track_id IS NOT NULL
+        ORDER BY d.timestamp_ms ASC
+        """,
+        (video_id,),
+    )
+    rows = cur.fetchall()
+    if not rows:
+        conn.commit()
+        return
+    cur.executemany(
+        """
+        INSERT INTO overlay_events (
+            video_id, track_id, timestamp_ms,
+            bbox_x, bbox_y, bbox_w, bbox_h,
+            label, status, confidence
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                video_id,
+                int(r[0]),
+                int(r[1]),
+                int(r[2]),
+                int(r[3]),
+                int(r[4]),
+                int(r[5]),
+                str(r[7]),
+                str(r[6]),
+                _sanitize_float(r[8]),
+            )
+            for r in rows
+        ],
+    )
+    conn.commit()
+
+
+def list_library(conn: mariadb.Connection) -> list[dict[str, Any]]:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT
+            p.id,
+            p.title,
+            p.production_type,
+            p.season_label,
+            v.id,
+            v.title,
+            v.episode_code,
+            v.video_path,
+            v.scan_status,
+            v.duration_ms,
+            COUNT(DISTINCT t.id) AS track_count,
+            SUM(CASE WHEN t.is_clear THEN 1 ELSE 0 END) AS clear_track_count
+        FROM productions p
+        LEFT JOIN videos v ON v.production_id = p.id
+        LEFT JOIN face_tracks t ON t.video_id = v.id
+        GROUP BY p.id, p.title, p.production_type, p.season_label,
+                 v.id, v.title, v.episode_code, v.video_path, v.scan_status, v.duration_ms
+        ORDER BY p.title ASC, v.title ASC
+        """
+    )
+    grouped: dict[int, dict[str, Any]] = {}
+    for row in cur.fetchall():
+        production_id = int(row[0])
+        prod = grouped.setdefault(
+            production_id,
+            {
+                "id": production_id,
+                "title": row[1],
+                "production_type": row[2],
+                "season_label": row[3],
+                "videos": [],
+            },
+        )
+        if row[4] is None:
+            continue
+        prod["videos"].append(
+            {
+                "id": int(row[4]),
+                "title": row[5],
+                "episode_code": row[6],
+                "video_path": row[7],
+                "scan_status": row[8],
+                "duration_ms": row[9],
+                "track_count": int(row[10] or 0),
+                "clear_track_count": int(row[11] or 0),
+            }
+        )
+    return list(grouped.values())
+
+
+def list_video_tracks(
+    conn: mariadb.Connection,
+    video_id: int,
+    *,
+    clear_only: bool = False,
+    status: str | None = None,
+) -> list[dict[str, Any]]:
+    where = ["t.video_id = ?"]
+    params: list[Any] = [video_id]
+    if clear_only:
+        where.append("t.is_clear = TRUE")
+    if status:
+        where.append("t.status = ?")
+        params.append(status)
+
+    cur = conn.cursor()
+    cur.execute(
+        f"""
+        SELECT
+            t.id, t.video_id, t.start_ms, t.end_ms, t.frame_count,
+            t.mean_face_area, t.mean_sharpness, t.mean_confidence,
+            t.stability_score, t.quality_score, t.relevance_score,
+            t.is_clear, t.status,
+            t.assigned_actor_id, aa.name,
+            t.assigned_role_id, r.name,
+            t.match_actor_id, ma.name, t.match_score,
+            t.representative_image_path, t.embedding_json, t.metadata_json
+        FROM face_tracks t
+        LEFT JOIN actors aa ON aa.id = t.assigned_actor_id
+        LEFT JOIN roles r ON r.id = t.assigned_role_id
+        LEFT JOIN actors ma ON ma.id = t.match_actor_id
+        WHERE {' AND '.join(where)}
+        ORDER BY t.start_ms ASC
+        """,
+        tuple(params),
+    )
+    rows = cur.fetchall()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        out.append(
+            {
+                "id": int(row[0]),
+                "video_id": int(row[1]),
+                "start_ms": int(row[2]),
+                "end_ms": int(row[3]),
+                "frame_count": int(row[4]),
+                "mean_face_area": row[5],
+                "mean_sharpness": row[6],
+                "mean_confidence": row[7],
+                "stability_score": row[8],
+                "quality_score": row[9],
+                "relevance_score": row[10],
+                "is_clear": bool(row[11]),
+                "status": row[12],
+                "assigned_actor_id": row[13],
+                "assigned_actor_name": row[14],
+                "assigned_role_id": row[15],
+                "assigned_role_name": row[16],
+                "match_actor_id": row[17],
+                "match_actor_name": row[18],
+                "match_score": row[19],
+                "representative_image_path": row[20],
+                "embedding": _from_json(row[21], []),
+                "metadata": _from_json(row[22], {}),
+            }
+        )
+    return out
+
+
+def list_track_detections(conn: mariadb.Connection, track_id: int) -> list[dict[str, Any]]:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT
+            id, frame_index, timestamp_ms,
+            bbox_x, bbox_y, bbox_w, bbox_h,
+            confidence, sharpness, crop_image_path, embedding_json, metadata_json
+        FROM face_detections
+        WHERE track_id = ?
+        ORDER BY timestamp_ms ASC
+        """,
+        (track_id,),
+    )
+    return [
+        {
+            "id": int(r[0]),
+            "frame_index": int(r[1]),
+            "timestamp_ms": int(r[2]),
+            "bbox": [int(r[3]), int(r[4]), int(r[5]), int(r[6])],
+            "confidence": r[7],
+            "sharpness": r[8],
+            "crop_image_path": r[9],
+            "embedding": _from_json(r[10], []),
+            "metadata": _from_json(r[11], {}),
+        }
+        for r in cur.fetchall()
+    ]
+
+
+def get_track(conn: mariadb.Connection, track_id: int) -> dict[str, Any] | None:
+    cur = conn.cursor()
+    cur.execute("SELECT video_id FROM face_tracks WHERE id = ?", (track_id,))
     row = cur.fetchone()
-    if row is None:
+    if not row:
         return None
-    cols = [d[0] for d in cur.description]
-    return dict(zip(cols, row))
+    video_id = int(row[0])
+    tracks = list_video_tracks(conn, video_id)
+    for track in tracks:
+        if track["id"] == track_id:
+            track["detections"] = list_track_detections(conn, track_id)
+            return track
+    return None
+
+
+def list_overlay_events(conn: mariadb.Connection, video_id: int) -> list[dict[str, Any]]:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT track_id, timestamp_ms, bbox_x, bbox_y, bbox_w, bbox_h, label, status, confidence
+        FROM overlay_events
+        WHERE video_id = ?
+        ORDER BY timestamp_ms ASC
+        """,
+        (video_id,),
+    )
+    return [
+        {
+            "track_id": int(r[0]),
+            "timestamp_ms": int(r[1]),
+            "bbox": [int(r[2]), int(r[3]), int(r[4]), int(r[5])],
+            "label": r[6],
+            "status": r[7],
+            "confidence": r[8],
+        }
+        for r in cur.fetchall()
+    ]
+
+
+def list_actors(conn: mariadb.Connection) -> list[dict[str, Any]]:
+    cur = conn.cursor()
+    cur.execute("SELECT id, name, description FROM actors ORDER BY name ASC")
+    return [{"id": int(r[0]), "name": r[1], "description": r[2] or ""} for r in cur.fetchall()]
 
 
 def create_actor(conn: mariadb.Connection, name: str, description: str = "") -> int:
     cur = conn.cursor()
-    cur.execute("INSERT INTO actors (name, description) VALUES (?, ?)", (name, description))
-    conn.commit()
-    return cur.lastrowid
-
-
-def update_actor(conn: mariadb.Connection, actor_id: int, name: str, description: str = "") -> None:
-    cur = conn.cursor()
-    cur.execute("UPDATE actors SET name = ?, description = ? WHERE id = ?", (name, description, actor_id))
-    conn.commit()
-
-
-def update_actor_image(conn: mariadb.Connection, actor_id: int, image_bytes: bytes, mime: str = "image/jpeg") -> None:
-    cur = conn.cursor()
     cur.execute(
-        "UPDATE actors SET image_blob = ?, image_mime = ? WHERE id = ?",
-        (image_bytes, mime, actor_id),
+        "INSERT INTO actors (name, description) VALUES (?, ?) "
+        "ON DUPLICATE KEY UPDATE description = VALUES(description)",
+        (name.strip(), description.strip() or None),
     )
     conn.commit()
+    cur.execute("SELECT id FROM actors WHERE name=?", (name.strip(),))
+    return int(cur.fetchone()[0])
 
 
-def get_actor_image(conn: mariadb.Connection, actor_id: int) -> tuple[bytes, str] | None:
+def list_roles(conn: mariadb.Connection) -> list[dict[str, Any]]:
     cur = conn.cursor()
-    cur.execute("SELECT image_blob, image_mime FROM actors WHERE id = ?", (actor_id,))
-    row = cur.fetchone()
-    if row is None or row[0] is None:
-        return None
-    return (bytes(row[0]), row[1] or "image/jpeg")
-
-
-def delete_actor(conn: mariadb.Connection, actor_id: int) -> None:
-    cur = conn.cursor()
-    cur.execute("DELETE FROM actors WHERE id = ?", (actor_id,))
-    conn.commit()
-
-
-# ---------------------------------------------------------------------------
-# Role CRUD
-# ---------------------------------------------------------------------------
-
-def list_roles(conn: mariadb.Connection) -> list[dict]:
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT id, name, description, (image_blob IS NOT NULL) AS has_image
-        FROM roles ORDER BY name
-    """)
-    cols = [d[0] for d in cur.description]
-    return [dict(zip(cols, row)) for row in cur.fetchall()]
-
-
-def get_role(conn: mariadb.Connection, role_id: int) -> dict | None:
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT id, name, description, (image_blob IS NOT NULL) AS has_image FROM roles WHERE id = ?",
-        (role_id,),
-    )
-    row = cur.fetchone()
-    if row is None:
-        return None
-    cols = [d[0] for d in cur.description]
-    return dict(zip(cols, row))
+    cur.execute("SELECT id, name, description FROM roles ORDER BY name ASC")
+    return [{"id": int(r[0]), "name": r[1], "description": r[2] or ""} for r in cur.fetchall()]
 
 
 def create_role(conn: mariadb.Connection, name: str, description: str = "") -> int:
     cur = conn.cursor()
-    cur.execute("INSERT INTO roles (name, description) VALUES (?, ?)", (name, description))
-    conn.commit()
-    return cur.lastrowid
-
-
-def update_role(conn: mariadb.Connection, role_id: int, name: str, description: str = "") -> None:
-    cur = conn.cursor()
-    cur.execute("UPDATE roles SET name = ?, description = ? WHERE id = ?", (name, description, role_id))
-    conn.commit()
-
-
-def update_role_image(conn: mariadb.Connection, role_id: int, image_bytes: bytes, mime: str = "image/jpeg") -> None:
-    cur = conn.cursor()
     cur.execute(
-        "UPDATE roles SET image_blob = ?, image_mime = ? WHERE id = ?",
-        (image_bytes, mime, role_id),
+        "INSERT INTO roles (name, description) VALUES (?, ?) "
+        "ON DUPLICATE KEY UPDATE description = VALUES(description)",
+        (name.strip(), description.strip() or None),
     )
     conn.commit()
+    cur.execute("SELECT id FROM roles WHERE name=?", (name.strip(),))
+    return int(cur.fetchone()[0])
 
 
-def get_role_image(conn: mariadb.Connection, role_id: int) -> tuple[bytes, str] | None:
-    cur = conn.cursor()
-    cur.execute("SELECT image_blob, image_mime FROM roles WHERE id = ?", (role_id,))
-    row = cur.fetchone()
-    if row is None or row[0] is None:
-        return None
-    return (bytes(row[0]), row[1] or "image/jpeg")
+def _cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
+    if not vec_a or not vec_b:
+        return -1.0
+    n = min(len(vec_a), len(vec_b))
+    if n == 0:
+        return -1.0
+    dot = sum(float(vec_a[i]) * float(vec_b[i]) for i in range(n))
+    norm_a = math.sqrt(sum(float(vec_a[i]) ** 2 for i in range(n)))
+    norm_b = math.sqrt(sum(float(vec_b[i]) ** 2 for i in range(n)))
+    if norm_a < 1e-9 or norm_b < 1e-9:
+        return -1.0
+    return dot / (norm_a * norm_b)
 
 
-def delete_role(conn: mariadb.Connection, role_id: int) -> None:
-    cur = conn.cursor()
-    cur.execute("DELETE FROM roles WHERE id = ?", (role_id,))
-    conn.commit()
-
-
-# ---------------------------------------------------------------------------
-# Production CRUD
-# ---------------------------------------------------------------------------
-
-def list_productions(conn: mariadb.Connection) -> list[dict]:
-    cur = conn.cursor()
-    cur.execute("SELECT id, title, year, type FROM productions ORDER BY title")
-    cols = [d[0] for d in cur.description]
-    return [dict(zip(cols, row)) for row in cur.fetchall()]
-
-
-def get_production(conn: mariadb.Connection, production_id: int) -> dict | None:
-    cur = conn.cursor()
-    cur.execute("SELECT id, title, year, type FROM productions WHERE id = ?", (production_id,))
-    row = cur.fetchone()
-    if row is None:
-        return None
-    cols = [d[0] for d in cur.description]
-    return dict(zip(cols, row))
-
-
-def create_production(conn: mariadb.Connection, title: str, year: int | None = None,
-                      prod_type: str = "Series") -> int:
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO productions (title, year, type) VALUES (?, ?, ?)",
-        (title, year, prod_type),
-    )
-    conn.commit()
-    return cur.lastrowid
-
-
-def update_production(conn: mariadb.Connection, production_id: int, title: str,
-                      year: int | None = None, prod_type: str = "Series") -> None:
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE productions SET title = ?, year = ?, type = ? WHERE id = ?",
-        (title, year, prod_type, production_id),
-    )
-    conn.commit()
-
-
-def delete_production(conn: mariadb.Connection, production_id: int) -> None:
-    cur = conn.cursor()
-    cur.execute("DELETE FROM productions WHERE id = ?", (production_id,))
-    conn.commit()
-
-
-# ---------------------------------------------------------------------------
-# Voice casting CRUD
-# ---------------------------------------------------------------------------
-
-def list_voice_castings(conn: mariadb.Connection, production_id: int | None = None) -> list[dict]:
-    cur = conn.cursor()
-    if production_id is not None:
-        cur.execute(
-            """
-            SELECT vc.id, vc.production_id, p.title AS production_title,
-                   vc.role_id, r.name AS role_name,
-                   vc.actor_id, a.name AS actor_name,
-                   vc.voice_actor_id, va.name AS voice_actor_name,
-                   vc.language
-            FROM voice_castings vc
-            JOIN productions p  ON p.id  = vc.production_id
-            JOIN roles        r ON r.id  = vc.role_id
-            JOIN actors       a ON a.id  = vc.actor_id
-            JOIN actors       va ON va.id = vc.voice_actor_id
-            WHERE vc.production_id = ?
-            ORDER BY r.name, vc.language
-            """,
-            (production_id,),
-        )
-    else:
-        cur.execute(
-            """
-            SELECT vc.id, vc.production_id, p.title AS production_title,
-                   vc.role_id, r.name AS role_name,
-                   vc.actor_id, a.name AS actor_name,
-                   vc.voice_actor_id, va.name AS voice_actor_name,
-                   vc.language
-            FROM voice_castings vc
-            JOIN productions p  ON p.id  = vc.production_id
-            JOIN roles        r ON r.id  = vc.role_id
-            JOIN actors       a ON a.id  = vc.actor_id
-            JOIN actors       va ON va.id = vc.voice_actor_id
-            ORDER BY p.title, r.name, vc.language
-            """
-        )
-    cols = [d[0] for d in cur.description]
-    return [dict(zip(cols, row)) for row in cur.fetchall()]
-
-
-def create_voice_casting(conn: mariadb.Connection, production_id: int, role_id: int,
-                         actor_id: int, voice_actor_id: int, language: str = "de") -> int:
-    cur = conn.cursor()
-    cur.execute(
-        """INSERT INTO voice_castings (production_id, role_id, actor_id, voice_actor_id, language)
-           VALUES (?, ?, ?, ?, ?)""",
-        (production_id, role_id, actor_id, voice_actor_id, language),
-    )
-    conn.commit()
-    return cur.lastrowid
-
-
-def delete_voice_casting(conn: mariadb.Connection, casting_id: int) -> None:
-    cur = conn.cursor()
-    cur.execute("DELETE FROM voice_castings WHERE id = ?", (casting_id,))
-    conn.commit()
-
-
-def update_voice_casting(conn: mariadb.Connection, casting_id: int, production_id: int,
-                         role_id: int, actor_id: int, voice_actor_id: int,
-                         language: str = "de") -> None:
-    cur = conn.cursor()
-    cur.execute(
-        """UPDATE voice_castings
-           SET production_id = ?, role_id = ?, actor_id = ?, voice_actor_id = ?, language = ?
-           WHERE id = ?""",
-        (production_id, role_id, actor_id, voice_actor_id, language, casting_id),
-    )
-    conn.commit()
-
-
-# ---------------------------------------------------------------------------
-# Named supervector groups
-# ---------------------------------------------------------------------------
-
-def list_supervector_groups(conn: mariadb.Connection, identity_id: int) -> list[dict]:
-    """Return all supervector groups for *identity_id* with their sample counts."""
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT sg.id, sg.name, sg.created_at,
-               COUNT(sv.id) AS sample_count
-        FROM supervector_groups sg
-        LEFT JOIN voice_samples sv ON sv.used_in_group_id = sg.id
-        WHERE sg.identity_id = ?
-        GROUP BY sg.id
-        ORDER BY sg.created_at
-        """,
-        (identity_id,),
-    )
-    results = []
-    for row in cur.fetchall():
-        results.append({
-            "id":           row[0],
-            "name":         row[1],
-            "created_at":   str(row[2]) if row[2] is not None else None,
-            "sample_count": row[3],
-        })
-    return results
-
-
-def list_free_samples(conn: mariadb.Connection, identity_id: int) -> list[dict]:
-    """Return active raw samples not yet merged into any supervector group."""
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT id, context, is_confirmed, is_active, is_low_quality, created_at
-        FROM voice_samples
-        WHERE identity_id = ?
-          AND (context IS NULL OR context != 'SUPERVECTOR')
-          AND used_in_group_id IS NULL
-        ORDER BY created_at
-        """,
-        (identity_id,),
-    )
-    results = []
-    for row in cur.fetchall():
-        results.append({
-            "id":           row[0],
-            "context":      row[1],
-            "is_confirmed": bool(row[2]),
-            "is_active":    bool(row[3]),
-            "is_low_quality": bool(row[4]),
-            "created_at":   str(row[5]) if row[5] is not None else None,
-        })
-    return results
-
-
-def list_group_samples(conn: mariadb.Connection, group_id: int) -> list[dict]:
-    """Return the source samples that were merged into *group_id*."""
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT id, context, is_confirmed, is_low_quality, created_at
-        FROM voice_samples
-        WHERE used_in_group_id = ?
-        ORDER BY created_at
-        """,
-        (group_id,),
-    )
-    results = []
-    for row in cur.fetchall():
-        results.append({
-            "id":             row[0],
-            "context":        row[1],
-            "is_confirmed":   bool(row[2]),
-            "is_low_quality": bool(row[3]),
-            "created_at":     str(row[4]) if row[4] is not None else None,
-        })
-    return results
-
-
-def get_group_vector_stats(conn: mariadb.Connection, group_id: int) -> dict:
-    """
-    Compute per-sample distance-to-centroid for the source samples of *group_id*.
-
-    Returns the same shape as get_identity_vector_stats():
-        {avg_distance: float, variance: float, sample_distances: [{id, distance}, …]}
-    """
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT id, embedding
-        FROM voice_samples
-        WHERE used_in_group_id = ?
-        ORDER BY created_at
-        """,
-        (group_id,),
-    )
-    rows = cur.fetchall()
-    cur.close()
-
-    if not rows:
-        return {"avg_distance": 0.0, "variance": 0.0, "sample_distances": []}
-
-    ids: list[int] = []
-    vecs: list[list[float]] = []
-    for row in rows:
-        vec = np.frombuffer(row[1], dtype=np.float32)
-        if vec.shape[0] == 512:
-            ids.append(row[0])
-            vecs.append(normalize_vector(vec.tolist()))
-
-    if not vecs:
-        return {"avg_distance": 0.0, "variance": 0.0, "sample_distances": []}
-
-    data = np.array(vecs, dtype=np.float32)
-    centroid = np.mean(data, axis=0)
-    dists = np.linalg.norm(data - centroid, axis=1)
-
-    sample_distances = [
-        {"id": sid, "distance": float(d)}
-        for sid, d in zip(ids, dists)
-    ]
-    return {
-        "avg_distance": float(np.mean(dists)),
-        "variance": float(np.var(dists)),
-        "sample_distances": sample_distances,
-    }
-
-
-def create_named_supervector(
+def assign_track(
     conn: mariadb.Connection,
-    identity_id: int,
-    name: str,
-    sample_ids: list[int],
-) -> int:
-    """
-    Compute the centroid of the selected *sample_ids*, store it as a new
-    SUPERVECTOR voice_sample linked to a new supervector_group, and mark all
-    source samples as inactive / merged.
-
-    Returns the new supervector_group.id.
-    Raises ValueError if any sample_id is invalid (wrong identity, already merged,
-    is itself a supervector, or is missing).
-    """
-    if not sample_ids:
-        raise ValueError("sample_ids must not be empty")
-
+    *,
+    track_id: int,
+    actor_id: int,
+    role_id: int | None = None,
+    add_sample: bool = True,
+    source: str = "manual",
+) -> dict[str, Any]:
     cur = conn.cursor()
+    cur.execute(
+        "SELECT video_id, representative_image_path, embedding_json, quality_score FROM face_tracks WHERE id=?",
+        (track_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        raise ValueError(f"Track {track_id} not found")
 
-    # Build a parameterised IN-clause from the validated integer list.
-    # {fmt} expands to "?,?,?,...,?" – only placeholders, never user data –
-    # so there is no SQL-injection risk despite the f-string.  The actual
-    # values are passed as bound parameters in the second argument.
-    fmt = ",".join("?" for _ in sample_ids)
+    video_id = int(row[0])
+    image_path = row[1]
+    embedding = _from_json(row[2], [])
+    quality_score = row[3]
+
+    cur.execute(
+        """
+        UPDATE face_tracks
+        SET assigned_actor_id=?, assigned_role_id=?, status='assigned', assignment_source=?,
+            match_actor_id=?, match_score=GREATEST(COALESCE(match_score, 0), 0.99)
+        WHERE id=?
+        """,
+        (actor_id, role_id, source, actor_id, track_id),
+    )
+
+    sample_id: int | None = None
+    if add_sample and embedding:
+        sample_id = create_face_sample(
+            conn,
+            actor_id=actor_id,
+            source_track_id=track_id,
+            image_path=image_path,
+            embedding=[float(x) for x in embedding],
+            quality_score=quality_score,
+            is_confirmed=True,
+            notes="auto-sample from track assignment",
+        )
+
+    if role_id is not None:
+        cur.execute("SELECT production_id FROM videos WHERE id=?", (video_id,))
+        prod_row = cur.fetchone()
+        production_id = int(prod_row[0]) if prod_row and prod_row[0] is not None else None
+        cur.execute(
+            """
+            INSERT INTO actor_roles (actor_id, production_id, role_id, notes)
+            VALUES (?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE notes = VALUES(notes)
+            """,
+            (actor_id, production_id, role_id, "created by track assignment"),
+        )
+
+    conn.commit()
+    rebuild_overlay_for_video(conn, video_id)
+    return {"track_id": track_id, "video_id": video_id, "sample_id": sample_id}
+
+
+def update_track_status(conn: mariadb.Connection, track_id: int, status: str) -> None:
+    allowed = {"candidate", "assigned", "ignored", "unknown", "background"}
+    if status not in allowed:
+        raise ValueError(f"Unsupported status: {status}")
+    cur = conn.cursor()
+    cur.execute("SELECT video_id FROM face_tracks WHERE id=?", (track_id,))
+    row = cur.fetchone()
+    if not row:
+        raise ValueError(f"Track {track_id} not found")
+    video_id = int(row[0])
+    cur.execute("UPDATE face_tracks SET status=? WHERE id=?", (status, track_id))
+    conn.commit()
+    rebuild_overlay_for_video(conn, video_id)
+
+
+def list_face_samples(conn: mariadb.Connection, actor_id: int | None = None) -> list[dict[str, Any]]:
+    where = ""
+    params: tuple[Any, ...] = ()
+    if actor_id is not None:
+        where = "WHERE s.actor_id = ?"
+        params = (actor_id,)
+    cur = conn.cursor()
     cur.execute(
         f"""
-        SELECT id FROM voice_samples
-        WHERE id IN ({fmt})
-          AND identity_id = ?
-          AND (context IS NULL OR context != 'SUPERVECTOR')
-          AND used_in_group_id IS NULL
-          AND is_active = TRUE
-        """,  # noqa: S608
-        (*sample_ids, identity_id),
+        SELECT s.id, s.actor_id, a.name, s.source_track_id, s.image_path,
+               s.embedding_json, s.quality_score, s.is_confirmed, s.notes, s.created_at
+        FROM face_samples s
+        JOIN actors a ON a.id = s.actor_id
+        {where}
+        ORDER BY s.created_at DESC
+        """,
+        params,
     )
-    valid_ids = {row[0] for row in cur.fetchall()}
-    invalid = set(sample_ids) - valid_ids
-    if invalid:
-        raise ValueError(f"Invalid or already-merged sample IDs: {invalid}")
+    return [
+        {
+            "id": int(r[0]),
+            "actor_id": int(r[1]),
+            "actor_name": r[2],
+            "source_track_id": r[3],
+            "image_path": r[4],
+            "embedding": _from_json(r[5], []),
+            "quality_score": r[6],
+            "is_confirmed": bool(r[7]),
+            "notes": r[8],
+            "created_at": str(r[9]),
+        }
+        for r in cur.fetchall()
+    ]
 
-    # Load embeddings
+
+def rematch_tracks(
+    conn: mariadb.Connection,
+    *,
+    video_id: int | None = None,
+    production_id: int | None = None,
+    actor_id: int | None = None,
+    assign_threshold: float = 0.90,
+    suggest_threshold: float = 0.78,
+) -> dict[str, Any]:
+    cur = conn.cursor()
+
+    sample_params: list[Any] = []
+    sample_where = ["is_confirmed = TRUE"]
+    if actor_id is not None:
+        sample_where.append("actor_id = ?")
+        sample_params.append(actor_id)
     cur.execute(
-        f"SELECT id, embedding FROM voice_samples WHERE id IN ({fmt})",  # noqa: S608
-        sample_ids,
+        f"SELECT actor_id, embedding_json FROM face_samples WHERE {' AND '.join(sample_where)}",
+        tuple(sample_params),
     )
-    embeddings = []
-    for row in cur.fetchall():
-        vec = np.frombuffer(row[1], dtype=np.float32)
-        if vec.shape[0] == 512:
-            embeddings.append(vec)
+    samples_by_actor: dict[int, list[list[float]]] = {}
+    for actor_id_raw, emb_json in cur.fetchall():
+        emb = _from_json(emb_json, [])
+        if not isinstance(emb, list) or not emb:
+            continue
+        samples_by_actor.setdefault(int(actor_id_raw), []).append([float(x) for x in emb])
 
-    if not embeddings:
-        raise ValueError("No valid 512-dim embeddings found in selected samples")
+    if not samples_by_actor:
+        return {"updated": 0, "suggested": 0, "assigned": 0, "total": 0}
 
-    robust = calculate_robust_supervector([v.tolist() for v in embeddings])
-    if robust is None:
-        raise ValueError("Robust supervector calculation returned no result")
-    supervector = np.array(robust, dtype=np.float32)
+    track_where = ["1=1"]
+    track_params: list[Any] = []
+    if video_id is not None:
+        track_where.append("video_id = ?")
+        track_params.append(video_id)
+    elif production_id is not None:
+        track_where.append("video_id IN (SELECT id FROM videos WHERE production_id = ?)")
+        track_params.append(production_id)
 
-    try:
-        # Create the group record
+    cur.execute(
+        f"SELECT id, video_id, embedding_json, assigned_actor_id FROM face_tracks WHERE {' AND '.join(track_where)}",
+        tuple(track_params),
+    )
+    tracks = cur.fetchall()
+
+    updated = 0
+    suggested = 0
+    assigned = 0
+
+    for track_id_raw, _, emb_json, assigned_actor in tracks:
+        emb = _from_json(emb_json, [])
+        if not isinstance(emb, list) or not emb:
+            continue
+        vec = [float(x) for x in emb]
+
+        best_actor: int | None = None
+        best_score = -1.0
+        for a_id, actor_samples in samples_by_actor.items():
+            actor_best = max(_cosine_similarity(vec, s) for s in actor_samples)
+            if actor_best > best_score:
+                best_score = actor_best
+                best_actor = a_id
+
+        if best_actor is None:
+            continue
+
+        new_status = None
+        new_assigned_actor = assigned_actor
+        new_source = None
+        if best_score >= assign_threshold and assigned_actor is None:
+            new_assigned_actor = best_actor
+            new_status = "assigned"
+            new_source = "rematch"
+            assigned += 1
+        elif best_score >= suggest_threshold and assigned_actor is None:
+            new_status = "candidate"
+            suggested += 1
+
         cur.execute(
-            "INSERT INTO supervector_groups (identity_id, name) VALUES (?, ?)",
-            (identity_id, name),
-        )
-        group_id = cur.lastrowid
-
-        # Insert the supervector sample
-        cur.execute(
-            """INSERT INTO voice_samples
-                   (identity_id, embedding, context, is_confirmed, is_active,
-                    supervector_group_id)
-               VALUES (?, ?, 'SUPERVECTOR', TRUE, TRUE, ?)
+            """
+            UPDATE face_tracks
+            SET match_actor_id=?, match_score=?,
+                status=COALESCE(?, status),
+                assigned_actor_id=COALESCE(?, assigned_actor_id),
+                assignment_source=COALESCE(?, assignment_source)
+            WHERE id=?
             """,
-            (identity_id, vector_to_bytes(supervector.tolist()), group_id),
+            (
+                best_actor,
+                _sanitize_float(best_score),
+                new_status,
+                new_assigned_actor if assigned_actor is None else None,
+                new_source,
+                int(track_id_raw),
+            ),
         )
+        updated += 1
 
-        # Mark source samples as merged (inactive, linked to group)
-        cur.execute(
-            f"""UPDATE voice_samples
-               SET is_active = FALSE, used_in_group_id = ?
-               WHERE id IN ({fmt})""",  # noqa: S608
-            (group_id, *sample_ids),
-        )
-
-        conn.commit()
-        return group_id
-    except Exception:
-        conn.rollback()
-        raise
-
-
-def revert_supervector_group(conn: mariadb.Connection, group_id: int) -> int:
-    """
-    Delete the supervector for *group_id* and reactivate all original samples
-    that were merged into it.  Deletes the group record afterwards.
-
-    Returns the number of reactivated samples.
-    """
-    cur = conn.cursor()
-    try:
-        # Delete the supervector sample linked to this group
-        cur.execute(
-            "DELETE FROM voice_samples WHERE supervector_group_id = ?",
-            (group_id,),
-        )
-        # Reactivate merged source samples
-        cur.execute(
-            """UPDATE voice_samples
-               SET is_active = TRUE, used_in_group_id = NULL
-               WHERE used_in_group_id = ?""",
-            (group_id,),
-        )
-        reactivated = cur.rowcount
-        # Delete the group record
-        cur.execute("DELETE FROM supervector_groups WHERE id = ?", (group_id,))
-        conn.commit()
-        return reactivated
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        cur.close()
-
-
-# ---------------------------------------------------------------------------
-# Voice sample CRUD
-# ---------------------------------------------------------------------------
-
-def add_voice_sample(
-    conn: mariadb.Connection,
-    identity_id: int,
-    embedding: list[float],
-    context: str = "",
-    is_confirmed: bool = False,
-    is_low_quality: bool = False,
-) -> int:
-    # Replace NaN / ±inf (e.g. from old scanner data) with 0.0 so MariaDB VECTOR
-    # does not reject the row with "Incorrect vector value".
-    embedding = [v if math.isfinite(v) else 0.0 for v in embedding]
-    cur = conn.cursor()
-    cur.execute(
-        """INSERT INTO voice_samples (identity_id, embedding, context, is_confirmed, is_low_quality)
-           VALUES (?, ?, ?, ?, ?)""",
-        (identity_id, vector_to_bytes(embedding), context or None, is_confirmed, is_low_quality),
-    )
-    conn.commit()
-    return cur.lastrowid
-
-
-def list_voice_samples(conn: mariadb.Connection, identity_id: int) -> list[dict]:
-    cur = conn.cursor()
-    cur.execute(
-        """SELECT id, identity_id, embedding, context, is_confirmed, is_active,
-                  is_low_quality, created_at
-           FROM voice_samples WHERE identity_id = ? ORDER BY created_at""",
-        (identity_id,),
-    )
-    results = []
-    for row in cur.fetchall():
-        results.append({
-            "id":             row[0],
-            "identity_id":    row[1],
-            "embedding":      bytes_to_vector(row[2]),
-            "context":        row[3],
-            "is_confirmed":   bool(row[4]),
-            "is_active":      bool(row[5]),
-            "is_low_quality": bool(row[6]),
-            "created_at":     str(row[7]),
-        })
-    return results
-
-
-def confirm_voice_sample(conn: mariadb.Connection, sample_id: int) -> None:
-    cur = conn.cursor()
-    cur.execute("UPDATE voice_samples SET is_confirmed = TRUE WHERE id = ?", (sample_id,))
     conn.commit()
 
-
-def delete_voice_sample(conn: mariadb.Connection, sample_id: int) -> None:
-    cur = conn.cursor()
-    cur.execute("DELETE FROM voice_samples WHERE id = ?", (sample_id,))
-    conn.commit()
-
-
-# ---------------------------------------------------------------------------
-# Nearest-neighbour vector search
-# ---------------------------------------------------------------------------
-
-def find_nearest_identity(
-    conn: mariadb.Connection,
-    embedding: list[float],
-    match_threshold: float = 0.25,
-    suggest_threshold: float = 0.45,
-    min_margin: float = 0.07,
-) -> dict:
-    """
-    Find the nearest identity for *embedding* by comparing it against all active
-    voice samples in the database.
-
-    The search is performed in two passes:
-
-    **Pass 1 – per-identity minimum distance**
-    ``GROUP BY identity_id`` with ``MIN(VEC_DISTANCE_COSINE)`` ensures that an
-    identity with many supervector samples cannot crowd out other identities.
-    The old flat ``LIMIT 10`` query had exactly this failure mode: if one identity
-    had ≥ 10 active supervectors all 10 result rows could be that identity,
-    ``second_distance`` was never populated, ``margin_ok`` was always *True*, and
-    every segment would match the same identity.
-
-    **Pass 2 – closest sample within the winning identity**
-    Retrieves the specific ``sample_id`` and ``context`` of the sample that
-    achieved the best distance, used for display / debugging.
-
-    *min_margin* guards against cross-identity confusion: if the runner-up
-    identity is fewer than *min_margin* away from the winner the result is
-    downgraded:
-      • confirmed → suggest  (if still ≤ suggest_threshold)
-      • suggest   → unknown
-
-    Returns a dict with keys:
-      status        – 'matched' | 'suggest' | 'unknown'
-      identity_id   – int or None
-      identity_name – str or None
-      sample_id     – int or None   (which sample triggered the match)
-      sample_context– str or None
-      distance      – float or None
-      second_distance – float or None  (runner-up identity distance, for debugging)
-    """
-    vec_bytes = vector_to_bytes(embedding)
-    cur = conn.cursor()
-
-    # ── Step 1: get the best (minimum) cosine distance per identity ───────────
-    # This ensures that an identity with many supervector samples cannot crowd
-    # out other identities by filling all LIMIT slots with its own rows.
-    # The old LIMIT 10 flat query had exactly that failure mode: if Sheldon had
-    # ≥ 10 active supervectors the entire result set was Sheldon, second_distance
-    # was never set, margin_ok was always True, and everything matched Sheldon.
-    cur.execute(
-        """
-        SELECT vs.identity_id,
-               i.name,
-               MIN(VEC_DISTANCE_COSINE(vs.embedding, ?)) AS best_dist
-        FROM voice_samples vs
-        JOIN identities i ON i.id = vs.identity_id
-        WHERE vs.is_active = TRUE
-        GROUP BY vs.identity_id, i.name
-        ORDER BY best_dist ASC
-        LIMIT 5
-        """,
-        (vec_bytes,),
-    )
-    identity_rows = cur.fetchall()
-
-    # VEC_DISTANCE_COSINE returns NULL for malformed embeddings – drop those.
-    identity_rows = [r for r in identity_rows if r[2] is not None]
-
-    if not identity_rows:
-        cur.close()
-        return {"status": "unknown", "identity_id": None, "identity_name": None,
-                "sample_id": None, "sample_context": None, "distance": None,
-                "second_distance": None}
-
-    identity_id, identity_name, distance = identity_rows[0]
-    identity_id   = int(identity_id)
-    distance      = float(distance)
-
-    # second_distance: closest match from any *different* identity
-    second_distance: float | None = None
-    for row in identity_rows[1:]:
-        if row[0] != identity_id and row[2] is not None:
-            second_distance = float(row[2])
-            break
-
-    # ── Step 2: find the specific sample within the winning identity ──────────
-    cur.execute(
-        """
-        SELECT id, context
-        FROM voice_samples
-        WHERE identity_id = ?
-          AND is_active = TRUE
-        ORDER BY VEC_DISTANCE_COSINE(embedding, ?) ASC
-        LIMIT 1
-        """,
-        (identity_id, vec_bytes),
-    )
-    sample_row = cur.fetchone()
-    cur.close()
-    sample_id      = sample_row[0] if sample_row else None
-    sample_context = sample_row[1] if sample_row else None
-
-    # Check whether the winning match is sufficiently separated from the
-    # runner-up identity.  If not, downgrade the confidence level.
-    margin_ok = (second_distance is None) or (second_distance - float(distance) >= min_margin)
-
-    if float(distance) <= match_threshold:
-        if margin_ok:
-            status = "matched"
-        elif float(distance) <= suggest_threshold:
-            status = "suggest"   # too close to a rival – downgrade
-        else:
-            status = "unknown"
-    elif float(distance) <= suggest_threshold:
-        status = "suggest"
-    else:
-        status = "unknown"
-
-    if status == "unknown":
-        return {"status": "unknown", "identity_id": None, "identity_name": None,
-                "sample_id": None, "sample_context": None,
-                "distance": float(distance), "second_distance": second_distance}
+    touched_videos = {int(v[1]) for v in tracks}
+    for v_id in touched_videos:
+        rebuild_overlay_for_video(conn, v_id)
 
     return {
-        "status": status,
-        "identity_id": identity_id,
-        "identity_name": identity_name,
-        "sample_id": sample_id,
-        "sample_context": sample_context,
-        "distance": float(distance),
-        "second_distance": second_distance,
+        "updated": updated,
+        "suggested": suggested,
+        "assigned": assigned,
+        "total": len(tracks),
     }
 
 
-# ---------------------------------------------------------------------------
-# Episode segment helpers
-# ---------------------------------------------------------------------------
-
-def upsert_segment(conn: mariadb.Connection, **kwargs) -> int:
-    """Insert a new episode segment row.  kwargs map directly to column names."""
-    # Explicit allowlist of valid column names – guards against SQL injection
-    # if the caller ever passes unexpected keys.
-    _ALLOWED_COLS = (
-        "series_name", "episode_title", "video_path", "start_ms", "end_ms",
-        "speaker_label", "embedding", "identity_id", "matched_sample_id",
-        "match_distance", "transcript", "confidence", "is_suggestion",
-        "is_low_quality",
-    )
-    data = {k: v for k, v in kwargs.items() if k in _ALLOWED_COLS}
-    if "match_distance" in data:
-        data["match_distance"] = _sanitize_float(data["match_distance"])
-    # Build column list from the verified allowlist (not from caller input)
-    cols         = ", ".join(data.keys())
-    placeholders = ", ".join("?" for _ in data)
+def list_videos(conn: mariadb.Connection, production_id: int | None = None) -> list[dict[str, Any]]:
     cur = conn.cursor()
-    cur.execute(
-        f"INSERT INTO episode_segments ({cols}) VALUES ({placeholders})",  # noqa: S608
-        list(data.values()),
-    )
-    conn.commit()
-    return cur.lastrowid
-
-
-def get_existing_segment(
-    conn: mariadb.Connection,
-    series_name: str,
-    episode_title: str,
-    start_ms: int,
-    end_ms: int,
-) -> dict | None:
-    """Return an existing segment row that matches the given timecodes, or None."""
-    cur = conn.cursor()
-    cur.execute(
-        """SELECT id, identity_id, is_suggestion, match_distance
-           FROM episode_segments
-           WHERE series_name = ? AND episode_title = ?
-             AND start_ms = ? AND end_ms = ?
-           LIMIT 1""",
-        (series_name, episode_title, start_ms, end_ms),
-    )
-    row = cur.fetchone()
-    if row is None:
-        return None
-    cols = [d[0] for d in cur.description]
-    return dict(zip(cols, row))
-
-
-def update_segment_match(
-    conn: mariadb.Connection,
-    segment_id: int,
-    identity_id: int | None,
-    matched_sample_id: int | None,
-    match_distance: float | None,
-    is_suggestion: bool,
-    embedding: bytes | None = None,
-    transcript: str | None = None,
-    is_low_quality: bool = False,
-) -> None:
-    """Update only the auto-detected fields; preserve manual identity assignments."""
-    match_distance = _sanitize_float(match_distance)
-    cur = conn.cursor()
-    if embedding is not None and transcript is not None:
+    if production_id is None:
         cur.execute(
-            """UPDATE episode_segments
-               SET identity_id = ?, matched_sample_id = ?, match_distance = ?,
-                   is_suggestion = ?, embedding = ?, transcript = ?, is_low_quality = ?
-               WHERE id = ?""",
-            (identity_id, matched_sample_id, match_distance, is_suggestion,
-             embedding, transcript, is_low_quality, segment_id),
+            "SELECT id, production_id, title, episode_code, video_path, duration_ms, scan_status FROM videos ORDER BY title ASC"
         )
     else:
         cur.execute(
-            """UPDATE episode_segments
-               SET identity_id = ?, matched_sample_id = ?, match_distance = ?,
-                   is_suggestion = ?, is_low_quality = ?
-               WHERE id = ?""",
-            (identity_id, matched_sample_id, match_distance, is_suggestion,
-             is_low_quality, segment_id),
+            "SELECT id, production_id, title, episode_code, video_path, duration_ms, scan_status "
+            "FROM videos WHERE production_id=? ORDER BY title ASC",
+            (production_id,),
         )
-    conn.commit()
+    return [
+        {
+            "id": int(r[0]),
+            "production_id": r[1],
+            "title": r[2],
+            "episode_code": r[3],
+            "video_path": r[4],
+            "duration_ms": r[5],
+            "scan_status": r[6],
+        }
+        for r in cur.fetchall()
+    ]
 
 
-def update_segment_identity(
-    conn: mariadb.Connection,
-    segment_id: int,
-    identity_id: int,
-    matched_sample_id: int | None = None,
-    match_distance: float | None = None,
-    is_suggestion: bool = False,
-) -> None:
-    match_distance = _sanitize_float(match_distance)
+def list_productions(conn: mariadb.Connection) -> list[dict[str, Any]]:
     cur = conn.cursor()
     cur.execute(
-        """UPDATE episode_segments
-           SET identity_id = ?, matched_sample_id = ?,
-               match_distance = ?, is_suggestion = ?
-           WHERE id = ?""",
-        (identity_id, matched_sample_id, match_distance, is_suggestion, segment_id),
+        "SELECT id, title, production_type, season_label, metadata_json FROM productions ORDER BY title ASC"
     )
-    conn.commit()
-
-
-def update_segment_tts_path(conn: mariadb.Connection, segment_id: int, wav_path: str) -> None:
-    """Store the path to the extracted TTS WAV snippet for a segment."""
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE episode_segments SET tts_wav_path = ? WHERE id = ?",
-        (wav_path, segment_id),
-    )
-    conn.commit()
-
-
-def get_segment_embedding(
-    conn: mariadb.Connection,
-    segment_id: int,
-) -> list[float] | None:
-    """Return the stored speaker embedding for a segment, or None if absent."""
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT embedding FROM episode_segments WHERE id = ?",
-        (segment_id,),
-    )
-    row = cur.fetchone()
-    if row is None or row[0] is None:
-        return None
-    return bytes_to_vector(row[0])
-
-
-def get_segment(conn: mariadb.Connection, segment_id: int) -> dict | None:
-    """Return full segment row as dict, or None if not found."""
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT es.id, es.series_name, es.episode_title, es.video_path,
-               es.start_ms, es.end_ms, es.speaker_label,
-               es.identity_id, i.name AS identity_name,
-               es.transcript, es.is_low_quality, es.tts_wav_path
-        FROM episode_segments es
-        LEFT JOIN identities i ON i.id = es.identity_id
-        WHERE es.id = ?
-        """,
-        (segment_id,),
-    )
-    row = cur.fetchone()
-    if row is None:
-        return None
-    cols = [d[0] for d in cur.description]
-    return dict(zip(cols, row))
-
-
-def list_processed_episodes(conn: mariadb.Connection) -> list[dict]:
-    """
-    Return a grouped list of all episodes that have been processed by the scanner.
-    Each entry contains series_name, episode_title, the stored video_path and the
-    total segment count – enough for the Web UI library view.
-    """
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT
-            series_name,
-            episode_title,
-            MIN(video_path)  AS video_path,
-            COUNT(*)         AS segment_count
-        FROM episode_segments
-        WHERE series_name IS NOT NULL
-          AND episode_title IS NOT NULL
-        GROUP BY series_name, episode_title
-        ORDER BY series_name, episode_title
-    """)
-    cols = [d[0] for d in cur.description]
-    return [dict(zip(cols, row)) for row in cur.fetchall()]
-
-
-def get_episode_segments(
-    conn: mariadb.Connection,
-    series_name: str,
-    episode_title: str,
-) -> list[dict]:
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT
-            es.id, es.start_ms, es.end_ms, es.speaker_label,
-            es.identity_id, i.name AS identity_name,
-            es.matched_sample_id, vs.context AS matched_sample_context,
-            es.match_distance, es.transcript, es.confidence, es.is_suggestion,
-            es.is_low_quality, es.tts_wav_path
-        FROM episode_segments es
-        LEFT JOIN identities i    ON i.id  = es.identity_id
-        LEFT JOIN voice_samples vs ON vs.id = es.matched_sample_id
-        WHERE es.series_name = ? AND es.episode_title = ?
-        ORDER BY es.start_ms
-        """,
-        (series_name, episode_title),
-    )
-    cols = [d[0] for d in cur.description]
-    return [dict(zip(cols, row)) for row in cur.fetchall()]
+    return [
+        {
+            "id": int(r[0]),
+            "title": r[1],
+            "production_type": r[2],
+            "season_label": r[3],
+            "metadata": _from_json(r[4], {}),
+        }
+        for r in cur.fetchall()
+    ]
