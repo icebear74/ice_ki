@@ -235,6 +235,7 @@ def upsert_production_and_video(
     video_path: str,
     *,
     production_type: str = "series",
+    season_label: str | None = None,
     episode_code: str | None = None,
     duration_ms: int | None = None,
     production_meta: dict[str, Any] | None = None,
@@ -243,13 +244,14 @@ def upsert_production_and_video(
     cur = conn.cursor()
     cur.execute(
         """
-        INSERT INTO productions (title, production_type, metadata_json)
-        VALUES (?, ?, ?)
+        INSERT INTO productions (title, production_type, season_label, metadata_json)
+        VALUES (?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE
             production_type = VALUES(production_type),
+            season_label = COALESCE(VALUES(season_label), season_label),
             metadata_json = VALUES(metadata_json)
         """,
-        (production_title, production_type, _to_json(production_meta)),
+        (production_title, production_type, season_label, _to_json(production_meta)),
     )
     conn.commit()
     cur.execute("SELECT id FROM productions WHERE title=?", (production_title,))

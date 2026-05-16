@@ -60,9 +60,29 @@
   <div class="layout">
     <section class="panel">
       <h2>Productions / Videos</h2>
-      <div class="toolbar">
+      <div class="toolbar" style="flex-wrap:wrap; gap:6px;">
         <button class="btn-main" onclick="loadLibrary()">Reload</button>
         <button class="btn-ok" onclick="triggerRematch()">Re-match</button>
+        <button class="btn-warn" onclick="showScanDirDialog()">Scan directory…</button>
+      </div>
+      <!-- Scan directory dialog (hidden by default) -->
+      <div id="scanDirDialog" style="display:none; padding:8px; border-bottom:1px solid var(--line); font-size:12px;">
+        <div style="margin-bottom:4px; color:var(--accent); font-weight:600;">Verzeichnis scannen</div>
+        <input id="scanDirPath" placeholder="Absoluter Pfad zum Verzeichnis" style="width:100%; margin-bottom:4px;" />
+        <input id="scanDirProd" placeholder="Produktionsname (optional, sonst Ordnername)" style="width:100%; margin-bottom:4px;" />
+        <div style="display:flex; gap:6px; align-items:center; margin-bottom:4px;">
+          <label style="display:flex;align-items:center;gap:4px;">
+            <input type="checkbox" id="scanDirRescan" /> Completed neu scannen
+          </label>
+          <label style="display:flex;align-items:center;gap:4px;">
+            <input type="checkbox" id="scanDirRecursive" /> Rekursiv
+          </label>
+        </div>
+        <div style="display:flex; gap:6px;">
+          <button class="btn-ok" style="flex:1" onclick="submitScanDir()">Starten</button>
+          <button onclick="hideScanDirDialog()">Abbrechen</button>
+        </div>
+        <div id="scanDirStatus" class="small" style="margin-top:4px;"></div>
       </div>
       <div id="library" class="scroll"></div>
     </section>
@@ -166,17 +186,61 @@
       }
       root.innerHTML = libraryData.map(prod => `
         <div class="item">
-          <div class="row"><strong>${prod.title}</strong><span class="pill">${prod.production_type}</span></div>
+          <div class="row"><strong>${prod.title}</strong><span class="pill">${prod.production_type}</span>${prod.season_label ? `<span class="pill">${prod.season_label}</span>` : ''}</div>
           <div class="small" style="margin-top:6px;">
             ${prod.videos.map(v => `
               <div class="item" onclick="selectVideo(${v.id}, event)">
-                <div class="row"><span>${v.title}</span><span class="pill">${v.scan_status}</span></div>
+                <div class="row">
+                  <span>${v.title}</span>
+                  <span class="pill">${v.scan_status}</span>
+                  <button class="btn-warn" style="font-size:10px;padding:2px 6px;margin-left:auto;" onclick="rescanVideo(${v.id}, event)">↻</button>
+                </div>
                 <div class="small">${v.episode_code || '—'} · clear ${v.clear_track_count}/${v.track_count}</div>
               </div>
             `).join('')}
           </div>
         </div>
       `).join('');
+    }
+
+    async function rescanVideo(videoId, event) {
+      event.stopPropagation();
+      if (!confirm('Alle Scan-Daten für dieses Video löschen und neu scannen?')) return;
+      try {
+        await jsonFetch(`/api/videos/${videoId}/rescan`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
+        alert('Rescan gestartet. Status wechselt auf "scanning". Reload nach Abschluss.');
+        await loadLibrary();
+      } catch (e) {
+        alert('Rescan-Fehler: ' + e.message);
+      }
+    }
+
+    function showScanDirDialog() {
+      document.getElementById('scanDirDialog').style.display = 'block';
+    }
+    function hideScanDirDialog() {
+      document.getElementById('scanDirDialog').style.display = 'none';
+      document.getElementById('scanDirStatus').textContent = '';
+    }
+    async function submitScanDir() {
+      const dir = document.getElementById('scanDirPath').value.trim();
+      const prod = document.getElementById('scanDirProd').value.trim();
+      const rescan = document.getElementById('scanDirRescan').checked;
+      const recursive = document.getElementById('scanDirRecursive').checked;
+      if (!dir) { alert('Bitte Verzeichnispfad angeben.'); return; }
+      const statusEl = document.getElementById('scanDirStatus');
+      statusEl.textContent = 'Starte Scan …';
+      try {
+        const result = await jsonFetch('/api/scan/directory', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ directory: dir, production: prod || null, rescan, recursive })
+        });
+        statusEl.textContent = `Scan gestartet: ${result.directory}`;
+        setTimeout(loadLibrary, 3000);
+      } catch (e) {
+        statusEl.textContent = 'Fehler: ' + e.message;
+      }
     }
 
     async function selectVideo(videoId, event) {

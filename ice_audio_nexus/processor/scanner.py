@@ -107,11 +107,26 @@ def _parse_episode_code(title_or_path: str) -> str | None:
     return m.group(1).upper() if m else None
 
 
+def _parse_season_label(title_or_path: str) -> str | None:
+    """Extract a season label like 'S01' from a filename containing SxxEyy."""
+    m = re.search(r"(S\d{1,2})E\d{1,2}", title_or_path, re.IGNORECASE)
+    return m.group(1).upper() if m else None
+
+
 def _parse_production_from_path(path: Path) -> str:
     if path.parent.name:
         return path.parent.name
     return "Unknown Production"
 
+
+#: Video file extensions recognised when scanning a directory.
+_SCAN_VIDEO_EXTENSIONS: frozenset[str] = frozenset(
+    {
+        ".mp4", ".mp2", ".mkv", ".avi", ".mov", ".m4v",
+        ".webm", ".ts", ".mpg", ".mpeg", ".wmv", ".flv",
+        ".vob", ".m2v", ".m2ts", ".mts", ".divx", ".3gp",
+    }
+)
 
 def _resolve_input_video_path(video_path: str) -> Path:
     """
@@ -215,6 +230,7 @@ def scan_video(
     production_name = production or _parse_production_from_path(source)
     video_title = title or source.stem
     ep_code = episode_code or _parse_episode_code(source.name)
+    season_lbl = _parse_season_label(source.name)
     duration_ms = _probe_duration_ms(str(source))
 
     data_root = Path(os.getenv("FACE_DATA_DIR", "data/faces")).resolve()
@@ -230,6 +246,7 @@ def scan_video(
         production_title=production_name,
         video_title=video_title,
         video_path=str(source),
+        season_label=season_lbl,
         episode_code=ep_code,
         duration_ms=duration_ms,
         production_meta={"scanner": "visual-step1"},
@@ -471,19 +488,133 @@ def scan_video(
     }
 
 
+def scan_directory(
+    directory: str,
+    *,
+    production: str | None = None,
+    skip_done: bool = True,
+    recursive: bool = False,
+    **scan_kwargs,
+) -> dict:
+    """Scan all video files found in *directory*.
+
+    Parameters
+    ----------
+    directory:
+        Root folder to search.
+    production:
+        Override production name. Defaults to the folder name.
+    skip_done:
+        When True (default), skip videos that already have scan_status='completed'.
+    recursive:
+        When True, search sub-directories as well.
+    **scan_kwargs:
+        Forwarded to :func:`scan_video` (fps, thresholds, …).
+    """
+    from db.database import get_connection as _get_conn, ensure_schema as _ensure_schema  # noqa: F401
+
+    root = Path(directory).expanduser().resolve()
+    if not root.is_dir():
+        raise NotADirectoryError(f"Not a directory: {root}")
+
+    pattern = "**/*" if recursive else "*"
+    video_files = sorted(
+        p for p in root.glob(pattern)
+        if p.is_file() and p.suffix.lower() in _SCAN_VIDEO_EXTENSIONS
+    )
+
+    if not video_files:
+        logger.warning("scan_directory: no video files found in %s", root)
+        return {"scanned": 0, "skipped": 0, "failed": 0, "results": []}
+
+    production_name = production or root.name
+
+    if skip_done:
+        _ensure_schema()
+        conn = _get_conn()
+        from db.database import list_videos as _list_videos
+        existing = {
+            v["video_path"]: v["scan_status"]
+            for v in _list_videos(conn)
+        }
+        conn.close()
+    else:
+        existing = {}
+
+    results: list[dict] = []
+    skipped = 0
+    failed = 0
+
+    for vf in video_files:
+        if skip_done and existing.get(str(vf)) == "completed":
+            logger.info("scan_directory: skipping already-completed %s", vf.name)
+            skipped += 1
+            continue
+        logger.info("scan_directory: scanning %s", vf.name)
+        try:
+            result = scan_video(
+                str(vf),
+                production=production_name,
+                **scan_kwargs,
+            )
+            results.append(result)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("scan_directory: failed on %s – %s", vf.name, exc)
+            failed += 1
+
+    return {
+        "directory": str(root),
+        "production": production_name,
+        "scanned": len(results),
+        "skipped": skipped,
+        "failed": failed,
+        "results": results,
+    }
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Step-1 visual face/track scanner")
-    parser.add_argument(
+    parser = argparse.ArgumentParser(
+        description="Step-1 visual face/track scanner",
+        epilog=(
+            "Examples:\n"
+            "  # Single video (re-scan always replaces old data)\n"
+            "  python scanner.py --video /data/ShowName.S01E02.mkv\n\n"
+            "  # Whole directory (skip already-completed videos)\n"
+            "  python scanner.py --dir /data/ShowName/ --production 'Show Name'\n\n"
+            "  # Whole directory, force re-scan of completed videos too\n"
+            "  python scanner.py --dir /data/ShowName/ --rescan\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument(
         "--video",
-        required=True,
         help=(
-            "Absolute path to source video. For spaces: use either "
-            "\"/path/with spaces/file.mkv\" or /path/with\\ spaces/file.mkv."
+            "Absolute path to a single video file. For spaces: quote the path or "
+            "use backslash escapes."
         ),
     )
-    parser.add_argument("--production", help="Production title (series/movie)")
-    parser.add_argument("--title", help="Video/episode title")
-    parser.add_argument("--episode-code", help="Optional episode code (e.g. S01E01)")
+    mode.add_argument(
+        "--dir",
+        dest="directory",
+        metavar="DIRECTORY",
+        help="Scan all video files in this directory.",
+    )
+
+    parser.add_argument("--production", help="Production title (series/movie); defaults to parent folder name")
+    parser.add_argument("--title", help="Video/episode title (single-video mode only)")
+    parser.add_argument("--episode-code", help="Override episode code, e.g. S01E01 (single-video mode only)")
+    parser.add_argument(
+        "--rescan",
+        action="store_true",
+        help="Force re-scan even for videos that are already status=completed (directory mode only; single-video always rescans)",
+    )
+    parser.add_argument(
+        "--recursive",
+        action="store_true",
+        help="Search sub-directories recursively (directory mode only)",
+    )
     parser.add_argument("--fps", type=float, default=float(os.getenv("FACE_SCAN_FPS", "4.0")))
     parser.add_argument("--min-clear-seconds", type=float, default=float(os.getenv("FACE_MIN_CLEAR_SECONDS", "2.0")))
     parser.add_argument("--min-face-area-ratio", type=float, default=float(os.getenv("FACE_MIN_AREA_RATIO", "0.04")))
@@ -493,11 +624,7 @@ def main() -> None:
     parser.add_argument("--min-face-size-px", type=int, default=int(os.getenv("FACE_MIN_SIZE_PX", "60")))
     args = parser.parse_args()
 
-    result = scan_video(
-        video_path=args.video,
-        production=args.production,
-        title=args.title,
-        episode_code=args.episode_code,
+    scan_kwargs = dict(
         sample_fps=args.fps,
         min_clear_seconds=args.min_clear_seconds,
         min_face_area_ratio=args.min_face_area_ratio,
@@ -506,7 +633,28 @@ def main() -> None:
         min_neighbors=args.min_neighbors,
         min_face_size_px=args.min_face_size_px,
     )
-    logger.info("Scan completed: %s", result)
+
+    if args.directory:
+        result = scan_directory(
+            args.directory,
+            production=args.production,
+            skip_done=not args.rescan,
+            recursive=args.recursive,
+            **scan_kwargs,
+        )
+        logger.info(
+            "Directory scan completed: %d scanned, %d skipped, %d failed",
+            result["scanned"], result["skipped"], result["failed"],
+        )
+    else:
+        result = scan_video(
+            video_path=args.video,
+            production=args.production,
+            title=args.title,
+            episode_code=args.episode_code,
+            **scan_kwargs,
+        )
+        logger.info("Scan completed: %s", result)
 
 
 if __name__ == "__main__":

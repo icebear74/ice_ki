@@ -10,6 +10,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -27,6 +28,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from db.database import (  # noqa: E402
     assign_track,
+    clear_video_scan_data,
     create_actor,
     create_role,
     ensure_schema,
@@ -42,6 +44,7 @@ from db.database import (  # noqa: E402
     list_video_tracks,
     list_videos,
     rematch_tracks,
+    set_video_scan_status,
     unlink_detection_from_track,
     update_track_status,
 )
@@ -370,6 +373,149 @@ def api_rematch(payload: dict = Body(default={})) -> JSONResponse:
         return JSONResponse(result)
     finally:
         conn.close()
+
+
+def _run_rescan_bg(video_id: int, video_path: str, scan_kwargs: dict) -> None:
+    """Background thread: clear existing scan data and re-scan a video."""
+    try:
+        # Import scanner lazily so the API can start without cv2 installed
+        from processor.scanner import scan_video  # noqa: F401  # type: ignore[import]
+    except ImportError:
+        logger.error("scanner not importable — cv2 / insightface missing?")
+        return
+
+    conn = get_connection()
+    try:
+        set_video_scan_status(conn, video_id, "scanning")
+        clear_video_scan_data(conn, video_id)
+    finally:
+        conn.close()
+
+    try:
+        result = scan_video(video_path, **scan_kwargs)
+        logger.info("Rescan completed for video_id=%d: %s", video_id, result)
+    except Exception as exc:
+        logger.error("Rescan failed for video_id=%d: %s", video_id, exc)
+        conn2 = get_connection()
+        try:
+            set_video_scan_status(conn2, video_id, "failed")
+        finally:
+            conn2.close()
+
+
+@app.post("/api/videos/{video_id}/rescan")
+def api_rescan_video(video_id: int, payload: dict = Body(default={})) -> JSONResponse:
+    """Delete all scan data for this video and trigger a fresh scan in the background.
+
+    The video's scan_status is immediately set to 'scanning'. Poll
+    GET /api/videos?production_id=… or the library endpoint to track progress.
+    """
+    conn = get_connection()
+    try:
+        video = get_video(conn, video_id)
+    finally:
+        conn.close()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    scan_kwargs: dict = {
+        "sample_fps": float(payload.get("fps", os.getenv("FACE_SCAN_FPS", "4.0"))),
+        "min_clear_seconds": float(payload.get("min_clear_seconds", os.getenv("FACE_MIN_CLEAR_SECONDS", "2.0"))),
+        "min_face_area_ratio": float(payload.get("min_face_area_ratio", os.getenv("FACE_MIN_AREA_RATIO", "0.04"))),
+        "min_sharpness": float(payload.get("min_sharpness", os.getenv("FACE_MIN_SHARPNESS", "70.0"))),
+        "min_stability": float(payload.get("min_stability", os.getenv("FACE_MIN_STABILITY", "0.30"))),
+        "min_neighbors": int(payload.get("min_neighbors", os.getenv("FACE_MIN_NEIGHBORS", "8"))),
+        "min_face_size_px": int(payload.get("min_face_size_px", os.getenv("FACE_MIN_SIZE_PX", "60"))),
+    }
+
+    t = threading.Thread(
+        target=_run_rescan_bg,
+        args=(video_id, str(video["video_path"]), scan_kwargs),
+        daemon=True,
+        name=f"rescan-{video_id}",
+    )
+    t.start()
+    return JSONResponse({"ok": True, "video_id": video_id, "status": "scanning"})
+
+
+def _run_scan_directory_bg(directory: str, production: str | None, skip_done: bool, recursive: bool, scan_kwargs: dict) -> None:
+    """Background thread: scan all video files in a directory."""
+    try:
+        from processor.scanner import scan_directory  # type: ignore[import]
+    except ImportError:
+        logger.error("scanner not importable — cv2 / insightface missing?")
+        return
+
+    try:
+        result = scan_directory(
+            directory,
+            production=production,
+            skip_done=skip_done,
+            recursive=recursive,
+            **scan_kwargs,
+        )
+        logger.info(
+            "Directory scan finished: scanned=%d skipped=%d failed=%d dir=%s",
+            result["scanned"], result["skipped"], result["failed"], directory,
+        )
+    except Exception as exc:
+        logger.error("Directory scan failed (%s): %s", directory, exc)
+
+
+@app.post("/api/scan/directory")
+def api_scan_directory(payload: dict = Body(...)) -> JSONResponse:
+    """Start a background scan of all video files in a directory.
+
+    Required body field:
+        directory (str): absolute path to the folder to scan.
+
+    Optional fields:
+        production (str): override production name (default: folder name).
+        rescan (bool): re-scan already-completed videos (default: false).
+        recursive (bool): search sub-directories (default: false).
+        fps, min_clear_seconds, min_face_area_ratio, min_sharpness,
+        min_stability, min_neighbors, min_face_size_px — scanner tunables.
+    """
+    directory = (payload.get("directory") or "").strip()
+    if not directory:
+        raise HTTPException(status_code=400, detail="'directory' is required")
+
+    root = Path(directory).resolve()
+    # Restrict to allowed roots (same allowlist used by video streaming)
+    allowed = any(root == ar or root.is_relative_to(ar) for ar in _STREAM_ROOTS)
+    if not allowed:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Directory is not within an allowed root. "
+                "Configure VIDEO_DIR or STREAM_ALLOWED_ROOTS to include this path."
+            ),
+        )
+    if not root.is_dir():
+        raise HTTPException(status_code=400, detail=f"Not a directory: {root}")
+
+    production = (payload.get("production") or "").strip() or None
+    skip_done = not bool(payload.get("rescan", False))
+    recursive = bool(payload.get("recursive", False))
+
+    scan_kwargs: dict = {
+        "sample_fps": float(payload.get("fps", os.getenv("FACE_SCAN_FPS", "4.0"))),
+        "min_clear_seconds": float(payload.get("min_clear_seconds", os.getenv("FACE_MIN_CLEAR_SECONDS", "2.0"))),
+        "min_face_area_ratio": float(payload.get("min_face_area_ratio", os.getenv("FACE_MIN_AREA_RATIO", "0.04"))),
+        "min_sharpness": float(payload.get("min_sharpness", os.getenv("FACE_MIN_SHARPNESS", "70.0"))),
+        "min_stability": float(payload.get("min_stability", os.getenv("FACE_MIN_STABILITY", "0.30"))),
+        "min_neighbors": int(payload.get("min_neighbors", os.getenv("FACE_MIN_NEIGHBORS", "8"))),
+        "min_face_size_px": int(payload.get("min_face_size_px", os.getenv("FACE_MIN_SIZE_PX", "60"))),
+    }
+
+    t = threading.Thread(
+        target=_run_scan_directory_bg,
+        args=(str(root), production, skip_done, recursive, scan_kwargs),
+        daemon=True,
+        name=f"scan-dir-{root.name}",
+    )
+    t.start()
+    return JSONResponse({"ok": True, "directory": str(root), "status": "scanning"})
 
 
 @app.get("/api/probe/{video_id}")
