@@ -113,6 +113,31 @@ def _parse_production_from_path(path: Path) -> str:
     return "Unknown Production"
 
 
+def _resolve_input_video_path(video_path: str) -> Path:
+    """
+    Resolve input path and recover from common escaped-space CLI misuse.
+    """
+    source = Path(video_path).expanduser().resolve()
+    if source.exists():
+        return source
+
+    if "\\ " in video_path:
+        normalized = video_path.replace("\\ ", " ")
+        candidate = Path(normalized).expanduser().resolve()
+        if candidate.exists():
+            logger.warning(
+                "Input path contained literal '\\ ' escapes; normalized to: %s",
+                candidate,
+            )
+            return candidate
+
+    raise FileNotFoundError(
+        "Video not found: "
+        f"{source}. If your path contains spaces, either quote it without backslashes "
+        "(\"/path/with spaces/file.mkv\") or use backslashes without quotes."
+    )
+
+
 def _safe_relpath(path: Path, root: Path) -> str:
     try:
         return str(path.resolve().relative_to(root.resolve()))
@@ -183,9 +208,7 @@ def scan_video(
     except ImportError as exc:
         raise RuntimeError("OpenCV not installed. Install opencv-python-headless.") from exc
 
-    source = Path(video_path).resolve()
-    if not source.exists():
-        raise FileNotFoundError(f"Video not found: {source}")
+    source = _resolve_input_video_path(video_path)
 
     production_name = production or _parse_production_from_path(source)
     video_title = title or source.stem
@@ -444,7 +467,14 @@ def scan_video(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Step-1 visual face/track scanner")
-    parser.add_argument("--video", required=True, help="Absolute path to source video")
+    parser.add_argument(
+        "--video",
+        required=True,
+        help=(
+            "Absolute path to source video. For spaces: use either "
+            "\"/path/with spaces/file.mkv\" or /path/with\\ spaces/file.mkv."
+        ),
+    )
     parser.add_argument("--production", help="Production title (series/movie)")
     parser.add_argument("--title", help="Video/episode title")
     parser.add_argument("--episode-code", help="Optional episode code (e.g. S01E01)")
