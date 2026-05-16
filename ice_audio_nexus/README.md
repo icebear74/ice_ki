@@ -46,9 +46,58 @@ Useful options:
 
 - `--fps` (default `4.0`)
 - `--min-clear-seconds` (default `2.0`)
-- `--min-face-area-ratio` (default `0.04`)
-- `--min-sharpness` (default `40.0`)
-- `--min-stability` (default `0.18`)
+- `--min-face-area-ratio` (default `0.06`)
+- `--min-sharpness` (default `70.0`)
+- `--min-stability` (default `0.45`)
+- `--dnn-confidence` (default `0.65`)
+- `--min-face-size-px` (default `80`)
+- `--disable-verifier` (deaktiviert die zweite KI-Verifikation)
+- `--verifier-score-threshold` (default `0.92`)
+- `--cpu-only` / `--gpu-device-id` / `--gpu-diagnostics`
+
+## False-Positive-Reduktion (2-stufig)
+
+Der Scanner verwendet jetzt zwei Modelle:
+
+1. OpenCV ResNet-SSD (erste Detection-Stufe)
+2. YuNet-Verifier (zweite Stufe, bestätigt nur plausible Gesichter)
+
+Treffer aus Stufe 1 werden vor dem Persistieren verworfen, wenn die Verifikation
+fehlschlägt (Score/Fläche/Zentrierung konfigurierbar via `.env`).
+
+## GPU/CUDA-Diagnostik
+
+OpenCV-DNN nutzt GPU nur, wenn OpenCV mit CUDA gebaut wurde. Prüfen mit:
+
+```bash
+python -m processor.scanner --diagnose-opencv
+```
+
+Im Setup (`setup_env.sh`) wird zusätzlich nach Installation automatisch ausgegeben:
+
+- OpenCV-Version
+- CUDA/cuDNN-Build-Status
+- von OpenCV sichtbare CUDA-Geräte
+
+## Rescan-Cleanup
+
+Beim (Re-)Scan werden alte Bilddaten (`data/faces/crops/<video>` und
+`data/faces/tracks/<video>`) vor dem neuen Lauf gelöscht, damit Festplatte und DB
+synchron bleiben.
+
+## Verifikation nach Merge (Self-Checks)
+
+1. **GPU vs CPU aktiv?**
+   - Scan starten und Log prüfen auf `Face detector: CUDA backend active` oder CPU-Fallback.
+2. **OpenCV mit CUDA gebaut?**
+   - `python -m processor.scanner --diagnose-opencv`
+3. **Verifier aktiv?**
+   - Log prüfen auf `Face verifier: enabled ...`
+   - Scan-Ergebnis enthält `verifier_rejections`.
+4. **False Positives reduziert?**
+   - Vorher/Nachher mit gleichem Video vergleichen (`detections`, `clear_tracks`, `verifier_rejections`).
+5. **Rescan räumt alte Bilder auf?**
+   - Vor Rescan Dateianzahl in `data/faces/crops/<video>` prüfen, dann Rescan starten und Log `Removed stale scan images` verifizieren.
 
 ## Web UI
 
