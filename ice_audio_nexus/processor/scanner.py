@@ -42,6 +42,13 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
 
@@ -176,9 +183,75 @@ _DNN_MODEL_URL = (
 )
 _DNN_PROTOTXT_NAME = "face_deploy.prototxt"
 _DNN_MODEL_NAME = "res10_300x300_ssd_fp16.caffemodel"
+_VERIFIER_MODEL_URL = (
+    "https://raw.githubusercontent.com/opencv/opencv_zoo/main/models/"
+    "face_detection_yunet/face_detection_yunet_2023mar.onnx"
+)
+_VERIFIER_MODEL_NAME = "face_detection_yunet_2023mar.onnx"
 
 
-def _get_dnn_face_detector(models_dir: Path):
+def _opencv_cuda_diagnostics() -> dict[str, object]:
+    import cv2
+
+    info: dict[str, object] = {
+        "opencv_version": cv2.__version__,
+        "cuda_module_available": hasattr(cv2, "cuda"),
+        "cuda_device_count": 0,
+        "cuda_build_enabled": False,
+        "cudnn_build_enabled": False,
+    }
+
+    build_info = ""
+    try:
+        build_info = cv2.getBuildInformation()
+        info["cuda_build_enabled"] = "NVIDIA CUDA:                   YES" in build_info
+        info["cudnn_build_enabled"] = "cuDNN:                         YES" in build_info
+    except Exception as exc:  # noqa: BLE001
+        info["build_info_error"] = str(exc)
+
+    if hasattr(cv2, "cuda"):
+        try:
+            count = int(cv2.cuda.getCudaEnabledDeviceCount())
+            info["cuda_device_count"] = count
+            devices: list[dict[str, object]] = []
+            for idx in range(max(0, count)):
+                name = ""
+                try:
+                    name = cv2.cuda.DeviceInfo(idx).name()
+                except Exception:  # noqa: BLE001
+                    name = "unknown"
+                devices.append({"index": idx, "name": name})
+            if devices:
+                info["cuda_devices"] = devices
+        except Exception as exc:  # noqa: BLE001
+            info["cuda_probe_error"] = str(exc)
+
+    return info
+
+
+def _configure_dnn_backend(net, *, prefer_gpu: bool, gpu_device_id: int = 0) -> tuple[str, str]:
+    import cv2
+
+    backend_name = "opencv"
+    target_name = "cpu"
+
+    if prefer_gpu:
+        try:
+            if hasattr(cv2, "cuda") and cv2.cuda.getCudaEnabledDeviceCount() > 0:
+                if gpu_device_id >= 0:
+                    cv2.cuda.setDevice(gpu_device_id)
+                net.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA)
+                net.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA)
+                return "cuda", f"cuda:{gpu_device_id}"
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not enable CUDA backend for DNN (%s); falling back to CPU", exc)
+
+    net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
+    net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+    return backend_name, target_name
+
+
+def _get_dnn_face_detector(models_dir: Path, *, prefer_gpu: bool = True, gpu_device_id: int = 0):
     """Load (downloading once) the OpenCV ResNet-SSD DNN face detector.
 
     Tries to use the CUDA backend (GPU) first; falls back to CPU if not
@@ -209,27 +282,82 @@ def _get_dnn_face_detector(models_dir: Path):
 
     net = cv2.dnn.readNetFromCaffe(str(prototxt), str(caffemodel))
 
-    # Attempt GPU (CUDA) backend – only works if OpenCV was compiled with CUDA.
-    gpu_ok = False
-    try:
-        if hasattr(cv2, "cuda") and cv2.cuda.getCudaEnabledDeviceCount() > 0:
-            net.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA)
-            net.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA)
-            gpu_ok = True
-    except Exception:
-        pass
-
-    if gpu_ok:
+    backend_name, target_name = _configure_dnn_backend(
+        net,
+        prefer_gpu=prefer_gpu,
+        gpu_device_id=gpu_device_id,
+    )
+    if backend_name == "cuda":
         logger.info("Face detector: CUDA backend active (GPU accelerated ✓)")
     else:
-        net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
-        net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
         logger.info(
             "Face detector: CPU backend "
             "(for GPU: install opencv-python with CUDA support)"
         )
 
-    return net
+    return net, {"backend": backend_name, "target": target_name}
+
+
+def _get_face_verifier_model(
+    models_dir: Path,
+    *,
+    enabled: bool,
+    prefer_gpu: bool,
+    gpu_device_id: int,
+):
+    if not enabled:
+        logger.info("Face verifier: disabled")
+        return None, {"enabled": False, "backend": "disabled"}
+
+    import cv2
+
+    models_dir.mkdir(parents=True, exist_ok=True)
+    onnx_path = models_dir / _VERIFIER_MODEL_NAME
+    if not onnx_path.exists():
+        logger.info("Downloading face-verifier model to %s …", onnx_path)
+        try:
+            urllib.request.urlretrieve(_VERIFIER_MODEL_URL, onnx_path)
+        except Exception as exc:
+            logger.warning("Face verifier unavailable (download failed: %s)", exc)
+            return None, {"enabled": False, "backend": "download_failed", "error": str(exc)}
+
+    if not hasattr(cv2, "FaceDetectorYN_create"):
+        logger.warning("Face verifier unavailable: cv2.FaceDetectorYN_create is missing in this OpenCV build")
+        return None, {"enabled": False, "backend": "unsupported_cv2"}
+
+    backend_id = cv2.dnn.DNN_BACKEND_OPENCV
+    target_id = cv2.dnn.DNN_TARGET_CPU
+    backend_name = "opencv"
+    target_name = "cpu"
+    if prefer_gpu:
+        try:
+            if hasattr(cv2, "cuda") and cv2.cuda.getCudaEnabledDeviceCount() > 0:
+                if gpu_device_id >= 0:
+                    cv2.cuda.setDevice(gpu_device_id)
+                backend_id = cv2.dnn.DNN_BACKEND_CUDA
+                target_id = cv2.dnn.DNN_TARGET_CUDA
+                backend_name = "cuda"
+                target_name = f"cuda:{gpu_device_id}"
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Face verifier CUDA setup failed (%s); using CPU", exc)
+
+    try:
+        verifier = cv2.FaceDetectorYN_create(
+            str(onnx_path),
+            "",
+            (320, 320),
+            0.9,
+            0.3,
+            5000,
+            backend_id,
+            target_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Face verifier model init failed (%s); verifier disabled", exc)
+        return None, {"enabled": False, "backend": "init_failed", "error": str(exc)}
+
+    logger.info("Face verifier: enabled (%s / %s)", backend_name, target_name)
+    return verifier, {"enabled": True, "backend": backend_name, "target": target_name}
 
 
 def _dnn_detect_faces(
@@ -266,6 +394,7 @@ def _dnn_detect_faces(
     return results
 
 
+def _build_face_descriptor(crop_bgr: np.ndarray) -> np.ndarray:
     import cv2
 
     gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
@@ -275,6 +404,39 @@ def _dnn_detect_faces(
     if norm > 1e-9:
         desc = desc / norm
     return desc
+
+
+def _verify_face_candidate(
+    verifier,
+    crop: np.ndarray,
+    *,
+    score_threshold: float,
+    min_area_ratio: float,
+    max_center_offset: float,
+) -> tuple[bool, dict[str, float]]:
+    h, w = crop.shape[:2]
+    if h < 20 or w < 20:
+        return False, {"score": 0.0, "area_ratio": 0.0, "center_offset": 1.0}
+
+    verifier.setInputSize((w, h))
+    _ok, faces = verifier.detect(crop)
+    if faces is None or len(faces) == 0:
+        return False, {"score": 0.0, "area_ratio": 0.0, "center_offset": 1.0}
+
+    best = max(faces, key=lambda row: float(row[14]))
+    vx, vy, vw, vh = [float(v) for v in best[:4]]
+    score = float(best[14])
+    area_ratio = max(0.0, (vw * vh) / float(w * h))
+    cx = vx + (vw / 2.0)
+    cy = vy + (vh / 2.0)
+    center_offset = (abs(cx - (w / 2.0)) / max(1.0, w)) + (abs(cy - (h / 2.0)) / max(1.0, h))
+
+    passed = (
+        score >= score_threshold
+        and area_ratio >= min_area_ratio
+        and center_offset <= max_center_offset
+    )
+    return passed, {"score": score, "area_ratio": area_ratio, "center_offset": center_offset}
 
 
 @dataclass
@@ -322,8 +484,15 @@ def scan_video(
     track_max_gap_ms: int = 600,
     iou_threshold: float = 0.30,
     descriptor_threshold: float = 0.72,
-    dnn_confidence: float = 0.50,
-    min_face_size_px: int = 60,
+    dnn_confidence: float = 0.65,
+    min_face_size_px: int = 80,
+    verifier_enabled: bool = True,
+    verifier_score_threshold: float = 0.92,
+    verifier_min_area_ratio: float = 0.25,
+    verifier_max_center_offset: float = 0.45,
+    prefer_gpu: bool = True,
+    gpu_device_id: int = 0,
+    gpu_diagnostics: bool = True,
 ) -> dict:
     try:
         import cv2
@@ -382,19 +551,44 @@ def scan_video(
 
     # Load DNN face detector (downloads model once on first run).
     models_dir = data_root / "models"
+    diag_info = _opencv_cuda_diagnostics()
+    if gpu_diagnostics:
+        logger.info("OpenCV version: %s", diag_info.get("opencv_version"))
+        logger.info(
+            "OpenCV CUDA build: %s | cuDNN build: %s | CUDA devices visible: %s",
+            diag_info.get("cuda_build_enabled"),
+            diag_info.get("cudnn_build_enabled"),
+            diag_info.get("cuda_device_count"),
+        )
+        if diag_info.get("cuda_devices"):
+            for dev in diag_info["cuda_devices"]:  # type: ignore[index]
+                logger.info("CUDA device[%s]: %s", dev.get("index"), dev.get("name"))  # type: ignore[union-attr]
+
     try:
-        face_net = _get_dnn_face_detector(models_dir)
+        face_net, detector_runtime = _get_dnn_face_detector(
+            models_dir,
+            prefer_gpu=prefer_gpu,
+            gpu_device_id=gpu_device_id,
+        )
     except Exception as exc:
         set_video_scan_status(conn, video_id, "failed")
         conn.close()
         cap.release()
         raise RuntimeError(f"Could not load DNN face detector: {exc}") from exc
 
+    verifier, verifier_runtime = _get_face_verifier_model(
+        models_dir,
+        enabled=verifier_enabled,
+        prefer_gpu=prefer_gpu,
+        gpu_device_id=gpu_device_id,
+    )
+
     active_tracks: list[Track] = []
     finished_tracks: list[Track] = []
     frame_index = -1
     sampled_frames = 0
     detection_count = 0
+    verifier_rejected_count = 0
 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     total_sample_frames = max(1, total_frames // frame_step) if total_frames > 0 else None
@@ -439,6 +633,22 @@ def scan_video(
             crop = frame[y : y + fh, x : x + fw]
             if crop.size == 0:
                 continue
+            verifier_meta = {"score": 0.0, "area_ratio": 0.0, "center_offset": 0.0}
+            if verifier is not None:
+                try:
+                    verified, verifier_meta = _verify_face_candidate(
+                        verifier,
+                        crop,
+                        score_threshold=verifier_score_threshold,
+                        min_area_ratio=verifier_min_area_ratio,
+                        max_center_offset=verifier_max_center_offset,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Face verifier failed on frame=%d det=%d: %s", frame_index, i, exc)
+                    verified = False
+                if not verified:
+                    verifier_rejected_count += 1
+                    continue
             sharpness = float(cv2.Laplacian(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), cv2.CV_64F).var())
             area_ratio = (fw * fh) / frame_area
             descriptor = _build_face_descriptor(crop)
@@ -470,7 +680,7 @@ def scan_video(
                 sharpness=sharpness,
                 crop_image_path=det.crop_path,
                 embedding=descriptor.astype(float).tolist(),
-                metadata={"area_ratio": area_ratio},
+                metadata={"area_ratio": area_ratio, "verifier": verifier_meta},
             )
             frame_detections.append(det)
             detection_count += 1
@@ -509,19 +719,20 @@ def scan_video(
                 _last_pct_reported = pct_milestone
                 elapsed_s = timestamp_ms / 1000.0
                 logger.info(
-                    "[%d%%] %.0fs / %.0fs | faces detected so far: %d | active tracks: %d | finished tracks: %d",
+                    "[%d%%] %.0fs / %.0fs | faces accepted: %d | verifier rejects: %d | active tracks: %d | finished tracks: %d",
                     pct_milestone,
                     elapsed_s,
                     duration_s_est or 0.0,
                     detection_count,
+                    verifier_rejected_count,
                     len(active_tracks),
                     len(finished_tracks),
                 )
         elif sampled_frames % 50 == 0:
             elapsed_s = timestamp_ms / 1000.0
             logger.info(
-                "[frame %d sampled] %.0fs elapsed | faces detected: %d | active tracks: %d",
-                sampled_frames, elapsed_s, detection_count, len(active_tracks),
+                "[frame %d sampled] %.0fs elapsed | faces accepted: %d | verifier rejects: %d | active tracks: %d",
+                sampled_frames, elapsed_s, detection_count, verifier_rejected_count, len(active_tracks),
             )
 
     cap.release()
@@ -607,6 +818,18 @@ def scan_video(
                     "min_face_area_ratio": min_face_area_ratio,
                     "min_sharpness": min_sharpness,
                     "min_stability": min_stability,
+                    "dnn_confidence": dnn_confidence,
+                    "min_face_size_px": min_face_size_px,
+                    "verifier_enabled": verifier is not None,
+                    "verifier_score_threshold": verifier_score_threshold,
+                    "verifier_min_area_ratio": verifier_min_area_ratio,
+                    "verifier_max_center_offset": verifier_max_center_offset,
+                },
+                "runtime": {
+                    "detector_backend": detector_runtime.get("backend"),
+                    "detector_target": detector_runtime.get("target"),
+                    "verifier_backend": verifier_runtime.get("backend"),
+                    "verifier_target": verifier_runtime.get("target"),
                 },
             },
         )
@@ -620,10 +843,11 @@ def scan_video(
     conn.close()
 
     logger.info(
-        "Scan finished: %s | sampled %d frames | %d face detections | %d tracks (%d clear / %d background)",
+        "Scan finished: %s | sampled %d frames | %d accepted detections | %d verifier rejects | %d tracks (%d clear / %d background)",
         source.name,
         sampled_frames,
         detection_count,
+        verifier_rejected_count,
         persisted_tracks,
         clear_tracks,
         persisted_tracks - clear_tracks,
@@ -635,9 +859,14 @@ def scan_video(
         "video_path": str(source),
         "sampled_frames": sampled_frames,
         "detections": detection_count,
+        "verifier_rejections": verifier_rejected_count,
         "tracks": persisted_tracks,
         "clear_tracks": clear_tracks,
         "sample_fps": sample_fps,
+        "detector_backend": detector_runtime.get("backend"),
+        "detector_target": detector_runtime.get("target"),
+        "verifier_enabled": bool(verifier is not None),
+        "gpu_diagnostics": diag_info,
     }
 
 
@@ -740,7 +969,7 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
-    mode = parser.add_mutually_exclusive_group(required=True)
+    mode = parser.add_mutually_exclusive_group(required=False)
     mode.add_argument(
         "--video",
         help=(
@@ -770,17 +999,71 @@ def main() -> None:
     )
     parser.add_argument("--fps", type=float, default=float(os.getenv("FACE_SCAN_FPS", "4.0")))
     parser.add_argument("--min-clear-seconds", type=float, default=float(os.getenv("FACE_MIN_CLEAR_SECONDS", "2.0")))
-    parser.add_argument("--min-face-area-ratio", type=float, default=float(os.getenv("FACE_MIN_AREA_RATIO", "0.04")))
+    parser.add_argument("--min-face-area-ratio", type=float, default=float(os.getenv("FACE_MIN_AREA_RATIO", "0.06")))
     parser.add_argument("--min-sharpness", type=float, default=float(os.getenv("FACE_MIN_SHARPNESS", "70.0")))
-    parser.add_argument("--min-stability", type=float, default=float(os.getenv("FACE_MIN_STABILITY", "0.30")))
+    parser.add_argument("--min-stability", type=float, default=float(os.getenv("FACE_MIN_STABILITY", "0.45")))
     parser.add_argument(
         "--dnn-confidence",
         type=float,
-        default=float(os.getenv("FACE_DNN_CONFIDENCE", "0.50")),
-        help="Minimum DNN detection confidence 0..1 (higher = fewer false positives, default: 0.50)",
+        default=float(os.getenv("FACE_DNN_CONFIDENCE", "0.65")),
+        help="Minimum DNN detection confidence 0..1 (higher = fewer false positives, default: 0.65)",
     )
-    parser.add_argument("--min-face-size-px", type=int, default=int(os.getenv("FACE_MIN_SIZE_PX", "60")))
+    parser.add_argument("--min-face-size-px", type=int, default=int(os.getenv("FACE_MIN_SIZE_PX", "80")))
+    parser.add_argument(
+        "--disable-verifier",
+        action="store_true",
+        help="Disable second-stage face verifier model (not recommended for precision).",
+    )
+    parser.add_argument(
+        "--verifier-score-threshold",
+        type=float,
+        default=float(os.getenv("FACE_VERIFIER_SCORE_THRESHOLD", "0.92")),
+    )
+    parser.add_argument(
+        "--verifier-min-area-ratio",
+        type=float,
+        default=float(os.getenv("FACE_VERIFIER_MIN_AREA_RATIO", "0.25")),
+    )
+    parser.add_argument(
+        "--verifier-max-center-offset",
+        type=float,
+        default=float(os.getenv("FACE_VERIFIER_MAX_CENTER_OFFSET", "0.45")),
+    )
+    parser.add_argument(
+        "--cpu-only",
+        action="store_true",
+        help="Force CPU backend (disables CUDA attempt).",
+    )
+    parser.add_argument(
+        "--gpu-device-id",
+        type=int,
+        default=int(os.getenv("FACE_GPU_DEVICE_ID", "0")),
+        help="Preferred CUDA device index for detector + verifier backends.",
+    )
+    parser.add_argument(
+        "--gpu-diagnostics",
+        action="store_true",
+        default=_env_bool("FACE_GPU_DIAGNOSTICS", True),
+        help="Log OpenCV/CUDA diagnostics at scan startup.",
+    )
+    parser.add_argument(
+        "--diagnose-opencv",
+        action="store_true",
+        help="Print OpenCV/CUDA diagnostics and exit (no scan).",
+    )
     args = parser.parse_args()
+
+    if args.diagnose_opencv:
+        try:
+            info = _opencv_cuda_diagnostics()
+            logger.info("OpenCV diagnostics: %s", info)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Could not collect OpenCV diagnostics: %s", exc)
+            raise SystemExit(2) from exc
+        return
+
+    if not args.video and not args.directory:
+        parser.error("one of --video or --dir is required (unless --diagnose-opencv is used)")
 
     scan_kwargs = dict(
         sample_fps=args.fps,
@@ -790,6 +1073,13 @@ def main() -> None:
         min_stability=args.min_stability,
         dnn_confidence=args.dnn_confidence,
         min_face_size_px=args.min_face_size_px,
+        verifier_enabled=_env_bool("FACE_VERIFIER_ENABLED", True) and not args.disable_verifier,
+        verifier_score_threshold=args.verifier_score_threshold,
+        verifier_min_area_ratio=args.verifier_min_area_ratio,
+        verifier_max_center_offset=args.verifier_max_center_offset,
+        prefer_gpu=_env_bool("FACE_GPU_ENABLED", True) and not args.cpu_only,
+        gpu_device_id=args.gpu_device_id,
+        gpu_diagnostics=args.gpu_diagnostics,
     )
 
     if args.directory:

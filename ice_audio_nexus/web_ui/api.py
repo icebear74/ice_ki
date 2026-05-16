@@ -52,6 +52,15 @@ from db.database import (  # noqa: E402
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
+
+def _as_bool(value: object, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
 VIDEO_DIR = Path(os.getenv("VIDEO_DIR", "/data/videos")).resolve()
 FACE_DATA_DIR = Path(os.getenv("FACE_DATA_DIR", "data/faces")).resolve()
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
@@ -421,11 +430,18 @@ def api_rescan_video(video_id: int, payload: dict = Body(default={})) -> JSONRes
     scan_kwargs: dict = {
         "sample_fps": float(payload.get("fps", os.getenv("FACE_SCAN_FPS", "4.0"))),
         "min_clear_seconds": float(payload.get("min_clear_seconds", os.getenv("FACE_MIN_CLEAR_SECONDS", "2.0"))),
-        "min_face_area_ratio": float(payload.get("min_face_area_ratio", os.getenv("FACE_MIN_AREA_RATIO", "0.04"))),
+        "min_face_area_ratio": float(payload.get("min_face_area_ratio", os.getenv("FACE_MIN_AREA_RATIO", "0.06"))),
         "min_sharpness": float(payload.get("min_sharpness", os.getenv("FACE_MIN_SHARPNESS", "70.0"))),
-        "min_stability": float(payload.get("min_stability", os.getenv("FACE_MIN_STABILITY", "0.30"))),
-        "dnn_confidence": float(payload.get("dnn_confidence", os.getenv("FACE_DNN_CONFIDENCE", "0.50"))),
-        "min_face_size_px": int(payload.get("min_face_size_px", os.getenv("FACE_MIN_SIZE_PX", "60"))),
+        "min_stability": float(payload.get("min_stability", os.getenv("FACE_MIN_STABILITY", "0.45"))),
+        "dnn_confidence": float(payload.get("dnn_confidence", os.getenv("FACE_DNN_CONFIDENCE", "0.65"))),
+        "min_face_size_px": int(payload.get("min_face_size_px", os.getenv("FACE_MIN_SIZE_PX", "80"))),
+        "verifier_enabled": _as_bool(payload.get("verifier_enabled"), _as_bool(os.getenv("FACE_VERIFIER_ENABLED"), True)),
+        "verifier_score_threshold": float(payload.get("verifier_score_threshold", os.getenv("FACE_VERIFIER_SCORE_THRESHOLD", "0.92"))),
+        "verifier_min_area_ratio": float(payload.get("verifier_min_area_ratio", os.getenv("FACE_VERIFIER_MIN_AREA_RATIO", "0.25"))),
+        "verifier_max_center_offset": float(payload.get("verifier_max_center_offset", os.getenv("FACE_VERIFIER_MAX_CENTER_OFFSET", "0.45"))),
+        "prefer_gpu": _as_bool(payload.get("prefer_gpu"), _as_bool(os.getenv("FACE_GPU_ENABLED"), True)),
+        "gpu_device_id": int(payload.get("gpu_device_id", os.getenv("FACE_GPU_DEVICE_ID", "0"))),
+        "gpu_diagnostics": _as_bool(payload.get("gpu_diagnostics"), _as_bool(os.getenv("FACE_GPU_DIAGNOSTICS"), True)),
     }
 
     t = threading.Thread(
@@ -474,7 +490,10 @@ def api_scan_directory(payload: dict = Body(...)) -> JSONResponse:
         rescan (bool): re-scan already-completed videos (default: false).
         recursive (bool): search sub-directories (default: false).
         fps, min_clear_seconds, min_face_area_ratio, min_sharpness,
-        min_stability, dnn_confidence, min_face_size_px — scanner tunables.
+        min_stability, dnn_confidence, min_face_size_px,
+        verifier_enabled, verifier_score_threshold, verifier_min_area_ratio,
+        verifier_max_center_offset, prefer_gpu, gpu_device_id, gpu_diagnostics
+        — scanner tunables.
     """
     directory = (payload.get("directory") or "").strip()
     if not directory:
@@ -501,11 +520,18 @@ def api_scan_directory(payload: dict = Body(...)) -> JSONResponse:
     scan_kwargs: dict = {
         "sample_fps": float(payload.get("fps", os.getenv("FACE_SCAN_FPS", "4.0"))),
         "min_clear_seconds": float(payload.get("min_clear_seconds", os.getenv("FACE_MIN_CLEAR_SECONDS", "2.0"))),
-        "min_face_area_ratio": float(payload.get("min_face_area_ratio", os.getenv("FACE_MIN_AREA_RATIO", "0.04"))),
+        "min_face_area_ratio": float(payload.get("min_face_area_ratio", os.getenv("FACE_MIN_AREA_RATIO", "0.06"))),
         "min_sharpness": float(payload.get("min_sharpness", os.getenv("FACE_MIN_SHARPNESS", "70.0"))),
-        "min_stability": float(payload.get("min_stability", os.getenv("FACE_MIN_STABILITY", "0.30"))),
-        "dnn_confidence": float(payload.get("dnn_confidence", os.getenv("FACE_DNN_CONFIDENCE", "0.50"))),
-        "min_face_size_px": int(payload.get("min_face_size_px", os.getenv("FACE_MIN_SIZE_PX", "60"))),
+        "min_stability": float(payload.get("min_stability", os.getenv("FACE_MIN_STABILITY", "0.45"))),
+        "dnn_confidence": float(payload.get("dnn_confidence", os.getenv("FACE_DNN_CONFIDENCE", "0.65"))),
+        "min_face_size_px": int(payload.get("min_face_size_px", os.getenv("FACE_MIN_SIZE_PX", "80"))),
+        "verifier_enabled": _as_bool(payload.get("verifier_enabled"), _as_bool(os.getenv("FACE_VERIFIER_ENABLED"), True)),
+        "verifier_score_threshold": float(payload.get("verifier_score_threshold", os.getenv("FACE_VERIFIER_SCORE_THRESHOLD", "0.92"))),
+        "verifier_min_area_ratio": float(payload.get("verifier_min_area_ratio", os.getenv("FACE_VERIFIER_MIN_AREA_RATIO", "0.25"))),
+        "verifier_max_center_offset": float(payload.get("verifier_max_center_offset", os.getenv("FACE_VERIFIER_MAX_CENTER_OFFSET", "0.45"))),
+        "prefer_gpu": _as_bool(payload.get("prefer_gpu"), _as_bool(os.getenv("FACE_GPU_ENABLED"), True)),
+        "gpu_device_id": int(payload.get("gpu_device_id", os.getenv("FACE_GPU_DEVICE_ID", "0"))),
+        "gpu_diagnostics": _as_bool(payload.get("gpu_diagnostics"), _as_bool(os.getenv("FACE_GPU_DIAGNOSTICS"), True)),
     }
 
     t = threading.Thread(
