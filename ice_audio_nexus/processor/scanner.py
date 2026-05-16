@@ -179,6 +179,64 @@ def _configure_torch_model_cache(models_dir: Path) -> dict[str, str]:
     return {"torch_home": str(torch_home), "hf_home": str(hf_home)}
 
 
+def _cuda_device_supported(device_idx: int) -> tuple[bool, str]:
+    """Return (supported, reason) for *device_idx* against the current torch wheel.
+
+    PyTorch silently accepts the device selection even when a GPU's compute
+    capability (CC) is below what the wheel was compiled for.  The failure only
+    surfaces at the first CUDA kernel launch ("no kernel image available").
+    This probe compares the device CC against the set of CCs the wheel was
+    actually built for so we can fall back to CPU before that happens.
+    """
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return False, "cuda_unavailable"
+
+        cc = torch.cuda.get_device_capability(device_idx)  # (major, minor)
+        device_cc = cc[0] * 10 + cc[1]  # e.g. 6.0 → 60
+
+        # The set of compiled-in CCs is exposed via _C._cuda_getCompiledCudaArches()
+        # on recent torch, but that API is not always present.  Fall back to the
+        # documented per-version check.
+        supported_ccs: set[int] = set()
+        try:
+            # Available since torch 2.0
+            arches = torch.cuda._get_device_properties  # type: ignore[attr-defined]
+            _ = arches  # just a probe; use the compiled-arches API below
+            compiled: list[int] = [int(a) for a in torch.cuda.get_arch_list()]  # "sm_86" → 86
+            # Each compiled SM supports all devices with that SM or above up to
+            # the next listed SM.  Build a supported-CC set: a device at cc X is
+            # supported when X >= any compiled SM in the wheel (torch selects the
+            # closest compatible binary / PTX fallback).
+            # Practically: sm_60 requires the wheel to ship a sm_60 or sm_61
+            # cubin or a PTX that can JIT to it.  Wheels cu124+ omit sm_60/sm_61.
+            supported_ccs = {int(a) for a in compiled}
+        except Exception:  # noqa: BLE001
+            pass
+
+        if supported_ccs:
+            # A device is usable if the wheel contains a cubin/PTX at or below
+            # the device's CC (torch can JIT-compile PTX upward, but requires
+            # the PTX to have been generated for a CC ≤ device_cc).
+            compatible = any(wcc <= device_cc for wcc in supported_ccs)
+            if not compatible:
+                cc_str = f"{cc[0]}.{cc[1]}"
+                wcc_str = ", ".join(f"sm_{c}" for c in sorted(supported_ccs))
+                reason = (
+                    f"GPU CC {cc_str} (sm_{device_cc}) is not supported by this "
+                    f"torch wheel (supports: {wcc_str}). "
+                    "Re-run setup_env.sh to install a compatible wheel "
+                    "(e.g. torch==2.4.1+cu121 for Pascal/Maxwell GPUs)."
+                )
+                return False, reason
+        # If we couldn't determine supported CCs, optimistically allow it
+        return True, "ok"
+    except Exception as exc:  # noqa: BLE001
+        return True, f"cc_probe_failed ({exc})"
+
+
 def _torch_runtime(prefer_gpu: bool, gpu_device_id: int) -> tuple["torch.device", dict[str, object]]:
     import torch
 
@@ -193,11 +251,14 @@ def _torch_runtime(prefer_gpu: bool, gpu_device_id: int) -> tuple["torch.device"
     if torch.cuda.is_available():
         for idx in range(torch.cuda.device_count()):
             name = "unknown"
+            cc_str = "unknown"
             try:
                 name = str(torch.cuda.get_device_name(idx))
+                cc = torch.cuda.get_device_capability(idx)
+                cc_str = f"{cc[0]}.{cc[1]}"
             except Exception:  # noqa: BLE001
                 pass
-            visible_devices.append({"index": idx, "name": name})
+            visible_devices.append({"index": idx, "name": name, "compute_capability": cc_str})
     diagnostics["cuda_devices"] = visible_devices
 
     if not prefer_gpu:
@@ -217,6 +278,19 @@ def _torch_runtime(prefer_gpu: bool, gpu_device_id: int) -> tuple["torch.device"
         diagnostics["selection_reason"] = "gpu_device_id_out_of_range"
     else:
         diagnostics["selection_reason"] = "cuda_selected"
+
+    # Check compute-capability compatibility before committing to CUDA
+    supported, cc_reason = _cuda_device_supported(selected_idx)
+    if not supported:
+        logger.warning(
+            "Falling back to CPU: %s",
+            cc_reason,
+        )
+        diagnostics["selected_device"] = "cpu"
+        diagnostics["selected_accelerator"] = "cpu"
+        diagnostics["selection_reason"] = "cc_incompatible"
+        diagnostics["cc_incompatible_reason"] = cc_reason
+        return torch.device("cpu"), diagnostics
 
     try:
         torch.cuda.set_device(selected_idx)
