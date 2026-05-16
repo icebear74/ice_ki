@@ -372,8 +372,6 @@ def _build_stream_cmd(
     cmd += [
         "-i", input_path,
         *video_codec,
-        "-profile:v", "baseline",
-        "-level", "3.1",
         "-c:a", "aac",
         "-b:a", "128k",
         "-ac", "2",
@@ -410,7 +408,7 @@ async def stream_video(video_id: int, t: float = 0.0) -> StreamingResponse:
             first_chunk = b""
 
         if candidate_proc.returncode is not None and candidate_proc.returncode != 0:
-            # Process already exited – read stderr for logging and try next codec.
+            # Process already exited with error – try next codec.
             stderr_out = b""
             try:
                 stderr_out = await asyncio.wait_for(candidate_proc.stderr.read(4096), timeout=1.0)  # type: ignore[union-attr]
@@ -422,6 +420,25 @@ async def stream_video(video_id: int, t: float = 0.0) -> StreamingResponse:
                 candidate_proc.returncode,
                 stderr_out.decode(errors="replace").strip(),
             )
+            try:
+                candidate_proc.kill()
+            except ProcessLookupError:
+                pass
+            await candidate_proc.wait()
+            continue
+
+        if not first_chunk:
+            # Process is running but produced no data in 2 s — encoder likely failed internally.
+            stderr_out = b""
+            try:
+                stderr_out = await asyncio.wait_for(candidate_proc.stderr.read(4096), timeout=0.5)  # type: ignore[union-attr]
+            except asyncio.TimeoutError:
+                pass
+            stderr_text = stderr_out.decode(errors="replace").strip()
+            if stderr_text:
+                logger.error("ffmpeg %s produced no data: %s", encoder_name, stderr_text)
+            else:
+                logger.error("ffmpeg %s produced no data after 2 s — skipping", encoder_name)
             try:
                 candidate_proc.kill()
             except ProcessLookupError:
