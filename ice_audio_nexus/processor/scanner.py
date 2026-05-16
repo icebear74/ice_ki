@@ -16,7 +16,6 @@ import logging
 import os
 import re
 import shutil
-import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -169,229 +168,249 @@ def _safe_relpath(path: Path, root: Path) -> str:
         return str(path.resolve())
 
 
-# ---------------------------------------------------------------------------
-# DNN face detector (OpenCV ResNet-SSD, much more accurate than Haar cascade)
-# ---------------------------------------------------------------------------
-_DNN_PROTOTXT_URL = (
-    "https://raw.githubusercontent.com/opencv/opencv/4.x/"
-    "samples/dnn/face_detector/deploy.prototxt"
-)
-_DNN_MODEL_URL = (
-    "https://raw.githubusercontent.com/opencv/opencv_3rdparty/"
-    "dnn_samples_face_detector_20180205_fp16/"
-    "res10_300x300_ssd_iter_140000_fp16.caffemodel"
-)
-_DNN_PROTOTXT_NAME = "face_deploy.prototxt"
-_DNN_MODEL_NAME = "res10_300x300_ssd_fp16.caffemodel"
-_VERIFIER_MODEL_URL = (
-    "https://raw.githubusercontent.com/opencv/opencv_zoo/main/models/"
-    "face_detection_yunet/face_detection_yunet_2023mar.onnx"
-)
-_VERIFIER_MODEL_NAME = "face_detection_yunet_2023mar.onnx"
-
-
-def _opencv_cuda_diagnostics() -> dict[str, object]:
-    import cv2
-
-    info: dict[str, object] = {
-        "opencv_version": cv2.__version__,
-        "cuda_module_available": hasattr(cv2, "cuda"),
-        "cuda_device_count": 0,
-        "cuda_build_enabled": False,
-        "cudnn_build_enabled": False,
-    }
-
-    build_info = ""
-    try:
-        build_info = cv2.getBuildInformation()
-        info["cuda_build_enabled"] = "NVIDIA CUDA:                   YES" in build_info
-        info["cudnn_build_enabled"] = "cuDNN:                         YES" in build_info
-    except Exception as exc:  # noqa: BLE001
-        info["build_info_error"] = str(exc)
-
-    if hasattr(cv2, "cuda"):
-        try:
-            count = int(cv2.cuda.getCudaEnabledDeviceCount())
-            info["cuda_device_count"] = count
-            devices: list[dict[str, object]] = []
-            for idx in range(max(0, count)):
-                name = ""
-                try:
-                    name = cv2.cuda.DeviceInfo(idx).name()
-                except Exception:  # noqa: BLE001
-                    name = "unknown"
-                devices.append({"index": idx, "name": name})
-            if devices:
-                info["cuda_devices"] = devices
-        except Exception as exc:  # noqa: BLE001
-            info["cuda_probe_error"] = str(exc)
-
-    return info
-
-
-def _configure_dnn_backend(net, *, prefer_gpu: bool, gpu_device_id: int = 0) -> tuple[str, str]:
-    import cv2
-
-    backend_name = "opencv"
-    target_name = "cpu"
-
-    if prefer_gpu:
-        try:
-            if hasattr(cv2, "cuda") and cv2.cuda.getCudaEnabledDeviceCount() > 0:
-                if gpu_device_id >= 0:
-                    cv2.cuda.setDevice(gpu_device_id)
-                net.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA)
-                net.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA)
-                return "cuda", f"cuda:{gpu_device_id}"
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Could not enable CUDA backend for DNN (%s); falling back to CPU", exc)
-
-    net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
-    net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
-    return backend_name, target_name
-
-
-def _get_dnn_face_detector(models_dir: Path, *, prefer_gpu: bool = True, gpu_device_id: int = 0):
-    """Load (downloading once) the OpenCV ResNet-SSD DNN face detector.
-
-    Tries to use the CUDA backend (GPU) first; falls back to CPU if not
-    available (standard opencv-python-headless has no CUDA support).
-    Returns the ``cv2.dnn_Net`` object.
-    """
-    import cv2
-
+def _configure_torch_model_cache(models_dir: Path) -> dict[str, str]:
     models_dir.mkdir(parents=True, exist_ok=True)
-    prototxt = models_dir / _DNN_PROTOTXT_NAME
-    caffemodel = models_dir / _DNN_MODEL_NAME
+    torch_home = models_dir / "torch_home"
+    hf_home = models_dir / "huggingface"
+    torch_home.mkdir(parents=True, exist_ok=True)
+    hf_home.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("TORCH_HOME", str(torch_home))
+    os.environ.setdefault("HF_HOME", str(hf_home))
+    return {"torch_home": str(torch_home), "hf_home": str(hf_home)}
 
-    if not prototxt.exists():
-        logger.info("Downloading DNN face-detector prototxt to %s …", prototxt)
-        try:
-            urllib.request.urlretrieve(_DNN_PROTOTXT_URL, prototxt)
-        except Exception as exc:
-            raise RuntimeError(f"Could not download DNN prototxt: {exc}") from exc
 
-    if not caffemodel.exists():
-        logger.info(
-            "Downloading DNN face-detector model (~2 MB) to %s …", caffemodel
-        )
-        try:
-            urllib.request.urlretrieve(_DNN_MODEL_URL, caffemodel)
-        except Exception as exc:
-            raise RuntimeError(f"Could not download DNN model: {exc}") from exc
+def _torch_runtime(prefer_gpu: bool, gpu_device_id: int) -> tuple["torch.device", dict[str, object]]:
+    import torch
 
-    net = cv2.dnn.readNetFromCaffe(str(prototxt), str(caffemodel))
+    diagnostics: dict[str, object] = {
+        "torch_version": torch.__version__,
+        "cuda_available": bool(torch.cuda.is_available()),
+        "cuda_device_count": int(torch.cuda.device_count() if torch.cuda.is_available() else 0),
+        "requested_device_id": gpu_device_id,
+        "prefer_gpu": prefer_gpu,
+    }
+    visible_devices: list[dict[str, object]] = []
+    if torch.cuda.is_available():
+        for idx in range(torch.cuda.device_count()):
+            name = "unknown"
+            try:
+                name = str(torch.cuda.get_device_name(idx))
+            except Exception:  # noqa: BLE001
+                pass
+            visible_devices.append({"index": idx, "name": name})
+    diagnostics["cuda_devices"] = visible_devices
 
-    backend_name, target_name = _configure_dnn_backend(
-        net,
-        prefer_gpu=prefer_gpu,
-        gpu_device_id=gpu_device_id,
-    )
-    if backend_name == "cuda":
-        logger.info("Face detector: CUDA backend active (GPU accelerated ✓)")
+    if not prefer_gpu:
+        diagnostics["selected_device"] = "cpu"
+        diagnostics["selected_accelerator"] = "cpu"
+        diagnostics["selection_reason"] = "gpu_disabled"
+        return torch.device("cpu"), diagnostics
+
+    if not torch.cuda.is_available() or torch.cuda.device_count() <= 0:
+        diagnostics["selected_device"] = "cpu"
+        diagnostics["selected_accelerator"] = "cpu"
+        diagnostics["selection_reason"] = "cuda_unavailable"
+        return torch.device("cpu"), diagnostics
+
+    selected_idx = gpu_device_id if 0 <= gpu_device_id < torch.cuda.device_count() else 0
+    if selected_idx != gpu_device_id:
+        diagnostics["selection_reason"] = "gpu_device_id_out_of_range"
     else:
-        logger.info(
-            "Face detector: CPU backend "
-            "(for GPU: install opencv-python with CUDA support)"
+        diagnostics["selection_reason"] = "cuda_selected"
+
+    try:
+        torch.cuda.set_device(selected_idx)
+    except Exception as exc:  # noqa: BLE001
+        diagnostics["selected_device"] = "cpu"
+        diagnostics["selected_accelerator"] = "cpu"
+        diagnostics["selection_reason"] = "cuda_set_device_failed"
+        diagnostics["cuda_set_device_error"] = str(exc)
+        return torch.device("cpu"), diagnostics
+
+    diagnostics["selected_device"] = f"cuda:{selected_idx}"
+    diagnostics["selected_accelerator"] = "gpu"
+    return torch.device(f"cuda:{selected_idx}"), diagnostics
+
+
+def _torch_diagnostics(prefer_gpu: bool, gpu_device_id: int) -> dict[str, object]:
+    import cv2
+
+    _device, diagnostics = _torch_runtime(prefer_gpu, gpu_device_id)
+    diagnostics["opencv_version"] = cv2.__version__
+    data_root = Path(os.getenv("FACE_DATA_DIR", "data/faces")).resolve()
+    models_dir = Path(os.getenv("FACE_MODELS_DIR", str(data_root / "models"))).resolve()
+    diagnostics["model_cache"] = _configure_torch_model_cache(models_dir)
+    return diagnostics
+
+
+class _TorchMTCNNDetector:
+    def __init__(self, mtcnn_model):
+        self._model = mtcnn_model
+
+    def detect(
+        self,
+        frame: np.ndarray,
+        min_confidence: float,
+        min_size_px: int,
+    ) -> list[tuple[int, int, int, int, float]]:
+        import cv2
+
+        h, w = frame.shape[:2]
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        boxes, probs = self._model.detect(rgb)
+        if boxes is None or probs is None:
+            return []
+
+        results: list[tuple[int, int, int, int, float]] = []
+        for box, score in zip(boxes, probs):
+            if box is None:
+                continue
+            confidence = float(score or 0.0)
+            if confidence < min_confidence:
+                continue
+            x1, y1, x2, y2 = [int(round(float(v))) for v in box]
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(w, x2), min(h, y2)
+            fw, fh = x2 - x1, y2 - y1
+            if fw < min_size_px or fh < min_size_px:
+                continue
+            results.append((x1, y1, fw, fh, confidence))
+        return results
+
+
+class _TorchMTCNNVerifier:
+    def __init__(self, mtcnn_model):
+        self._model = mtcnn_model
+
+    def verify(
+        self,
+        crop: np.ndarray,
+        *,
+        score_threshold: float,
+        min_area_ratio: float,
+        max_center_offset: float,
+    ) -> tuple[bool, dict[str, float]]:
+        import cv2
+
+        h, w = crop.shape[:2]
+        if h < 20 or w < 20:
+            return False, {"score": 0.0, "area_ratio": 0.0, "center_offset": 1.0}
+
+        rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+        boxes, probs = self._model.detect(rgb)
+        if boxes is None or probs is None or len(boxes) == 0:
+            return False, {"score": 0.0, "area_ratio": 0.0, "center_offset": 1.0}
+
+        best_idx = int(np.argmax(np.asarray(probs, dtype=np.float32)))
+        best_box = boxes[best_idx]
+        score = float(probs[best_idx] or 0.0)
+
+        vx1, vy1, vx2, vy2 = [float(v) for v in best_box]
+        vw, vh = max(0.0, vx2 - vx1), max(0.0, vy2 - vy1)
+        area_ratio = max(0.0, (vw * vh) / float(max(1, w * h)))
+        cx = vx1 + (vw / 2.0)
+        cy = vy1 + (vh / 2.0)
+        center_offset = (abs(cx - (w / 2.0)) / max(1.0, w)) + (abs(cy - (h / 2.0)) / max(1.0, h))
+
+        passed = (
+            score >= score_threshold
+            and area_ratio >= min_area_ratio
+            and center_offset <= max_center_offset
         )
+        return passed, {"score": score, "area_ratio": area_ratio, "center_offset": center_offset}
 
-    return net, {"backend": backend_name, "target": target_name}
+
+def _create_mtcnn_model(
+    *,
+    device: "torch.device",
+    min_face_size: int,
+    thresholds: tuple[float, float, float],
+):
+    try:
+        from facenet_pytorch import MTCNN
+    except ImportError as exc:
+        raise RuntimeError(
+            "Missing dependency 'facenet-pytorch'. Run ice_audio_nexus/setup_env.sh to install Torch models."
+        ) from exc
+
+    return MTCNN(
+        image_size=160,
+        margin=0,
+        min_face_size=max(20, int(min_face_size)),
+        thresholds=list(thresholds),
+        factor=0.709,
+        post_process=False,
+        keep_all=True,
+        device=device,
+    )
 
 
-def _get_face_verifier_model(
+def _get_torch_face_detector(
+    models_dir: Path,
+    *,
+    device: "torch.device",
+    min_face_size_px: int,
+):
+    _configure_torch_model_cache(models_dir)
+    try:
+        model = _create_mtcnn_model(
+            device=device,
+            min_face_size=min_face_size_px,
+            thresholds=(0.6, 0.7, 0.7),
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "Could not initialize Torch face detector model. "
+            f"Check internet connectivity for first-time model download or pre-populate {models_dir / 'torch_home'}: {exc}"
+        ) from exc
+    backend = "gpu" if str(device).startswith("cuda") else "cpu"
+    logger.info("Face detector: Torch MTCNN active (%s / %s)", backend, device)
+    return _TorchMTCNNDetector(model), {"backend": "torch", "target": str(device), "accelerator": backend}
+
+
+def _get_torch_face_verifier_model(
     models_dir: Path,
     *,
     enabled: bool,
-    prefer_gpu: bool,
-    gpu_device_id: int,
+    device: "torch.device",
 ):
     if not enabled:
         logger.info("Face verifier: disabled")
         return None, {"enabled": False, "backend": "disabled"}
 
-    import cv2
-
-    models_dir.mkdir(parents=True, exist_ok=True)
-    onnx_path = models_dir / _VERIFIER_MODEL_NAME
-    if not onnx_path.exists():
-        logger.info("Downloading face-verifier model to %s …", onnx_path)
-        try:
-            urllib.request.urlretrieve(_VERIFIER_MODEL_URL, onnx_path)
-        except Exception as exc:
-            logger.warning("Face verifier unavailable (download failed: %s)", exc)
-            return None, {"enabled": False, "backend": "download_failed", "error": str(exc)}
-
-    if not hasattr(cv2, "FaceDetectorYN_create"):
-        logger.warning("Face verifier unavailable: cv2.FaceDetectorYN_create is missing in this OpenCV build")
-        return None, {"enabled": False, "backend": "unsupported_cv2"}
-
-    backend_id = cv2.dnn.DNN_BACKEND_OPENCV
-    target_id = cv2.dnn.DNN_TARGET_CPU
-    backend_name = "opencv"
-    target_name = "cpu"
-    if prefer_gpu:
-        try:
-            if hasattr(cv2, "cuda") and cv2.cuda.getCudaEnabledDeviceCount() > 0:
-                if gpu_device_id >= 0:
-                    cv2.cuda.setDevice(gpu_device_id)
-                backend_id = cv2.dnn.DNN_BACKEND_CUDA
-                target_id = cv2.dnn.DNN_TARGET_CUDA
-                backend_name = "cuda"
-                target_name = f"cuda:{gpu_device_id}"
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Face verifier CUDA setup failed (%s); using CPU", exc)
-
+    _configure_torch_model_cache(models_dir)
     try:
-        verifier = cv2.FaceDetectorYN_create(
-            str(onnx_path),
-            "",
-            (320, 320),
-            0.9,
-            0.3,
-            5000,
-            backend_id,
-            target_id,
+        model = _create_mtcnn_model(
+            device=device,
+            min_face_size=20,
+            thresholds=(0.7, 0.8, 0.8),
         )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Face verifier model init failed (%s); verifier disabled", exc)
+    except Exception as exc:
+        logger.warning(
+            "Face verifier unavailable: Torch model init/download failed. "
+            "Pre-populate cache in %s or check internet access. Error: %s",
+            models_dir / "torch_home",
+            exc,
+        )
         return None, {"enabled": False, "backend": "init_failed", "error": str(exc)}
 
-    logger.info("Face verifier: enabled (%s / %s)", backend_name, target_name)
-    return verifier, {"enabled": True, "backend": backend_name, "target": target_name}
+    backend = "gpu" if str(device).startswith("cuda") else "cpu"
+    logger.info("Face verifier: enabled (torch / %s)", device)
+    return _TorchMTCNNVerifier(model), {"enabled": True, "backend": "torch", "target": str(device), "accelerator": backend}
 
 
-def _dnn_detect_faces(
-    net,
+def _torch_detect_faces(
+    detector: _TorchMTCNNDetector,
     frame: np.ndarray,
     min_confidence: float,
     min_size_px: int,
 ) -> list[tuple[int, int, int, int, float]]:
-    """Run the DNN face detector on *frame*.
+    """Run the Torch face detector on *frame*.
 
     Returns a list of ``(x, y, w, h, confidence)`` tuples for every detected
     face that passes the confidence and minimum-size filters.
     """
-    import cv2
-
-    h, w = frame.shape[:2]
-    blob = cv2.dnn.blobFromImage(frame, 1.0, (300, 300), (104.0, 177.0, 123.0))
-    net.setInput(blob)
-    raw = net.forward()  # shape (1, 1, N, 7)
-
-    results: list[tuple[int, int, int, int, float]] = []
-    for i in range(raw.shape[2]):
-        confidence = float(raw[0, 0, i, 2])
-        if confidence < min_confidence:
-            continue
-        box = raw[0, 0, i, 3:7] * np.array([w, h, w, h], dtype=np.float32)
-        x1, y1, x2, y2 = box.astype(int)
-        x1, y1 = max(0, x1), max(0, y1)
-        x2, y2 = min(w, x2), min(h, y2)
-        fw, fh = x2 - x1, y2 - y1
-        if fw < min_size_px or fh < min_size_px:
-            continue
-        results.append((x1, y1, fw, fh, confidence))
-    return results
+    return detector.detect(frame, min_confidence=min_confidence, min_size_px=min_size_px)
 
 
 def _build_face_descriptor(crop_bgr: np.ndarray) -> np.ndarray:
@@ -407,36 +426,19 @@ def _build_face_descriptor(crop_bgr: np.ndarray) -> np.ndarray:
 
 
 def _verify_face_candidate(
-    verifier,
+    verifier: _TorchMTCNNVerifier,
     crop: np.ndarray,
     *,
     score_threshold: float,
     min_area_ratio: float,
     max_center_offset: float,
 ) -> tuple[bool, dict[str, float]]:
-    h, w = crop.shape[:2]
-    if h < 20 or w < 20:
-        return False, {"score": 0.0, "area_ratio": 0.0, "center_offset": 1.0}
-
-    verifier.setInputSize((w, h))
-    _ok, faces = verifier.detect(crop)
-    if faces is None or len(faces) == 0:
-        return False, {"score": 0.0, "area_ratio": 0.0, "center_offset": 1.0}
-
-    best = max(faces, key=lambda row: float(row[14]))
-    vx, vy, vw, vh = [float(v) for v in best[:4]]
-    score = float(best[14])
-    area_ratio = max(0.0, (vw * vh) / float(w * h))
-    cx = vx + (vw / 2.0)
-    cy = vy + (vh / 2.0)
-    center_offset = (abs(cx - (w / 2.0)) / max(1.0, w)) + (abs(cy - (h / 2.0)) / max(1.0, h))
-
-    passed = (
-        score >= score_threshold
-        and area_ratio >= min_area_ratio
-        and center_offset <= max_center_offset
+    return verifier.verify(
+        crop,
+        score_threshold=score_threshold,
+        min_area_ratio=min_area_ratio,
+        max_center_offset=max_center_offset,
     )
-    return passed, {"score": score, "area_ratio": area_ratio, "center_offset": center_offset}
 
 
 @dataclass
@@ -549,38 +551,42 @@ def scan_video(
         native_fps = 25.0
     frame_step = max(1, int(round(native_fps / max(sample_fps, 0.5))))
 
-    # Load DNN face detector (downloads model once on first run).
-    models_dir = data_root / "models"
-    diag_info = _opencv_cuda_diagnostics()
+    # Load Torch face detector/verifier (downloads model weights once on first run).
+    models_dir = Path(os.getenv("FACE_MODELS_DIR", str(data_root / "models"))).resolve()
+    torch_device, diag_info = _torch_runtime(prefer_gpu=prefer_gpu, gpu_device_id=gpu_device_id)
+    diag_info["opencv_version"] = cv2.__version__
+    cache_info = _configure_torch_model_cache(models_dir)
+    diag_info["model_cache"] = cache_info
     if gpu_diagnostics:
-        logger.info("OpenCV version: %s", diag_info.get("opencv_version"))
+        logger.info("OpenCV version (I/O only): %s", diag_info.get("opencv_version"))
+        logger.info("Torch version: %s", diag_info.get("torch_version"))
         logger.info(
-            "OpenCV CUDA build: %s | cuDNN build: %s | CUDA devices visible: %s",
-            diag_info.get("cuda_build_enabled"),
-            diag_info.get("cudnn_build_enabled"),
+            "Torch CUDA available: %s | CUDA devices visible: %s | selected device: %s",
+            diag_info.get("cuda_available"),
             diag_info.get("cuda_device_count"),
+            diag_info.get("selected_device"),
         )
         if diag_info.get("cuda_devices"):
             for dev in diag_info["cuda_devices"]:  # type: ignore[index]
                 logger.info("CUDA device[%s]: %s", dev.get("index"), dev.get("name"))  # type: ignore[union-attr]
+        logger.info("Model cache: TORCH_HOME=%s | HF_HOME=%s", cache_info.get("torch_home"), cache_info.get("hf_home"))
 
     try:
-        face_net, detector_runtime = _get_dnn_face_detector(
+        face_detector, detector_runtime = _get_torch_face_detector(
             models_dir,
-            prefer_gpu=prefer_gpu,
-            gpu_device_id=gpu_device_id,
+            device=torch_device,
+            min_face_size_px=min_face_size_px,
         )
     except Exception as exc:
         set_video_scan_status(conn, video_id, "failed")
         conn.close()
         cap.release()
-        raise RuntimeError(f"Could not load DNN face detector: {exc}") from exc
+        raise RuntimeError(f"Could not load Torch face detector: {exc}") from exc
 
-    verifier, verifier_runtime = _get_face_verifier_model(
+    verifier, verifier_runtime = _get_torch_face_verifier_model(
         models_dir,
         enabled=verifier_enabled,
-        prefer_gpu=prefer_gpu,
-        gpu_device_id=gpu_device_id,
+        device=torch_device,
     )
 
     active_tracks: list[Track] = []
@@ -618,7 +624,7 @@ def scan_video(
         frame_area = float(w * h)
         timestamp_ms = int((frame_index / native_fps) * 1000.0)
 
-        raw_faces = _dnn_detect_faces(face_net, frame, dnn_confidence, min_face_size_px)
+        raw_faces = _torch_detect_faces(face_detector, frame, dnn_confidence, min_face_size_px)
 
         frame_detections: list[Detection] = []
         for i, (x, y, fw, fh, conf) in enumerate(raw_faces):
@@ -819,6 +825,7 @@ def scan_video(
                     "min_sharpness": min_sharpness,
                     "min_stability": min_stability,
                     "dnn_confidence": dnn_confidence,
+                    "detector_score_threshold": dnn_confidence,
                     "min_face_size_px": min_face_size_px,
                     "verifier_enabled": verifier is not None,
                     "verifier_score_threshold": verifier_score_threshold,
@@ -1005,8 +1012,8 @@ def main() -> None:
     parser.add_argument(
         "--dnn-confidence",
         type=float,
-        default=float(os.getenv("FACE_DNN_CONFIDENCE", "0.65")),
-        help="Minimum DNN detection confidence 0..1 (higher = fewer false positives, default: 0.65)",
+        default=float(os.getenv("FACE_DETECTOR_SCORE_THRESHOLD", os.getenv("FACE_DNN_CONFIDENCE", "0.65"))),
+        help="Minimum Torch detector confidence 0..1 (higher = fewer false positives, default: 0.65)",
     )
     parser.add_argument("--min-face-size-px", type=int, default=int(os.getenv("FACE_MIN_SIZE_PX", "80")))
     parser.add_argument(
@@ -1038,32 +1045,40 @@ def main() -> None:
         "--gpu-device-id",
         type=int,
         default=int(os.getenv("FACE_GPU_DEVICE_ID", "0")),
-        help="Preferred CUDA device index for detector + verifier backends.",
+        help="Preferred CUDA device index for detector + verifier torch backends.",
     )
     parser.add_argument(
         "--gpu-diagnostics",
         action="store_true",
         default=_env_bool("FACE_GPU_DIAGNOSTICS", True),
-        help="Log OpenCV/CUDA diagnostics at scan startup.",
+        help="Log Torch/CUDA diagnostics at scan startup.",
+    )
+    parser.add_argument(
+        "--diagnose-torch",
+        action="store_true",
+        help="Print Torch/CUDA diagnostics and exit (no scan).",
     )
     parser.add_argument(
         "--diagnose-opencv",
         action="store_true",
-        help="Print OpenCV/CUDA diagnostics and exit (no scan).",
+        help="Backward-compatible alias for --diagnose-torch.",
     )
     args = parser.parse_args()
 
-    if args.diagnose_opencv:
+    if args.diagnose_torch or args.diagnose_opencv:
         try:
-            info = _opencv_cuda_diagnostics()
-            logger.info("OpenCV diagnostics: %s", info)
+            info = _torch_diagnostics(
+                prefer_gpu=_env_bool("FACE_GPU_ENABLED", True) and not args.cpu_only,
+                gpu_device_id=args.gpu_device_id,
+            )
+            logger.info("Torch diagnostics: %s", info)
         except Exception as exc:  # noqa: BLE001
-            logger.error("Could not collect OpenCV diagnostics: %s", exc)
+            logger.error("Could not collect Torch diagnostics: %s", exc)
             raise SystemExit(2) from exc
         return
 
     if not args.video and not args.directory:
-        parser.error("one of --video or --dir is required (unless --diagnose-opencv is used)")
+        parser.error("one of --video or --dir is required (unless --diagnose-torch is used)")
 
     scan_kwargs = dict(
         sample_fps=args.fps,

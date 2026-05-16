@@ -49,35 +49,50 @@ Useful options:
 - `--min-face-area-ratio` (default `0.06`)
 - `--min-sharpness` (default `70.0`)
 - `--min-stability` (default `0.45`)
-- `--dnn-confidence` (default `0.65`)
+- `--dnn-confidence` (Torch detector score threshold, default `0.65`)
 - `--min-face-size-px` (default `80`)
 - `--disable-verifier` (deaktiviert die zweite KI-Verifikation)
 - `--verifier-score-threshold` (default `0.92`)
 - `--cpu-only` / `--gpu-device-id` / `--gpu-diagnostics`
+- `--diagnose-torch` (Torch/CUDA Diagnostik ohne Scan)
 
 ## False-Positive-Reduktion (2-stufig)
 
 Der Scanner verwendet jetzt zwei Modelle:
 
-1. OpenCV ResNet-SSD (erste Detection-Stufe)
-2. YuNet-Verifier (zweite Stufe, bestätigt nur plausible Gesichter)
+1. Torch MTCNN Detector (erste Detection-Stufe)
+2. Torch MTCNN Verifier (zweite Stufe, bestätigt nur plausible Gesichter)
 
 Treffer aus Stufe 1 werden vor dem Persistieren verworfen, wenn die Verifikation
 fehlschlägt (Score/Fläche/Zentrierung konfigurierbar via `.env`).
 
+## Modell-Download & lokaler Cache
+
+- Die Torch-Modelle werden beim ersten Start automatisch geladen.
+- Standard-Cache: `FACE_DATA_DIR/models` (optional überschreibbar via `FACE_MODELS_DIR`).
+- Scanner verwendet:
+  - `TORCH_HOME=<models>/torch_home`
+  - `HF_HOME=<models>/huggingface`
+- Bei Downloadfehlern bricht der Scanner mit klarer Fehlermeldung ab
+  (Internet/Proxy prüfen oder Cache vorab befüllen).
+
 ## GPU/CUDA-Diagnostik
 
-OpenCV-DNN nutzt GPU nur, wenn OpenCV mit CUDA gebaut wurde. Prüfen mit:
+Die Inferenz läuft über PyTorch (CUDA wenn verfügbar), OpenCV bleibt nur für I/O
+(`VideoCapture`, Farbraum/Resize/Crops, Bildspeichern).
+
+Torch-Status prüfen mit:
 
 ```bash
-python -m processor.scanner --diagnose-opencv
+python -m processor.scanner --diagnose-torch
 ```
 
 Im Setup (`setup_env.sh`) wird zusätzlich nach Installation automatisch ausgegeben:
 
-- OpenCV-Version
-- CUDA/cuDNN-Build-Status
-- von OpenCV sichtbare CUDA-Geräte
+- Torch-Version
+- CUDA-Verfügbarkeit / sichtbare Geräte
+- ausgewähltes Scanner-Device (`cpu` oder `cuda:<id>`)
+- OpenCV-Version (nur I/O)
 
 ## Rescan-Cleanup
 
@@ -88,9 +103,9 @@ synchron bleiben.
 ## Verifikation nach Merge (Self-Checks)
 
 1. **GPU vs CPU aktiv?**
-   - Scan starten und Log prüfen auf `Face detector: CUDA backend active` oder CPU-Fallback.
-2. **OpenCV mit CUDA gebaut?**
-   - `python -m processor.scanner --diagnose-opencv`
+   - Scan starten und Log prüfen auf `Face detector: Torch MTCNN active (gpu / cuda:...)` oder CPU-Fallback.
+2. **Torch CUDA Status prüfen**
+   - `python -m processor.scanner --diagnose-torch`
 3. **Verifier aktiv?**
    - Log prüfen auf `Face verifier: enabled ...`
    - Scan-Ergebnis enthält `verifier_rejections`.

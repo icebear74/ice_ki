@@ -390,7 +390,7 @@ def _run_rescan_bg(video_id: int, video_path: str, scan_kwargs: dict) -> None:
         # Import scanner lazily so the API can start without cv2 installed
         from processor.scanner import scan_video  # noqa: F401  # type: ignore[import]
     except ImportError:
-        logger.error("scanner not importable — cv2 / insightface missing?")
+        logger.error("scanner not importable — missing scanner dependencies (cv2 / torch / facenet-pytorch)?")
         return
 
     conn = get_connection()
@@ -433,7 +433,12 @@ def api_rescan_video(video_id: int, payload: dict = Body(default={})) -> JSONRes
         "min_face_area_ratio": float(payload.get("min_face_area_ratio", os.getenv("FACE_MIN_AREA_RATIO", "0.06"))),
         "min_sharpness": float(payload.get("min_sharpness", os.getenv("FACE_MIN_SHARPNESS", "70.0"))),
         "min_stability": float(payload.get("min_stability", os.getenv("FACE_MIN_STABILITY", "0.45"))),
-        "dnn_confidence": float(payload.get("dnn_confidence", os.getenv("FACE_DNN_CONFIDENCE", "0.65"))),
+        "dnn_confidence": float(
+            payload.get(
+                "dnn_confidence",
+                os.getenv("FACE_DETECTOR_SCORE_THRESHOLD", os.getenv("FACE_DNN_CONFIDENCE", "0.65")),
+            )
+        ),
         "min_face_size_px": int(payload.get("min_face_size_px", os.getenv("FACE_MIN_SIZE_PX", "80"))),
         "verifier_enabled": _as_bool(payload.get("verifier_enabled"), _as_bool(os.getenv("FACE_VERIFIER_ENABLED"), True)),
         "verifier_score_threshold": float(payload.get("verifier_score_threshold", os.getenv("FACE_VERIFIER_SCORE_THRESHOLD", "0.92"))),
@@ -459,7 +464,7 @@ def _run_scan_directory_bg(directory: str, production: str | None, skip_done: bo
     try:
         from processor.scanner import scan_directory  # type: ignore[import]
     except ImportError:
-        logger.error("scanner not importable — cv2 / insightface missing?")
+        logger.error("scanner not importable — missing scanner dependencies (cv2 / torch / facenet-pytorch)?")
         return
 
     try:
@@ -523,7 +528,12 @@ def api_scan_directory(payload: dict = Body(...)) -> JSONResponse:
         "min_face_area_ratio": float(payload.get("min_face_area_ratio", os.getenv("FACE_MIN_AREA_RATIO", "0.06"))),
         "min_sharpness": float(payload.get("min_sharpness", os.getenv("FACE_MIN_SHARPNESS", "70.0"))),
         "min_stability": float(payload.get("min_stability", os.getenv("FACE_MIN_STABILITY", "0.45"))),
-        "dnn_confidence": float(payload.get("dnn_confidence", os.getenv("FACE_DNN_CONFIDENCE", "0.65"))),
+        "dnn_confidence": float(
+            payload.get(
+                "dnn_confidence",
+                os.getenv("FACE_DETECTOR_SCORE_THRESHOLD", os.getenv("FACE_DNN_CONFIDENCE", "0.65")),
+            )
+        ),
         "min_face_size_px": int(payload.get("min_face_size_px", os.getenv("FACE_MIN_SIZE_PX", "80"))),
         "verifier_enabled": _as_bool(payload.get("verifier_enabled"), _as_bool(os.getenv("FACE_VERIFIER_ENABLED"), True)),
         "verifier_score_threshold": float(payload.get("verifier_score_threshold", os.getenv("FACE_VERIFIER_SCORE_THRESHOLD", "0.92"))),
