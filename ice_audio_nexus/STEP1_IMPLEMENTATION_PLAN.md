@@ -96,86 +96,97 @@ Diese PR implementiert die Audio-/Fusionsebene noch nicht, aber Step 1 muss bere
 
 ## In dieser PR umgesetzt
 
+### Phase 1 – Grundlage / Planung (erste Commits)
 - [x] Diese Fortschritts-/Planungsdatei angelegt und mit Zielbild + Gap-Analyse gefüllt
 - [x] `README_FIRST.md` explizit als Projektanker in die Step-1-Planung eingebunden
-- [x] Scanner-Metadaten vorbereitet:
-  - `seed_workflow`-Block pro Track
-  - Top-Seed-Kandidaten im Track-Metadatenblock
-  - Tracking wird explizit als Support-Container statt Wahrheitsquelle gedacht
-- [x] API vorbereitet:
-  - Track-Responses liefern normalisierte `seed_workflow`-Daten
-  - neuer Workflow-Endpunkt zum Speichern von Review-/Stage-/Group-Infos
-- [x] WebUI vorbereitet:
-  - Seed-first-Review-Felder (`group_label`, `stage`, `review_state`, `expansion_state`, `notes`)
-  - bestehende Rollenliste nun direkt auswählbar
-  - UI-Text macht klar: intern reale Person, optional Rolle/Persona-Kontext
+- [x] Scanner-Metadaten vorbereitet: `seed_workflow`-Block pro Track
+- [x] API vorbereitet: Track-Responses mit normalisiertem `seed_workflow`, erster Workflow-Endpunkt
+- [x] WebUI vorbereitet: Seed-first-Review-Felder, Rollenliste direkt auswählbar
 - [x] README von `ice_audio_nexus` auf seed-first-Richtung aktualisiert
 
-### Wichtig: Was diese PR **bewusst noch nicht** macht
+### Phase 2 – WP1–WP5 vollständig umgesetzt (diese Commits)
+- [x] **WP1**: Tabellen `visual_groups` + `visual_seeds` + alle DB-Funktionen + API-Endpunkte
+- [x] **WP2**: Konservatives Clustering (`cluster_tracks_into_groups`, threshold 0.92, `visual_person_###`)
+- [x] **WP3**: Groups-Tab in der WebUI: Gruppenansicht, Seeds entfernbar, States verwaltbar
+- [x] **WP4**: Tabelle `persona_catalog` + CRUD-Funktionen + Personas-Tab in der WebUI (Vorabpflege mit Rolle, realer Person, Synchronsprecher, Sprache, Relevanz)
+- [x] **WP5**: Expansion-Trigger (nur `confirmed`-Gruppen; `irrelevant`/`ignored` bleiben geblockt)
 
-- [x] **Keine** neue massive Seed-/Cluster-Tabelle einführen
-- [x] **Kein** vollständiges `visual_person_###`-Auto-Clustering implementieren
-- [x] **Keine** fertige Expansion-/Tracking-Nachziehlogik bauen
-- [x] **Keinen** vollständigen Persona-Katalog inklusive Sprecher/Relevanz fertigstellen
-- [x] **Keine** Voice-/Fusion-Logik implementieren
+### Bewusst noch nicht umgesetzt (WP6 / spätere PRs)
+- [ ] echte Expansion-Engine (automatisches Tracking nach bestätigten Seeds)
+- [ ] Voice-Identitäten als eigene Tabelle
+- [ ] Face↔Voice-Fusion-Tabellen / Sprachkontext
+- [ ] Sprecherwechsel über Staffeln hinweg
 
 ---
 
-## Arbeitspakete ab jetzt
+## Arbeitspakete
 
-### WP1 – Seed-Objekt / Visual-Group-Modell
-- [ ] Eigenständige Seed-Entität definieren
-- [ ] Eigenständige Visual-Group-Entität definieren
-- [ ] Beziehung Track ↔ Seed ↔ Visual Group sauber modellieren
+### WP1 – Seed-Objekt / Visual-Group-Modell ✅ UMGESETZT
+- [x] Eigenständige Seed-Entität definieren → Tabelle `visual_seeds`
+- [x] Eigenständige Visual-Group-Entität definieren → Tabelle `visual_groups`
+- [x] Beziehung Track ↔ Seed ↔ Visual Group sauber modelliert
+- [x] DB-Funktionen: `create_visual_group`, `list_visual_groups`, `get_visual_group`, `update_visual_group`, `_create_visual_seed`, `list_visual_seeds`, `remove_visual_seed`
+- [x] API-Endpunkte: `GET/POST /api/visual_groups`, `GET/PUT /api/visual_groups/{id}`, `DELETE /api/visual_seeds/{id}`
 
-### WP2 – Conservative clustering
-- [ ] nur sehr sichere Ähnlichkeiten automatisch mergen
-- [ ] lieber Split als Fehlmerge
-- [ ] Gruppenlabels `visual_person_001`, `visual_person_002`, ...
+### WP2 – Conservative clustering ✅ UMGESETZT
+- [x] `cluster_tracks_into_groups()` – greedy Centroid-Clustering, threshold 0.92
+- [x] lieber Split als Fehlmerge (nur sehr sichere Ähnlichkeiten)
+- [x] Gruppenlabels `visual_person_001`, `visual_person_002`, ...
+- [x] bereits gruppierte Tracks werden beim Re-Run übersprungen
+- [x] API-Endpunkt: `POST /api/productions/{id}/cluster`
+- [x] UI-Button: „Cluster tracks…" im Groups-Tab
 
-### WP3 – Review-Workflow
-- [ ] Gruppenansicht statt reinem Track-Fokus
-- [ ] Seed-Bilder aus Gruppe entfernbar
-- [ ] Gruppen als irrelevant/ignored/fertig markierbar
+### WP3 – Review-Workflow ✅ UMGESETZT
+- [x] Gruppenansicht als eigener Tab im mittleren Panel (Tracks / Groups)
+- [x] Seed-Bilder aus Gruppe entfernbar (soft-delete via `remove_visual_seed`)
+- [x] Gruppen als `irrelevant`/`ignored`/`confirmed`/`needs_split`/`pending` markierbar
+- [x] Group-Détailansicht im rechten Review-Panel (eigener Tab)
+- [x] Actor/Role-Zuweisung direkt per Gruppen-Review
 
-### WP4 – Persona-Katalog
-- [ ] Vorabpflege für Rolle
-- [ ] Verknüpfung zu realer Person
-- [ ] Sprecher / Synchronsprecher
-- [ ] Relevanzpriorisierung
+### WP4 – Persona-Katalog ✅ UMGESETZT
+- [x] Tabelle `persona_catalog` (Produktion, Rolle, reale Person, Synchronsprecher, Sprache, Relevanz)
+- [x] Vorabpflege für Rollen: `upsert_persona_catalog` legt Rolle und Actor on-the-fly an
+- [x] Verknüpfung zu realer Person über `actor_id`
+- [x] Sprecher / Synchronsprecher über `voice_actor_name` + `language`
+- [x] Relevanzpriorisierung (0=niedrig, 1=mittel, 2=hoch, 3=lead)
+- [x] API-Endpunkte: `GET/POST /api/persona_catalog`, `DELETE /api/persona_catalog/{id}`
+- [x] UI-Tab „Personas" im rechten Panel: Liste, Vorabpflege-Formular, Production-Filter
 
-### WP5 – Expansion nach Review
-- [ ] bestätigte Seeds als Suchanker benutzen
-- [ ] Tracking/Matching nur als Folgeprozess
-- [ ] aggressives Nachziehen für irrelevante Seeds verhindern
+### WP5 – Expansion nach Review ✅ UMGESETZT
+- [x] `trigger_group_expansion()` – setzt `expansion_state = 'ready'` nur für `confirmed`-Gruppen
+- [x] `block_group_expansion()` – explizit blocken
+- [x] `irrelevant` / `ignored`-Gruppen werden nicht expanded, Fehlermeldung mit Begründung
+- [x] API-Endpunkte: `POST /api/visual_groups/{id}/expand`, `POST /api/visual_groups/{id}/block_expansion`
+- [x] UI-Buttons: „Expand" und „Block" pro Gruppe
 
 ### WP6 – Multimodale Vorbereitung
-- [ ] Voice-Identitäten modellieren
+- [ ] Voice-Identitäten modellieren (eigene Tabelle)
 - [ ] Produktions-/Sprachkontext für Face↔Voice vorbereiten
-- [ ] spätere Sprecherwechsel sauber abbilden
+- [ ] spätere Sprecherwechsel sauber abbilden (z. B. anderer Sync-Sprecher ab Staffel X)
 
 ---
 
 ## Empfohlene nächste PRs
 
-1. **PR A – echtes Seed-/Visual-Group-Datenmodell**
-   - neue Tabellen/Objekte statt reinem Track-Metadaten-Hook
-2. **PR B – konservatives Auto-Clustering**
-   - Seed-Erzeugung + `visual_person_###`
-3. **PR C – Persona-Katalog**
-   - Rolle / reale Person / Sprecher / Relevanz
-4. **PR D – Expansion nach bestätigten Seeds**
-   - Tracking als Folgeprozess
+1. **PR C – echte Expansion-Engine**
+   - Matching gegen bestätigte Seeds um das Videomaterial zu erweitern
+   - Tracking als Folgeprozess nach Review
+2. **PR D – Voice-Identitäten / Schritt 2 vorbereiten**
+   - eigene Tabelle für Speaker-Identitäten
+   - Vorbereitung für automatischen Stimmproben-Seed aus bestätigten visuellen Seeds
+3. **PR E – Face↔Voice Fusion**
+   - Kontextbezogene Verknüpfung zwischen Face und Voice
+   - Sprecherwechsel über Staffeln / Sprachversionen
 
 ---
 
 ## Kurzfazit
 
-Diese PR richtet Step 1 noch nicht vollständig neu aus, schafft aber eine belastbare Grundlage:
+WP1–WP5 sind vollständig umgesetzt. Das Step-1-Fundament ist belastbar:
 
-- Projektziel aus `README_FIRST.md` ist explizit verankert
-- track-first-Schwächen sind dokumentiert
-- seed-first-Workflow ist beschrieben
-- erste UI/API/Metadaten-Hooks für Review, Group-Label und spätere Expansion sind vorhanden
-
-Damit kann die nächste PR den eigentlichen Datenmodell- und Workflow-Umbau deutlich gezielter durchführen.
+- `visual_groups` + `visual_seeds` + `persona_catalog` als eigene Tabellen
+- Konservatives Clustering (0.92 Threshold, lieber Split als Merge)
+- Vorabpflege des Persona-Katalogs direkt in der WebUI
+- Groups-Tab für Group-zentrierten Review-Workflow (Seeds entfernbar, States, Actor/Role-Zuweisung)
+- Expansion nur für bestätigte Gruppen, Schutz vor `irrelevant`/`ignored`-Expansion
+- Nächster Schritt: echte Expansion-Engine + Step 2 (Voice) vorbereiten
