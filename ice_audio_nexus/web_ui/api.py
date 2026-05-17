@@ -33,9 +33,11 @@ from db.database import (  # noqa: E402
     cluster_tracks_into_groups,
     create_actor,
     create_role,
+    create_voice_actor,
     create_visual_group,
     create_visual_seed,
     delete_persona_catalog_entry,
+    delete_role_cast_assignment,
     ensure_schema,
     get_connection,
     get_video,
@@ -47,20 +49,24 @@ from db.database import (  # noqa: E402
     list_overlay_events,
     list_persona_catalog,
     list_productions,
+    list_role_cast_assignments,
     list_roles,
     list_video_tracks,
     list_videos,
+    list_voice_actors,
     list_visual_groups,
     list_visual_seeds,
     rematch_tracks,
     remove_visual_seed,
     run_expansion_for_group,
     set_video_scan_status,
+    set_video_expansion_release,
     trigger_group_expansion,
     unlink_detection_from_track,
     update_track_seed_workflow,
     update_track_status,
     update_visual_group,
+    upsert_role_cast_assignment,
     upsert_persona_catalog,
 )
 
@@ -234,6 +240,19 @@ def api_videos(production_id: int | None = None) -> JSONResponse:
         conn.close()
 
 
+@app.post("/api/videos/{video_id}/expansion_release")
+def api_video_expansion_release(video_id: int, payload: dict = Body(...)) -> JSONResponse:
+    conn = get_connection()
+    try:
+        released = bool(payload.get("released", False))
+        result = set_video_expansion_release(conn, video_id, released=released)
+        return JSONResponse({"ok": True, **result})
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    finally:
+        conn.close()
+
+
 @app.get("/api/videos/{video_id}/tracks")
 def api_video_tracks(video_id: int, clear_only: bool = False, status: str | None = None) -> JSONResponse:
     conn = get_connection()
@@ -369,6 +388,28 @@ def api_create_role(payload: dict = Body(...)) -> JSONResponse:
     try:
         role_id = create_role(conn, name, payload.get("description", ""))
         return JSONResponse({"id": role_id, "name": name})
+    finally:
+        conn.close()
+
+
+@app.get("/api/voice_actors")
+def api_voice_actors() -> JSONResponse:
+    conn = get_connection()
+    try:
+        return JSONResponse(list_voice_actors(conn))
+    finally:
+        conn.close()
+
+
+@app.post("/api/voice_actors")
+def api_create_voice_actor(payload: dict = Body(...)) -> JSONResponse:
+    name = (payload.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+    conn = get_connection()
+    try:
+        voice_actor_id = create_voice_actor(conn, name, payload.get("notes", ""))
+        return JSONResponse({"id": voice_actor_id, "name": name})
     finally:
         conn.close()
 
@@ -547,7 +588,29 @@ def api_run_expansion(group_id: int, payload: dict = Body(default={})) -> JSONRe
     threshold = float(payload.get("match_threshold", os.getenv("FACE_EXPAND_THRESHOLD", "0.70")))
     conn = get_connection()
     try:
-        result = run_expansion_for_group(conn, group_id, match_threshold=threshold)
+        group = get_visual_group(conn, group_id)
+        if not group:
+            raise HTTPException(status_code=404, detail="Visual group not found")
+        production_id = group.get("production_id")
+        allowed_video_ids: list[int] = []
+        if production_id is not None:
+            videos = list_videos(conn, production_id=int(production_id))
+            allowed_video_ids = [int(v["id"]) for v in videos if bool(v.get("expansion_released"))]
+        if not allowed_video_ids:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "reason": "No released episodes for this production. Release episodes before expansion.",
+                    "tracks_matched": 0,
+                    "seeds_added": 0,
+                }
+            )
+        result = run_expansion_for_group(
+            conn,
+            group_id,
+            match_threshold=threshold,
+            allowed_video_ids=allowed_video_ids,
+        )
         return JSONResponse(result)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -578,12 +641,17 @@ def api_upsert_persona(payload: dict = Body(...)) -> JSONResponse:
         actor_name = (payload.get("actor_name") or "").strip()
         if not actor_id and actor_name:
             actor_id = create_actor(conn, actor_name, "")
+        voice_actor_id = payload.get("voice_actor_id")
+        voice_actor_name = (payload.get("voice_actor_name") or "").strip()
+        if not voice_actor_id and voice_actor_name:
+            voice_actor_id = create_voice_actor(conn, voice_actor_name, "")
         entry_id = upsert_persona_catalog(
             conn,
             production_id=int(payload["production_id"]) if payload.get("production_id") else None,
             role_id=int(role_id) if role_id is not None else None,
             actor_id=int(actor_id) if actor_id is not None else None,
-            voice_actor_name=payload.get("voice_actor_name"),
+            voice_actor_id=int(voice_actor_id) if voice_actor_id is not None else None,
+            voice_actor_name=voice_actor_name or None,
             language=str(payload.get("language") or "de"),
             relevance=int(payload.get("relevance", 1)),
             notes=payload.get("notes"),
@@ -591,6 +659,67 @@ def api_upsert_persona(payload: dict = Body(...)) -> JSONResponse:
         return JSONResponse({"ok": True, "id": entry_id})
     except (KeyError, TypeError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        conn.close()
+
+
+@app.get("/api/role_cast_assignments")
+def api_role_cast_assignments(production_id: int | None = None) -> JSONResponse:
+    conn = get_connection()
+    try:
+        return JSONResponse(list_role_cast_assignments(conn, production_id=production_id))
+    finally:
+        conn.close()
+
+
+@app.post("/api/role_cast_assignments")
+def api_upsert_role_cast_assignment(payload: dict = Body(...)) -> JSONResponse:
+    conn = get_connection()
+    try:
+        if not payload.get("production_id"):
+            raise HTTPException(status_code=400, detail="production_id is required")
+        role_id = payload.get("role_id")
+        role_name = (payload.get("role_name") or "").strip()
+        if not role_id and role_name:
+            role_id = create_role(conn, role_name, "")
+        actor_id = payload.get("actor_id")
+        actor_name = (payload.get("actor_name") or "").strip()
+        if not actor_id and actor_name:
+            actor_id = create_actor(conn, actor_name, "")
+        voice_actor_id = payload.get("voice_actor_id")
+        voice_actor_name = (payload.get("voice_actor_name") or "").strip()
+        if not voice_actor_id and voice_actor_name:
+            voice_actor_id = create_voice_actor(conn, voice_actor_name, "")
+        if not role_id:
+            raise HTTPException(status_code=400, detail="role_id or role_name is required")
+        if not voice_actor_id:
+            raise HTTPException(status_code=400, detail="voice_actor_id or voice_actor_name is required")
+
+        assignment_id = upsert_role_cast_assignment(
+            conn,
+            production_id=int(payload["production_id"]),
+            role_id=int(role_id),
+            actor_id=int(actor_id) if actor_id is not None else None,
+            voice_actor_id=int(voice_actor_id),
+            language=str(payload.get("language") or "de"),
+            relevance=int(payload.get("relevance", 1)),
+            start_season=int(payload.get("start_season", 1)),
+            start_episode=int(payload.get("start_episode", 1)),
+            notes=payload.get("notes"),
+        )
+        return JSONResponse({"ok": True, "id": assignment_id})
+    finally:
+        conn.close()
+
+
+@app.delete("/api/role_cast_assignments/{assignment_id}")
+def api_delete_role_cast_assignment(assignment_id: int) -> JSONResponse:
+    conn = get_connection()
+    try:
+        ok = delete_role_cast_assignment(conn, assignment_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="Assignment not found")
+        return JSONResponse({"ok": True, "id": assignment_id})
     finally:
         conn.close()
 
