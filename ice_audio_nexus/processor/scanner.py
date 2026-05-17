@@ -12,11 +12,13 @@ Pipeline:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import re
 import shutil
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -242,13 +244,36 @@ def _cuda_device_supported(device_idx: int) -> tuple[bool, str]:
         return True, f"cc_probe_failed ({exc})"
 
 
-def _torch_runtime(prefer_gpu: bool, gpu_device_id: int) -> tuple["torch.device", dict[str, object]]:
+def _resolve_cuda_index(requested_device: str | None, gpu_device_id: int) -> tuple[int | None, str]:
+    raw = (requested_device or "").strip().lower()
+    if not raw:
+        return gpu_device_id, f"cuda:{gpu_device_id}"
+    if raw == "cpu":
+        return None, "cpu"
+    if raw == "cuda":
+        return 0, "cuda:0"
+    m = re.fullmatch(r"cuda:(\d+)", raw)
+    if m:
+        return int(m.group(1)), raw
+    return gpu_device_id, f"invalid:{requested_device}"
+
+
+def _torch_runtime_for_component(
+    *,
+    prefer_gpu: bool,
+    requested_device: str | None,
+    gpu_device_id: int,
+    component_name: str,
+) -> tuple["torch.device", dict[str, object]]:
     import torch
 
+    requested_idx, requested_label = _resolve_cuda_index(requested_device, gpu_device_id)
     diagnostics: dict[str, object] = {
         "torch_version": torch.__version__,
         "cuda_available": bool(torch.cuda.is_available()),
         "cuda_device_count": int(torch.cuda.device_count() if torch.cuda.is_available() else 0),
+        "component": component_name,
+        "requested_device": requested_label,
         "requested_device_id": gpu_device_id,
         "prefer_gpu": prefer_gpu,
     }
@@ -272,14 +297,26 @@ def _torch_runtime(prefer_gpu: bool, gpu_device_id: int) -> tuple["torch.device"
         diagnostics["selection_reason"] = "gpu_disabled"
         return torch.device("cpu"), diagnostics
 
+    if requested_idx is None:
+        diagnostics["selected_device"] = "cpu"
+        diagnostics["selected_accelerator"] = "cpu"
+        diagnostics["selection_reason"] = "cpu_requested"
+        return torch.device("cpu"), diagnostics
+
+    if str(requested_label).startswith("invalid:"):
+        diagnostics["selected_device"] = "cpu"
+        diagnostics["selected_accelerator"] = "cpu"
+        diagnostics["selection_reason"] = "invalid_device_string"
+        return torch.device("cpu"), diagnostics
+
     if not torch.cuda.is_available() or torch.cuda.device_count() <= 0:
         diagnostics["selected_device"] = "cpu"
         diagnostics["selected_accelerator"] = "cpu"
         diagnostics["selection_reason"] = "cuda_unavailable"
         return torch.device("cpu"), diagnostics
 
-    selected_idx = gpu_device_id if 0 <= gpu_device_id < torch.cuda.device_count() else 0
-    if selected_idx != gpu_device_id:
+    selected_idx = requested_idx if 0 <= requested_idx < torch.cuda.device_count() else 0
+    if selected_idx != requested_idx:
         diagnostics["selection_reason"] = "gpu_device_id_out_of_range"
     else:
         diagnostics["selection_reason"] = "cuda_selected"
@@ -311,11 +348,42 @@ def _torch_runtime(prefer_gpu: bool, gpu_device_id: int) -> tuple["torch.device"
     return torch.device(f"cuda:{selected_idx}"), diagnostics
 
 
+def _torch_runtime(prefer_gpu: bool, gpu_device_id: int) -> tuple["torch.device", dict[str, object]]:
+    return _torch_runtime_for_component(
+        prefer_gpu=prefer_gpu,
+        requested_device=None,
+        gpu_device_id=gpu_device_id,
+        component_name="shared",
+    )
+
+
 def _torch_diagnostics(prefer_gpu: bool, gpu_device_id: int) -> dict[str, object]:
     import cv2
 
-    _device, diagnostics = _torch_runtime(prefer_gpu, gpu_device_id)
-    diagnostics["opencv_version"] = cv2.__version__
+    _det_device, detector_diag = _torch_runtime_for_component(
+        prefer_gpu=prefer_gpu,
+        requested_device=os.getenv("FACE_DETECTOR_DEVICE"),
+        gpu_device_id=gpu_device_id,
+        component_name="detector",
+    )
+    _ver_device, verifier_diag = _torch_runtime_for_component(
+        prefer_gpu=prefer_gpu,
+        requested_device=os.getenv("FACE_VERIFIER_DEVICE"),
+        gpu_device_id=gpu_device_id,
+        component_name="verifier",
+    )
+    _emb_device, embedding_diag = _torch_runtime_for_component(
+        prefer_gpu=prefer_gpu,
+        requested_device=os.getenv("FACE_EMBEDDING_DEVICE"),
+        gpu_device_id=gpu_device_id,
+        component_name="embedding",
+    )
+    diagnostics = {
+        "opencv_version": cv2.__version__,
+        "detector": detector_diag,
+        "verifier": verifier_diag,
+        "embedding": embedding_diag,
+    }
     data_root = Path(os.getenv("FACE_DATA_DIR", "data/faces")).resolve()
     models_dir = Path(os.getenv("FACE_MODELS_DIR", str(data_root / "models"))).resolve()
     diagnostics["model_cache"] = _configure_torch_model_cache(models_dir)
@@ -368,17 +436,17 @@ class _TorchMTCNNVerifier:
         score_threshold: float,
         min_area_ratio: float,
         max_center_offset: float,
-    ) -> tuple[bool, dict[str, float]]:
+    ) -> tuple[bool, dict[str, object]]:
         import cv2
 
         h, w = crop.shape[:2]
         if h < 20 or w < 20:
-            return False, {"score": 0.0, "area_ratio": 0.0, "center_offset": 1.0}
+            return False, {"score": 0.0, "area_ratio": 0.0, "center_offset": 1.0, "reason": "too_small"}
 
         rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
         boxes, probs = self._model.detect(rgb)
         if boxes is None or probs is None or len(boxes) == 0:
-            return False, {"score": 0.0, "area_ratio": 0.0, "center_offset": 1.0}
+            return False, {"score": 0.0, "area_ratio": 0.0, "center_offset": 1.0, "reason": "no_face"}
 
         best_idx = int(np.argmax(np.asarray(probs, dtype=np.float32)))
         best_box = boxes[best_idx]
@@ -391,12 +459,16 @@ class _TorchMTCNNVerifier:
         cy = vy1 + (vh / 2.0)
         center_offset = (abs(cx - (w / 2.0)) / max(1.0, w)) + (abs(cy - (h / 2.0)) / max(1.0, h))
 
-        passed = (
-            score >= score_threshold
-            and area_ratio >= min_area_ratio
-            and center_offset <= max_center_offset
-        )
-        return passed, {"score": score, "area_ratio": area_ratio, "center_offset": center_offset}
+        reason = "ok"
+        if score < score_threshold:
+            reason = "low_score"
+        elif area_ratio < min_area_ratio:
+            reason = "low_area_ratio"
+        elif center_offset > max_center_offset:
+            reason = "high_center_offset"
+
+        passed = reason == "ok"
+        return passed, {"score": score, "area_ratio": area_ratio, "center_offset": center_offset, "reason": reason}
 
 
 def _create_mtcnn_model(
@@ -573,7 +645,7 @@ def _verify_face_candidate(
     score_threshold: float,
     min_area_ratio: float,
     max_center_offset: float,
-) -> tuple[bool, dict[str, float]]:
+) -> tuple[bool, dict[str, object]]:
     return verifier.verify(
         crop,
         score_threshold=score_threshold,
@@ -659,14 +731,26 @@ def scan_video(
     descriptor_threshold: float = 0.72,
     dnn_confidence: float = 0.65,
     min_face_size_px: int = 80,
+    max_aspect_ratio_deviation: float = 0.65,
+    min_brightness: float = 40.0,
+    min_quality_score: float = 0.55,
+    seed_acceptance_threshold: float = 0.60,
     verifier_enabled: bool = True,
     verifier_score_threshold: float = 0.92,
     verifier_min_area_ratio: float = 0.25,
     verifier_max_center_offset: float = 0.45,
     prefer_gpu: bool = True,
     gpu_device_id: int = 0,
+    detector_device: str | None = None,
+    verifier_device: str | None = None,
+    embedding_device: str | None = None,
     gpu_diagnostics: bool = True,
     seed_group_similarity_threshold: float = 0.90,
+    duplicate_similarity_threshold: float = 0.985,
+    start_offset_seconds: float = 0.0,
+    max_sampled_frames: int = 0,
+    write_debug_stats: bool = False,
+    debug_stats_dir: str | None = None,
 ) -> dict:
     try:
         import cv2
@@ -722,31 +806,54 @@ def scan_video(
     if native_fps <= 0:
         native_fps = 25.0
     frame_step = max(1, int(round(native_fps / max(sample_fps, 0.5))))
+    start_offset_seconds = max(0.0, float(start_offset_seconds))
+    max_sampled_frames = max(0, int(max_sampled_frames))
 
     # Load Torch face detector/verifier (downloads model weights once on first run).
     models_dir = Path(os.getenv("FACE_MODELS_DIR", str(data_root / "models"))).resolve()
-    torch_device, diag_info = _torch_runtime(prefer_gpu=prefer_gpu, gpu_device_id=gpu_device_id)
-    diag_info["opencv_version"] = cv2.__version__
+    detector_torch_device, detector_diag = _torch_runtime_for_component(
+        prefer_gpu=prefer_gpu,
+        requested_device=detector_device,
+        gpu_device_id=gpu_device_id,
+        component_name="detector",
+    )
+    verifier_torch_device, verifier_diag = _torch_runtime_for_component(
+        prefer_gpu=prefer_gpu,
+        requested_device=verifier_device,
+        gpu_device_id=gpu_device_id,
+        component_name="verifier",
+    )
+    embedding_torch_device, embedding_diag = _torch_runtime_for_component(
+        prefer_gpu=prefer_gpu,
+        requested_device=embedding_device,
+        gpu_device_id=gpu_device_id,
+        component_name="embedding",
+    )
+    diag_info = {
+        "opencv_version": cv2.__version__,
+        "detector": detector_diag,
+        "verifier": verifier_diag,
+        "embedding": embedding_diag,
+    }
     cache_info = _configure_torch_model_cache(models_dir)
     diag_info["model_cache"] = cache_info
     if gpu_diagnostics:
-        logger.info("OpenCV version (I/O only): %s", diag_info.get("opencv_version"))
-        logger.info("Torch version: %s", diag_info.get("torch_version"))
+        logger.info("OpenCV version (I/O only): %s", cv2.__version__)
         logger.info(
-            "Torch CUDA available: %s | CUDA devices visible: %s | selected device: %s",
-            diag_info.get("cuda_available"),
-            diag_info.get("cuda_device_count"),
-            diag_info.get("selected_device"),
+            "Torch devices | detector=%s (%s) | verifier=%s (%s) | embedding=%s (%s)",
+            detector_diag.get("selected_device"),
+            detector_diag.get("selection_reason"),
+            verifier_diag.get("selected_device"),
+            verifier_diag.get("selection_reason"),
+            embedding_diag.get("selected_device"),
+            embedding_diag.get("selection_reason"),
         )
-        if diag_info.get("cuda_devices"):
-            for dev in diag_info["cuda_devices"]:  # type: ignore[index]
-                logger.info("CUDA device[%s]: %s", dev.get("index"), dev.get("name"))  # type: ignore[union-attr]
         logger.info("Model cache: TORCH_HOME=%s | HF_HOME=%s", cache_info.get("torch_home"), cache_info.get("hf_home"))
 
     try:
         face_detector, detector_runtime = _get_torch_face_detector(
             models_dir,
-            device=torch_device,
+            device=detector_torch_device,
             min_face_size_px=min_face_size_px,
         )
     except Exception as exc:
@@ -758,12 +865,12 @@ def scan_video(
     verifier, verifier_runtime = _get_torch_face_verifier_model(
         models_dir,
         enabled=verifier_enabled,
-        device=torch_device,
+        device=verifier_torch_device,
     )
 
     # FaceNet embedding model (InceptionResnetV1) – generates 512-dim embeddings for
     # proper face re-identification. Falls back to 128-dim pixel-hash on load failure.
-    facenet_model, facenet_runtime = _get_facenet_embedding_model(models_dir, device=torch_device)
+    facenet_model, facenet_runtime = _get_facenet_embedding_model(models_dir, device=embedding_torch_device)
     if gpu_diagnostics:
         logger.info(
             "FaceNet embedding: enabled=%s | backend=%s",
@@ -771,31 +878,54 @@ def scan_video(
             facenet_runtime.get("backend", "pixel_hash_fallback"),
         )
 
-    frame_index = -1
+    start_frame_index = 0
+    if start_offset_seconds > 0.0:
+        cap.set(cv2.CAP_PROP_POS_MSEC, start_offset_seconds * 1000.0)
+        start_frame_index = int(cap.get(cv2.CAP_PROP_POS_FRAMES) or int(start_offset_seconds * native_fps))
+    frame_index = max(-1, start_frame_index - 1)
+    timestamp_ms = int(start_offset_seconds * 1000.0)
     sampled_frames = 0
     detections_considered = 0
-    low_quality_rejected = 0
     seeds_accepted = 0
-    verifier_rejected_count = 0
     groups_created = 0
     groups_matched = 0
     pseudo_tracks = 0
+    quality_passed_before_verifier = 0
+    verifier_rejected_after_quality = 0
+    duplicate_matches = 0
+    reject_reasons: dict[str, int] = {
+        "small": 0,
+        "blurry": 0,
+        "pose": 0,
+        "occluded": 0,
+        "dark": 0,
+        "quality_score": 0,
+        "verifier": 0,
+        "duplicate": 0,
+        "other": 0,
+    }
     group_centroids = _load_existing_group_centroids(conn, production_id)
 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     total_sample_frames = max(1, total_frames // frame_step) if total_frames > 0 else None
     duration_s_est = (total_frames / native_fps) if (native_fps > 0 and total_frames > 0) else None
+    if total_sample_frames and start_frame_index > 0:
+        total_sample_frames = max(1, total_sample_frames - (start_frame_index // frame_step))
+    if max_sampled_frames > 0:
+        total_sample_frames = min(total_sample_frames, max_sampled_frames) if total_sample_frames else max_sampled_frames
     _last_pct_reported = -1  # tracks last reported percentage milestone
 
     if duration_s_est:
         logger.info(
-            "Starting seed discovery: %s | duration ~%.0fs | ~%d frames to sample at %.1f fps",
-            source.name, duration_s_est, total_sample_frames or 0, sample_fps,
+            "Starting seed discovery: %s | duration ~%.0fs | ~%d frames to sample at %.1f fps | start_offset=%.1fs",
+            source.name, duration_s_est, total_sample_frames or 0, sample_fps, start_offset_seconds,
         )
     else:
-        logger.info("Starting seed discovery: %s | sampling at %.1f fps", source.name, sample_fps)
+        logger.info("Starting seed discovery: %s | sampling at %.1f fps | start_offset=%.1fs", source.name, sample_fps, start_offset_seconds)
 
     while True:
+        if max_sampled_frames > 0 and sampled_frames >= max_sampled_frames:
+            break
         ok, frame = cap.read()
         if not ok:
             break
@@ -816,18 +946,49 @@ def scan_video(
             fw = int(min(fw, w - x))
             fh = int(min(fh, h - y))
             if fw <= 0 or fh <= 0:
-                low_quality_rejected += 1
+                reject_reasons["other"] += 1
                 continue
             # Skip detections with extreme aspect ratios – real faces are roughly square.
-            aspect = fw / fh
-            if aspect < 0.5 or aspect > 2.0:
-                low_quality_rejected += 1
+            if fw < min_face_size_px or fh < min_face_size_px:
+                reject_reasons["small"] += 1
+                continue
+            aspect = fw / max(fh, 1)
+            if abs(aspect - 1.0) > max_aspect_ratio_deviation:
+                reject_reasons["pose"] += 1
                 continue
             crop = frame[y : y + fh, x : x + fw]
             if crop.size == 0:
-                low_quality_rejected += 1
+                reject_reasons["other"] += 1
                 continue
-            verifier_meta = {"score": 0.0, "area_ratio": 0.0, "center_offset": 0.0}
+            gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+            sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+            area_ratio = (fw * fh) / frame_area
+            brightness = float(np.mean(gray))
+            if area_ratio < min_face_area_ratio:
+                reject_reasons["small"] += 1
+                continue
+            if sharpness < min_sharpness:
+                reject_reasons["blurry"] += 1
+                continue
+            if brightness < min_brightness:
+                reject_reasons["dark"] += 1
+                continue
+
+            normalized_sharpness = min(sharpness / max(min_sharpness * 2.0, 1.0), 1.0)
+            normalized_area = min(area_ratio / max(min_face_area_ratio * 2.0, 1e-6), 1.0)
+            normalized_brightness = min(brightness / 255.0, 1.0)
+            quality_score = (
+                float(conf) * 0.35
+                + normalized_sharpness * 0.30
+                + normalized_area * 0.20
+                + normalized_brightness * 0.15
+            )
+            if quality_score < min_quality_score or quality_score < seed_acceptance_threshold:
+                reject_reasons["quality_score"] += 1
+                continue
+
+            quality_passed_before_verifier += 1
+            verifier_meta: dict[str, object] = {"score": 0.0, "area_ratio": 0.0, "center_offset": 0.0, "reason": "disabled"}
             if verifier is not None:
                 try:
                     verified, verifier_meta = _verify_face_candidate(
@@ -840,15 +1001,22 @@ def scan_video(
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Face verifier failed on frame=%d det=%d: %s", frame_index, i, exc)
                     verified = False
+                    verifier_meta = {"score": 0.0, "area_ratio": 0.0, "center_offset": 1.0, "reason": "verifier_error"}
                 if not verified:
-                    verifier_rejected_count += 1
+                    verifier_rejected_after_quality += 1
+                    verifier_reason = str(verifier_meta.get("reason") or "verifier_reject")
+                    if verifier_reason in {"high_center_offset"}:
+                        reject_reasons["pose"] += 1
+                    elif verifier_reason in {"no_face", "low_area_ratio", "too_small"}:
+                        reject_reasons["occluded"] += 1
+                    else:
+                        reject_reasons["verifier"] += 1
                     continue
-            sharpness = float(cv2.Laplacian(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), cv2.CV_64F).var())
-            area_ratio = (fw * fh) / frame_area
-            if area_ratio < min_face_area_ratio or sharpness < min_sharpness:
-                low_quality_rejected += 1
+
+            descriptor = _build_face_embedding(crop, facenet_model, embedding_torch_device)
+            if descriptor.size == 0:
+                reject_reasons["other"] += 1
                 continue
-            descriptor = _build_face_embedding(crop, facenet_model, torch_device)
 
             crop_name = f"f{frame_index:08d}_d{i:02d}.jpg"
             crop_path = crops_root / crop_name
@@ -890,7 +1058,7 @@ def scan_video(
                 mean_sharpness=sharpness,
                 mean_confidence=conf,
                 stability_score=1.0,
-                quality_score=min(1.0, 0.5 * conf + 0.5 * min(sharpness / max(min_sharpness, 1.0), 1.0)),
+                quality_score=quality_score,
                 relevance_score=min(1.0, 0.4 + 0.6 * area_ratio / max(min_face_area_ratio, 1e-6)),
                 is_clear=True,
                 status="candidate",
@@ -913,12 +1081,18 @@ def scan_video(
                         "seed_group_similarity_threshold": seed_group_similarity_threshold,
                         "verifier_enabled": verifier is not None,
                         "verifier_score_threshold": verifier_score_threshold,
+                        "min_brightness": min_brightness,
+                        "min_quality_score": min_quality_score,
+                        "seed_acceptance_threshold": seed_acceptance_threshold,
+                        "duplicate_similarity_threshold": duplicate_similarity_threshold,
                     },
                     "runtime": {
                         "detector_backend": detector_runtime.get("backend"),
                         "detector_target": detector_runtime.get("target"),
                         "verifier_backend": verifier_runtime.get("backend"),
                         "verifier_target": verifier_runtime.get("target"),
+                        "embedding_backend": facenet_runtime.get("backend", "pixel_hash_fallback"),
+                        "embedding_target": str(embedding_torch_device),
                     },
                 },
             )
@@ -931,6 +1105,10 @@ def scan_video(
                 if sim > best_sim:
                     best_sim = sim
                     best_group = g
+            if best_group is not None and best_sim >= duplicate_similarity_threshold:
+                duplicate_matches += 1
+                reject_reasons["duplicate"] += 1
+                continue
             if best_group is not None and best_sim >= seed_group_similarity_threshold:
                 group_id = int(best_group["id"])
                 group_label = str(best_group["label"])
@@ -963,7 +1141,6 @@ def scan_video(
                 groups_created += 1
                 best_sim = 1.0
 
-            q = float(det.confidence) * 0.5 + min(float(det.sharpness) / 300.0, 1.0) * 0.5
             create_visual_seed(
                 conn,
                 group_id=group_id,
@@ -974,10 +1151,13 @@ def scan_video(
                 area_ratio=float(det.area_ratio),
                 sharpness=float(det.sharpness),
                 confidence=float(det.confidence),
-                seed_quality_score=q,
+                seed_quality_score=quality_score,
                 notes=f"auto seed; group_sim={best_sim:.3f}",
             )
             seeds_accepted += 1
+
+        rejected_total = int(sum(reject_reasons.values()))
+        verifier_rejects_for_log = int(verifier_rejected_after_quality)
 
         # Progress reporting every 5 % of the video (or every 50 sampled frames as fallback)
         if total_sample_frames:
@@ -987,14 +1167,22 @@ def scan_video(
                 _last_pct_reported = pct_milestone
                 elapsed_s = timestamp_ms / 1000.0
                 logger.info(
-                    "[%d%%] %.0fs / %.0fs | sampled frames: %d | detections considered: %d | low-quality rejected: %d | verifier rejects: %d | high-quality seeds accepted: %d | new visual groups: %d | matched to existing groups: %d",
+                    "[%d%%] %.0fs / %.0fs | sampled frames=%d | detections considered=%d | rejected_small=%d | rejected_blurry=%d | rejected_pose=%d | rejected_occluded=%d | rejected_dark=%d | rejected_quality_score=%d | quality_passed_before_verifier=%d | verifier_rejects=%d | duplicate_matches=%d | rejected_total=%d | high_quality_seeds_accepted=%d | new_visual_groups_created=%d | matched_existing_groups=%d",
                     pct_milestone,
                     elapsed_s,
                     duration_s_est or 0.0,
                     sampled_frames,
                     detections_considered,
-                    low_quality_rejected,
-                    verifier_rejected_count,
+                    reject_reasons["small"],
+                    reject_reasons["blurry"],
+                    reject_reasons["pose"],
+                    reject_reasons["occluded"],
+                    reject_reasons["dark"],
+                    reject_reasons["quality_score"],
+                    quality_passed_before_verifier,
+                    verifier_rejects_for_log,
+                    duplicate_matches,
+                    rejected_total,
                     seeds_accepted,
                     groups_created,
                     groups_matched,
@@ -1002,8 +1190,15 @@ def scan_video(
         elif sampled_frames % 50 == 0:
             elapsed_s = timestamp_ms / 1000.0
             logger.info(
-                "[frame %d sampled] %.0fs elapsed | detections considered: %d | low-quality rejected: %d | verifier rejects: %d | seeds accepted: %d",
-                sampled_frames, elapsed_s, detections_considered, low_quality_rejected, verifier_rejected_count, seeds_accepted,
+                "[frame %d sampled] %.0fs elapsed | detections=%d | quality_passed_before_verifier=%d | verifier_rejects=%d | duplicate_matches=%d | rejected_total=%d | seeds_accepted=%d",
+                sampled_frames,
+                elapsed_s,
+                detections_considered,
+                quality_passed_before_verifier,
+                verifier_rejects_for_log,
+                duplicate_matches,
+                rejected_total,
+                seeds_accepted,
             )
 
     cap.release()
@@ -1011,13 +1206,79 @@ def scan_video(
     set_video_scan_status(conn, video_id, "completed")
     conn.close()
 
+    rejected_total = int(sum(reject_reasons.values()))
+    verifier_rejects_for_log = int(verifier_rejected_after_quality)
+    stats = {
+        "sampled_frames": sampled_frames,
+        "detections_considered": detections_considered,
+        "accepted_seeds": seeds_accepted,
+        "rejected_total": rejected_total,
+        "rejected_small": reject_reasons["small"],
+        "rejected_blurry": reject_reasons["blurry"],
+        "rejected_pose": reject_reasons["pose"],
+        "rejected_occluded": reject_reasons["occluded"],
+        "rejected_dark": reject_reasons["dark"],
+        "rejected_quality_score": reject_reasons["quality_score"],
+        "rejected_verifier": reject_reasons["verifier"],
+        "duplicate_matches": duplicate_matches,
+        "rejected_other": reject_reasons["other"],
+        "verifier_rejects": verifier_rejects_for_log,
+        "quality_passed_before_verifier": quality_passed_before_verifier,
+        "verifier_rejects_after_quality": verifier_rejects_for_log,
+        "high_quality_seeds_accepted": seeds_accepted,
+        "new_visual_groups_created": groups_created,
+        "matched_existing_groups": groups_matched,
+    }
+    debug_stats_path = None
+    if write_debug_stats:
+        run_debug_dir = Path(debug_stats_dir).resolve() if debug_stats_dir else (data_root / "debug" / "seed_runs")
+        run_debug_dir.mkdir(parents=True, exist_ok=True)
+        timestamp_slug = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        debug_stats_path = run_debug_dir / f"{source.stem}_{timestamp_slug}.json"
+        debug_payload = {
+            "run_at_utc": datetime.now(timezone.utc).isoformat(),
+            "video_path": str(source),
+            "video_id": video_id,
+            "production_id": production_id,
+            "thresholds": {
+                "sample_fps": sample_fps,
+                "start_offset_seconds": start_offset_seconds,
+                "max_sampled_frames": max_sampled_frames,
+                "min_face_area_ratio": min_face_area_ratio,
+                "min_face_size_px": min_face_size_px,
+                "max_aspect_ratio_deviation": max_aspect_ratio_deviation,
+                "min_sharpness": min_sharpness,
+                "min_brightness": min_brightness,
+                "min_quality_score": min_quality_score,
+                "seed_acceptance_threshold": seed_acceptance_threshold,
+                "seed_group_similarity_threshold": seed_group_similarity_threshold,
+                "duplicate_similarity_threshold": duplicate_similarity_threshold,
+                "verifier_enabled": bool(verifier is not None),
+                "verifier_score_threshold": verifier_score_threshold,
+                "verifier_min_area_ratio": verifier_min_area_ratio,
+                "verifier_max_center_offset": verifier_max_center_offset,
+            },
+            "stats": stats,
+            "runtime": diag_info,
+        }
+        debug_stats_path.write_text(json.dumps(debug_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        logger.info("Seed debug stats written: %s", debug_stats_path)
+
     logger.info(
-        "Seed discovery finished: %s | sampled frames=%d | detections considered=%d | low-quality rejected=%d | verifier rejects=%d | high-quality seeds accepted=%d | pseudo tracks=%d | groups created=%d | matched existing groups=%d",
+        "Seed discovery finished: %s | sampled frames=%d | detections considered=%d | rejected_small=%d | rejected_blurry=%d | rejected_pose=%d | rejected_occluded=%d | rejected_dark=%d | rejected_quality_score=%d | quality_passed_before_verifier=%d | verifier_rejects_after_quality=%d | duplicate_matches=%d | rejected_total=%d | high_quality_seeds_accepted=%d | pseudo_tracks=%d | new_visual_groups_created=%d | matched_existing_groups=%d",
         source.name,
         sampled_frames,
         detections_considered,
-        low_quality_rejected,
-        verifier_rejected_count,
+        reject_reasons["small"],
+        reject_reasons["blurry"],
+        reject_reasons["pose"],
+        reject_reasons["occluded"],
+        reject_reasons["dark"],
+        reject_reasons["quality_score"],
+        quality_passed_before_verifier,
+        verifier_rejects_for_log,
+        duplicate_matches,
+        rejected_total,
         seeds_accepted,
         pseudo_tracks,
         groups_created,
@@ -1030,9 +1291,29 @@ def scan_video(
         "video_path": str(source),
         "sampled_frames": sampled_frames,
         "detections_considered": detections_considered,
-        "low_quality_rejections": low_quality_rejected,
+        "rejected_total": rejected_total,
+        "rejected_small": reject_reasons["small"],
+        "rejected_blurry": reject_reasons["blurry"],
+        "rejected_pose": reject_reasons["pose"],
+        "rejected_occluded": reject_reasons["occluded"],
+        "rejected_dark": reject_reasons["dark"],
+        "rejected_quality_score": reject_reasons["quality_score"],
+        "rejected_verifier": reject_reasons["verifier"],
+        "rejected_duplicate": reject_reasons["duplicate"],
+        "rejected_other": reject_reasons["other"],
+        "low_quality_rejections": (
+            reject_reasons["small"]
+            + reject_reasons["blurry"]
+            + reject_reasons["pose"]
+            + reject_reasons["occluded"]
+            + reject_reasons["dark"]
+            + reject_reasons["quality_score"]
+        ),
         "seeds_accepted": seeds_accepted,
-        "verifier_rejections": verifier_rejected_count,
+        "verifier_rejections": verifier_rejects_for_log,
+        "verifier_rejects_after_quality": verifier_rejects_for_log,
+        "quality_passed_before_verifier": quality_passed_before_verifier,
+        "duplicate_matches": duplicate_matches,
         "groups_created": groups_created,
         "groups_matched": groups_matched,
         "tracks": pseudo_tracks,
@@ -1044,6 +1325,7 @@ def scan_video(
         "facenet_enabled": bool(facenet_model is not None),
         "facenet_backend": facenet_runtime.get("backend", "pixel_hash_fallback"),
         "gpu_diagnostics": diag_info,
+        "seed_debug_stats_path": str(debug_stats_path) if debug_stats_path else None,
     }
 
 
@@ -1243,9 +1525,15 @@ def main() -> None:
         help="Search sub-directories recursively (directory mode only)",
     )
     parser.add_argument("--fps", type=float, default=float(os.getenv("FACE_SCAN_FPS", "4.0")))
+    parser.add_argument("--start-offset-seconds", type=float, default=float(os.getenv("FACE_SCAN_START_OFFSET_SECONDS", "0.0")))
+    parser.add_argument("--max-sampled-frames", type=int, default=int(os.getenv("FACE_SCAN_MAX_SAMPLED_FRAMES", "0")))
     parser.add_argument("--min-clear-seconds", type=float, default=float(os.getenv("FACE_MIN_CLEAR_SECONDS", "2.0")))
     parser.add_argument("--min-face-area-ratio", type=float, default=float(os.getenv("FACE_MIN_AREA_RATIO", "0.06")))
     parser.add_argument("--min-sharpness", type=float, default=float(os.getenv("FACE_MIN_SHARPNESS", "70.0")))
+    parser.add_argument("--min-brightness", type=float, default=float(os.getenv("FACE_MIN_BRIGHTNESS", "40.0")))
+    parser.add_argument("--min-quality-score", type=float, default=float(os.getenv("FACE_MIN_QUALITY_SCORE", "0.55")))
+    parser.add_argument("--seed-acceptance-threshold", type=float, default=float(os.getenv("FACE_SEED_ACCEPTANCE_THRESHOLD", "0.60")))
+    parser.add_argument("--max-aspect-ratio-deviation", type=float, default=float(os.getenv("FACE_MAX_ASPECT_RATIO_DEVIATION", "0.65")))
     parser.add_argument("--min-stability", type=float, default=float(os.getenv("FACE_MIN_STABILITY", "0.45")))
     parser.add_argument(
         "--dnn-confidence",
@@ -1280,10 +1568,25 @@ def main() -> None:
         help="Force CPU backend (disables CUDA attempt).",
     )
     parser.add_argument(
+        "--detector-device",
+        default=os.getenv("FACE_DETECTOR_DEVICE"),
+        help="Torch device for face detection (cpu | cuda | cuda:<id>).",
+    )
+    parser.add_argument(
+        "--verifier-device",
+        default=os.getenv("FACE_VERIFIER_DEVICE"),
+        help="Torch device for verifier (cpu | cuda | cuda:<id>).",
+    )
+    parser.add_argument(
+        "--embedding-device",
+        default=os.getenv("FACE_EMBEDDING_DEVICE"),
+        help="Torch device for embedding model (cpu | cuda | cuda:<id>).",
+    )
+    parser.add_argument(
         "--gpu-device-id",
         type=int,
         default=int(os.getenv("FACE_GPU_DEVICE_ID", "0")),
-        help="Preferred CUDA device index for detector + verifier torch backends.",
+        help="Legacy fallback CUDA device index when component device env vars are not set.",
     )
     parser.add_argument(
         "--gpu-diagnostics",
@@ -1295,6 +1598,17 @@ def main() -> None:
         "--diagnose-torch",
         action="store_true",
         help="Print Torch/CUDA diagnostics and exit (no scan).",
+    )
+    parser.add_argument(
+        "--write-debug-stats",
+        action="store_true",
+        default=_env_bool("FACE_SEED_DEBUG_STATS_ENABLED", False),
+        help="Write per-run seed statistics JSON.",
+    )
+    parser.add_argument(
+        "--debug-stats-dir",
+        default=os.getenv("FACE_SEED_DEBUG_STATS_DIR"),
+        help="Directory for per-run seed debug statistics JSON.",
     )
     parser.add_argument(
         "--diagnose-opencv",
@@ -1317,9 +1631,15 @@ def main() -> None:
 
     scan_kwargs = dict(
         sample_fps=args.fps,
+        start_offset_seconds=args.start_offset_seconds,
+        max_sampled_frames=args.max_sampled_frames,
         min_clear_seconds=args.min_clear_seconds,
         min_face_area_ratio=args.min_face_area_ratio,
         min_sharpness=args.min_sharpness,
+        min_brightness=args.min_brightness,
+        min_quality_score=args.min_quality_score,
+        seed_acceptance_threshold=args.seed_acceptance_threshold,
+        max_aspect_ratio_deviation=args.max_aspect_ratio_deviation,
         min_stability=args.min_stability,
         dnn_confidence=args.dnn_confidence,
         min_face_size_px=args.min_face_size_px,
@@ -1329,8 +1649,16 @@ def main() -> None:
         verifier_max_center_offset=args.verifier_max_center_offset,
         prefer_gpu=_env_bool("FACE_GPU_ENABLED", True) and not args.cpu_only,
         gpu_device_id=args.gpu_device_id,
+        detector_device=args.detector_device,
+        verifier_device=args.verifier_device,
+        embedding_device=args.embedding_device,
         gpu_diagnostics=args.gpu_diagnostics,
-        seed_group_similarity_threshold=float(os.getenv("FACE_SEED_GROUP_SIMILARITY_THRESHOLD", "0.90")),
+        seed_group_similarity_threshold=float(
+            os.getenv("FACE_SEED_GROUP_SIMILARITY_THRESHOLD", os.getenv("FACE_VISUAL_GROUP_ASSIGNMENT_THRESHOLD", "0.90"))
+        ),
+        duplicate_similarity_threshold=float(os.getenv("FACE_SEED_DUPLICATE_SIMILARITY_THRESHOLD", "0.985")),
+        write_debug_stats=args.write_debug_stats,
+        debug_stats_dir=args.debug_stats_dir,
     )
 
     if not args.video and not args.directory:

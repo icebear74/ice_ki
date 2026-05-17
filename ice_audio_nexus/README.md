@@ -9,7 +9,7 @@ For each video in seed mode (`--video`) the scanner now:
 
 1. samples frames (default `4 FPS`)
 2. detects faces
-3. applies strict quality gates (size/sharpness/verifier)
+3. applies strict quality gates (size/sharpness/brightness/quality/verifier)
 4. accepts high-quality face seeds
 5. assigns seeds conservatively to visual groups (high-similarity only)
 6. stores detections, seed containers and seed-review metadata
@@ -52,16 +52,37 @@ python -m processor.scanner
 Useful options:
 
 - `--fps` (default `4.0`)
+- `--start-offset-seconds` / `--max-sampled-frames`
 - `--min-clear-seconds` (default `2.0`)
 - `--min-face-area-ratio` (default `0.06`)
+- `--max-aspect-ratio-deviation` (default `0.65`)
 - `--min-sharpness` (default `70.0`)
+- `--min-brightness` / `--min-quality-score` / `--seed-acceptance-threshold`
 - `--min-stability` (default `0.45`)
 - `--dnn-confidence` (Torch detector score threshold, default `0.65`)
 - `--min-face-size-px` (default `80`)
 - `--disable-verifier` (deaktiviert die zweite KI-Verifikation)
 - `--verifier-score-threshold` (default `0.92`)
-- `--cpu-only` / `--gpu-device-id` / `--gpu-diagnostics`
+- `--cpu-only` / `--gpu-device-id` / `--detector-device` / `--verifier-device` / `--embedding-device`
+- `--write-debug-stats` / `--debug-stats-dir`
 - `--diagnose-torch` (Torch/CUDA Diagnostik ohne Scan)
+
+Seed-Logs zeigen nun granular:
+
+- `rejected_small`
+- `rejected_blurry`
+- `rejected_pose`
+- `rejected_occluded`
+- `rejected_dark`
+- `rejected_quality_score`
+- `verifier_rejects`
+- `duplicate_matches`
+- `high_quality_seeds_accepted`
+- `new_visual_groups_created`
+- `matched_existing_groups`
+
+Optional schreibt der Scanner pro Lauf eine JSON-Datei (`FACE_SEED_DEBUG_STATS_ENABLED=1`) nach
+`data/faces/debug/seed_runs` (oder `FACE_SEED_DEBUG_STATS_DIR`).
 
 ## False-Positive-Reduktion (2-stufig)
 
@@ -87,6 +108,14 @@ fehlschlägt (Score/Fläche/Zentrierung konfigurierbar via `.env`).
 
 Die Inferenz läuft über PyTorch (CUDA wenn verfügbar), OpenCV bleibt nur für I/O
 (`VideoCapture`, Farbraum/Resize/Crops, Bildspeichern).
+
+Komponenten können getrennt zugewiesen werden:
+
+- `FACE_DETECTOR_DEVICE`
+- `FACE_VERIFIER_DEVICE`
+- `FACE_EMBEDDING_DEVICE`
+
+Wenn ein Device fehlt, ungültig ist oder nicht kompatibel ist, fällt die jeweilige Komponente auf CPU zurück.
 
 Torch-Status prüfen mit:
 

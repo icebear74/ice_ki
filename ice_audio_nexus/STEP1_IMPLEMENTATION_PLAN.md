@@ -23,7 +23,9 @@ Stand: 2026-05-17
   - Frame-Sampling + Detection + Qualitätsfilter
   - konservative Gruppierung per Embedding-Ähnlichkeit (`FACE_SEED_GROUP_SIMILARITY_THRESHOLD`, Default 0.90)
   - keine dominierende Track-Lebenszyklus-Logik mehr als Kern
-  - seed-first Logs: sampled frames, detections considered, low-quality rejected, high-quality seeds accepted, new/matched visual groups
+  - seed-first Logs mit granularen Reject-Gründen: `rejected_small`, `rejected_blurry`, `rejected_pose`, `rejected_occluded`, `rejected_dark`, `rejected_quality_score`, `verifier_rejects`, `duplicate_matches`
+  - Stufen-Transparenz: `quality_passed_before_verifier` und `verifier_rejects_after_quality`
+  - optionale JSON-Laufstatistik (`FACE_SEED_DEBUG_STATS_ENABLED`, `FACE_SEED_DEBUG_STATS_DIR`)
 - `scanner` ohne Dateiname startet jetzt Expansion-Orchestrierung:
   - nur `confirmed` + `expansion_state=ready`
   - nur auf **freigegebenen Episoden** (`expansion_released=true`)
@@ -36,6 +38,8 @@ Stand: 2026-05-17
   - neue Entität `voice_actors`
   - `persona_catalog.voice_actor_id`
   - neue Kontexttabelle `role_cast_assignments` mit Startregel (`start_season`, `start_episode`, Sprache, Relevanz)
+- Scanner/API-Parameter für Step-1A jetzt umfassend per `.env` steuerbar (Sampling, Detection/Quality, Verifier/Grouping, Duplicate-Handling, Debug-Ausgabe).
+- Device-Zuordnung je Komponente konfigurierbar (`FACE_DETECTOR_DEVICE`, `FACE_VERIFIER_DEVICE`, `FACE_EMBEDDING_DEVICE`) mit CPU-Fallback je Komponente.
 
 ### WebUI
 - Episoden können für Expansion explizit freigegeben/geblockt werden.
@@ -50,6 +54,7 @@ Stand: 2026-05-17
 - Vollständige semantische Auswertung mehrerer Sprecherwechselregeln (Konflikt-/Prioritätslogik in Inferenzpfaden).
 - Weitere UX-Verbesserung der neuen Stammdaten-/Assignment-Ansichten (Filter, Editieren bestehender Einträge).
 - Multimodale Face↔Voice-Fusionsauswertung (Step 2/3).
+- Reject-Gründe `pose`/`occluded` werden aktuell heuristisch aus Geometrie + Verifier-Metadaten abgeleitet; feinere Landmark-basierte Trennung bleibt offen.
 
 ---
 
