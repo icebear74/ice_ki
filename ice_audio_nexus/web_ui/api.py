@@ -46,6 +46,7 @@ from db.database import (  # noqa: E402
     rematch_tracks,
     set_video_scan_status,
     unlink_detection_from_track,
+    update_track_seed_workflow,
     update_track_status,
 )
 
@@ -279,6 +280,26 @@ def api_update_track_status(track_id: int, payload: dict = Body(...)) -> JSONRes
     try:
         update_track_status(conn, track_id, status)
         return JSONResponse({"ok": True, "track_id": track_id, "status": status})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        conn.close()
+
+
+@app.post("/api/tracks/{track_id}/workflow")
+def api_update_track_workflow(track_id: int, payload: dict = Body(...)) -> JSONResponse:
+    conn = get_connection()
+    try:
+        result = update_track_seed_workflow(
+            conn,
+            track_id,
+            stage=payload.get("stage"),
+            review_state=payload.get("review_state"),
+            group_label=payload.get("group_label"),
+            expansion_state=payload.get("expansion_state"),
+            notes=payload.get("notes"),
+        )
+        return JSONResponse({"ok": True, **result})
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     finally:

@@ -14,6 +14,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+SEED_WORKFLOW_STAGES = {"seed_discovery", "review", "finished", "expansion"}
+SEED_REVIEW_STATES = {"pending", "confirmed", "needs_split", "ignored", "irrelevant"}
+SEED_EXPANSION_STATES = {"blocked", "ready", "running", "done"}
+
 
 DDL_STATEMENTS: list[str] = [
     """
@@ -215,6 +219,45 @@ def _sanitize_float(value: float | None) -> float | None:
     except TypeError:
         return None
     return float(value)
+
+
+def _clean_optional_text(value: object, *, limit: int | None = None) -> str | None:
+    if value is None:
+        return None
+    cleaned = str(value).strip()
+    if not cleaned:
+        return None
+    if limit is not None:
+        cleaned = cleaned[:limit]
+    return cleaned
+
+
+def _normalize_seed_workflow(metadata: dict[str, Any] | None, *, is_clear: bool) -> dict[str, Any]:
+    raw_workflow = metadata.get("seed_workflow", {}) if isinstance(metadata, dict) else {}
+    if not isinstance(raw_workflow, dict):
+        raw_workflow = {}
+
+    stage_default = "review" if is_clear else "seed_discovery"
+    stage = str(raw_workflow.get("stage") or stage_default).strip()
+    if stage not in SEED_WORKFLOW_STAGES:
+        stage = stage_default
+
+    review_state = str(raw_workflow.get("review_state") or "pending").strip()
+    if review_state not in SEED_REVIEW_STATES:
+        review_state = "pending"
+
+    expansion_state = str(raw_workflow.get("expansion_state") or "blocked").strip()
+    if expansion_state not in SEED_EXPANSION_STATES:
+        expansion_state = "blocked"
+
+    return {
+        "mode": "seed_first",
+        "stage": stage,
+        "review_state": review_state,
+        "group_label": _clean_optional_text(raw_workflow.get("group_label"), limit=64),
+        "expansion_state": expansion_state,
+        "notes": _clean_optional_text(raw_workflow.get("notes"), limit=500),
+    }
 
 
 def ensure_schema() -> None:
@@ -593,6 +636,11 @@ def list_video_tracks(
     rows = cur.fetchall()
     out: list[dict[str, Any]] = []
     for row in rows:
+        metadata = _from_json(row[22], {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        seed_workflow = _normalize_seed_workflow(metadata, is_clear=bool(row[11]))
+        metadata["seed_workflow"] = seed_workflow
         out.append(
             {
                 "id": int(row[0]),
@@ -617,7 +665,8 @@ def list_video_tracks(
                 "match_score": row[19],
                 "representative_image_path": row[20],
                 "embedding": _from_json(row[21], []),
-                "metadata": _from_json(row[22], {}),
+                "metadata": metadata,
+                "seed_workflow": seed_workflow,
             }
         )
     return out
@@ -819,6 +868,51 @@ def update_track_status(conn: mariadb.Connection, track_id: int, status: str) ->
     cur.execute("UPDATE face_tracks SET status=? WHERE id=?", (status, track_id))
     conn.commit()
     rebuild_overlay_for_video(conn, video_id)
+
+
+def update_track_seed_workflow(
+    conn: mariadb.Connection,
+    track_id: int,
+    *,
+    stage: str | None = None,
+    review_state: str | None = None,
+    group_label: str | None = None,
+    expansion_state: str | None = None,
+    notes: str | None = None,
+) -> dict[str, Any]:
+    cur = conn.cursor()
+    cur.execute("SELECT video_id, is_clear, metadata_json FROM face_tracks WHERE id=?", (track_id,))
+    row = cur.fetchone()
+    if not row:
+        raise ValueError(f"Track {track_id} not found")
+
+    video_id = int(row[0])
+    metadata = _from_json(row[2], {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    workflow = _normalize_seed_workflow(metadata, is_clear=bool(row[1]))
+
+    if stage is not None:
+        if stage not in SEED_WORKFLOW_STAGES:
+            raise ValueError(f"Unsupported workflow stage: {stage}")
+        workflow["stage"] = stage
+    if review_state is not None:
+        if review_state not in SEED_REVIEW_STATES:
+            raise ValueError(f"Unsupported review state: {review_state}")
+        workflow["review_state"] = review_state
+    if expansion_state is not None:
+        if expansion_state not in SEED_EXPANSION_STATES:
+            raise ValueError(f"Unsupported expansion state: {expansion_state}")
+        workflow["expansion_state"] = expansion_state
+    if group_label is not None:
+        workflow["group_label"] = _clean_optional_text(group_label, limit=64)
+    if notes is not None:
+        workflow["notes"] = _clean_optional_text(notes, limit=500)
+
+    metadata["seed_workflow"] = workflow
+    cur.execute("UPDATE face_tracks SET metadata_json=? WHERE id=?", (_to_json(metadata), track_id))
+    conn.commit()
+    return {"track_id": track_id, "video_id": video_id, "seed_workflow": workflow}
 
 
 def list_face_samples(conn: mariadb.Connection, actor_id: int | None = None) -> list[dict[str, Any]]:

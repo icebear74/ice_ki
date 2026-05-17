@@ -116,14 +116,46 @@
     </section>
 
     <section class="panel">
-      <h2>Track review</h2>
+      <h2>Seed / Track review</h2>
       <div class="scroll">
         <div id="trackDetails" class="small">Select a track to review and assign.</div>
         <hr style="border-color:#334155; margin:14px 0;" />
+        <div class="small" style="margin-bottom:6px;">Seed-first workflow prep</div>
+        <div class="grid">
+          <input id="groupLabel" placeholder="visual_person_001" />
+          <select id="workflowStage">
+            <option value="seed_discovery">Seed discovery</option>
+            <option value="review">Review</option>
+            <option value="finished">Finished</option>
+            <option value="expansion">Expansion</option>
+          </select>
+          <select id="reviewState">
+            <option value="pending">Pending</option>
+            <option value="confirmed">Confirmed</option>
+            <option value="needs_split">Needs split</option>
+            <option value="irrelevant">Irrelevant</option>
+            <option value="ignored">Ignored</option>
+          </select>
+          <select id="expansionState">
+            <option value="blocked">Expansion blocked</option>
+            <option value="ready">Expansion ready</option>
+            <option value="running">Expansion running</option>
+            <option value="done">Expansion done</option>
+          </select>
+        </div>
+        <input id="workflowNotes" placeholder="Review notes / why this group matters" style="width:100%; margin-top:8px;" />
+        <div class="row" style="margin-top:8px;">
+          <button class="btn-main" onclick="saveWorkflow()">Save seed workflow</button>
+        </div>
+        <hr style="border-color:#334155; margin:14px 0;" />
+        <div class="small" style="margin-bottom:6px;">Manual assignment (internal: real person, optional role for UI/context)</div>
         <div class="grid">
           <input id="newActorName" placeholder="New actor name" />
-          <input id="newRoleName" placeholder="Optional role name" />
+          <select id="roleSelect">
+            <option value="">Optional role / persona</option>
+          </select>
         </div>
+        <input id="newRoleName" placeholder="Optional new role / persona name" style="width:100%; margin-top:8px;" />
         <div class="row" style="margin-top:8px;">
           <select id="actorSelect" style="flex:1"></select>
           <button class="btn-ok" onclick="assignTrack()">Assign</button>
@@ -144,6 +176,7 @@
     let overlayEvents = [];
     let selectedTrack = null;
     let actors = [];
+    let roles = [];
 
     const player = document.getElementById('player');
     const canvas = document.getElementById('overlay');
@@ -175,6 +208,13 @@
       const sel = document.getElementById('actorSelect');
       sel.innerHTML = `<option value="">Select actor</option>` +
         actors.map(a => `<option value="${a.id}">${a.name}</option>`).join('');
+    }
+
+    async function loadRoles() {
+      roles = await jsonFetch('/api/roles');
+      const sel = document.getElementById('roleSelect');
+      sel.innerHTML = `<option value="">Optional role / persona</option>` +
+        roles.map(r => `<option value="${r.id}">${r.name}</option>`).join('');
     }
 
     async function loadLibrary() {
@@ -269,8 +309,10 @@
             <strong>#${t.id}</strong>
             <span class="pill ${statusClass(t.status)}">${t.status}</span>
             ${t.is_clear ? '<span class="pill">clear</span>' : '<span class="pill">low</span>'}
+            ${t.seed_workflow?.group_label ? `<span class="pill">${t.seed_workflow.group_label}</span>` : ''}
           </div>
           <div class="small">${msToClock(t.start_ms)} → ${msToClock(t.end_ms)} · q=${(t.quality_score||0).toFixed(2)} · rel=${(t.relevance_score||0).toFixed(2)}</div>
+          <div class="small">seed: ${t.seed_workflow?.review_state || 'pending'} · ${t.seed_workflow?.stage || 'review'}</div>
           <div class="small">${t.assigned_actor_name || t.match_actor_name || 'unassigned'}</div>
         </div>
       `).join('');
@@ -341,6 +383,7 @@
       selectedTrack = await jsonFetch(`/api/tracks/${trackId}`);
       renderTracks();
       const d = selectedTrack;
+      const workflow = d.seed_workflow || {};
       const repSrc = d.representative_image_path ? `/faces/${d.representative_image_path}` : '';
       const thumbsHtml = (d.detections || []).map(x => {
         const conf = x.confidence != null ? `conf ${(x.confidence).toFixed(2)}` : '';
@@ -353,10 +396,18 @@
             ${caption ? `<div class="thumb-caption">${caption}</div>` : ''}
           </div>`;
       }).join('');
+      document.getElementById('groupLabel').value = workflow.group_label || '';
+      document.getElementById('workflowStage').value = workflow.stage || 'review';
+      document.getElementById('reviewState').value = workflow.review_state || 'pending';
+      document.getElementById('expansionState').value = workflow.expansion_state || 'blocked';
+      document.getElementById('workflowNotes').value = workflow.notes || '';
+      document.getElementById('roleSelect').value = d.assigned_role_id || '';
       document.getElementById('trackDetails').innerHTML = `
         <div class="row"><strong>Track #${d.id}</strong><span class="pill ${statusClass(d.status)}">${d.status}</span></div>
         <div class="small">Time: ${msToClock(d.start_ms)} → ${msToClock(d.end_ms)} (${d.frame_count} frames)</div>
         <div class="small">Actor: ${d.assigned_actor_name || '—'} | Match: ${d.match_actor_name || '—'} (${(d.match_score||0).toFixed(2)})</div>
+        <div class="small">Visual group: ${workflow.group_label || '—'} | Review: ${workflow.review_state || 'pending'} | Stage: ${workflow.stage || 'review'} | Expansion: ${workflow.expansion_state || 'blocked'}</div>
+        <div class="small">Role / persona: ${d.assigned_role_name || '—'} (internal actor model stays separate)</div>
         <div class="small" style="margin-top:4px;">q=${(d.quality_score||0).toFixed(2)} · conf=${(d.mean_confidence||0).toFixed(2)} · ${d.detections?.length||0} detections</div>
         ${repSrc ? `<img class="thumb" src="${repSrc}" style="margin-top:8px;" />` : '<div class="small">No representative image</div>'}
         <div class="grid" style="margin-top:8px;">${thumbsHtml || ''}</div>
@@ -367,12 +418,14 @@
       if (!selectedTrack) return;
       const actorId = document.getElementById('actorSelect').value;
       const newActor = document.getElementById('newActorName').value.trim();
+      const roleId = document.getElementById('roleSelect').value;
       const newRole = document.getElementById('newRoleName').value.trim();
       await jsonFetch(`/api/tracks/${selectedTrack.id}/assign`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           actor_id: actorId ? Number(actorId) : null,
+          role_id: roleId ? Number(roleId) : null,
           new_actor_name: newActor || null,
           new_role_name: newRole || null,
           add_sample: true
@@ -380,9 +433,28 @@
       });
       document.getElementById('newActorName').value = '';
       document.getElementById('newRoleName').value = '';
+      document.getElementById('roleSelect').value = '';
       await loadActors();
+      await loadRoles();
       await loadTracks();
       await loadOverlay();
+      await selectTrack(selectedTrack.id);
+    }
+
+    async function saveWorkflow() {
+      if (!selectedTrack) return;
+      await jsonFetch(`/api/tracks/${selectedTrack.id}/workflow`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          group_label: document.getElementById('groupLabel').value.trim() || null,
+          stage: document.getElementById('workflowStage').value,
+          review_state: document.getElementById('reviewState').value,
+          expansion_state: document.getElementById('expansionState').value,
+          notes: document.getElementById('workflowNotes').value.trim() || null
+        })
+      });
+      await loadTracks();
       await selectTrack(selectedTrack.id);
     }
 
@@ -425,7 +497,7 @@
     });
 
     drawOverlay();
-    loadActors().then(loadLibrary);
+    Promise.all([loadActors(), loadRoles()]).then(loadLibrary);
   </script>
 </body>
 </html>

@@ -856,6 +856,11 @@ def scan_video(
         if is_clear:
             clear_tracks += 1
 
+        top_seed_candidates = sorted(
+            track.detections,
+            key=lambda d: (d.area_ratio, d.sharpness, d.confidence),
+            reverse=True,
+        )[:3]
         best_det = max(
             track.detections,
             key=lambda d: (d.sharpness * (0.5 + d.area_ratio)),
@@ -893,6 +898,26 @@ def scan_video(
             metadata={
                 "duration_seconds": duration_s,
                 "global_rule": "step1_clear_track_rule",
+                "seed_workflow": {
+                    "mode": "seed_first",
+                    "stage": "review" if is_clear else "seed_discovery",
+                    "review_state": "pending",
+                    "group_label": None,
+                    "expansion_state": "blocked",
+                    "notes": None,
+                },
+                "seed_candidates": [
+                    {
+                        "detection_id": det.db_id,
+                        "timestamp_ms": det.timestamp_ms,
+                        "crop_image_path": det.crop_path,
+                        "area_ratio": round(float(det.area_ratio), 6),
+                        "sharpness": round(float(det.sharpness), 3),
+                        "confidence": round(float(det.confidence), 4),
+                    }
+                    for det in top_seed_candidates
+                ],
+                "tracking_role": "support_container",
                 "thresholds": {
                     "min_clear_seconds": min_clear_seconds,
                     "min_face_area_ratio": min_face_area_ratio,
