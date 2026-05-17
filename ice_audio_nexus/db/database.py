@@ -21,7 +21,6 @@ SEED_WORKFLOW_STAGES = {"seed_discovery", "review", "finished", "expansion"}
 SEED_REVIEW_STATES = {"pending", "confirmed", "needs_split", "ignored", "irrelevant"}
 SEED_EXPANSION_STATES = {"blocked", "ready", "running", "done"}
 _UNSET = object()
-_AUTO_EMPTY_GROUP_NOTE = "[auto-empty-after-video-rescan]"
 logger = logging.getLogger(__name__)
 
 
@@ -489,21 +488,9 @@ def clear_video_scan_data(conn: mariadb.Connection, video_id: int) -> None:
         )
         if int(cur.fetchone()[0] or 0) > 0:
             continue
-        cur.execute(
-            """
-            UPDATE visual_groups
-            SET review_state='ignored',
-                expansion_state='blocked',
-                representative_image_path=NULL,
-                notes=CASE
-                    WHEN notes IS NULL OR notes='' THEN ?
-                    WHEN notes LIKE ? THEN notes
-                    ELSE CONCAT(notes, '\n', ?)
-                END
-            WHERE id=?
-            """,
-            (_AUTO_EMPTY_GROUP_NOTE, f"%{_AUTO_EMPTY_GROUP_NOTE}%", _AUTO_EMPTY_GROUP_NOTE, group_id),
-        )
+        # Group is now empty – delete it so it doesn't clutter the UI.
+        cur.execute("DELETE FROM visual_groups WHERE id=?", (group_id,))
+        logger.info("Deleted empty visual_group id=%s after video rescan", group_id)
 
     metadata = _from_json(video_row[1], {})
     if isinstance(metadata, dict):

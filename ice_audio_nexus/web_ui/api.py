@@ -142,17 +142,19 @@ async def lifespan(_: FastAPI):
     global _NVENC_AVAILABLE
     ensure_schema()
     _NVENC_AVAILABLE = _probe_nvenc()
-    FACE_DATA_DIR.mkdir(parents=True, exist_ok=True)
     logger.info("NVENC available: %s", _NVENC_AVAILABLE)
     yield
 
+
+# Ensure face-data directory exists at module-load time so the static mount
+# always succeeds (creating it in lifespan would be too late).
+FACE_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="ice_audio_nexus", version="3.0.0", lifespan=lifespan)
 
 if VIDEO_DIR.exists():
     app.mount("/videos", StaticFiles(directory=str(VIDEO_DIR)), name="videos")
-if FACE_DATA_DIR.exists():
-    app.mount("/faces", StaticFiles(directory=str(FACE_DATA_DIR)), name="faces")
+app.mount("/faces", StaticFiles(directory=str(FACE_DATA_DIR)), name="faces")
 
 
 def _resolve_video_path(path: str) -> Path:

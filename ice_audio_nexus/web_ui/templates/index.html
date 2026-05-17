@@ -73,6 +73,14 @@
     .seed-img-wrap img { width:100%; border-radius:4px; border:1px solid var(--line); min-height:60px; object-fit:cover; }
     .seed-img-wrap .remove-btn { display:none; position:absolute; top:2px; right:2px; background:rgba(239,68,68,.85); color:#fff; border:none; border-radius:50%; width:16px; height:16px; font-size:10px; line-height:16px; text-align:center; cursor:pointer; padding:0; }
     .seed-img-wrap:hover .remove-btn { display:block; }
+    /* ── Mode bar ── */
+    .mode-bar { display:flex; gap:8px; padding:8px 10px; border-bottom:1px solid var(--line); }
+    .mode-btn { flex:1; padding:10px 6px; font-size:12px; font-weight:700; border-radius:8px; cursor:pointer; background:transparent; color:var(--muted); border:1px solid var(--line); letter-spacing:.03em; }
+    .mode-btn.active-groups { background:rgba(34,197,94,.12); border-color:var(--ok); color:var(--ok); }
+    .mode-btn.active-tracks { background:rgba(56,189,248,.12); border-color:var(--accent); color:var(--accent); }
+    .group-thumb { width:44px; height:44px; border-radius:6px; border:1px solid var(--line); object-fit:cover; float:right; margin-left:8px; }
+    .mode-hint { font-size:12px; color:var(--muted); padding:14px 0; text-align:center; }
+    .info-box { font-size:11px; color:var(--accent); padding:4px 7px; background:rgba(56,189,248,.07); border-radius:5px; margin-top:5px; }
   </style>
 </head>
 <body>
@@ -107,7 +115,7 @@
     </section>
 
     <section class="panel">
-      <h2>Video + Overlay</h2>
+      <h2 id="midPanelTitle">Video + Overlay — Gruppen-Review</h2>
       <div class="video-wrap">
         <video id="player" controls></video>
         <canvas id="overlay"></canvas>
@@ -116,7 +124,13 @@
         <button onclick="jumpToTrackStart()">Jump to selected track</button>
         <span id="videoMeta" class="meta">No video selected</span>
       </div>
-      <div class="toolbar" style="gap:6px; padding-top:4px;">
+      <!-- Mode bar -->
+      <div class="mode-bar">
+        <button class="mode-btn active-groups" id="mode-btn-groups" onclick="setMode('groups')">🏷 Gruppen-Review (Primär)</button>
+        <button class="mode-btn" id="mode-btn-tracks" onclick="setMode('tracks')">🎯 Track-Support (Debug)</button>
+      </div>
+      <!-- Track filter toolbar – only shown in tracks mode -->
+      <div id="trackFilterBar" style="display:none;" class="toolbar">
         <label style="display:flex;align-items:center;gap:4px;font-size:12px;">
           <input type="checkbox" id="filterClear" onchange="loadTracks()" />
           Clear only
@@ -131,13 +145,7 @@
         </select>
         <span id="trackCount" class="meta" style="margin-left:auto;font-size:11px;"></span>
       </div>
-      <div class="tabs">
-        <button class="tab-btn" id="tab-tracks-btn" onclick="switchTab('tracks')">Tracks (Support)</button>
-        <button class="tab-btn active" id="tab-groups-btn" onclick="switchTab('groups')">Groups (Primary)</button>
-      </div>
-      <div id="pane-tracks" class="tab-pane scroll">
-        <div id="tracks"></div>
-      </div>
+      <!-- Groups pane (default active) -->
       <div id="pane-groups" class="tab-pane active scroll">
         <div id="groupsToolbar" style="padding:6px 0 8px;display:flex;gap:6px;flex-wrap:wrap;">
           <button class="btn-main" onclick="loadGroups()">Reload</button>
@@ -145,97 +153,118 @@
         </div>
         <div id="groups"></div>
       </div>
+      <!-- Tracks pane (hidden by default) -->
+      <div id="pane-tracks" class="tab-pane scroll">
+        <div id="tracks"></div>
+      </div>
     </section>
 
     <section class="panel">
-      <h2>Review / Personas</h2>
+      <h2 id="rightPanelTitle">Gruppen-Review / Personas</h2>
       <div class="tabs">
         <button class="tab-btn active" id="tab-review-btn" onclick="switchRightTab('review')">Review</button>
         <button class="tab-btn" id="tab-personas-btn" onclick="switchRightTab('personas')">Personas</button>
       </div>
       <div id="pane-review" class="tab-pane active scroll">
-        <div id="trackDetails" class="small">Tracks sind Support/Expansion. Primäre Zuordnung erfolgt über Groups.</div>
-        <hr style="border-color:#334155; margin:14px 0;" />
-        <div class="small" style="margin-bottom:6px;">Seed-first workflow prep</div>
-        <div class="grid">
-          <input id="groupLabel" placeholder="visual_person_001" />
-          <select id="workflowStage">
-            <option value="seed_discovery">Seed discovery</option>
-            <option value="review">Review</option>
-            <option value="finished">Finished</option>
-            <option value="expansion">Expansion</option>
-          </select>
-          <select id="reviewState">
-            <option value="pending">Pending</option>
-            <option value="confirmed">Confirmed</option>
-            <option value="needs_split">Needs split</option>
-            <option value="irrelevant">Irrelevant</option>
-            <option value="ignored">Ignored</option>
-          </select>
-          <select id="expansionState">
-            <option value="blocked">Expansion blocked</option>
-            <option value="ready">Expansion ready</option>
-            <option value="running">Expansion running</option>
-            <option value="done">Expansion done</option>
-          </select>
+
+        <!-- ═══════════════════════════════════════════════════════
+             GRUPPEN-MODUS  (sichtbar wenn mode=groups)
+             ═══════════════════════════════════════════════════════ -->
+        <div id="groupModePanel">
+          <div id="groupHint" class="mode-hint">⬅ Wähle eine Gruppe aus der Liste links.</div>
+          <div id="groupReviewPanel" style="display:none;">
+            <div id="groupReviewInfo" class="small"></div>
+            <div class="seed-grid" id="groupSeedGrid"></div>
+            <div class="grid" style="margin-top:10px;">
+              <select id="groupReviewState">
+                <option value="pending">Pending</option>
+                <option value="confirmed">Confirmed</option>
+                <option value="needs_split">Needs split</option>
+                <option value="irrelevant">Irrelevant</option>
+                <option value="ignored">Ignored</option>
+              </select>
+              <select id="groupExpansionState">
+                <option value="blocked">Expansion blocked</option>
+                <option value="ready">Expansion ready</option>
+                <option value="running">Expansion running</option>
+                <option value="done">Expansion done</option>
+              </select>
+            </div>
+            <hr style="border-color:#334155; margin:10px 0;" />
+            <div class="small" style="margin-bottom:6px;">Rollen-/Besetzungs-Zuordnung</div>
+            <div class="grid">
+              <select id="groupRoleSelect" onchange="onGroupRoleChange()">
+                <option value="">Rolle auswählen</option>
+              </select>
+              <input id="groupNewRoleName" placeholder="…oder neue Rolle anlegen" />
+              <select id="groupActorSelect">
+                <option value="">Schauspieler (optional)</option>
+              </select>
+              <input id="groupNewActorName" placeholder="…oder neuen Schauspieler anlegen" />
+            </div>
+            <div id="groupVoiceActorHint" class="info-box" style="display:none;"></div>
+            <input id="groupNotes" placeholder="Review-Notiz" style="width:100%; margin-top:8px;" />
+            <div class="row" style="margin-top:10px;gap:6px;flex-wrap:wrap;">
+              <button class="btn-ok" onclick="saveGroupReview()">💾 Gruppe speichern</button>
+              <button id="btnRunExpansion" class="btn-main" onclick="doTriggerExpansion()">▶▶ Expansion starten</button>
+              <button class="btn-bad" onclick="doBlockExpansion()">⛔ Blockieren</button>
+            </div>
+          </div>
         </div>
-        <input id="workflowNotes" placeholder="Review notes / why this group matters" style="width:100%; margin-top:8px;" />
-        <div class="row" style="margin-top:8px;">
-          <button class="btn-main" onclick="saveWorkflow()">Save seed workflow</button>
-        </div>
-        <hr style="border-color:#334155; margin:14px 0;" />
-        <div class="small" style="margin-bottom:6px;">Track support assignment (optional / spätere Bereinigung)</div>
-        <div class="grid">
-          <input id="newActorName" placeholder="New actor name" />
-          <select id="roleSelect">
-            <option value="">Optional role / persona</option>
-          </select>
-        </div>
-        <input id="newRoleName" placeholder="Optional new role / persona name" style="width:100%; margin-top:8px;" />
-        <div class="row" style="margin-top:8px;">
-          <select id="actorSelect" style="flex:1"></select>
-          <button class="btn-ok" onclick="assignTrack()">Assign</button>
-        </div>
-        <div class="row" style="margin-top:8px;">
-          <button class="btn-warn" onclick="setTrackStatus('unknown')">Unknown</button>
-          <button class="btn-warn" onclick="setTrackStatus('background')">Background</button>
-          <button class="btn-bad" onclick="setTrackStatus('ignored')">Ignore</button>
-        </div>
-        <hr style="border-color:#334155; margin:14px 0;" />
-        <div class="small" style="margin-bottom:6px;">Primary Step-1 Group assignment (track-unabhängig)</div>
-        <div id="groupReviewPanel" style="display:none;">
-          <div id="groupReviewInfo" class="small"></div>
-          <div class="seed-grid" id="groupSeedGrid"></div>
-          <div class="grid" style="margin-top:8px;">
-            <select id="groupReviewState">
+
+        <!-- ═══════════════════════════════════════════════════════
+             TRACK-MODUS  (sichtbar wenn mode=tracks)
+             ═══════════════════════════════════════════════════════ -->
+        <div id="trackModePanel" style="display:none;">
+          <div id="trackDetails" class="small">⬅ Wähle einen Track aus der Liste links.</div>
+          <hr style="border-color:#334155; margin:14px 0;" />
+          <div class="small" style="margin-bottom:6px;">Seed-first workflow prep</div>
+          <div class="grid">
+            <input id="groupLabel" placeholder="visual_person_001" />
+            <select id="workflowStage">
+              <option value="seed_discovery">Seed discovery</option>
+              <option value="review">Review</option>
+              <option value="finished">Finished</option>
+              <option value="expansion">Expansion</option>
+            </select>
+            <select id="reviewState">
               <option value="pending">Pending</option>
               <option value="confirmed">Confirmed</option>
               <option value="needs_split">Needs split</option>
               <option value="irrelevant">Irrelevant</option>
               <option value="ignored">Ignored</option>
             </select>
-            <select id="groupExpansionState">
+            <select id="expansionState">
               <option value="blocked">Expansion blocked</option>
               <option value="ready">Expansion ready</option>
               <option value="running">Expansion running</option>
               <option value="done">Expansion done</option>
             </select>
-            <select id="groupActorSelect">
-              <option value="">Assign actor (optional)</option>
-            </select>
-            <input id="groupNewActorName" placeholder="…or create new actor" />
-            <select id="groupRoleSelect">
-              <option value="">Assign role (optional)</option>
-            </select>
-            <input id="groupNewRoleName" placeholder="…or create new role" />
           </div>
-          <input id="groupNotes" placeholder="Group review notes" style="width:100%; margin-top:8px;" />
-          <div class="row" style="margin-top:8px;gap:4px;flex-wrap:wrap;">
-            <button class="btn-ok" onclick="saveGroupReview()">Save group</button>
-            <button id="btnRunExpansion" class="btn-main" onclick="doTriggerExpansion()">▶▶ Run Expansion</button>
-            <button class="btn-bad" onclick="doBlockExpansion()">⛔ Block</button>
+          <input id="workflowNotes" placeholder="Review notes / why this group matters" style="width:100%; margin-top:8px;" />
+          <div class="row" style="margin-top:8px;">
+            <button class="btn-main" onclick="saveWorkflow()">Save seed workflow</button>
+          </div>
+          <hr style="border-color:#334155; margin:14px 0;" />
+          <div class="small" style="margin-bottom:6px;">Track-Zuordnung (Bereinigung / Support)</div>
+          <div class="grid">
+            <input id="newActorName" placeholder="New actor name" />
+            <select id="roleSelect">
+              <option value="">Optional role / persona</option>
+            </select>
+          </div>
+          <input id="newRoleName" placeholder="Optional new role / persona name" style="width:100%; margin-top:8px;" />
+          <div class="row" style="margin-top:8px;">
+            <select id="actorSelect" style="flex:1"></select>
+            <button class="btn-ok" onclick="assignTrack()">Assign</button>
+          </div>
+          <div class="row" style="margin-top:8px;">
+            <button class="btn-warn" onclick="setTrackStatus('unknown')">Unknown</button>
+            <button class="btn-warn" onclick="setTrackStatus('background')">Background</button>
+            <button class="btn-bad" onclick="setTrackStatus('ignored')">Ignore</button>
           </div>
         </div>
+
       </div>
       <div id="pane-personas" class="tab-pane scroll">
         <div style="font-size:12px;margin-bottom:8px;color:var(--accent);">Persona Catalog</div>
@@ -331,13 +360,36 @@
     let roles = [];
     let visualGroups = [];
     let selectedGroup = null;
+    let allPersonas = [];   // global persona cache for role→actor auto-fill
+    let _currentMode = 'groups';
+
+    function setMode(mode) {
+      _currentMode = mode;
+      const isGroups = mode === 'groups';
+      // Middle panel panes
+      document.getElementById('pane-groups').classList.toggle('active', isGroups);
+      document.getElementById('pane-tracks').classList.toggle('active', !isGroups);
+      // Track filter bar
+      document.getElementById('trackFilterBar').style.display = isGroups ? 'none' : '';
+      // Mode buttons
+      const gb = document.getElementById('mode-btn-groups');
+      const tb = document.getElementById('mode-btn-tracks');
+      gb.className = 'mode-btn' + (isGroups ? ' active-groups' : '');
+      tb.className = 'mode-btn' + (!isGroups ? ' active-tracks' : '');
+      // Right panel mode panels
+      document.getElementById('groupModePanel').style.display = isGroups ? '' : 'none';
+      document.getElementById('trackModePanel').style.display = isGroups ? 'none' : '';
+      // Panel titles
+      document.getElementById('midPanelTitle').textContent =
+        isGroups ? 'Video + Overlay — Gruppen-Review' : 'Video + Overlay — Track-Support';
+      document.getElementById('rightPanelTitle').textContent =
+        isGroups ? 'Gruppen-Review / Personas' : 'Track-Support / Personas';
+      // Load appropriate list
+      if (isGroups) loadGroups();
+    }
 
     function switchTab(name) {
-      ['tracks', 'groups'].forEach(t => {
-        document.getElementById(`pane-${t}`).classList.toggle('active', t === name);
-        document.getElementById(`tab-${t}-btn`).classList.toggle('active', t === name);
-      });
-      if (name === 'groups') loadGroups();
+      setMode(name === 'groups' ? 'groups' : 'tracks');
     }
 
     function switchRightTab(name) {
@@ -382,7 +434,7 @@
       const groupSel = document.getElementById('groupActorSelect');
       sel.innerHTML = `<option value="">Select actor</option>` +
         actors.map(a => `<option value="${a.id}">${a.name}</option>`).join('');
-      groupSel.innerHTML = `<option value="">Assign actor (optional)</option>` +
+      groupSel.innerHTML = `<option value="">Schauspieler (optional)</option>` +
         actors.map(a => `<option value="${a.id}">${a.name}</option>`).join('');
       if (selectedGroup) {
         groupSel.value = selectedGroup.assigned_actor_id || '';
@@ -395,7 +447,7 @@
       const groupSel = document.getElementById('groupRoleSelect');
       sel.innerHTML = `<option value="">Optional role / persona</option>` +
         roles.map(r => `<option value="${r.id}">${r.name}</option>`).join('');
-      groupSel.innerHTML = `<option value="">Assign role (optional)</option>` +
+      groupSel.innerHTML = `<option value="">Rolle auswählen</option>` +
         roles.map(r => `<option value="${r.id}">${r.name}</option>`).join('');
       if (selectedGroup) {
         groupSel.value = selectedGroup.assigned_role_id || '';
@@ -404,6 +456,36 @@
 
     async function loadVoiceActors() {
       voiceActors = await jsonFetch('/api/voice_actors');
+    }
+
+    async function loadPersonasGlobal() {
+      try {
+        allPersonas = await jsonFetch('/api/persona_catalog');
+      } catch (e) {
+        allPersonas = [];
+      }
+    }
+
+    // When a role is selected in the group panel, auto-fill actor and show voice-actor hint
+    // from the persona catalog.
+    function onGroupRoleChange() {
+      const roleId = Number(document.getElementById('groupRoleSelect').value);
+      const vaHint = document.getElementById('groupVoiceActorHint');
+      if (!roleId) { vaHint.style.display = 'none'; return; }
+      // Prefer persona matching current production; fall back to any production
+      const prodId = selectedGroup ? selectedGroup.production_id : null;
+      const match = allPersonas.find(p => p.role_id === roleId && p.production_id === prodId)
+                 || allPersonas.find(p => p.role_id === roleId);
+      if (!match) { vaHint.style.display = 'none'; return; }
+      if (match.actor_id) {
+        document.getElementById('groupActorSelect').value = match.actor_id;
+      }
+      if (match.voice_actor_name) {
+        vaHint.textContent = `🎙 Synchronsprecher: ${match.voice_actor_name}`;
+        vaHint.style.display = '';
+      } else {
+        vaHint.style.display = 'none';
+      }
     }
 
     async function loadLibrary() {
@@ -720,19 +802,20 @@
     function renderGroups() {
       const root = document.getElementById('groups');
       if (!visualGroups.length) {
-        root.innerHTML = '<div class="small">No visual groups yet. Run clustering first.</div>';
+        root.innerHTML = '<div class="small">Noch keine visuellen Gruppen. Clustering ausführen oder scannen.</div>';
         return;
       }
       root.innerHTML = visualGroups.map(g => `
         <div class="group-item ${selectedGroup && selectedGroup.id === g.id ? 'active' : ''}" onclick="selectGroup(${g.id})">
+          ${g.representative_image_path ? `<img class="group-thumb" src="/faces/${g.representative_image_path}" onerror="this.style.display='none'" />` : ''}
           <div class="row">
             <strong>${g.label}</strong>
             <span class="pill">${g.review_state}</span>
             <span class="pill">${g.expansion_state}</span>
           </div>
           <div class="small">${g.production_title || '—'} · seeds: ${g.active_seeds}/${g.seed_count}</div>
-          ${g.assigned_actor_name ? `<div class="small">Actor: ${g.assigned_actor_name}</div>` : ''}
-          ${g.assigned_role_name ? `<div class="small">Role: ${g.assigned_role_name}</div>` : ''}
+          ${g.assigned_actor_name ? `<div class="small" style="color:var(--ok);">👤 ${g.assigned_actor_name}${g.assigned_role_name ? ' · ' + g.assigned_role_name : ''}</div>` : ''}
+          <div style="clear:both;"></div>
         </div>
       `).join('');
     }
@@ -741,8 +824,10 @@
       try {
         selectedGroup = await jsonFetch(`/api/visual_groups/${groupId}`);
         renderGroups();
-        // Show group review panel in right panel
+        // Ensure we are in groups mode and right panel shows review
+        if (_currentMode !== 'groups') setMode('groups');
         switchRightTab('review');
+        document.getElementById('groupHint').style.display = 'none';
         document.getElementById('groupReviewPanel').style.display = 'block';
         document.getElementById('groupReviewState').value = selectedGroup.review_state || 'pending';
         document.getElementById('groupExpansionState').value = selectedGroup.expansion_state || 'blocked';
@@ -751,21 +836,28 @@
         document.getElementById('groupNewActorName').value = '';
         document.getElementById('groupNewRoleName').value = '';
         document.getElementById('groupNotes').value = selectedGroup.notes || '';
+        document.getElementById('groupVoiceActorHint').style.display = 'none';
         document.getElementById('groupReviewInfo').innerHTML = `
-          <strong>${selectedGroup.label}</strong> · ${selectedGroup.review_state} · ${selectedGroup.expansion_state}<br>
-          Seeds: ${selectedGroup.active_seeds}/${selectedGroup.seed_count}
-          ${selectedGroup.assigned_actor_name ? ` · Actor: ${selectedGroup.assigned_actor_name}` : ''}
-          ${selectedGroup.assigned_role_name ? ` · Role: ${selectedGroup.assigned_role_name}` : ''}
+          <strong>${selectedGroup.label}</strong>
+          <span class="pill" style="margin-left:4px;">${selectedGroup.review_state}</span>
+          <span class="pill" style="margin-left:2px;">${selectedGroup.expansion_state}</span><br>
+          <span class="small">Seeds: ${selectedGroup.active_seeds}/${selectedGroup.seed_count}</span>
+          ${selectedGroup.assigned_actor_name ? `<span class="small"> · 👤 ${selectedGroup.assigned_actor_name}</span>` : ''}
+          ${selectedGroup.assigned_role_name ? `<span class="small"> · 🎭 ${selectedGroup.assigned_role_name}</span>` : ''}
         `;
         const seeds = selectedGroup.seeds || [];
         document.getElementById('groupSeedGrid').innerHTML = seeds.map(s => `
           <div class="seed-img-wrap">
-            ${s.image_path ? `<img src="/faces/${s.image_path}" title="q=${(s.seed_quality_score||0).toFixed(2)}" />` : '<div style="background:#1e293b;border-radius:4px;min-height:60px;"></div>'}
+            ${s.image_path
+              ? `<img src="/faces/${s.image_path}" title="q=${(s.seed_quality_score||0).toFixed(2)}" onerror="this.style.display='none'" />`
+              : '<div style="background:#1e293b;border-radius:4px;min-height:60px;"></div>'}
             <button class="remove-btn" onclick="removeSeed(${s.id})" title="Remove seed">×</button>
           </div>
-        `).join('') || '<div class="small">No seeds</div>';
+        `).join('') || '<div class="small">Keine Seeds</div>';
+        // Refresh persona hint in case role is already set
+        onGroupRoleChange();
       } catch (e) {
-        alert('Error loading group: ' + e.message);
+        alert('Fehler beim Laden der Gruppe: ' + e.message);
       }
     }
 
@@ -789,12 +881,12 @@
             notes: document.getElementById('groupNotes').value.trim() || null
           })
         });
-        await loadActors();
-        await loadRoles();
+        // Refresh master data and persona cache so new entities are immediately available
+        await Promise.all([loadActors(), loadRoles(), loadPersonasGlobal()]);
         await selectGroup(selectedGroup.id);
         renderGroups();
       } catch (e) {
-        alert('Error saving group: ' + e.message);
+        alert('Fehler beim Speichern der Gruppe: ' + e.message);
       }
     }
 
@@ -1048,7 +1140,8 @@
     }
 
     drawOverlay();
-    Promise.all([loadActors(), loadRoles(), loadVoiceActors()]).then(() => {
+    setMode('groups');
+    Promise.all([loadActors(), loadRoles(), loadVoiceActors(), loadPersonasGlobal()]).then(() => {
       loadLibrary().then(() => {
         _populateProductionSelects();
         _populateEntitySelects();
