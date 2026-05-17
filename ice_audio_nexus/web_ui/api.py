@@ -781,9 +781,15 @@ def api_rescan_video(video_id: int, payload: dict = Body(default={})) -> JSONRes
 
     scan_kwargs: dict = {
         "sample_fps": float(payload.get("fps", os.getenv("FACE_SCAN_FPS", "4.0"))),
+        "start_offset_seconds": float(payload.get("start_offset_seconds", os.getenv("FACE_SCAN_START_OFFSET_SECONDS", "0.0"))),
+        "max_sampled_frames": int(payload.get("max_sampled_frames", os.getenv("FACE_SCAN_MAX_SAMPLED_FRAMES", "0"))),
         "min_clear_seconds": float(payload.get("min_clear_seconds", os.getenv("FACE_MIN_CLEAR_SECONDS", "2.0"))),
         "min_face_area_ratio": float(payload.get("min_face_area_ratio", os.getenv("FACE_MIN_AREA_RATIO", "0.06"))),
         "min_sharpness": float(payload.get("min_sharpness", os.getenv("FACE_MIN_SHARPNESS", "70.0"))),
+        "min_brightness": float(payload.get("min_brightness", os.getenv("FACE_MIN_BRIGHTNESS", "40.0"))),
+        "min_quality_score": float(payload.get("min_quality_score", os.getenv("FACE_MIN_QUALITY_SCORE", "0.55"))),
+        "seed_acceptance_threshold": float(payload.get("seed_acceptance_threshold", os.getenv("FACE_SEED_ACCEPTANCE_THRESHOLD", "0.60"))),
+        "max_aspect_ratio_deviation": float(payload.get("max_aspect_ratio_deviation", os.getenv("FACE_MAX_ASPECT_RATIO_DEVIATION", "0.65"))),
         "min_stability": float(payload.get("min_stability", os.getenv("FACE_MIN_STABILITY", "0.45"))),
         "dnn_confidence": float(
             payload.get(
@@ -798,7 +804,13 @@ def api_rescan_video(video_id: int, payload: dict = Body(default={})) -> JSONRes
         "verifier_max_center_offset": float(payload.get("verifier_max_center_offset", os.getenv("FACE_VERIFIER_MAX_CENTER_OFFSET", "0.45"))),
         "prefer_gpu": _as_bool(payload.get("prefer_gpu"), _as_bool(os.getenv("FACE_GPU_ENABLED"), True)),
         "gpu_device_id": int(payload.get("gpu_device_id", os.getenv("FACE_GPU_DEVICE_ID", "0"))),
+        "detector_device": payload.get("detector_device", os.getenv("FACE_DETECTOR_DEVICE")),
+        "verifier_device": payload.get("verifier_device", os.getenv("FACE_VERIFIER_DEVICE")),
+        "embedding_device": payload.get("embedding_device", os.getenv("FACE_EMBEDDING_DEVICE")),
         "gpu_diagnostics": _as_bool(payload.get("gpu_diagnostics"), _as_bool(os.getenv("FACE_GPU_DIAGNOSTICS"), True)),
+        "duplicate_similarity_threshold": float(payload.get("duplicate_similarity_threshold", os.getenv("FACE_SEED_DUPLICATE_SIMILARITY_THRESHOLD", "0.985"))),
+        "write_debug_stats": _as_bool(payload.get("write_debug_stats"), _as_bool(os.getenv("FACE_SEED_DEBUG_STATS_ENABLED"), False)),
+        "debug_stats_dir": payload.get("debug_stats_dir", os.getenv("FACE_SEED_DEBUG_STATS_DIR")),
     }
 
     t = threading.Thread(
@@ -846,10 +858,14 @@ def api_scan_directory(payload: dict = Body(...)) -> JSONResponse:
         production (str): override production name (default: folder name).
         rescan (bool): re-scan already-completed videos (default: false).
         recursive (bool): search sub-directories (default: false).
-        fps, min_clear_seconds, min_face_area_ratio, min_sharpness,
+        fps, start_offset_seconds, max_sampled_frames,
+        min_clear_seconds, min_face_area_ratio, min_sharpness, min_brightness,
+        min_quality_score, seed_acceptance_threshold, max_aspect_ratio_deviation,
         min_stability, dnn_confidence, min_face_size_px,
         verifier_enabled, verifier_score_threshold, verifier_min_area_ratio,
-        verifier_max_center_offset, prefer_gpu, gpu_device_id, gpu_diagnostics
+        verifier_max_center_offset, duplicate_similarity_threshold,
+        prefer_gpu, gpu_device_id, detector_device, verifier_device, embedding_device,
+        gpu_diagnostics, write_debug_stats, debug_stats_dir
         — scanner tunables.
     """
     directory = (payload.get("directory") or "").strip()
@@ -876,9 +892,15 @@ def api_scan_directory(payload: dict = Body(...)) -> JSONResponse:
 
     scan_kwargs: dict = {
         "sample_fps": float(payload.get("fps", os.getenv("FACE_SCAN_FPS", "4.0"))),
+        "start_offset_seconds": float(payload.get("start_offset_seconds", os.getenv("FACE_SCAN_START_OFFSET_SECONDS", "0.0"))),
+        "max_sampled_frames": int(payload.get("max_sampled_frames", os.getenv("FACE_SCAN_MAX_SAMPLED_FRAMES", "0"))),
         "min_clear_seconds": float(payload.get("min_clear_seconds", os.getenv("FACE_MIN_CLEAR_SECONDS", "2.0"))),
         "min_face_area_ratio": float(payload.get("min_face_area_ratio", os.getenv("FACE_MIN_AREA_RATIO", "0.06"))),
         "min_sharpness": float(payload.get("min_sharpness", os.getenv("FACE_MIN_SHARPNESS", "70.0"))),
+        "min_brightness": float(payload.get("min_brightness", os.getenv("FACE_MIN_BRIGHTNESS", "40.0"))),
+        "min_quality_score": float(payload.get("min_quality_score", os.getenv("FACE_MIN_QUALITY_SCORE", "0.55"))),
+        "seed_acceptance_threshold": float(payload.get("seed_acceptance_threshold", os.getenv("FACE_SEED_ACCEPTANCE_THRESHOLD", "0.60"))),
+        "max_aspect_ratio_deviation": float(payload.get("max_aspect_ratio_deviation", os.getenv("FACE_MAX_ASPECT_RATIO_DEVIATION", "0.65"))),
         "min_stability": float(payload.get("min_stability", os.getenv("FACE_MIN_STABILITY", "0.45"))),
         "dnn_confidence": float(
             payload.get(
@@ -893,7 +915,13 @@ def api_scan_directory(payload: dict = Body(...)) -> JSONResponse:
         "verifier_max_center_offset": float(payload.get("verifier_max_center_offset", os.getenv("FACE_VERIFIER_MAX_CENTER_OFFSET", "0.45"))),
         "prefer_gpu": _as_bool(payload.get("prefer_gpu"), _as_bool(os.getenv("FACE_GPU_ENABLED"), True)),
         "gpu_device_id": int(payload.get("gpu_device_id", os.getenv("FACE_GPU_DEVICE_ID", "0"))),
+        "detector_device": payload.get("detector_device", os.getenv("FACE_DETECTOR_DEVICE")),
+        "verifier_device": payload.get("verifier_device", os.getenv("FACE_VERIFIER_DEVICE")),
+        "embedding_device": payload.get("embedding_device", os.getenv("FACE_EMBEDDING_DEVICE")),
         "gpu_diagnostics": _as_bool(payload.get("gpu_diagnostics"), _as_bool(os.getenv("FACE_GPU_DIAGNOSTICS"), True)),
+        "duplicate_similarity_threshold": float(payload.get("duplicate_similarity_threshold", os.getenv("FACE_SEED_DUPLICATE_SIMILARITY_THRESHOLD", "0.985"))),
+        "write_debug_stats": _as_bool(payload.get("write_debug_stats"), _as_bool(os.getenv("FACE_SEED_DEBUG_STATS_ENABLED"), False)),
+        "debug_stats_dir": payload.get("debug_stats_dir", os.getenv("FACE_SEED_DEBUG_STATS_DIR")),
     }
 
     t = threading.Thread(
