@@ -217,7 +217,7 @@
           </div>
           <div class="row" style="margin-top:8px;gap:4px;flex-wrap:wrap;">
             <button class="btn-ok" onclick="saveGroupReview()">Save group</button>
-            <button class="btn-main" onclick="doTriggerExpansion()">▶ Expand</button>
+            <button id="btnRunExpansion" class="btn-main" onclick="doTriggerExpansion()">▶▶ Run Expansion</button>
             <button class="btn-bad" onclick="doBlockExpansion()">⛔ Block</button>
           </div>
         </div>
@@ -604,20 +604,13 @@
     // ──────────────── Groups ────────────────
 
     async function loadGroups() {
-      const prodId = currentVideo ? null : null;
-      let url = '/api/visual_groups';
-      if (currentVideo) url += `?production_id=${currentVideo.id}`;
       try {
-        visualGroups = await jsonFetch(url.replace('production_id=', 'production_id='));
-        // Actually load by production, not video id – fetch productions first if needed
-        const prods = libraryData;
-        let pid = null;
+        let url = '/api/visual_groups';
         if (currentVideo) {
-          const vid = prods.flatMap(p => p.videos).find(v => v.id === currentVideo.id);
-          pid = vid ? prods.find(p => p.videos.some(v => v.id === currentVideo.id))?.id : null;
+          const prod = libraryData.find(p => p.videos.some(v => v.id === currentVideo.id));
+          if (prod) url += `?production_id=${prod.id}`;
         }
-        const fetchUrl = pid ? `/api/visual_groups?production_id=${pid}` : '/api/visual_groups';
-        visualGroups = await jsonFetch(fetchUrl);
+        visualGroups = await jsonFetch(url);
         renderGroups();
       } catch (e) {
         document.getElementById('groups').innerHTML = `<div class="small" style="color:var(--bad);">${e.message}</div>`;
@@ -686,16 +679,25 @@
 
     async function doTriggerExpansion() {
       if (!selectedGroup) return;
+      if (selectedGroup.review_state !== 'confirmed') {
+        alert('Gruppe muss erst auf "confirmed" gesetzt werden.');
+        return;
+      }
+      const btn = document.getElementById('btnRunExpansion');
+      if (btn) btn.disabled = true;
       try {
-        const r = await jsonFetch(`/api/visual_groups/${selectedGroup.id}/expand`, { method: 'POST' });
+        const r = await jsonFetch(`/api/visual_groups/${selectedGroup.id}/run_expansion`, { method: 'POST' });
         if (r.ok) {
+          alert(`Expansion abgeschlossen: ${r.tracks_matched} neue Tracks, ${r.seeds_added} Seeds hinzugefügt.`);
           await selectGroup(selectedGroup.id);
           renderGroups();
         } else {
-          alert(r.reason || 'Cannot expand');
+          alert(r.reason || 'Expansion nicht möglich');
         }
       } catch (e) {
-        alert('Error: ' + e.message);
+        alert('Fehler: ' + e.message);
+      } finally {
+        if (btn) btn.disabled = false;
       }
     }
 

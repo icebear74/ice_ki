@@ -842,9 +842,9 @@ def create_role(conn: mariadb.Connection, name: str, description: str = "") -> i
 def _cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
     if not vec_a or not vec_b:
         return -1.0
-    n = min(len(vec_a), len(vec_b))
-    if n == 0:
-        return -1.0
+    if len(vec_a) != len(vec_b):
+        return -1.0  # incompatible embedding dimensions (e.g. old 128-dim vs new 512-dim FaceNet)
+    n = len(vec_a)
     dot = sum(float(vec_a[i]) * float(vec_b[i]) for i in range(n))
     norm_a = math.sqrt(sum(float(vec_a[i]) ** 2 for i in range(n)))
     norm_b = math.sqrt(sum(float(vec_b[i]) ** 2 for i in range(n)))
@@ -1157,7 +1157,7 @@ def update_visual_group(
 
 # ──────────────────────────── WP1 – visual_seeds ────────────────────────────
 
-def _create_visual_seed(
+def create_visual_seed(
     conn: mariadb.Connection,
     *,
     group_id: int | None,
@@ -1255,7 +1255,7 @@ def cluster_tracks_into_groups(
     conn: mariadb.Connection,
     production_id: int,
     *,
-    similarity_threshold: float = 0.92,
+    similarity_threshold: float = 0.80,
 ) -> dict[str, Any]:
     """WP2: Conservative seed-first clustering.
 
@@ -1362,39 +1362,50 @@ def cluster_tracks_into_groups(
                 (_to_json(meta), td["id"]),
             )
 
-            # Extract top-3 detection seeds for this track
+            # For each track in cluster: reuse existing seeds or create new ones
             cur.execute(
-                """
-                SELECT id, crop_image_path, embedding_json,
-                       COALESCE(confidence, 0) AS conf,
-                       COALESCE(sharpness, 0) AS sharp,
-                       CAST(bbox_w AS FLOAT) / 1000.0 AS area_ratio_proxy
-                FROM face_detections
-                WHERE track_id = ? AND crop_image_path IS NOT NULL
-                ORDER BY (COALESCE(sharpness, 0) + COALESCE(confidence, 0) * 100) DESC
-                LIMIT 3
-                """,
+                "SELECT id FROM visual_seeds WHERE track_id=? AND is_removed=FALSE",
                 (td["id"],),
             )
-            for det_row in cur.fetchall():
-                det_id = int(det_row[0])
-                crop_path = det_row[1]
-                emb = _from_json(det_row[2], [])
-                conf = _sanitize_float(float(det_row[3]))
-                sharp = _sanitize_float(float(det_row[4]))
-                q = ((conf or 0.0) * 0.5 + min((sharp or 0.0) / 300.0, 1.0) * 0.5)
-                _create_visual_seed(
-                    conn,
-                    group_id=group_id,
-                    track_id=td["id"],
-                    detection_id=det_id,
-                    image_path=crop_path,
-                    embedding=emb,
-                    sharpness=sharp,
-                    confidence=conf,
-                    seed_quality_score=q,
+            existing_seed_ids = [int(r[0]) for r in cur.fetchall()]
+            if existing_seed_ids:
+                # Reuse seeds already created by scanner – just assign the group
+                for seed_id in existing_seed_ids:
+                    cur.execute("UPDATE visual_seeds SET group_id=? WHERE id=?", (group_id, seed_id))
+                seeds_added += len(existing_seed_ids)
+            else:
+                # No pre-existing seeds: create from top-3 detections
+                cur.execute(
+                    """
+                    SELECT id, crop_image_path, embedding_json,
+                           COALESCE(confidence, 0) AS conf,
+                           COALESCE(sharpness, 0) AS sharp
+                    FROM face_detections
+                    WHERE track_id = ? AND crop_image_path IS NOT NULL
+                    ORDER BY (COALESCE(sharpness, 0) + COALESCE(confidence, 0) * 100) DESC
+                    LIMIT 3
+                    """,
+                    (td["id"],),
                 )
-                seeds_added += 1
+                for det_row in cur.fetchall():
+                    det_id = int(det_row[0])
+                    crop_path = det_row[1]
+                    emb = _from_json(det_row[2], [])
+                    conf = _sanitize_float(float(det_row[3]))
+                    sharp = _sanitize_float(float(det_row[4]))
+                    q = ((conf or 0.0) * 0.5 + min((sharp or 0.0) / 300.0, 1.0) * 0.5)
+                    create_visual_seed(
+                        conn,
+                        group_id=group_id,
+                        track_id=td["id"],
+                        detection_id=det_id,
+                        image_path=crop_path,
+                        embedding=emb,
+                        sharpness=sharp,
+                        confidence=conf,
+                        seed_quality_score=q,
+                    )
+                    seeds_added += 1
 
     conn.commit()
     return {
@@ -1562,6 +1573,186 @@ def block_group_expansion(
     )
     conn.commit()
     return {"group_id": group_id, "ok": True, "expansion_state": "blocked"}
+
+
+# ──────────────────────────── Step 1C – Expansion engine ─────────────────────
+
+def run_expansion_for_group(
+    conn: mariadb.Connection,
+    group_id: int,
+    *,
+    match_threshold: float = 0.70,
+    top_seeds: int = 10,
+) -> dict[str, Any]:
+    """Step 1C: Find unassigned clear tracks in the same production that match
+    a confirmed group's seed centroid and assign them to the group.
+
+    Only works for groups with review_state='confirmed'.
+    Groups marked 'irrelevant' or 'ignored' stay blocked.
+    Returns a result dict with ok/tracks_matched/seeds_added.
+    """
+    import numpy as _np
+
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, production_id, label, review_state, expansion_state FROM visual_groups WHERE id=?",
+        (group_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        raise ValueError(f"Visual group {group_id} not found")
+
+    review_state = str(row[3])
+    if review_state in ("irrelevant", "ignored"):
+        return {
+            "ok": False,
+            "reason": f"Group is {review_state} – expansion blocked to prevent noise",
+            "tracks_matched": 0,
+            "seeds_added": 0,
+        }
+    if review_state != "confirmed":
+        return {
+            "ok": False,
+            "reason": f"Group must be confirmed before expansion (current: {review_state})",
+            "tracks_matched": 0,
+            "seeds_added": 0,
+        }
+
+    production_id = row[1]
+    group_label = str(row[2])
+
+    # Mark as running
+    cur.execute("UPDATE visual_groups SET expansion_state='running' WHERE id=?", (group_id,))
+    conn.commit()
+
+    # Get seed embeddings for this group (best quality first, up to top_seeds)
+    cur.execute(
+        """
+        SELECT embedding_json FROM visual_seeds
+        WHERE group_id = ? AND is_removed = FALSE AND embedding_json IS NOT NULL
+        ORDER BY seed_quality_score DESC
+        LIMIT ?
+        """,
+        (group_id, top_seeds),
+    )
+    seed_embs = [_from_json(r[0], []) for r in cur.fetchall()]
+    seed_embs = [e for e in seed_embs if isinstance(e, list) and len(e) > 0]
+
+    if not seed_embs:
+        cur.execute("UPDATE visual_groups SET expansion_state='blocked' WHERE id=?", (group_id,))
+        conn.commit()
+        return {"ok": False, "reason": "No valid seed embeddings found", "tracks_matched": 0, "seeds_added": 0}
+
+    # Compute L2-normalised centroid of all seed embeddings
+    arr = _np.array(seed_embs, dtype=_np.float64)
+    centroid = arr.mean(axis=0)
+    cnorm = float(_np.linalg.norm(centroid))
+    if cnorm > 1e-9:
+        centroid = centroid / cnorm
+    centroid_list: list[float] = centroid.tolist()
+
+    # All clear, unignored tracks in the same production
+    cur.execute(
+        """
+        SELECT t.id, t.embedding_json, t.representative_image_path, t.quality_score, t.metadata_json
+        FROM face_tracks t
+        JOIN videos v ON v.id = t.video_id
+        WHERE v.production_id = ?
+          AND t.is_clear = TRUE
+          AND t.status NOT IN ('ignored', 'background')
+        """,
+        (production_id,),
+    )
+    all_tracks = cur.fetchall()
+
+    # Keep only tracks that have NO group_label yet (not already clustered/expanded)
+    candidate_tracks = []
+    for track_row in all_tracks:
+        meta = _from_json(track_row[4], {})
+        if isinstance(meta, dict):
+            wf = meta.get("seed_workflow", {})
+            if isinstance(wf, dict) and wf.get("group_label"):
+                continue  # already in a group
+        candidate_tracks.append(track_row)
+
+    tracks_matched = 0
+    seeds_added = 0
+
+    for track_row in candidate_tracks:
+        track_id = int(track_row[0])
+        track_emb = _from_json(track_row[1], [])
+        if not isinstance(track_emb, list) or not track_emb:
+            continue
+
+        sim = _cosine_similarity(centroid_list, track_emb)
+        if sim < match_threshold:
+            continue
+
+        # Match – assign this track to the group by updating its seed_workflow
+        meta = _from_json(track_row[4], {})
+        if not isinstance(meta, dict):
+            meta = {}
+        wf = meta.get("seed_workflow", {})
+        if not isinstance(wf, dict):
+            wf = {}
+        wf["group_label"] = group_label
+        wf.setdefault("stage", "review")
+        wf.setdefault("review_state", "pending")
+        wf.setdefault("expansion_state", "blocked")
+        meta["seed_workflow"] = wf
+        cur.execute(
+            "UPDATE face_tracks SET metadata_json=? WHERE id=?",
+            (_to_json(meta), track_id),
+        )
+
+        # Create seeds from best 2 detections of matched track
+        cur.execute(
+            """
+            SELECT id, crop_image_path, embedding_json,
+                   COALESCE(confidence, 0) AS conf,
+                   COALESCE(sharpness, 0) AS sharp
+            FROM face_detections
+            WHERE track_id = ? AND crop_image_path IS NOT NULL
+            ORDER BY (COALESCE(sharpness, 0) + COALESCE(confidence, 0) * 100) DESC
+            LIMIT 2
+            """,
+            (track_id,),
+        )
+        for det_row in cur.fetchall():
+            det_id = int(det_row[0])
+            crop_path = det_row[1]
+            emb = _from_json(det_row[2], [])
+            conf = _sanitize_float(float(det_row[3]))
+            sharp = _sanitize_float(float(det_row[4]))
+            q = ((conf or 0.0) * 0.5 + min((sharp or 0.0) / 300.0, 1.0) * 0.5)
+            create_visual_seed(
+                conn,
+                group_id=group_id,
+                track_id=track_id,
+                detection_id=det_id,
+                image_path=crop_path,
+                embedding=emb,
+                sharpness=sharp,
+                confidence=conf,
+                seed_quality_score=q,
+            )
+            seeds_added += 1
+
+        tracks_matched += 1
+
+    conn.commit()
+    cur.execute("UPDATE visual_groups SET expansion_state='done' WHERE id=?", (group_id,))
+    conn.commit()
+
+    return {
+        "ok": True,
+        "group_id": group_id,
+        "group_label": group_label,
+        "tracks_matched": tracks_matched,
+        "seeds_added": seeds_added,
+        "candidates_evaluated": len(candidate_tracks),
+        "expansion_state": "done",
+    }
 
 
 def list_face_samples(conn: mariadb.Connection, actor_id: int | None = None) -> list[dict[str, Any]]:

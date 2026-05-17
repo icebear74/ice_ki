@@ -68,29 +68,31 @@ Diese PR implementiert die Audio-/Fusionsebene noch nicht, aber Step 1 muss bere
 ### Scanner / Orchestrierung
 
 - [x] Bestehender Scanner erkennt Gesichter, bildet lokale Tracks und speichert Detections/Tracks
-- [x] Bestehende Logik ist aktuell **track-first**
-- [x] „clear track“ entscheidet aktuell stark über Candidate-vs-Background
-- [ ] Es gibt noch **keine eigenständigen Seed-Objekte**, die unabhängig von Tracks leben
-- [ ] Es gibt noch **keine konservative Auto-Gruppierung** zu `visual_person_###`
-- [ ] Expansion/Tracking nach bestätigten Seeds existiert noch nicht als eigener Workflow
+- [x] Bestehende Logik ist aktuell **track-first** (Tracking als Quality-Assessment-Mechanismus, kein Selbstzweck)
+- [x] „clear track“ entscheidet weiterhin über Candidate-vs-Background
+- [x] **FaceNet InceptionResnetV1 (vggface2)** ersetzt 16×8-Pixel-Hash → 512-dim L2-normierte Embeddings
+- [x] Scanner erstellt nach dem Scan automatisch **ungroupierte visual_seeds** für alle clear tracks (top-3 Detections je Track)
+- [x] face_tracks bleiben Support-Container; visual_seeds sind das primäre Step-1A-Ergebnis
+- [x] **Expansion/Tracking nach bestätigten Seeds** als eigener Step-1C-Workflow implementiert
 
 ### Datenmodell
 
 - [x] `actors`, `roles`, `actor_roles`, `face_tracks`, `face_detections`, `face_samples` existieren bereits
 - [x] Reale Person und Rolle sind bereits grundsätzlich getrennt modellierbar
 - [x] `metadata_json` auf Tracks erlaubt kleine vorbereitende Workflow-Felder ohne Großumbau
-- [ ] Es fehlt noch ein echtes Seed-/Visual-Group-Datenmodell
-- [ ] Es fehlt noch ein Persona-Katalog mit zusätzlichem Sprecher-/Relevanz-Kontext
+- [x] **Echtes Seed-/Visual-Group-Datenmodell** → `visual_seeds` + `visual_groups`
+- [x] **Persona-Katalog** → `persona_catalog`
 - [ ] Es fehlt noch ein explizites Modell für spätere Face-/Voice-Fusion
 
 ### WebUI / Review
 
 - [x] Tracks lassen sich bereits ansehen, zuordnen, ignorieren und ausdünnen
 - [x] Bestehende UI kann schon Actors und optionale Rollen anlegen
-- [x] Diese PR ergänzt erste Seed-first-Workflow-Hooks (siehe „In dieser PR umgesetzt“)
-- [ ] Es gibt noch keine echte Gruppenansicht für anonyme visuelle Personen
-- [ ] Es gibt noch keine Persona-Katalog-Verwaltung mit Sprecher/Relevanz
-- [ ] Expansion nach bestätigten Seeds ist noch nicht in der UI verdrahtet
+- [x] **JS-Crash behoben** (duplicate `const` entfernt → Library-/Personas-Tab wieder funktional)
+- [x] **loadGroups()** verwendet jetzt korrekt die production_id statt der video_id
+- [x] Gruppenansicht für anonyme visuelle Personen (Groups-Tab)
+- [x] Persona-Katalog-Verwaltung mit Sprecher/Relevanz
+- [x] **„▶▶ Run Expansion“** – ruft Step-1C-Engine direkt auf (statt nur Status zu setzen)
 
 ---
 

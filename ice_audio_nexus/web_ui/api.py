@@ -34,6 +34,7 @@ from db.database import (  # noqa: E402
     create_actor,
     create_role,
     create_visual_group,
+    create_visual_seed,
     delete_persona_catalog_entry,
     ensure_schema,
     get_connection,
@@ -53,6 +54,7 @@ from db.database import (  # noqa: E402
     list_visual_seeds,
     rematch_tracks,
     remove_visual_seed,
+    run_expansion_for_group,
     set_video_scan_status,
     trigger_group_expansion,
     unlink_detection_from_track,
@@ -526,6 +528,26 @@ def api_block_expansion(group_id: int) -> JSONResponse:
     conn = get_connection()
     try:
         result = block_group_expansion(conn, group_id)
+        return JSONResponse(result)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    finally:
+        conn.close()
+
+
+@app.post("/api/visual_groups/{group_id}/run_expansion")
+def api_run_expansion(group_id: int, payload: dict = Body(default={})) -> JSONResponse:
+    """Step 1C: Run the expansion engine for a confirmed group.
+
+    Finds all unassigned clear tracks in the same production that match the
+    group's seed centroid (cosine similarity >= match_threshold) and assigns
+    them to the group.  Only works for confirmed groups; irrelevant/ignored
+    groups are rejected.
+    """
+    threshold = float(payload.get("match_threshold", os.getenv("FACE_EXPAND_THRESHOLD", "0.70")))
+    conn = get_connection()
+    try:
+        result = run_expansion_for_group(conn, group_id, match_threshold=threshold)
         return JSONResponse(result)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
