@@ -267,10 +267,6 @@
     let visualGroups = [];
     let selectedGroup = null;
 
-    const player = document.getElementById('player');
-    const canvas = document.getElementById('overlay');
-    const ctx = canvas.getContext('2d');
-
     function switchTab(name) {
       ['tracks', 'groups'].forEach(t => {
         document.getElementById(`pane-${t}`).classList.toggle('active', t === name);
