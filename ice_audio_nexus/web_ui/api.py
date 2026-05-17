@@ -505,15 +505,31 @@ def api_create_visual_group(payload: dict = Body(...)) -> JSONResponse:
 def api_update_visual_group(group_id: int, payload: dict = Body(...)) -> JSONResponse:
     conn = get_connection()
     try:
+        update_kwargs: dict = {
+            "label": payload.get("label"),
+            "review_state": payload.get("review_state"),
+            "expansion_state": payload.get("expansion_state"),
+            "notes": payload.get("notes"),
+        }
+
+        new_actor_name = (payload.get("new_actor_name") or "").strip()
+        if "assigned_actor_id" in payload or new_actor_name:
+            actor_id = payload.get("assigned_actor_id")
+            if actor_id is None and new_actor_name:
+                actor_id = create_actor(conn, new_actor_name, payload.get("new_actor_description", ""))
+            update_kwargs["assigned_actor_id"] = int(actor_id) if actor_id else None
+
+        new_role_name = (payload.get("new_role_name") or "").strip()
+        if "assigned_role_id" in payload or new_role_name:
+            role_id = payload.get("assigned_role_id")
+            if role_id is None and new_role_name:
+                role_id = create_role(conn, new_role_name, "")
+            update_kwargs["assigned_role_id"] = int(role_id) if role_id else None
+
         result = update_visual_group(
             conn,
             group_id,
-            label=payload.get("label"),
-            review_state=payload.get("review_state"),
-            expansion_state=payload.get("expansion_state"),
-            assigned_actor_id=int(payload["assigned_actor_id"]) if payload.get("assigned_actor_id") else None,
-            assigned_role_id=int(payload["assigned_role_id"]) if payload.get("assigned_role_id") else None,
-            notes=payload.get("notes"),
+            **update_kwargs,
         )
         return JSONResponse({"ok": True, **result})
     except ValueError as exc:

@@ -132,13 +132,13 @@
         <span id="trackCount" class="meta" style="margin-left:auto;font-size:11px;"></span>
       </div>
       <div class="tabs">
-        <button class="tab-btn active" id="tab-tracks-btn" onclick="switchTab('tracks')">Tracks</button>
-        <button class="tab-btn" id="tab-groups-btn" onclick="switchTab('groups')">Groups</button>
+        <button class="tab-btn" id="tab-tracks-btn" onclick="switchTab('tracks')">Tracks (Support)</button>
+        <button class="tab-btn active" id="tab-groups-btn" onclick="switchTab('groups')">Groups (Primary)</button>
       </div>
-      <div id="pane-tracks" class="tab-pane active scroll">
+      <div id="pane-tracks" class="tab-pane scroll">
         <div id="tracks"></div>
       </div>
-      <div id="pane-groups" class="tab-pane scroll">
+      <div id="pane-groups" class="tab-pane active scroll">
         <div id="groupsToolbar" style="padding:6px 0 8px;display:flex;gap:6px;flex-wrap:wrap;">
           <button class="btn-main" onclick="loadGroups()">Reload</button>
           <button class="btn-ok" onclick="triggerCluster()">Cluster tracks…</button>
@@ -154,7 +154,7 @@
         <button class="tab-btn" id="tab-personas-btn" onclick="switchRightTab('personas')">Personas</button>
       </div>
       <div id="pane-review" class="tab-pane active scroll">
-        <div id="trackDetails" class="small">Select a track to review and assign.</div>
+        <div id="trackDetails" class="small">Tracks sind Support/Expansion. Primäre Zuordnung erfolgt über Groups.</div>
         <hr style="border-color:#334155; margin:14px 0;" />
         <div class="small" style="margin-bottom:6px;">Seed-first workflow prep</div>
         <div class="grid">
@@ -184,7 +184,7 @@
           <button class="btn-main" onclick="saveWorkflow()">Save seed workflow</button>
         </div>
         <hr style="border-color:#334155; margin:14px 0;" />
-        <div class="small" style="margin-bottom:6px;">Manual assignment (internal: real person, optional role for UI/context)</div>
+        <div class="small" style="margin-bottom:6px;">Track support assignment (optional / spätere Bereinigung)</div>
         <div class="grid">
           <input id="newActorName" placeholder="New actor name" />
           <select id="roleSelect">
@@ -202,7 +202,7 @@
           <button class="btn-bad" onclick="setTrackStatus('ignored')">Ignore</button>
         </div>
         <hr style="border-color:#334155; margin:14px 0;" />
-        <div class="small" style="margin-bottom:6px;">Selected Group review</div>
+        <div class="small" style="margin-bottom:6px;">Primary Step-1 Group assignment (track-unabhängig)</div>
         <div id="groupReviewPanel" style="display:none;">
           <div id="groupReviewInfo" class="small"></div>
           <div class="seed-grid" id="groupSeedGrid"></div>
@@ -214,7 +214,22 @@
               <option value="irrelevant">Irrelevant</option>
               <option value="ignored">Ignored</option>
             </select>
+            <select id="groupExpansionState">
+              <option value="blocked">Expansion blocked</option>
+              <option value="ready">Expansion ready</option>
+              <option value="running">Expansion running</option>
+              <option value="done">Expansion done</option>
+            </select>
+            <select id="groupActorSelect">
+              <option value="">Assign actor (optional)</option>
+            </select>
+            <input id="groupNewActorName" placeholder="…or create new actor" />
+            <select id="groupRoleSelect">
+              <option value="">Assign role (optional)</option>
+            </select>
+            <input id="groupNewRoleName" placeholder="…or create new role" />
           </div>
+          <input id="groupNotes" placeholder="Group review notes" style="width:100%; margin-top:8px;" />
           <div class="row" style="margin-top:8px;gap:4px;flex-wrap:wrap;">
             <button class="btn-ok" onclick="saveGroupReview()">Save group</button>
             <button id="btnRunExpansion" class="btn-main" onclick="doTriggerExpansion()">▶▶ Run Expansion</button>
@@ -364,15 +379,27 @@
     async function loadActors() {
       actors = await jsonFetch('/api/actors');
       const sel = document.getElementById('actorSelect');
+      const groupSel = document.getElementById('groupActorSelect');
       sel.innerHTML = `<option value="">Select actor</option>` +
         actors.map(a => `<option value="${a.id}">${a.name}</option>`).join('');
+      groupSel.innerHTML = `<option value="">Assign actor (optional)</option>` +
+        actors.map(a => `<option value="${a.id}">${a.name}</option>`).join('');
+      if (selectedGroup) {
+        groupSel.value = selectedGroup.assigned_actor_id || '';
+      }
     }
 
     async function loadRoles() {
       roles = await jsonFetch('/api/roles');
       const sel = document.getElementById('roleSelect');
+      const groupSel = document.getElementById('groupRoleSelect');
       sel.innerHTML = `<option value="">Optional role / persona</option>` +
         roles.map(r => `<option value="${r.id}">${r.name}</option>`).join('');
+      groupSel.innerHTML = `<option value="">Assign role (optional)</option>` +
+        roles.map(r => `<option value="${r.id}">${r.name}</option>`).join('');
+      if (selectedGroup) {
+        groupSel.value = selectedGroup.assigned_role_id || '';
+      }
     }
 
     async function loadVoiceActors() {
@@ -718,10 +745,17 @@
         switchRightTab('review');
         document.getElementById('groupReviewPanel').style.display = 'block';
         document.getElementById('groupReviewState').value = selectedGroup.review_state || 'pending';
+        document.getElementById('groupExpansionState').value = selectedGroup.expansion_state || 'blocked';
+        document.getElementById('groupActorSelect').value = selectedGroup.assigned_actor_id || '';
+        document.getElementById('groupRoleSelect').value = selectedGroup.assigned_role_id || '';
+        document.getElementById('groupNewActorName').value = '';
+        document.getElementById('groupNewRoleName').value = '';
+        document.getElementById('groupNotes').value = selectedGroup.notes || '';
         document.getElementById('groupReviewInfo').innerHTML = `
           <strong>${selectedGroup.label}</strong> · ${selectedGroup.review_state} · ${selectedGroup.expansion_state}<br>
           Seeds: ${selectedGroup.active_seeds}/${selectedGroup.seed_count}
           ${selectedGroup.assigned_actor_name ? ` · Actor: ${selectedGroup.assigned_actor_name}` : ''}
+          ${selectedGroup.assigned_role_name ? ` · Role: ${selectedGroup.assigned_role_name}` : ''}
         `;
         const seeds = selectedGroup.seeds || [];
         document.getElementById('groupSeedGrid').innerHTML = seeds.map(s => `
@@ -738,11 +772,25 @@
     async function saveGroupReview() {
       if (!selectedGroup) return;
       try {
+        const actorId = document.getElementById('groupActorSelect').value;
+        const roleId = document.getElementById('groupRoleSelect').value;
+        const newActorName = document.getElementById('groupNewActorName').value.trim();
+        const newRoleName = document.getElementById('groupNewRoleName').value.trim();
         await jsonFetch(`/api/visual_groups/${selectedGroup.id}`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ review_state: document.getElementById('groupReviewState').value })
+          body: JSON.stringify({
+            review_state: document.getElementById('groupReviewState').value,
+            expansion_state: document.getElementById('groupExpansionState').value,
+            assigned_actor_id: actorId ? Number(actorId) : null,
+            assigned_role_id: roleId ? Number(roleId) : null,
+            new_actor_name: newActorName || null,
+            new_role_name: newRoleName || null,
+            notes: document.getElementById('groupNotes').value.trim() || null
+          })
         });
+        await loadActors();
+        await loadRoles();
         await selectGroup(selectedGroup.id);
         renderGroups();
       } catch (e) {
@@ -1006,6 +1054,7 @@
         _populateEntitySelects();
         loadPersonas();
         loadRoleAssignments();
+        loadGroups();
       });
     });
   </script>
