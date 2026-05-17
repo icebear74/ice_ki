@@ -28,25 +28,40 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from db.database import (  # noqa: E402
     assign_track,
+    block_group_expansion,
     clear_video_scan_data,
+    cluster_tracks_into_groups,
     create_actor,
     create_role,
+    create_visual_group,
+    create_visual_seed,
+    delete_persona_catalog_entry,
     ensure_schema,
     get_connection,
     get_video,
     get_track,
+    get_visual_group,
     list_actors,
     list_face_samples,
     list_library,
     list_overlay_events,
+    list_persona_catalog,
     list_productions,
     list_roles,
     list_video_tracks,
     list_videos,
+    list_visual_groups,
+    list_visual_seeds,
     rematch_tracks,
+    remove_visual_seed,
+    run_expansion_for_group,
     set_video_scan_status,
+    trigger_group_expansion,
     unlink_detection_from_track,
+    update_track_seed_workflow,
     update_track_status,
+    update_visual_group,
+    upsert_persona_catalog,
 )
 
 logger = logging.getLogger(__name__)
@@ -285,6 +300,26 @@ def api_update_track_status(track_id: int, payload: dict = Body(...)) -> JSONRes
         conn.close()
 
 
+@app.post("/api/tracks/{track_id}/workflow")
+def api_update_track_workflow(track_id: int, payload: dict = Body(...)) -> JSONResponse:
+    conn = get_connection()
+    try:
+        result = update_track_seed_workflow(
+            conn,
+            track_id,
+            stage=payload.get("stage"),
+            review_state=payload.get("review_state"),
+            group_label=payload.get("group_label"),
+            expansion_state=payload.get("expansion_state"),
+            notes=payload.get("notes"),
+        )
+        return JSONResponse({"ok": True, **result})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        conn.close()
+
+
 @app.get("/api/videos/{video_id}/overlay")
 def api_overlay(video_id: int) -> JSONResponse:
     conn = get_connection()
@@ -380,6 +415,194 @@ def api_rematch(payload: dict = Body(default={})) -> JSONResponse:
             suggest_threshold=float(payload.get("suggest_threshold", os.getenv("FACE_REMATCH_SUGGEST_THRESHOLD", "0.78"))),
         )
         return JSONResponse(result)
+    finally:
+        conn.close()
+
+
+# ─────────────────────── WP1+WP2+WP3 – visual groups ───────────────────────
+
+@app.get("/api/visual_groups")
+def api_visual_groups(production_id: int | None = None) -> JSONResponse:
+    conn = get_connection()
+    try:
+        return JSONResponse(list_visual_groups(conn, production_id=production_id))
+    finally:
+        conn.close()
+
+
+@app.get("/api/visual_groups/{group_id}")
+def api_visual_group(group_id: int) -> JSONResponse:
+    conn = get_connection()
+    try:
+        g = get_visual_group(conn, group_id)
+        if not g:
+            raise HTTPException(status_code=404, detail="Visual group not found")
+        return JSONResponse(g)
+    finally:
+        conn.close()
+
+
+@app.post("/api/visual_groups")
+def api_create_visual_group(payload: dict = Body(...)) -> JSONResponse:
+    production_id = payload.get("production_id")
+    if not production_id:
+        raise HTTPException(status_code=400, detail="production_id required")
+    conn = get_connection()
+    try:
+        gid = create_visual_group(
+            conn,
+            production_id=int(production_id),
+            label=payload.get("label"),
+            notes=payload.get("notes"),
+        )
+        return JSONResponse({"ok": True, "group_id": gid})
+    finally:
+        conn.close()
+
+
+@app.put("/api/visual_groups/{group_id}")
+def api_update_visual_group(group_id: int, payload: dict = Body(...)) -> JSONResponse:
+    conn = get_connection()
+    try:
+        result = update_visual_group(
+            conn,
+            group_id,
+            label=payload.get("label"),
+            review_state=payload.get("review_state"),
+            expansion_state=payload.get("expansion_state"),
+            assigned_actor_id=int(payload["assigned_actor_id"]) if payload.get("assigned_actor_id") else None,
+            assigned_role_id=int(payload["assigned_role_id"]) if payload.get("assigned_role_id") else None,
+            notes=payload.get("notes"),
+        )
+        return JSONResponse({"ok": True, **result})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        conn.close()
+
+
+@app.delete("/api/visual_seeds/{seed_id}")
+def api_remove_visual_seed(seed_id: int) -> JSONResponse:
+    conn = get_connection()
+    try:
+        ok = remove_visual_seed(conn, seed_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="Seed not found")
+        return JSONResponse({"ok": True, "seed_id": seed_id})
+    finally:
+        conn.close()
+
+
+# ─────────────────────────── WP2 – clustering ───────────────────────────────
+
+@app.post("/api/productions/{production_id}/cluster")
+def api_cluster(production_id: int, payload: dict = Body(default={})) -> JSONResponse:
+    """WP2: Conservative clustering – groups tracks into visual_person_NNN groups."""
+    threshold = float(payload.get("similarity_threshold", 0.92))
+    conn = get_connection()
+    try:
+        result = cluster_tracks_into_groups(conn, production_id, similarity_threshold=threshold)
+        return JSONResponse({"ok": True, **result})
+    finally:
+        conn.close()
+
+
+# ─────────────────────── WP5 – expansion control ────────────────────────────
+
+@app.post("/api/visual_groups/{group_id}/expand")
+def api_trigger_expansion(group_id: int) -> JSONResponse:
+    """WP5: Mark a confirmed group as ready for expansion. Blocks irrelevant groups."""
+    conn = get_connection()
+    try:
+        result = trigger_group_expansion(conn, group_id)
+        return JSONResponse(result)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    finally:
+        conn.close()
+
+
+@app.post("/api/visual_groups/{group_id}/block_expansion")
+def api_block_expansion(group_id: int) -> JSONResponse:
+    """WP5: Explicitly block expansion for a group."""
+    conn = get_connection()
+    try:
+        result = block_group_expansion(conn, group_id)
+        return JSONResponse(result)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    finally:
+        conn.close()
+
+
+@app.post("/api/visual_groups/{group_id}/run_expansion")
+def api_run_expansion(group_id: int, payload: dict = Body(default={})) -> JSONResponse:
+    """Step 1C: Run the expansion engine for a confirmed group.
+
+    Finds all unassigned clear tracks in the same production that match the
+    group's seed centroid (cosine similarity >= match_threshold) and assigns
+    them to the group.  Only works for confirmed groups; irrelevant/ignored
+    groups are rejected.
+    """
+    threshold = float(payload.get("match_threshold", os.getenv("FACE_EXPAND_THRESHOLD", "0.70")))
+    conn = get_connection()
+    try:
+        result = run_expansion_for_group(conn, group_id, match_threshold=threshold)
+        return JSONResponse(result)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    finally:
+        conn.close()
+
+
+# ─────────────────────────── WP4 – persona catalog ──────────────────────────
+
+@app.get("/api/persona_catalog")
+def api_persona_catalog(production_id: int | None = None) -> JSONResponse:
+    conn = get_connection()
+    try:
+        return JSONResponse(list_persona_catalog(conn, production_id=production_id))
+    finally:
+        conn.close()
+
+
+@app.post("/api/persona_catalog")
+def api_upsert_persona(payload: dict = Body(...)) -> JSONResponse:
+    conn = get_connection()
+    try:
+        role_id = payload.get("role_id")
+        role_name = (payload.get("role_name") or "").strip()
+        if not role_id and role_name:
+            role_id = create_role(conn, role_name, "")
+        actor_id = payload.get("actor_id")
+        actor_name = (payload.get("actor_name") or "").strip()
+        if not actor_id and actor_name:
+            actor_id = create_actor(conn, actor_name, "")
+        entry_id = upsert_persona_catalog(
+            conn,
+            production_id=int(payload["production_id"]) if payload.get("production_id") else None,
+            role_id=int(role_id) if role_id is not None else None,
+            actor_id=int(actor_id) if actor_id is not None else None,
+            voice_actor_name=payload.get("voice_actor_name"),
+            language=str(payload.get("language") or "de"),
+            relevance=int(payload.get("relevance", 1)),
+            notes=payload.get("notes"),
+        )
+        return JSONResponse({"ok": True, "id": entry_id})
+    except (KeyError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    finally:
+        conn.close()
+
+
+@app.delete("/api/persona_catalog/{entry_id}")
+def api_delete_persona(entry_id: int) -> JSONResponse:
+    conn = get_connection()
+    try:
+        ok = delete_persona_catalog_entry(conn, entry_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="Entry not found")
+        return JSONResponse({"ok": True, "id": entry_id})
     finally:
         conn.close()
 

@@ -146,3 +146,62 @@ CREATE TABLE IF NOT EXISTS overlay_events (
     FOREIGN KEY (video_id) REFERENCES videos(id) ON DELETE CASCADE,
     FOREIGN KEY (track_id) REFERENCES face_tracks(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS visual_groups (
+    id                        INT AUTO_INCREMENT PRIMARY KEY,
+    production_id             INT NULL,
+    label                     VARCHAR(64) NOT NULL,
+    review_state              ENUM('pending','confirmed','needs_split','ignored','irrelevant') NOT NULL DEFAULT 'pending',
+    expansion_state           ENUM('blocked','ready','running','done') NOT NULL DEFAULT 'blocked',
+    representative_image_path TEXT NULL,
+    assigned_actor_id         INT NULL,
+    assigned_role_id          INT NULL,
+    notes                     TEXT NULL,
+    created_at                TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at                TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (production_id) REFERENCES productions(id) ON DELETE SET NULL,
+    FOREIGN KEY (assigned_actor_id) REFERENCES actors(id) ON DELETE SET NULL,
+    FOREIGN KEY (assigned_role_id) REFERENCES roles(id) ON DELETE SET NULL,
+    UNIQUE KEY uq_vg_prod_label (production_id, label),
+    INDEX idx_vg_prod (production_id),
+    INDEX idx_vg_review (review_state)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS visual_seeds (
+    id                   INT AUTO_INCREMENT PRIMARY KEY,
+    group_id             INT NULL,
+    track_id             INT NULL,
+    detection_id         INT NULL,
+    image_path           TEXT NULL,
+    embedding_json       LONGTEXT NULL,
+    area_ratio           FLOAT NULL,
+    sharpness            FLOAT NULL,
+    confidence           FLOAT NULL,
+    seed_quality_score   FLOAT NULL,
+    is_removed           BOOLEAN NOT NULL DEFAULT FALSE,
+    notes                VARCHAR(255) NULL,
+    created_at           TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (group_id) REFERENCES visual_groups(id) ON DELETE SET NULL,
+    FOREIGN KEY (track_id) REFERENCES face_tracks(id) ON DELETE SET NULL,
+    FOREIGN KEY (detection_id) REFERENCES face_detections(id) ON DELETE SET NULL,
+    INDEX idx_seed_group (group_id, is_removed),
+    INDEX idx_seed_track (track_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS persona_catalog (
+    id                   INT AUTO_INCREMENT PRIMARY KEY,
+    production_id        INT NULL,
+    role_id              INT NULL,
+    actor_id             INT NULL,
+    voice_actor_name     VARCHAR(255) NULL,
+    language             VARCHAR(32) NOT NULL DEFAULT 'de',
+    relevance            TINYINT NOT NULL DEFAULT 1,
+    notes                TEXT NULL,
+    created_at           TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at           TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (production_id) REFERENCES productions(id) ON DELETE CASCADE,
+    FOREIGN KEY (role_id) REFERENCES roles(id) ON DELETE SET NULL,
+    FOREIGN KEY (actor_id) REFERENCES actors(id) ON DELETE SET NULL,
+    UNIQUE KEY uq_persona (production_id, role_id, language),
+    INDEX idx_persona_prod (production_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

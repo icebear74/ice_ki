@@ -14,6 +14,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+SEED_WORKFLOW_STAGES = {"seed_discovery", "review", "finished", "expansion"}
+SEED_REVIEW_STATES = {"pending", "confirmed", "needs_split", "ignored", "irrelevant"}
+SEED_EXPANSION_STATES = {"blocked", "ready", "running", "done"}
+
 
 DDL_STATEMENTS: list[str] = [
     """
@@ -174,6 +178,68 @@ DDL_STATEMENTS: list[str] = [
         INDEX idx_overlay_video_time (video_id, timestamp_ms)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
+    """
+    CREATE TABLE IF NOT EXISTS visual_groups (
+        id                        INT AUTO_INCREMENT PRIMARY KEY,
+        production_id             INT NULL,
+        label                     VARCHAR(64) NOT NULL,
+        review_state              ENUM('pending','confirmed','needs_split','ignored','irrelevant') NOT NULL DEFAULT 'pending',
+        expansion_state           ENUM('blocked','ready','running','done') NOT NULL DEFAULT 'blocked',
+        representative_image_path TEXT NULL,
+        assigned_actor_id         INT NULL,
+        assigned_role_id          INT NULL,
+        notes                     TEXT NULL,
+        created_at                TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at                TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        FOREIGN KEY (production_id) REFERENCES productions(id) ON DELETE SET NULL,
+        FOREIGN KEY (assigned_actor_id) REFERENCES actors(id) ON DELETE SET NULL,
+        FOREIGN KEY (assigned_role_id) REFERENCES roles(id) ON DELETE SET NULL,
+        UNIQUE KEY uq_vg_prod_label (production_id, label),
+        INDEX idx_vg_prod (production_id),
+        INDEX idx_vg_review (review_state)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS visual_seeds (
+        id                   INT AUTO_INCREMENT PRIMARY KEY,
+        group_id             INT NULL,
+        track_id             INT NULL,
+        detection_id         INT NULL,
+        image_path           TEXT NULL,
+        embedding_json       LONGTEXT NULL,
+        area_ratio           FLOAT NULL,
+        sharpness            FLOAT NULL,
+        confidence           FLOAT NULL,
+        seed_quality_score   FLOAT NULL,
+        is_removed           BOOLEAN NOT NULL DEFAULT FALSE,
+        notes                VARCHAR(255) NULL,
+        created_at           TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (group_id) REFERENCES visual_groups(id) ON DELETE SET NULL,
+        FOREIGN KEY (track_id) REFERENCES face_tracks(id) ON DELETE SET NULL,
+        FOREIGN KEY (detection_id) REFERENCES face_detections(id) ON DELETE SET NULL,
+        INDEX idx_seed_group (group_id, is_removed),
+        INDEX idx_seed_track (track_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS persona_catalog (
+        id                   INT AUTO_INCREMENT PRIMARY KEY,
+        production_id        INT NULL,
+        role_id              INT NULL,
+        actor_id             INT NULL,
+        voice_actor_name     VARCHAR(255) NULL,
+        language             VARCHAR(32) NOT NULL DEFAULT 'de',
+        relevance            TINYINT NOT NULL DEFAULT 1,
+        notes                TEXT NULL,
+        created_at           TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at           TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        FOREIGN KEY (production_id) REFERENCES productions(id) ON DELETE CASCADE,
+        FOREIGN KEY (role_id) REFERENCES roles(id) ON DELETE SET NULL,
+        FOREIGN KEY (actor_id) REFERENCES actors(id) ON DELETE SET NULL,
+        UNIQUE KEY uq_persona (production_id, role_id, language),
+        INDEX idx_persona_prod (production_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
 ]
 
 
@@ -215,6 +281,45 @@ def _sanitize_float(value: float | None) -> float | None:
     except TypeError:
         return None
     return float(value)
+
+
+def _clean_optional_text(value: object, *, limit: int | None = None) -> str | None:
+    if value is None:
+        return None
+    cleaned = str(value).strip()
+    if not cleaned:
+        return None
+    if limit is not None:
+        cleaned = cleaned[:limit]
+    return cleaned
+
+
+def _normalize_seed_workflow(metadata: dict[str, Any] | None, *, is_clear: bool) -> dict[str, Any]:
+    raw_workflow = metadata.get("seed_workflow", {}) if isinstance(metadata, dict) else {}
+    if not isinstance(raw_workflow, dict):
+        raw_workflow = {}
+
+    stage_default = "review" if is_clear else "seed_discovery"
+    stage = str(raw_workflow.get("stage") or stage_default).strip()
+    if stage not in SEED_WORKFLOW_STAGES:
+        stage = stage_default
+
+    review_state = str(raw_workflow.get("review_state") or "pending").strip()
+    if review_state not in SEED_REVIEW_STATES:
+        review_state = "pending"
+
+    expansion_state = str(raw_workflow.get("expansion_state") or "blocked").strip()
+    if expansion_state not in SEED_EXPANSION_STATES:
+        expansion_state = "blocked"
+
+    return {
+        "mode": "seed_first",
+        "stage": stage,
+        "review_state": review_state,
+        "group_label": _clean_optional_text(raw_workflow.get("group_label"), limit=64),
+        "expansion_state": expansion_state,
+        "notes": _clean_optional_text(raw_workflow.get("notes"), limit=500),
+    }
 
 
 def ensure_schema() -> None:
@@ -593,6 +698,11 @@ def list_video_tracks(
     rows = cur.fetchall()
     out: list[dict[str, Any]] = []
     for row in rows:
+        metadata = _from_json(row[22], {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        seed_workflow = _normalize_seed_workflow(metadata, is_clear=bool(row[11]))
+        metadata["seed_workflow"] = seed_workflow
         out.append(
             {
                 "id": int(row[0]),
@@ -617,7 +727,8 @@ def list_video_tracks(
                 "match_score": row[19],
                 "representative_image_path": row[20],
                 "embedding": _from_json(row[21], []),
-                "metadata": _from_json(row[22], {}),
+                "metadata": metadata,
+                "seed_workflow": seed_workflow,
             }
         )
     return out
@@ -731,9 +842,9 @@ def create_role(conn: mariadb.Connection, name: str, description: str = "") -> i
 def _cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
     if not vec_a or not vec_b:
         return -1.0
-    n = min(len(vec_a), len(vec_b))
-    if n == 0:
-        return -1.0
+    if len(vec_a) != len(vec_b):
+        return -1.0  # incompatible embedding dimensions (e.g. old 128-dim vs new 512-dim FaceNet)
+    n = len(vec_a)
     dot = sum(float(vec_a[i]) * float(vec_b[i]) for i in range(n))
     norm_a = math.sqrt(sum(float(vec_a[i]) ** 2 for i in range(n)))
     norm_b = math.sqrt(sum(float(vec_b[i]) ** 2 for i in range(n)))
@@ -819,6 +930,829 @@ def update_track_status(conn: mariadb.Connection, track_id: int, status: str) ->
     cur.execute("UPDATE face_tracks SET status=? WHERE id=?", (status, track_id))
     conn.commit()
     rebuild_overlay_for_video(conn, video_id)
+
+
+def update_track_seed_workflow(
+    conn: mariadb.Connection,
+    track_id: int,
+    *,
+    stage: str | None = None,
+    review_state: str | None = None,
+    group_label: str | None = None,
+    expansion_state: str | None = None,
+    notes: str | None = None,
+) -> dict[str, Any]:
+    cur = conn.cursor()
+    cur.execute("SELECT video_id, is_clear, metadata_json FROM face_tracks WHERE id=?", (track_id,))
+    row = cur.fetchone()
+    if not row:
+        raise ValueError(f"Track {track_id} not found")
+
+    video_id = int(row[0])
+    metadata = _from_json(row[2], {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    workflow = _normalize_seed_workflow(metadata, is_clear=bool(row[1]))
+
+    if stage is not None:
+        if stage not in SEED_WORKFLOW_STAGES:
+            raise ValueError(f"Unsupported workflow stage: {stage}")
+        workflow["stage"] = stage
+    if review_state is not None:
+        if review_state not in SEED_REVIEW_STATES:
+            raise ValueError(f"Unsupported review state: {review_state}")
+        workflow["review_state"] = review_state
+    if expansion_state is not None:
+        if expansion_state not in SEED_EXPANSION_STATES:
+            raise ValueError(f"Unsupported expansion state: {expansion_state}")
+        workflow["expansion_state"] = expansion_state
+    if group_label is not None:
+        workflow["group_label"] = _clean_optional_text(group_label, limit=64)
+    if notes is not None:
+        workflow["notes"] = _clean_optional_text(notes, limit=500)
+
+    metadata["seed_workflow"] = workflow
+    cur.execute("UPDATE face_tracks SET metadata_json=? WHERE id=?", (_to_json(metadata), track_id))
+    conn.commit()
+    return {"track_id": track_id, "video_id": video_id, "seed_workflow": workflow}
+
+
+# ──────────────────────────── WP1 – visual_groups ────────────────────────────
+
+def _get_next_group_label(conn: mariadb.Connection, production_id: int) -> str:
+    """Return the next available visual_person_NNN label for a production."""
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT COUNT(*) FROM visual_groups WHERE production_id=?",
+        (production_id,),
+    )
+    count = int(cur.fetchone()[0])
+    return f"visual_person_{count + 1:03d}"
+
+
+def create_visual_group(
+    conn: mariadb.Connection,
+    *,
+    production_id: int,
+    label: str | None = None,
+    review_state: str = "pending",
+    expansion_state: str = "blocked",
+    representative_image_path: str | None = None,
+    assigned_actor_id: int | None = None,
+    assigned_role_id: int | None = None,
+    notes: str | None = None,
+) -> int:
+    if not label:
+        label = _get_next_group_label(conn, production_id)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO visual_groups
+            (production_id, label, review_state, expansion_state,
+             representative_image_path, assigned_actor_id, assigned_role_id, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            production_id,
+            label.strip(),
+            review_state,
+            expansion_state,
+            representative_image_path,
+            assigned_actor_id,
+            assigned_role_id,
+            _clean_optional_text(notes, limit=500),
+        ),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def list_visual_groups(
+    conn: mariadb.Connection,
+    production_id: int | None = None,
+    *,
+    include_seeds: bool = False,
+) -> list[dict[str, Any]]:
+    cur = conn.cursor()
+    params: list[Any] = []
+    where = "1=1"
+    if production_id is not None:
+        where = "g.production_id = ?"
+        params.append(production_id)
+    cur.execute(
+        f"""
+        SELECT g.id, g.production_id, p.title,
+               g.label, g.review_state, g.expansion_state,
+               g.representative_image_path,
+               g.assigned_actor_id, aa.name,
+               g.assigned_role_id, r.name,
+               g.notes, g.created_at, g.updated_at,
+               COUNT(DISTINCT s.id) AS seed_count,
+               COUNT(DISTINCT CASE WHEN s.is_removed=FALSE THEN s.id END) AS active_seeds
+        FROM visual_groups g
+        LEFT JOIN productions p ON p.id = g.production_id
+        LEFT JOIN actors aa ON aa.id = g.assigned_actor_id
+        LEFT JOIN roles r ON r.id = g.assigned_role_id
+        LEFT JOIN visual_seeds s ON s.group_id = g.id
+        WHERE {where}
+        GROUP BY g.id, g.production_id, p.title, g.label, g.review_state,
+                 g.expansion_state, g.representative_image_path,
+                 g.assigned_actor_id, aa.name, g.assigned_role_id, r.name,
+                 g.notes, g.created_at, g.updated_at
+        ORDER BY g.production_id ASC, g.label ASC
+        """,
+        tuple(params),
+    )
+    rows = cur.fetchall()
+    out = []
+    for row in rows:
+        entry: dict[str, Any] = {
+            "id": int(row[0]),
+            "production_id": row[1],
+            "production_title": row[2],
+            "label": row[3],
+            "review_state": row[4],
+            "expansion_state": row[5],
+            "representative_image_path": row[6],
+            "assigned_actor_id": row[7],
+            "assigned_actor_name": row[8],
+            "assigned_role_id": row[9],
+            "assigned_role_name": row[10],
+            "notes": row[11],
+            "created_at": str(row[12]),
+            "updated_at": str(row[13]),
+            "seed_count": int(row[14] or 0),
+            "active_seeds": int(row[15] or 0),
+        }
+        if include_seeds:
+            entry["seeds"] = list_visual_seeds(conn, group_id=entry["id"])
+        out.append(entry)
+    return out
+
+
+def get_visual_group(conn: mariadb.Connection, group_id: int) -> dict[str, Any] | None:
+    groups = list_visual_groups(conn, include_seeds=True)
+    for g in groups:
+        if g["id"] == group_id:
+            return g
+    return None
+
+
+def update_visual_group(
+    conn: mariadb.Connection,
+    group_id: int,
+    *,
+    label: str | None = None,
+    review_state: str | None = None,
+    expansion_state: str | None = None,
+    assigned_actor_id: int | None = None,
+    assigned_role_id: int | None = None,
+    representative_image_path: str | None = None,
+    notes: str | None = None,
+) -> dict[str, Any]:
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM visual_groups WHERE id=?", (group_id,))
+    if not cur.fetchone():
+        raise ValueError(f"Visual group {group_id} not found")
+
+    updates: list[str] = []
+    params: list[Any] = []
+
+    if label is not None:
+        updates.append("label=?")
+        params.append(label.strip()[:64])
+    if review_state is not None:
+        if review_state not in SEED_REVIEW_STATES:
+            raise ValueError(f"Invalid review_state: {review_state}")
+        updates.append("review_state=?")
+        params.append(review_state)
+    if expansion_state is not None:
+        if expansion_state not in SEED_EXPANSION_STATES:
+            raise ValueError(f"Invalid expansion_state: {expansion_state}")
+        updates.append("expansion_state=?")
+        params.append(expansion_state)
+    if assigned_actor_id is not None:
+        updates.append("assigned_actor_id=?")
+        params.append(assigned_actor_id)
+    if assigned_role_id is not None:
+        updates.append("assigned_role_id=?")
+        params.append(assigned_role_id)
+    if representative_image_path is not None:
+        updates.append("representative_image_path=?")
+        params.append(representative_image_path)
+    if notes is not None:
+        updates.append("notes=?")
+        params.append(_clean_optional_text(notes, limit=500))
+
+    if updates:
+        params.append(group_id)
+        cur.execute(f"UPDATE visual_groups SET {', '.join(updates)} WHERE id=?", tuple(params))
+        conn.commit()
+
+    result = get_visual_group(conn, group_id)
+    if not result:
+        raise ValueError(f"Visual group {group_id} not found after update")
+    return result
+
+
+# ──────────────────────────── WP1 – visual_seeds ────────────────────────────
+
+def create_visual_seed(
+    conn: mariadb.Connection,
+    *,
+    group_id: int | None,
+    track_id: int | None,
+    detection_id: int | None,
+    image_path: str | None,
+    embedding: list[float] | None,
+    area_ratio: float | None = None,
+    sharpness: float | None = None,
+    confidence: float | None = None,
+    seed_quality_score: float | None = None,
+    notes: str | None = None,
+) -> int:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO visual_seeds
+            (group_id, track_id, detection_id, image_path, embedding_json,
+             area_ratio, sharpness, confidence, seed_quality_score, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            group_id,
+            track_id,
+            detection_id,
+            image_path,
+            _to_json(embedding),
+            _sanitize_float(area_ratio),
+            _sanitize_float(sharpness),
+            _sanitize_float(confidence),
+            _sanitize_float(seed_quality_score),
+            notes,
+        ),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def list_visual_seeds(
+    conn: mariadb.Connection,
+    *,
+    group_id: int | None = None,
+    include_removed: bool = False,
+) -> list[dict[str, Any]]:
+    cur = conn.cursor()
+    where_clauses = []
+    params: list[Any] = []
+    if group_id is not None:
+        where_clauses.append("s.group_id = ?")
+        params.append(group_id)
+    if not include_removed:
+        where_clauses.append("s.is_removed = FALSE")
+    where = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+    cur.execute(
+        f"""
+        SELECT s.id, s.group_id, s.track_id, s.detection_id, s.image_path,
+               s.area_ratio, s.sharpness, s.confidence, s.seed_quality_score,
+               s.is_removed, s.notes, s.created_at
+        FROM visual_seeds s
+        {where}
+        ORDER BY s.seed_quality_score DESC, s.created_at ASC
+        """,
+        tuple(params),
+    )
+    return [
+        {
+            "id": int(r[0]),
+            "group_id": r[1],
+            "track_id": r[2],
+            "detection_id": r[3],
+            "image_path": r[4],
+            "area_ratio": r[5],
+            "sharpness": r[6],
+            "confidence": r[7],
+            "seed_quality_score": r[8],
+            "is_removed": bool(r[9]),
+            "notes": r[10],
+            "created_at": str(r[11]),
+        }
+        for r in cur.fetchall()
+    ]
+
+
+def remove_visual_seed(conn: mariadb.Connection, seed_id: int) -> bool:
+    """Soft-delete a visual seed (sets is_removed=TRUE). Returns True if found."""
+    cur = conn.cursor()
+    cur.execute("UPDATE visual_seeds SET is_removed=TRUE WHERE id=?", (seed_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+# ──────────────────────────── WP2 – conservative clustering ────────────────
+
+def cluster_tracks_into_groups(
+    conn: mariadb.Connection,
+    production_id: int,
+    *,
+    similarity_threshold: float = 0.80,
+) -> dict[str, Any]:
+    """WP2: Conservative seed-first clustering.
+
+    Only auto-merges tracks with cosine similarity >= similarity_threshold.
+    Lieber Split als Fehlmerge.  Generates visual_person_NNN labels.
+    Already-grouped tracks (have metadata seed_workflow.group_label) are skipped.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT t.id, t.embedding_json, t.representative_image_path, t.quality_score,
+               t.metadata_json
+        FROM face_tracks t
+        JOIN videos v ON v.id = t.video_id
+        WHERE v.production_id = ?
+          AND t.is_clear = TRUE
+          AND t.status NOT IN ('ignored', 'background')
+        """,
+        (production_id,),
+    )
+    raw_tracks = cur.fetchall()
+
+    # Filter out already-grouped tracks
+    track_data: list[dict[str, Any]] = []
+    for row in raw_tracks:
+        meta = _from_json(row[4], {})
+        if isinstance(meta, dict):
+            wf = meta.get("seed_workflow", {})
+            if isinstance(wf, dict) and wf.get("group_label"):
+                continue  # already in a group
+        emb = _from_json(row[1], [])
+        if not isinstance(emb, list) or not emb:
+            continue
+        track_data.append({
+            "id": int(row[0]),
+            "embedding": [float(x) for x in emb],
+            "rep_path": row[2],
+            "quality": float(row[3] or 0.0),
+            "metadata": meta if isinstance(meta, dict) else {},
+        })
+
+    if not track_data:
+        return {
+            "groups_created": 0,
+            "seeds_added": 0,
+            "tracks_processed": 0,
+            "clusters": 0,
+            "skipped": len(raw_tracks),
+        }
+
+    # Greedy centroid-based clustering (conservative: only merge when sim >= threshold)
+    clusters: list[list[int]] = []  # list of track_data indices
+    assigned = [False] * len(track_data)
+
+    for i in range(len(track_data)):
+        if assigned[i]:
+            continue
+        cluster = [i]
+        assigned[i] = True
+        centroid = track_data[i]["embedding"][:]
+        for j in range(i + 1, len(track_data)):
+            if assigned[j]:
+                continue
+            sim = _cosine_similarity(centroid, track_data[j]["embedding"])
+            if sim >= similarity_threshold:
+                cluster.append(j)
+                assigned[j] = True
+                n = len(cluster)
+                centroid = [
+                    (centroid[k] * (n - 1) + track_data[j]["embedding"][k]) / n
+                    for k in range(len(centroid))
+                ]
+        clusters.append(cluster)
+
+    groups_created = 0
+    seeds_added = 0
+
+    for cluster in clusters:
+        best_idx = max(cluster, key=lambda i: track_data[i]["quality"])
+        best_td = track_data[best_idx]
+
+        label = _get_next_group_label(conn, production_id)
+        group_id = create_visual_group(
+            conn,
+            production_id=production_id,
+            label=label,
+            representative_image_path=best_td["rep_path"],
+        )
+        groups_created += 1
+
+        for idx in cluster:
+            td = track_data[idx]
+            meta = td["metadata"]
+            wf = meta.get("seed_workflow", {})
+            if not isinstance(wf, dict):
+                wf = {}
+            wf["group_label"] = label
+            wf.setdefault("stage", "review")
+            wf.setdefault("review_state", "pending")
+            wf.setdefault("expansion_state", "blocked")
+            meta["seed_workflow"] = wf
+            cur.execute(
+                "UPDATE face_tracks SET metadata_json=? WHERE id=?",
+                (_to_json(meta), td["id"]),
+            )
+
+            # For each track in cluster: reuse existing seeds or create new ones
+            cur.execute(
+                "SELECT id FROM visual_seeds WHERE track_id=? AND is_removed=FALSE",
+                (td["id"],),
+            )
+            existing_seed_ids = [int(r[0]) for r in cur.fetchall()]
+            if existing_seed_ids:
+                # Reuse seeds already created by scanner – just assign the group
+                for seed_id in existing_seed_ids:
+                    cur.execute("UPDATE visual_seeds SET group_id=? WHERE id=?", (group_id, seed_id))
+                seeds_added += len(existing_seed_ids)
+            else:
+                # No pre-existing seeds: create from top-3 detections
+                cur.execute(
+                    """
+                    SELECT id, crop_image_path, embedding_json,
+                           COALESCE(confidence, 0) AS conf,
+                           COALESCE(sharpness, 0) AS sharp
+                    FROM face_detections
+                    WHERE track_id = ? AND crop_image_path IS NOT NULL
+                    ORDER BY (COALESCE(sharpness, 0) + COALESCE(confidence, 0) * 100) DESC
+                    LIMIT 3
+                    """,
+                    (td["id"],),
+                )
+                for det_row in cur.fetchall():
+                    det_id = int(det_row[0])
+                    crop_path = det_row[1]
+                    emb = _from_json(det_row[2], [])
+                    conf = _sanitize_float(float(det_row[3]))
+                    sharp = _sanitize_float(float(det_row[4]))
+                    q = ((conf or 0.0) * 0.5 + min((sharp or 0.0) / 300.0, 1.0) * 0.5)
+                    create_visual_seed(
+                        conn,
+                        group_id=group_id,
+                        track_id=td["id"],
+                        detection_id=det_id,
+                        image_path=crop_path,
+                        embedding=emb,
+                        sharpness=sharp,
+                        confidence=conf,
+                        seed_quality_score=q,
+                    )
+                    seeds_added += 1
+
+    conn.commit()
+    return {
+        "groups_created": groups_created,
+        "seeds_added": seeds_added,
+        "tracks_processed": len(track_data),
+        "clusters": len(clusters),
+        "skipped_already_grouped": len(raw_tracks) - len(track_data),
+    }
+
+
+# ────────────────────────── WP4 – persona_catalog ──────────────────────────
+
+def list_persona_catalog(
+    conn: mariadb.Connection,
+    production_id: int | None = None,
+) -> list[dict[str, Any]]:
+    params: list[Any] = []
+    where = "1=1"
+    if production_id is not None:
+        where = "pc.production_id = ?"
+        params.append(production_id)
+    cur = conn.cursor()
+    cur.execute(
+        f"""
+        SELECT pc.id, pc.production_id, p.title,
+               pc.role_id, r.name,
+               pc.actor_id, a.name,
+               pc.voice_actor_name, pc.language, pc.relevance, pc.notes,
+               pc.created_at, pc.updated_at
+        FROM persona_catalog pc
+        LEFT JOIN productions p ON p.id = pc.production_id
+        LEFT JOIN roles r ON r.id = pc.role_id
+        LEFT JOIN actors a ON a.id = pc.actor_id
+        WHERE {where}
+        ORDER BY pc.relevance DESC, r.name ASC
+        """,
+        tuple(params),
+    )
+    return [
+        {
+            "id": int(r[0]),
+            "production_id": r[1],
+            "production_title": r[2],
+            "role_id": r[3],
+            "role_name": r[4],
+            "actor_id": r[5],
+            "actor_name": r[6],
+            "voice_actor_name": r[7],
+            "language": r[8],
+            "relevance": int(r[9]),
+            "notes": r[10],
+            "created_at": str(r[11]),
+            "updated_at": str(r[12]),
+        }
+        for r in cur.fetchall()
+    ]
+
+
+def upsert_persona_catalog(
+    conn: mariadb.Connection,
+    *,
+    production_id: int | None,
+    role_id: int | None,
+    actor_id: int | None = None,
+    voice_actor_name: str | None = None,
+    language: str = "de",
+    relevance: int = 1,
+    notes: str | None = None,
+) -> int:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO persona_catalog
+            (production_id, role_id, actor_id, voice_actor_name, language, relevance, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+            actor_id = COALESCE(VALUES(actor_id), actor_id),
+            voice_actor_name = COALESCE(VALUES(voice_actor_name), voice_actor_name),
+            relevance = VALUES(relevance),
+            notes = COALESCE(VALUES(notes), notes)
+        """,
+        (
+            production_id,
+            role_id,
+            actor_id,
+            _clean_optional_text(voice_actor_name, limit=255),
+            language.strip()[:32] if language else "de",
+            max(0, min(int(relevance), 3)),
+            _clean_optional_text(notes, limit=500),
+        ),
+    )
+    conn.commit()
+    cur.execute(
+        "SELECT id FROM persona_catalog WHERE production_id<=>? AND role_id<=>? AND language=?",
+        (production_id, role_id, language),
+    )
+    row = cur.fetchone()
+    return int(row[0]) if row else int(cur.lastrowid)
+
+
+def delete_persona_catalog_entry(conn: mariadb.Connection, entry_id: int) -> bool:
+    cur = conn.cursor()
+    cur.execute("DELETE FROM persona_catalog WHERE id=?", (entry_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+# ──────────────────────────── WP5 – expansion ──────────────────────────────
+
+def trigger_group_expansion(
+    conn: mariadb.Connection,
+    group_id: int,
+) -> dict[str, Any]:
+    """WP5: Mark a confirmed group as ready for expansion.
+
+    Only works when review_state = 'confirmed'.
+    Groups with review_state in ('irrelevant', 'ignored') stay blocked.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, review_state, expansion_state FROM visual_groups WHERE id=?",
+        (group_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        raise ValueError(f"Visual group {group_id} not found")
+
+    review_state = row[1]
+    if review_state in ("irrelevant", "ignored"):
+        return {
+            "group_id": group_id,
+            "ok": False,
+            "reason": f"Group is {review_state} – expansion blocked to prevent noise",
+            "expansion_state": row[2],
+        }
+    if review_state != "confirmed":
+        return {
+            "group_id": group_id,
+            "ok": False,
+            "reason": f"Group must be confirmed before expansion (current: {review_state})",
+            "expansion_state": row[2],
+        }
+
+    cur.execute(
+        "UPDATE visual_groups SET expansion_state='ready' WHERE id=?",
+        (group_id,),
+    )
+    conn.commit()
+    return {"group_id": group_id, "ok": True, "expansion_state": "ready"}
+
+
+def block_group_expansion(
+    conn: mariadb.Connection,
+    group_id: int,
+) -> dict[str, Any]:
+    """WP5: Explicitly block expansion (e.g. after marking as irrelevant)."""
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM visual_groups WHERE id=?", (group_id,))
+    if not cur.fetchone():
+        raise ValueError(f"Visual group {group_id} not found")
+    cur.execute(
+        "UPDATE visual_groups SET expansion_state='blocked' WHERE id=?",
+        (group_id,),
+    )
+    conn.commit()
+    return {"group_id": group_id, "ok": True, "expansion_state": "blocked"}
+
+
+# ──────────────────────────── Step 1C – Expansion engine ─────────────────────
+
+def run_expansion_for_group(
+    conn: mariadb.Connection,
+    group_id: int,
+    *,
+    match_threshold: float = 0.70,
+    top_seeds: int = 10,
+) -> dict[str, Any]:
+    """Step 1C: Find unassigned clear tracks in the same production that match
+    a confirmed group's seed centroid and assign them to the group.
+
+    Only works for groups with review_state='confirmed'.
+    Groups marked 'irrelevant' or 'ignored' stay blocked.
+    Returns a result dict with ok/tracks_matched/seeds_added.
+    """
+    import numpy as _np
+
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, production_id, label, review_state, expansion_state FROM visual_groups WHERE id=?",
+        (group_id,),
+    )
+    row = cur.fetchone()
+    if not row:
+        raise ValueError(f"Visual group {group_id} not found")
+
+    review_state = str(row[3])
+    if review_state in ("irrelevant", "ignored"):
+        return {
+            "ok": False,
+            "reason": f"Group is {review_state} – expansion blocked to prevent noise",
+            "tracks_matched": 0,
+            "seeds_added": 0,
+        }
+    if review_state != "confirmed":
+        return {
+            "ok": False,
+            "reason": f"Group must be confirmed before expansion (current: {review_state})",
+            "tracks_matched": 0,
+            "seeds_added": 0,
+        }
+
+    production_id = row[1]
+    group_label = str(row[2])
+
+    # Mark as running
+    cur.execute("UPDATE visual_groups SET expansion_state='running' WHERE id=?", (group_id,))
+    conn.commit()
+
+    # Get seed embeddings for this group (best quality first, up to top_seeds)
+    cur.execute(
+        """
+        SELECT embedding_json FROM visual_seeds
+        WHERE group_id = ? AND is_removed = FALSE AND embedding_json IS NOT NULL
+        ORDER BY seed_quality_score DESC
+        LIMIT ?
+        """,
+        (group_id, top_seeds),
+    )
+    seed_embs = [_from_json(r[0], []) for r in cur.fetchall()]
+    seed_embs = [e for e in seed_embs if isinstance(e, list) and len(e) > 0]
+
+    if not seed_embs:
+        cur.execute("UPDATE visual_groups SET expansion_state='blocked' WHERE id=?", (group_id,))
+        conn.commit()
+        return {"ok": False, "reason": "No valid seed embeddings found", "tracks_matched": 0, "seeds_added": 0}
+
+    # Compute L2-normalised centroid of all seed embeddings
+    arr = _np.array(seed_embs, dtype=_np.float64)
+    centroid = arr.mean(axis=0)
+    cnorm = float(_np.linalg.norm(centroid))
+    if cnorm > 1e-9:
+        centroid = centroid / cnorm
+    centroid_list: list[float] = centroid.tolist()
+
+    # All clear, unignored tracks in the same production
+    cur.execute(
+        """
+        SELECT t.id, t.embedding_json, t.representative_image_path, t.quality_score, t.metadata_json
+        FROM face_tracks t
+        JOIN videos v ON v.id = t.video_id
+        WHERE v.production_id = ?
+          AND t.is_clear = TRUE
+          AND t.status NOT IN ('ignored', 'background')
+        """,
+        (production_id,),
+    )
+    all_tracks = cur.fetchall()
+
+    # Keep only tracks that have NO group_label yet (not already clustered/expanded)
+    candidate_tracks = []
+    for track_row in all_tracks:
+        meta = _from_json(track_row[4], {})
+        if isinstance(meta, dict):
+            wf = meta.get("seed_workflow", {})
+            if isinstance(wf, dict) and wf.get("group_label"):
+                continue  # already in a group
+        candidate_tracks.append(track_row)
+
+    tracks_matched = 0
+    seeds_added = 0
+
+    for track_row in candidate_tracks:
+        track_id = int(track_row[0])
+        track_emb = _from_json(track_row[1], [])
+        if not isinstance(track_emb, list) or not track_emb:
+            continue
+
+        sim = _cosine_similarity(centroid_list, track_emb)
+        if sim < match_threshold:
+            continue
+
+        # Match – assign this track to the group by updating its seed_workflow
+        meta = _from_json(track_row[4], {})
+        if not isinstance(meta, dict):
+            meta = {}
+        wf = meta.get("seed_workflow", {})
+        if not isinstance(wf, dict):
+            wf = {}
+        wf["group_label"] = group_label
+        wf.setdefault("stage", "review")
+        wf.setdefault("review_state", "pending")
+        wf.setdefault("expansion_state", "blocked")
+        meta["seed_workflow"] = wf
+        cur.execute(
+            "UPDATE face_tracks SET metadata_json=? WHERE id=?",
+            (_to_json(meta), track_id),
+        )
+
+        # Create seeds from best 2 detections of matched track
+        cur.execute(
+            """
+            SELECT id, crop_image_path, embedding_json,
+                   COALESCE(confidence, 0) AS conf,
+                   COALESCE(sharpness, 0) AS sharp
+            FROM face_detections
+            WHERE track_id = ? AND crop_image_path IS NOT NULL
+            ORDER BY (COALESCE(sharpness, 0) + COALESCE(confidence, 0) * 100) DESC
+            LIMIT 2
+            """,
+            (track_id,),
+        )
+        for det_row in cur.fetchall():
+            det_id = int(det_row[0])
+            crop_path = det_row[1]
+            emb = _from_json(det_row[2], [])
+            conf = _sanitize_float(float(det_row[3]))
+            sharp = _sanitize_float(float(det_row[4]))
+            q = ((conf or 0.0) * 0.5 + min((sharp or 0.0) / 300.0, 1.0) * 0.5)
+            create_visual_seed(
+                conn,
+                group_id=group_id,
+                track_id=track_id,
+                detection_id=det_id,
+                image_path=crop_path,
+                embedding=emb,
+                sharpness=sharp,
+                confidence=conf,
+                seed_quality_score=q,
+            )
+            seeds_added += 1
+
+        tracks_matched += 1
+
+    conn.commit()
+    cur.execute("UPDATE visual_groups SET expansion_state='done' WHERE id=?", (group_id,))
+    conn.commit()
+
+    return {
+        "ok": True,
+        "group_id": group_id,
+        "group_label": group_label,
+        "tracks_matched": tracks_matched,
+        "seeds_added": seeds_added,
+        "candidates_evaluated": len(candidate_tracks),
+        "expansion_state": "done",
+    }
 
 
 def list_face_samples(conn: mariadb.Connection, actor_id: int | None = None) -> list[dict[str, Any]]:

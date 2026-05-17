@@ -54,6 +54,25 @@
     .status-background { color: var(--warn); }
     .status-ignored { color: var(--bad); }
     .small { font-size: 12px; color: var(--muted); }
+    .tabs { display: flex; gap: 0; border-bottom: 1px solid var(--line); }
+    .tab-btn { flex: 1; background: transparent; border: none; border-bottom: 3px solid transparent;
+               border-radius: 0; padding: 9px 4px; font-size: 12px; cursor: pointer; color: var(--muted); }
+    .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+    .tab-pane { display: none; }
+    .tab-pane.active { display: block; }
+    .persona-row { display: flex; gap: 6px; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 12px; }
+    .persona-row:last-child { border-bottom: none; }
+    .relevance-0 { color: var(--muted); }
+    .relevance-1 { color: var(--text); }
+    .relevance-2 { color: var(--warn); }
+    .relevance-3 { color: var(--ok); }
+    .group-item { border: 1px solid var(--line); border-radius: 8px; padding: 8px; margin-bottom: 8px; }
+    .group-item.active { border-color: var(--accent); }
+    .seed-grid { display: grid; grid-template-columns: repeat(4,1fr); gap: 4px; margin-top: 6px; }
+    .seed-img-wrap { position: relative; }
+    .seed-img-wrap img { width:100%; border-radius:4px; border:1px solid var(--line); min-height:60px; object-fit:cover; }
+    .seed-img-wrap .remove-btn { display:none; position:absolute; top:2px; right:2px; background:rgba(239,68,68,.85); color:#fff; border:none; border-radius:50%; width:16px; height:16px; font-size:10px; line-height:16px; text-align:center; cursor:pointer; padding:0; }
+    .seed-img-wrap:hover .remove-btn { display:block; }
   </style>
 </head>
 <body>
@@ -112,18 +131,67 @@
         </select>
         <span id="trackCount" class="meta" style="margin-left:auto;font-size:11px;"></span>
       </div>
-      <div id="tracks" class="scroll"></div>
+      <div class="tabs">
+        <button class="tab-btn active" id="tab-tracks-btn" onclick="switchTab('tracks')">Tracks</button>
+        <button class="tab-btn" id="tab-groups-btn" onclick="switchTab('groups')">Groups</button>
+      </div>
+      <div id="pane-tracks" class="tab-pane active scroll">
+        <div id="tracks"></div>
+      </div>
+      <div id="pane-groups" class="tab-pane scroll">
+        <div id="groupsToolbar" style="padding:6px 0 8px;display:flex;gap:6px;flex-wrap:wrap;">
+          <button class="btn-main" onclick="loadGroups()">Reload</button>
+          <button class="btn-ok" onclick="triggerCluster()">Cluster tracks…</button>
+        </div>
+        <div id="groups"></div>
+      </div>
     </section>
 
     <section class="panel">
-      <h2>Track review</h2>
-      <div class="scroll">
+      <h2>Review / Personas</h2>
+      <div class="tabs">
+        <button class="tab-btn active" id="tab-review-btn" onclick="switchRightTab('review')">Review</button>
+        <button class="tab-btn" id="tab-personas-btn" onclick="switchRightTab('personas')">Personas</button>
+      </div>
+      <div id="pane-review" class="tab-pane active scroll">
         <div id="trackDetails" class="small">Select a track to review and assign.</div>
         <hr style="border-color:#334155; margin:14px 0;" />
+        <div class="small" style="margin-bottom:6px;">Seed-first workflow prep</div>
+        <div class="grid">
+          <input id="groupLabel" placeholder="visual_person_001" />
+          <select id="workflowStage">
+            <option value="seed_discovery">Seed discovery</option>
+            <option value="review">Review</option>
+            <option value="finished">Finished</option>
+            <option value="expansion">Expansion</option>
+          </select>
+          <select id="reviewState">
+            <option value="pending">Pending</option>
+            <option value="confirmed">Confirmed</option>
+            <option value="needs_split">Needs split</option>
+            <option value="irrelevant">Irrelevant</option>
+            <option value="ignored">Ignored</option>
+          </select>
+          <select id="expansionState">
+            <option value="blocked">Expansion blocked</option>
+            <option value="ready">Expansion ready</option>
+            <option value="running">Expansion running</option>
+            <option value="done">Expansion done</option>
+          </select>
+        </div>
+        <input id="workflowNotes" placeholder="Review notes / why this group matters" style="width:100%; margin-top:8px;" />
+        <div class="row" style="margin-top:8px;">
+          <button class="btn-main" onclick="saveWorkflow()">Save seed workflow</button>
+        </div>
+        <hr style="border-color:#334155; margin:14px 0;" />
+        <div class="small" style="margin-bottom:6px;">Manual assignment (internal: real person, optional role for UI/context)</div>
         <div class="grid">
           <input id="newActorName" placeholder="New actor name" />
-          <input id="newRoleName" placeholder="Optional role name" />
+          <select id="roleSelect">
+            <option value="">Optional role / persona</option>
+          </select>
         </div>
+        <input id="newRoleName" placeholder="Optional new role / persona name" style="width:100%; margin-top:8px;" />
         <div class="row" style="margin-top:8px;">
           <select id="actorSelect" style="flex:1"></select>
           <button class="btn-ok" onclick="assignTrack()">Assign</button>
@@ -132,6 +200,57 @@
           <button class="btn-warn" onclick="setTrackStatus('unknown')">Unknown</button>
           <button class="btn-warn" onclick="setTrackStatus('background')">Background</button>
           <button class="btn-bad" onclick="setTrackStatus('ignored')">Ignore</button>
+        </div>
+        <hr style="border-color:#334155; margin:14px 0;" />
+        <div class="small" style="margin-bottom:6px;">Selected Group review</div>
+        <div id="groupReviewPanel" style="display:none;">
+          <div id="groupReviewInfo" class="small"></div>
+          <div class="seed-grid" id="groupSeedGrid"></div>
+          <div class="grid" style="margin-top:8px;">
+            <select id="groupReviewState">
+              <option value="pending">Pending</option>
+              <option value="confirmed">Confirmed</option>
+              <option value="needs_split">Needs split</option>
+              <option value="irrelevant">Irrelevant</option>
+              <option value="ignored">Ignored</option>
+            </select>
+          </div>
+          <div class="row" style="margin-top:8px;gap:4px;flex-wrap:wrap;">
+            <button class="btn-ok" onclick="saveGroupReview()">Save group</button>
+            <button id="btnRunExpansion" class="btn-main" onclick="doTriggerExpansion()">▶▶ Run Expansion</button>
+            <button class="btn-bad" onclick="doBlockExpansion()">⛔ Block</button>
+          </div>
+        </div>
+      </div>
+      <div id="pane-personas" class="tab-pane scroll">
+        <div style="font-size:12px;margin-bottom:8px;color:var(--accent);">Persona Catalog</div>
+        <div style="display:flex;gap:4px;margin-bottom:8px;flex-wrap:wrap;">
+          <select id="personaProdFilter" style="flex:1;font-size:12px;" onchange="loadPersonas()">
+            <option value="">All productions</option>
+          </select>
+          <button class="btn-main" onclick="loadPersonas()">Reload</button>
+        </div>
+        <div id="personaList"></div>
+        <hr style="border-color:#334155; margin:10px 0;" />
+        <div class="small" style="margin-bottom:6px;">Add / Update Persona</div>
+        <div class="grid">
+          <select id="personaProdSelect" style="font-size:12px;">
+            <option value="">Production</option>
+          </select>
+          <input id="personaRoleName" placeholder="Role name" style="font-size:12px;" />
+          <input id="personaActorName" placeholder="Actor name (optional)" style="font-size:12px;" />
+          <input id="personaVoiceActor" placeholder="Voice actor (optional)" style="font-size:12px;" />
+          <input id="personaLang" placeholder="Language (de)" value="de" style="font-size:12px;" />
+          <select id="personaRelevance" style="font-size:12px;">
+            <option value="0">Relevanz 0</option>
+            <option value="1" selected>Relevanz 1</option>
+            <option value="2">Relevanz 2</option>
+            <option value="3">Relevanz 3</option>
+          </select>
+        </div>
+        <input id="personaNotes" placeholder="Notes (optional)" style="width:100%;margin-top:6px;font-size:12px;" />
+        <div class="row" style="margin-top:8px;">
+          <button class="btn-ok" onclick="savePersona()">Save persona</button>
         </div>
       </div>
     </section>
@@ -144,6 +263,25 @@
     let overlayEvents = [];
     let selectedTrack = null;
     let actors = [];
+    let roles = [];
+    let visualGroups = [];
+    let selectedGroup = null;
+
+    function switchTab(name) {
+      ['tracks', 'groups'].forEach(t => {
+        document.getElementById(`pane-${t}`).classList.toggle('active', t === name);
+        document.getElementById(`tab-${t}-btn`).classList.toggle('active', t === name);
+      });
+      if (name === 'groups') loadGroups();
+    }
+
+    function switchRightTab(name) {
+      ['review', 'personas'].forEach(t => {
+        document.getElementById(`pane-${t}`).classList.toggle('active', t === name);
+        document.getElementById(`tab-${t}-btn`).classList.toggle('active', t === name);
+      });
+      if (name === 'personas') loadPersonas();
+    }
 
     const player = document.getElementById('player');
     const canvas = document.getElementById('overlay');
@@ -175,6 +313,13 @@
       const sel = document.getElementById('actorSelect');
       sel.innerHTML = `<option value="">Select actor</option>` +
         actors.map(a => `<option value="${a.id}">${a.name}</option>`).join('');
+    }
+
+    async function loadRoles() {
+      roles = await jsonFetch('/api/roles');
+      const sel = document.getElementById('roleSelect');
+      sel.innerHTML = `<option value="">Optional role / persona</option>` +
+        roles.map(r => `<option value="${r.id}">${r.name}</option>`).join('');
     }
 
     async function loadLibrary() {
@@ -269,8 +414,10 @@
             <strong>#${t.id}</strong>
             <span class="pill ${statusClass(t.status)}">${t.status}</span>
             ${t.is_clear ? '<span class="pill">clear</span>' : '<span class="pill">low</span>'}
+            ${t.seed_workflow?.group_label ? `<span class="pill">${t.seed_workflow.group_label}</span>` : ''}
           </div>
           <div class="small">${msToClock(t.start_ms)} → ${msToClock(t.end_ms)} · q=${(t.quality_score||0).toFixed(2)} · rel=${(t.relevance_score||0).toFixed(2)}</div>
+          <div class="small">seed: ${t.seed_workflow?.review_state || 'pending'} · ${t.seed_workflow?.stage || 'review'}</div>
           <div class="small">${t.assigned_actor_name || t.match_actor_name || 'unassigned'}</div>
         </div>
       `).join('');
@@ -341,6 +488,7 @@
       selectedTrack = await jsonFetch(`/api/tracks/${trackId}`);
       renderTracks();
       const d = selectedTrack;
+      const workflow = d.seed_workflow || {};
       const repSrc = d.representative_image_path ? `/faces/${d.representative_image_path}` : '';
       const thumbsHtml = (d.detections || []).map(x => {
         const conf = x.confidence != null ? `conf ${(x.confidence).toFixed(2)}` : '';
@@ -353,10 +501,18 @@
             ${caption ? `<div class="thumb-caption">${caption}</div>` : ''}
           </div>`;
       }).join('');
+      document.getElementById('groupLabel').value = workflow.group_label || '';
+      document.getElementById('workflowStage').value = workflow.stage || 'review';
+      document.getElementById('reviewState').value = workflow.review_state || 'pending';
+      document.getElementById('expansionState').value = workflow.expansion_state || 'blocked';
+      document.getElementById('workflowNotes').value = workflow.notes || '';
+      document.getElementById('roleSelect').value = d.assigned_role_id || '';
       document.getElementById('trackDetails').innerHTML = `
         <div class="row"><strong>Track #${d.id}</strong><span class="pill ${statusClass(d.status)}">${d.status}</span></div>
         <div class="small">Time: ${msToClock(d.start_ms)} → ${msToClock(d.end_ms)} (${d.frame_count} frames)</div>
         <div class="small">Actor: ${d.assigned_actor_name || '—'} | Match: ${d.match_actor_name || '—'} (${(d.match_score||0).toFixed(2)})</div>
+        <div class="small">Visual group: ${workflow.group_label || '—'} | Review: ${workflow.review_state || 'pending'} | Stage: ${workflow.stage || 'review'} | Expansion: ${workflow.expansion_state || 'blocked'}</div>
+        <div class="small">Role / persona: ${d.assigned_role_name || '—'} (internal actor model stays separate)</div>
         <div class="small" style="margin-top:4px;">q=${(d.quality_score||0).toFixed(2)} · conf=${(d.mean_confidence||0).toFixed(2)} · ${d.detections?.length||0} detections</div>
         ${repSrc ? `<img class="thumb" src="${repSrc}" style="margin-top:8px;" />` : '<div class="small">No representative image</div>'}
         <div class="grid" style="margin-top:8px;">${thumbsHtml || ''}</div>
@@ -367,12 +523,14 @@
       if (!selectedTrack) return;
       const actorId = document.getElementById('actorSelect').value;
       const newActor = document.getElementById('newActorName').value.trim();
+      const roleId = document.getElementById('roleSelect').value;
       const newRole = document.getElementById('newRoleName').value.trim();
       await jsonFetch(`/api/tracks/${selectedTrack.id}/assign`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           actor_id: actorId ? Number(actorId) : null,
+          role_id: roleId ? Number(roleId) : null,
           new_actor_name: newActor || null,
           new_role_name: newRole || null,
           add_sample: true
@@ -380,9 +538,28 @@
       });
       document.getElementById('newActorName').value = '';
       document.getElementById('newRoleName').value = '';
+      document.getElementById('roleSelect').value = '';
       await loadActors();
+      await loadRoles();
       await loadTracks();
       await loadOverlay();
+      await selectTrack(selectedTrack.id);
+    }
+
+    async function saveWorkflow() {
+      if (!selectedTrack) return;
+      await jsonFetch(`/api/tracks/${selectedTrack.id}/workflow`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          group_label: document.getElementById('groupLabel').value.trim() || null,
+          stage: document.getElementById('workflowStage').value,
+          review_state: document.getElementById('reviewState').value,
+          expansion_state: document.getElementById('expansionState').value,
+          notes: document.getElementById('workflowNotes').value.trim() || null
+        })
+      });
+      await loadTracks();
       await selectTrack(selectedTrack.id);
     }
 
@@ -424,8 +601,227 @@
       canvas.height = player.clientHeight;
     });
 
+    // ──────────────── Groups ────────────────
+
+    async function loadGroups() {
+      try {
+        let url = '/api/visual_groups';
+        if (currentVideo) {
+          const prod = libraryData.find(p => p.videos.some(v => v.id === currentVideo.id));
+          if (prod) url += `?production_id=${prod.id}`;
+        }
+        visualGroups = await jsonFetch(url);
+        renderGroups();
+      } catch (e) {
+        document.getElementById('groups').innerHTML = `<div class="small" style="color:var(--bad);">${e.message}</div>`;
+      }
+    }
+
+    function renderGroups() {
+      const root = document.getElementById('groups');
+      if (!visualGroups.length) {
+        root.innerHTML = '<div class="small">No visual groups yet. Run clustering first.</div>';
+        return;
+      }
+      root.innerHTML = visualGroups.map(g => `
+        <div class="group-item ${selectedGroup && selectedGroup.id === g.id ? 'active' : ''}" onclick="selectGroup(${g.id})">
+          <div class="row">
+            <strong>${g.label}</strong>
+            <span class="pill">${g.review_state}</span>
+            <span class="pill">${g.expansion_state}</span>
+          </div>
+          <div class="small">${g.production_title || '—'} · seeds: ${g.active_seeds}/${g.seed_count}</div>
+          ${g.assigned_actor_name ? `<div class="small">Actor: ${g.assigned_actor_name}</div>` : ''}
+          ${g.assigned_role_name ? `<div class="small">Role: ${g.assigned_role_name}</div>` : ''}
+        </div>
+      `).join('');
+    }
+
+    async function selectGroup(groupId) {
+      try {
+        selectedGroup = await jsonFetch(`/api/visual_groups/${groupId}`);
+        renderGroups();
+        // Show group review panel in right panel
+        switchRightTab('review');
+        document.getElementById('groupReviewPanel').style.display = 'block';
+        document.getElementById('groupReviewState').value = selectedGroup.review_state || 'pending';
+        document.getElementById('groupReviewInfo').innerHTML = `
+          <strong>${selectedGroup.label}</strong> · ${selectedGroup.review_state} · ${selectedGroup.expansion_state}<br>
+          Seeds: ${selectedGroup.active_seeds}/${selectedGroup.seed_count}
+          ${selectedGroup.assigned_actor_name ? ` · Actor: ${selectedGroup.assigned_actor_name}` : ''}
+        `;
+        const seeds = selectedGroup.seeds || [];
+        document.getElementById('groupSeedGrid').innerHTML = seeds.map(s => `
+          <div class="seed-img-wrap">
+            ${s.image_path ? `<img src="/faces/${s.image_path}" title="q=${(s.seed_quality_score||0).toFixed(2)}" />` : '<div style="background:#1e293b;border-radius:4px;min-height:60px;"></div>'}
+            <button class="remove-btn" onclick="removeSeed(${s.id})" title="Remove seed">×</button>
+          </div>
+        `).join('') || '<div class="small">No seeds</div>';
+      } catch (e) {
+        alert('Error loading group: ' + e.message);
+      }
+    }
+
+    async function saveGroupReview() {
+      if (!selectedGroup) return;
+      try {
+        await jsonFetch(`/api/visual_groups/${selectedGroup.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ review_state: document.getElementById('groupReviewState').value })
+        });
+        await selectGroup(selectedGroup.id);
+        renderGroups();
+      } catch (e) {
+        alert('Error saving group: ' + e.message);
+      }
+    }
+
+    async function doTriggerExpansion() {
+      if (!selectedGroup) return;
+      if (selectedGroup.review_state !== 'confirmed') {
+        alert('Gruppe muss erst auf "confirmed" gesetzt werden.');
+        return;
+      }
+      const btn = document.getElementById('btnRunExpansion');
+      if (btn) btn.disabled = true;
+      try {
+        const r = await jsonFetch(`/api/visual_groups/${selectedGroup.id}/run_expansion`, { method: 'POST' });
+        if (r.ok) {
+          alert(`Expansion abgeschlossen: ${r.tracks_matched} neue Tracks, ${r.seeds_added} Seeds hinzugefügt.`);
+          await selectGroup(selectedGroup.id);
+          renderGroups();
+        } else {
+          alert(r.reason || 'Expansion nicht möglich');
+        }
+      } catch (e) {
+        alert('Fehler: ' + e.message);
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    }
+
+    async function doBlockExpansion() {
+      if (!selectedGroup) return;
+      try {
+        await jsonFetch(`/api/visual_groups/${selectedGroup.id}/block_expansion`, { method: 'POST' });
+        await selectGroup(selectedGroup.id);
+        renderGroups();
+      } catch (e) {
+        alert('Error: ' + e.message);
+      }
+    }
+
+    async function removeSeed(seedId) {
+      try {
+        await jsonFetch(`/api/visual_seeds/${seedId}`, { method: 'DELETE' });
+        if (selectedGroup) await selectGroup(selectedGroup.id);
+      } catch (e) {
+        alert('Error removing seed: ' + e.message);
+      }
+    }
+
+    async function triggerCluster() {
+      if (!currentVideo) { alert('Select a video first to determine production.'); return; }
+      const prod = libraryData.find(p => p.videos.some(v => v.id === currentVideo.id));
+      if (!prod) { alert('Production not found.'); return; }
+      if (!confirm(`Cluster tracks for production "${prod.title}"?`)) return;
+      try {
+        const r = await jsonFetch(`/api/productions/${prod.id}/cluster`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({})
+        });
+        alert(`Clustering done: ${r.groups_created} groups, ${r.seeds_added} seeds from ${r.tracks_processed} tracks.`);
+        await loadGroups();
+      } catch (e) {
+        alert('Clustering error: ' + e.message);
+      }
+    }
+
+    // ──────────────── Personas ────────────────
+
+    async function loadPersonas() {
+      const pid = document.getElementById('personaProdFilter').value;
+      const url = pid ? `/api/persona_catalog?production_id=${pid}` : '/api/persona_catalog';
+      try {
+        const personas = await jsonFetch(url);
+        renderPersonas(personas);
+      } catch (e) {
+        document.getElementById('personaList').innerHTML = `<div class="small" style="color:var(--bad);">${e.message}</div>`;
+      }
+    }
+
+    function renderPersonas(personas) {
+      const root = document.getElementById('personaList');
+      if (!personas.length) {
+        root.innerHTML = '<div class="small">No personas yet.</div>';
+        return;
+      }
+      root.innerHTML = personas.map(p => `
+        <div class="persona-row relevance-${p.relevance}">
+          <span style="flex:1"><strong>${p.role_name || '—'}</strong> ${p.actor_name ? `· ${p.actor_name}` : ''} ${p.voice_actor_name ? `· 🎙 ${p.voice_actor_name}` : ''}</span>
+          <span class="pill">${p.language}</span>
+          <span class="pill">rel:${p.relevance}</span>
+          <button class="btn-bad" style="font-size:10px;padding:2px 5px;" onclick="deletePersona(${p.id})">×</button>
+        </div>
+      `).join('');
+    }
+
+    async function savePersona() {
+      const prodId = document.getElementById('personaProdSelect').value;
+      const roleName = document.getElementById('personaRoleName').value.trim();
+      if (!roleName) { alert('Role name is required'); return; }
+      try {
+        await jsonFetch('/api/persona_catalog', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            production_id: prodId ? Number(prodId) : null,
+            role_name: roleName,
+            actor_name: document.getElementById('personaActorName').value.trim() || null,
+            voice_actor_name: document.getElementById('personaVoiceActor').value.trim() || null,
+            language: document.getElementById('personaLang').value.trim() || 'de',
+            relevance: Number(document.getElementById('personaRelevance').value),
+            notes: document.getElementById('personaNotes').value.trim() || null
+          })
+        });
+        document.getElementById('personaRoleName').value = '';
+        document.getElementById('personaActorName').value = '';
+        document.getElementById('personaVoiceActor').value = '';
+        document.getElementById('personaNotes').value = '';
+        await loadPersonas();
+      } catch (e) {
+        alert('Error saving persona: ' + e.message);
+      }
+    }
+
+    async function deletePersona(id) {
+      if (!confirm('Delete this persona entry?')) return;
+      try {
+        await jsonFetch(`/api/persona_catalog/${id}`, { method: 'DELETE' });
+        await loadPersonas();
+      } catch (e) {
+        alert('Error: ' + e.message);
+      }
+    }
+
+    function _populateProductionSelects() {
+      const opts = `<option value="">All productions</option>` +
+        libraryData.map(p => `<option value="${p.id}">${p.title}</option>`).join('');
+      document.getElementById('personaProdFilter').innerHTML = opts;
+      document.getElementById('personaProdSelect').innerHTML =
+        `<option value="">Production</option>` +
+        libraryData.map(p => `<option value="${p.id}">${p.title}</option>`).join('');
+    }
+
     drawOverlay();
-    loadActors().then(loadLibrary);
+    Promise.all([loadActors(), loadRoles()]).then(() => {
+      loadLibrary().then(() => {
+        _populateProductionSelects();
+        loadPersonas();
+      });
+    });
   </script>
 </body>
 </html>

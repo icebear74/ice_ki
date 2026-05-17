@@ -30,6 +30,7 @@ from db.database import (  # noqa: E402
     clear_video_scan_data,
     create_face_detection,
     create_face_track,
+    create_visual_seed,
     ensure_schema,
     get_connection,
     rebuild_overlay_for_video,
@@ -473,6 +474,80 @@ def _get_torch_face_verifier_model(
     return _TorchMTCNNVerifier(model), {"enabled": True, "backend": "torch", "target": str(device), "accelerator": backend}
 
 
+def _get_facenet_embedding_model(
+    models_dir: Path,
+    *,
+    device: "torch.device",
+):
+    """Load InceptionResnetV1 (VGGFace2) for 512-dim L2-normalised face embeddings.
+
+    Returns (model, info_dict).  On any failure returns (None, {'enabled': False, ...})
+    so the scanner can fall back to the simple pixel-hash descriptor.
+    """
+    _configure_torch_model_cache(models_dir)
+    try:
+        from facenet_pytorch import InceptionResnetV1
+    except ImportError:
+        logger.warning("InceptionResnetV1 not available – falling back to pixel-hash descriptor")
+        return None, {"enabled": False, "reason": "facenet_pytorch missing InceptionResnetV1"}
+
+    try:
+        model = InceptionResnetV1(pretrained="vggface2").eval().to(device)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Could not load InceptionResnetV1 (will use fallback descriptor): %s", exc
+        )
+        return None, {"enabled": False, "reason": str(exc)}
+
+    backend = "gpu" if str(device).startswith("cuda") else "cpu"
+    logger.info("FaceNet embedding model: InceptionResnetV1 (vggface2) active (%s / %s)", backend, device)
+    return model, {"enabled": True, "backend": "facenet_vggface2", "target": str(device), "accelerator": backend}
+
+
+def _build_face_embedding(
+    crop_bgr: np.ndarray,
+    facenet_model,
+    device: "torch.device",
+) -> np.ndarray:
+    """Return a 512-dim L2-normalised FaceNet embedding for *crop_bgr*.
+
+    Falls back to the simple 128-dim pixel-hash descriptor when *facenet_model*
+    is None (model load failed) so the pipeline never stalls.
+    """
+    import cv2
+
+    if facenet_model is None:
+        return _build_face_descriptor_fallback(crop_bgr)
+
+    try:
+        import torch
+
+        rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
+        face = cv2.resize(rgb, (160, 160), interpolation=cv2.INTER_CUBIC)
+        tensor = torch.from_numpy(face.astype(np.float32)).permute(2, 0, 1)
+        tensor = (tensor - 127.5) / 128.0
+        tensor = tensor.unsqueeze(0).to(device)
+        with torch.no_grad():
+            embedding = facenet_model(tensor)
+        return embedding.squeeze(0).cpu().numpy()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("FaceNet embedding failed (using fallback): %s", exc)
+        return _build_face_descriptor_fallback(crop_bgr)
+
+
+def _build_face_descriptor_fallback(crop_bgr: np.ndarray) -> np.ndarray:
+    """128-dim grayscale pixel-hash – used only when FaceNet is unavailable."""
+    import cv2
+
+    gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
+    small = cv2.resize(gray, (16, 8), interpolation=cv2.INTER_AREA)
+    desc = small.astype(np.float32).reshape(-1) / 255.0
+    norm = np.linalg.norm(desc)
+    if norm > 1e-9:
+        desc = desc / norm
+    return desc
+
+
 def _torch_detect_faces(
     detector: _TorchMTCNNDetector,
     frame: np.ndarray,
@@ -485,18 +560,6 @@ def _torch_detect_faces(
     face that passes the confidence and minimum-size filters.
     """
     return detector.detect(frame, min_confidence=min_confidence, min_size_px=min_size_px)
-
-
-def _build_face_descriptor(crop_bgr: np.ndarray) -> np.ndarray:
-    import cv2
-
-    gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
-    small = cv2.resize(gray, (16, 8), interpolation=cv2.INTER_AREA)
-    desc = small.astype(np.float32).reshape(-1) / 255.0
-    norm = np.linalg.norm(desc)
-    if norm > 1e-9:
-        desc = desc / norm
-    return desc
 
 
 def _verify_face_candidate(
@@ -663,6 +726,16 @@ def scan_video(
         device=torch_device,
     )
 
+    # FaceNet embedding model (InceptionResnetV1) – generates 512-dim embeddings for
+    # proper face re-identification. Falls back to 128-dim pixel-hash on load failure.
+    facenet_model, facenet_runtime = _get_facenet_embedding_model(models_dir, device=torch_device)
+    if gpu_diagnostics:
+        logger.info(
+            "FaceNet embedding: enabled=%s | backend=%s",
+            facenet_runtime.get("enabled"),
+            facenet_runtime.get("backend", "pixel_hash_fallback"),
+        )
+
     active_tracks: list[Track] = []
     finished_tracks: list[Track] = []
     frame_index = -1
@@ -731,7 +804,7 @@ def scan_video(
                     continue
             sharpness = float(cv2.Laplacian(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), cv2.CV_64F).var())
             area_ratio = (fw * fh) / frame_area
-            descriptor = _build_face_descriptor(crop)
+            descriptor = _build_face_embedding(crop, facenet_model, torch_device)
 
             crop_name = f"f{frame_index:08d}_d{i:02d}.jpg"
             crop_path = crops_root / crop_name
@@ -856,6 +929,11 @@ def scan_video(
         if is_clear:
             clear_tracks += 1
 
+        top_seed_candidates = sorted(
+            track.detections,
+            key=lambda d: (d.area_ratio, d.sharpness, d.confidence),
+            reverse=True,
+        )[:3]
         best_det = max(
             track.detections,
             key=lambda d: (d.sharpness * (0.5 + d.area_ratio)),
@@ -893,6 +971,26 @@ def scan_video(
             metadata={
                 "duration_seconds": duration_s,
                 "global_rule": "step1_clear_track_rule",
+                "seed_workflow": {
+                    "mode": "seed_first",
+                    "stage": "review" if is_clear else "seed_discovery",
+                    "review_state": "pending",
+                    "group_label": None,
+                    "expansion_state": "blocked",
+                    "notes": None,
+                },
+                "seed_candidates": [
+                    {
+                        "detection_id": det.db_id,
+                        "timestamp_ms": det.timestamp_ms,
+                        "crop_image_path": det.crop_path,
+                        "area_ratio": round(float(det.area_ratio), 6),
+                        "sharpness": round(float(det.sharpness), 3),
+                        "confidence": round(float(det.confidence), 4),
+                    }
+                    for det in top_seed_candidates
+                ],
+                "tracking_role": "support_container",
                 "thresholds": {
                     "min_clear_seconds": min_clear_seconds,
                     "min_face_area_ratio": min_face_area_ratio,
@@ -918,6 +1016,35 @@ def scan_video(
         for det in track.detections:
             if det.db_id is not None:
                 assign_detection_to_track(conn, det.db_id, track_id)
+
+        # Step 1A: auto-create ungrouped visual_seeds from the top-3 detections of
+        # every clear track so the seed pipeline is populated immediately after scanning
+        # (group assignment happens later via cluster_tracks_into_groups / run_expansion).
+        if is_clear:
+            top_seed_dets = sorted(
+                track.detections,
+                key=lambda d: (d.area_ratio, d.sharpness, d.confidence),
+                reverse=True,
+            )[:3]
+            for det in top_seed_dets:
+                if det.db_id is None:
+                    continue
+                q = float(det.confidence) * 0.5 + min(float(det.sharpness) / 300.0, 1.0) * 0.5
+                try:
+                    create_visual_seed(
+                        conn,
+                        group_id=None,
+                        track_id=track_id,
+                        detection_id=det.db_id,
+                        image_path=det.crop_path,
+                        embedding=det.embedding.astype(float).tolist(),
+                        area_ratio=float(det.area_ratio),
+                        sharpness=float(det.sharpness),
+                        confidence=float(det.confidence),
+                        seed_quality_score=q,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Auto-seed creation failed for track_id=%d det_id=%d: %s", track_id, det.db_id, exc)
 
     rebuild_overlay_for_video(conn, video_id)
     set_video_scan_status(conn, video_id, "completed")
@@ -947,6 +1074,8 @@ def scan_video(
         "detector_backend": detector_runtime.get("backend"),
         "detector_target": detector_runtime.get("target"),
         "verifier_enabled": bool(verifier is not None),
+        "facenet_enabled": bool(facenet_model is not None),
+        "facenet_backend": facenet_runtime.get("backend", "pixel_hash_fallback"),
         "gpu_diagnostics": diag_info,
     }
 

@@ -1,6 +1,7 @@
 # ice_audio_nexus (Step-1 visual person discovery)
 
 `ice_audio_nexus` was rewritten from a voice-first prototype to a **face-first Step-1 pipeline**.
+The current follow-up direction is a **seed-first** review flow: find strong visual seeds first, review them conservatively, and only use tracking as later expansion/support context.
 
 ## Step-1 goal
 
@@ -9,10 +10,11 @@ For each video the scanner now:
 1. samples frames (default `4 FPS`)
 2. detects faces
 3. builds short local tracks
-4. promotes only **clear tracks** (high precision, low noise)
-5. stores detections, tracks, representative crops, embeddings/descriptors and review metadata
+4. persists local track containers for nearby detections
+5. stores detections, tracks, representative crops, embeddings/descriptors and seed-review metadata
 
 This phase is intentionally person-centric and review-driven. Full role/speaker resolution is left for later phases.
+`README_FIRST.md` is the binding project goal: Step 1 must prefer identity purity over raw detection count because these visual anchors later seed audio / speaker attribution.
 
 ## Core model (visual-first)
 
@@ -126,7 +128,8 @@ UI provides:
 
 - browse productions/videos
 - inspect discovered tracks and representative crops
-- assign track to existing actor or create new actor (+ optional role)
+- capture seed-review metadata (anonymous visual group label, review state, expansion readiness)
+- assign track to existing actor or create new actor (+ optional existing/new role)
 - mark track as unknown/background/ignored
 - precomputed video overlay (bbox + label)
 - re-match button for post-assignment re-evaluation
