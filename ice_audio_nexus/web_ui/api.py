@@ -56,6 +56,7 @@ from db.database import (  # noqa: E402
     list_voice_actors,
     list_visual_groups,
     list_visual_seeds,
+    purge_empty_visual_groups,
     rematch_tracks,
     remove_visual_seed,
     run_expansion_for_group,
@@ -548,6 +549,17 @@ def api_remove_visual_seed(seed_id: int) -> JSONResponse:
         if not ok:
             raise HTTPException(status_code=404, detail="Seed not found")
         return JSONResponse({"ok": True, "seed_id": seed_id})
+    finally:
+        conn.close()
+
+
+@app.post("/api/visual_groups/purge_empty")
+def api_purge_empty_visual_groups() -> JSONResponse:
+    """Delete all visual_groups that have no active (non-removed) seeds."""
+    conn = get_connection()
+    try:
+        deleted = purge_empty_visual_groups(conn)
+        return JSONResponse({"ok": True, "deleted": deleted})
     finally:
         conn.close()
 

@@ -443,6 +443,30 @@ def set_video_scan_status(conn: mariadb.Connection, video_id: int, status: str) 
     conn.commit()
 
 
+def purge_empty_visual_groups(conn: mariadb.Connection) -> int:
+    """Delete every visual_group that has no active (non-removed) seeds.
+
+    Returns the number of groups deleted.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id FROM visual_groups
+        WHERE id NOT IN (
+            SELECT DISTINCT group_id FROM visual_seeds
+            WHERE group_id IS NOT NULL AND is_removed = FALSE
+        )
+        """
+    )
+    empty_ids = [int(r[0]) for r in cur.fetchall()]
+    if empty_ids:
+        placeholders = ", ".join(["?"] * len(empty_ids))
+        cur.execute(f"DELETE FROM visual_groups WHERE id IN ({placeholders})", tuple(empty_ids))
+        conn.commit()
+        logger.info("Purged %d empty visual_groups: %s", len(empty_ids), empty_ids)
+    return len(empty_ids)
+
+
 def clear_video_scan_data(conn: mariadb.Connection, video_id: int) -> None:
     cur = conn.cursor()
     cur.execute("SELECT video_path, metadata_json FROM videos WHERE id=?", (video_id,))
@@ -488,9 +512,11 @@ def clear_video_scan_data(conn: mariadb.Connection, video_id: int) -> None:
         )
         if int(cur.fetchone()[0] or 0) > 0:
             continue
-        # Group is now empty – delete it so it doesn't clutter the UI.
         cur.execute("DELETE FROM visual_groups WHERE id=?", (group_id,))
-        logger.info("Deleted empty visual_group id=%s after video rescan", group_id)
+        logger.info("Deleted empty visual_group id=%s (video-linked seed cleanup)", group_id)
+
+    # Additionally purge every other visual_group that has no active seeds.
+    purge_empty_visual_groups(conn)
 
     metadata = _from_json(video_row[1], {})
     if isinstance(metadata, dict):

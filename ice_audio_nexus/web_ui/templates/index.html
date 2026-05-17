@@ -150,6 +150,7 @@
         <div id="groupsToolbar" style="padding:6px 0 8px;display:flex;gap:6px;flex-wrap:wrap;">
           <button class="btn-main" onclick="loadGroups()">Reload</button>
           <button class="btn-ok" onclick="triggerCluster()">Cluster tracks…</button>
+          <button class="btn-bad" onclick="purgeEmptyGroups()" title="Alle leeren Gruppen löschen">🗑 Leere löschen</button>
         </div>
         <div id="groups"></div>
       </div>
@@ -949,6 +950,20 @@
         await loadGroups();
       } catch (e) {
         alert('Clustering error: ' + e.message);
+      }
+    }
+
+    async function purgeEmptyGroups() {
+      if (!confirm('Alle leeren Gruppen (ohne aktive Seeds) unwiderruflich löschen?')) return;
+      try {
+        const r = await jsonFetch('/api/visual_groups/purge_empty', { method: 'POST' });
+        alert(`${r.deleted} leere Gruppe(n) gelöscht.`);
+        selectedGroup = null;
+        document.getElementById('groupHint').style.display = '';
+        document.getElementById('groupReviewPanel').style.display = 'none';
+        await loadGroups();
+      } catch (e) {
+        alert('Fehler: ' + e.message);
       }
     }
 
