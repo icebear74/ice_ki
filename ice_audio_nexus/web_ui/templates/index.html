@@ -232,14 +232,33 @@
         </div>
         <div id="personaList"></div>
         <hr style="border-color:#334155; margin:10px 0;" />
+        <div class="small" style="margin-bottom:6px;">Stammdaten</div>
+        <div class="grid">
+          <input id="masterActorName" placeholder="Neuer Schauspieler" style="font-size:12px;" />
+          <button class="btn-ok" onclick="createMasterActor()">Actor anlegen</button>
+          <input id="masterVoiceActorName" placeholder="Neuer Synchronsprecher" style="font-size:12px;" />
+          <button class="btn-ok" onclick="createMasterVoiceActor()">Voice anlegen</button>
+          <input id="masterRoleName" placeholder="Neue Rolle" style="font-size:12px;" />
+          <button class="btn-ok" onclick="createMasterRole()">Rolle anlegen</button>
+        </div>
+        <hr style="border-color:#334155; margin:10px 0;" />
         <div class="small" style="margin-bottom:6px;">Add / Update Persona</div>
         <div class="grid">
           <select id="personaProdSelect" style="font-size:12px;">
             <option value="">Production</option>
           </select>
-          <input id="personaRoleName" placeholder="Role name" style="font-size:12px;" />
-          <input id="personaActorName" placeholder="Actor name (optional)" style="font-size:12px;" />
-          <input id="personaVoiceActor" placeholder="Voice actor (optional)" style="font-size:12px;" />
+          <select id="personaRoleSelect" style="font-size:12px;">
+            <option value="">Rolle auswählen</option>
+          </select>
+          <select id="personaActorSelect" style="font-size:12px;">
+            <option value="">Schauspieler auswählen</option>
+          </select>
+          <select id="personaVoiceActorSelect" style="font-size:12px;">
+            <option value="">Synchronsprecher auswählen</option>
+          </select>
+          <input id="personaRoleName" placeholder="Neue Rolle (Fallback)" style="font-size:12px;" />
+          <input id="personaActorName" placeholder="Neuer Schauspieler (Fallback)" style="font-size:12px;" />
+          <input id="personaVoiceActor" placeholder="Neuer Synchronsprecher (Fallback)" style="font-size:12px;" />
           <input id="personaLang" placeholder="Language (de)" value="de" style="font-size:12px;" />
           <select id="personaRelevance" style="font-size:12px;">
             <option value="0">Relevanz 0</option>
@@ -252,6 +271,36 @@
         <div class="row" style="margin-top:8px;">
           <button class="btn-ok" onclick="savePersona()">Save persona</button>
         </div>
+        <hr style="border-color:#334155; margin:10px 0;" />
+        <div class="small" style="margin-bottom:6px;">Rollen-/Besetzungszuordnung (mit Startregel)</div>
+        <div class="grid">
+          <select id="assignProdSelect" style="font-size:12px;" onchange="loadRoleAssignments()">
+            <option value="">Production</option>
+          </select>
+          <select id="assignRoleSelect" style="font-size:12px;">
+            <option value="">Rolle auswählen</option>
+          </select>
+          <select id="assignActorSelect" style="font-size:12px;">
+            <option value="">Schauspieler (optional)</option>
+          </select>
+          <select id="assignVoiceActorSelect" style="font-size:12px;">
+            <option value="">Synchronsprecher auswählen</option>
+          </select>
+          <input id="assignLanguage" placeholder="Sprache" value="de" style="font-size:12px;" />
+          <select id="assignRelevance" style="font-size:12px;">
+            <option value="0">Relevanz 0</option>
+            <option value="1" selected>Relevanz 1</option>
+            <option value="2">Relevanz 2</option>
+            <option value="3">Relevanz 3</option>
+          </select>
+          <input id="assignStartSeason" type="number" min="1" value="1" placeholder="Start Staffel" style="font-size:12px;" />
+          <input id="assignStartEpisode" type="number" min="1" value="1" placeholder="Start Folge" style="font-size:12px;" />
+        </div>
+        <input id="assignNotes" placeholder="Notiz (optional)" style="width:100%;margin-top:6px;font-size:12px;" />
+        <div class="row" style="margin-top:8px;">
+          <button class="btn-ok" onclick="saveRoleAssignment()">Zuordnung speichern</button>
+        </div>
+        <div id="roleAssignmentList" style="margin-top:8px;"></div>
       </div>
     </section>
   </div>
@@ -263,6 +312,7 @@
     let overlayEvents = [];
     let selectedTrack = null;
     let actors = [];
+    let voiceActors = [];
     let roles = [];
     let visualGroups = [];
     let selectedGroup = null;
@@ -280,7 +330,10 @@
         document.getElementById(`pane-${t}`).classList.toggle('active', t === name);
         document.getElementById(`tab-${t}-btn`).classList.toggle('active', t === name);
       });
-      if (name === 'personas') loadPersonas();
+      if (name === 'personas') {
+        loadPersonas();
+        loadRoleAssignments();
+      }
     }
 
     const player = document.getElementById('player');
@@ -322,6 +375,10 @@
         roles.map(r => `<option value="${r.id}">${r.name}</option>`).join('');
     }
 
+    async function loadVoiceActors() {
+      voiceActors = await jsonFetch('/api/voice_actors');
+    }
+
     async function loadLibrary() {
       libraryData = await jsonFetch('/api/library');
       const root = document.getElementById('library');
@@ -334,12 +391,14 @@
           <div class="row"><strong>${prod.title}</strong><span class="pill">${prod.production_type}</span>${prod.season_label ? `<span class="pill">${prod.season_label}</span>` : ''}</div>
           <div class="small" style="margin-top:6px;">
             ${prod.videos.map(v => `
-              <div class="item" onclick="selectVideo(${v.id}, event)">
-                <div class="row">
-                  <span>${v.title}</span>
-                  <span class="pill">${v.scan_status}</span>
-                  <button class="btn-warn" style="font-size:10px;padding:2px 6px;margin-left:auto;" onclick="rescanVideo(${v.id}, event)">↻</button>
-                </div>
+                <div class="item" onclick="selectVideo(${v.id}, event)">
+                  <div class="row">
+                    <span>${v.title}</span>
+                    <span class="pill">${v.scan_status}</span>
+                    <span class="pill">${v.expansion_released ? 'expansion:released' : 'expansion:blocked'}</span>
+                    <button class="btn-ok" style="font-size:10px;padding:2px 6px;" onclick="toggleVideoRelease(${v.id}, ${v.expansion_released ? 'false' : 'true'}, event)">${v.expansion_released ? '🚫' : '✓'}</button>
+                    <button class="btn-warn" style="font-size:10px;padding:2px 6px;margin-left:auto;" onclick="rescanVideo(${v.id}, event)">↻</button>
+                  </div>
                 <div class="small">${v.episode_code || '—'} · clear ${v.clear_track_count}/${v.track_count}</div>
               </div>
             `).join('')}
@@ -357,6 +416,20 @@
         await loadLibrary();
       } catch (e) {
         alert('Rescan-Fehler: ' + e.message);
+      }
+    }
+
+    async function toggleVideoRelease(videoId, released, event) {
+      event.stopPropagation();
+      try {
+        await jsonFetch(`/api/videos/${videoId}/expansion_release`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ released })
+        });
+        await loadLibrary();
+      } catch (e) {
+        alert('Freigabe-Fehler: ' + e.message);
       }
     }
 
@@ -770,16 +843,20 @@
 
     async function savePersona() {
       const prodId = document.getElementById('personaProdSelect').value;
+      const roleId = document.getElementById('personaRoleSelect').value;
       const roleName = document.getElementById('personaRoleName').value.trim();
-      if (!roleName) { alert('Role name is required'); return; }
+      if (!roleId && !roleName) { alert('Rolle auswählen oder neu anlegen'); return; }
       try {
         await jsonFetch('/api/persona_catalog', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             production_id: prodId ? Number(prodId) : null,
-            role_name: roleName,
+            role_id: roleId ? Number(roleId) : null,
+            role_name: roleName || null,
+            actor_id: document.getElementById('personaActorSelect').value ? Number(document.getElementById('personaActorSelect').value) : null,
             actor_name: document.getElementById('personaActorName').value.trim() || null,
+            voice_actor_id: document.getElementById('personaVoiceActorSelect').value ? Number(document.getElementById('personaVoiceActorSelect').value) : null,
             voice_actor_name: document.getElementById('personaVoiceActor').value.trim() || null,
             language: document.getElementById('personaLang').value.trim() || 'de',
             relevance: Number(document.getElementById('personaRelevance').value),
@@ -787,8 +864,11 @@
           })
         });
         document.getElementById('personaRoleName').value = '';
+        document.getElementById('personaRoleSelect').value = '';
         document.getElementById('personaActorName').value = '';
+        document.getElementById('personaActorSelect').value = '';
         document.getElementById('personaVoiceActor').value = '';
+        document.getElementById('personaVoiceActorSelect').value = '';
         document.getElementById('personaNotes').value = '';
         await loadPersonas();
       } catch (e) {
@@ -806,6 +886,95 @@
       }
     }
 
+    async function createMasterActor() {
+      const name = document.getElementById('masterActorName').value.trim();
+      if (!name) return;
+      await jsonFetch('/api/actors', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name })
+      });
+      document.getElementById('masterActorName').value = '';
+      await loadActors();
+      _populateEntitySelects();
+    }
+
+    async function createMasterVoiceActor() {
+      const name = document.getElementById('masterVoiceActorName').value.trim();
+      if (!name) return;
+      await jsonFetch('/api/voice_actors', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name })
+      });
+      document.getElementById('masterVoiceActorName').value = '';
+      await loadVoiceActors();
+      _populateEntitySelects();
+    }
+
+    async function createMasterRole() {
+      const name = document.getElementById('masterRoleName').value.trim();
+      if (!name) return;
+      await jsonFetch('/api/roles', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name })
+      });
+      document.getElementById('masterRoleName').value = '';
+      await loadRoles();
+      _populateEntitySelects();
+    }
+
+    async function loadRoleAssignments() {
+      const pid = document.getElementById('assignProdSelect').value;
+      const url = pid ? `/api/role_cast_assignments?production_id=${pid}` : '/api/role_cast_assignments';
+      const rows = await jsonFetch(url);
+      const root = document.getElementById('roleAssignmentList');
+      if (!rows.length) {
+        root.innerHTML = '<div class="small">Keine Zuordnungen.</div>';
+        return;
+      }
+      root.innerHTML = rows.map(r => `
+        <div class="persona-row relevance-${r.relevance}">
+          <span style="flex:1"><strong>${r.role_name}</strong> · ${r.voice_actor_name} · ${r.language} · ab S${r.start_season}E${r.start_episode}${r.actor_name ? ` · Actor: ${r.actor_name}` : ''}</span>
+          <button class="btn-bad" style="font-size:10px;padding:2px 5px;" onclick="deleteRoleAssignment(${r.id})">×</button>
+        </div>
+      `).join('');
+    }
+
+    async function saveRoleAssignment() {
+      const productionId = document.getElementById('assignProdSelect').value;
+      const roleId = document.getElementById('assignRoleSelect').value;
+      const voiceActorId = document.getElementById('assignVoiceActorSelect').value;
+      if (!productionId || !roleId || !voiceActorId) {
+        alert('Production, Rolle und Synchronsprecher sind Pflicht.');
+        return;
+      }
+      await jsonFetch('/api/role_cast_assignments', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          production_id: Number(productionId),
+          role_id: Number(roleId),
+          actor_id: document.getElementById('assignActorSelect').value ? Number(document.getElementById('assignActorSelect').value) : null,
+          voice_actor_id: Number(voiceActorId),
+          language: document.getElementById('assignLanguage').value.trim() || 'de',
+          relevance: Number(document.getElementById('assignRelevance').value || '1'),
+          start_season: Number(document.getElementById('assignStartSeason').value || '1'),
+          start_episode: Number(document.getElementById('assignStartEpisode').value || '1'),
+          notes: document.getElementById('assignNotes').value.trim() || null
+        })
+      });
+      document.getElementById('assignNotes').value = '';
+      await loadRoleAssignments();
+    }
+
+    async function deleteRoleAssignment(id) {
+      if (!confirm('Zuordnung löschen?')) return;
+      await jsonFetch(`/api/role_cast_assignments/${id}`, { method: 'DELETE' });
+      await loadRoleAssignments();
+    }
+
     function _populateProductionSelects() {
       const opts = `<option value="">All productions</option>` +
         libraryData.map(p => `<option value="${p.id}">${p.title}</option>`).join('');
@@ -813,13 +982,30 @@
       document.getElementById('personaProdSelect').innerHTML =
         `<option value="">Production</option>` +
         libraryData.map(p => `<option value="${p.id}">${p.title}</option>`).join('');
+      document.getElementById('assignProdSelect').innerHTML =
+        `<option value="">Production</option>` +
+        libraryData.map(p => `<option value="${p.id}">${p.title}</option>`).join('');
+    }
+
+    function _populateEntitySelects() {
+      const roleOpts = `<option value="">Rolle auswählen</option>` + roles.map(r => `<option value="${r.id}">${r.name}</option>`).join('');
+      const actorOpts = `<option value="">Schauspieler auswählen</option>` + actors.map(a => `<option value="${a.id}">${a.name}</option>`).join('');
+      const voiceOpts = `<option value="">Synchronsprecher auswählen</option>` + voiceActors.map(v => `<option value="${v.id}">${v.name}</option>`).join('');
+      document.getElementById('personaRoleSelect').innerHTML = roleOpts;
+      document.getElementById('personaActorSelect').innerHTML = actorOpts;
+      document.getElementById('personaVoiceActorSelect').innerHTML = voiceOpts;
+      document.getElementById('assignRoleSelect').innerHTML = roleOpts;
+      document.getElementById('assignActorSelect').innerHTML = `<option value="">Schauspieler (optional)</option>` + actors.map(a => `<option value="${a.id}">${a.name}</option>`).join('');
+      document.getElementById('assignVoiceActorSelect').innerHTML = voiceOpts;
     }
 
     drawOverlay();
-    Promise.all([loadActors(), loadRoles()]).then(() => {
+    Promise.all([loadActors(), loadRoles(), loadVoiceActors()]).then(() => {
       loadLibrary().then(() => {
         _populateProductionSelects();
+        _populateEntitySelects();
         loadPersonas();
+        loadRoleAssignments();
       });
     });
   </script>

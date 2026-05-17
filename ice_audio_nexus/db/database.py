@@ -31,6 +31,16 @@ DDL_STATEMENTS: list[str] = [
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
     """
+    CREATE TABLE IF NOT EXISTS voice_actors (
+        id          INT AUTO_INCREMENT PRIMARY KEY,
+        name        VARCHAR(255) NOT NULL,
+        notes       TEXT NULL,
+        created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_voice_actor_name (name)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
     CREATE TABLE IF NOT EXISTS productions (
         id              INT AUTO_INCREMENT PRIMARY KEY,
         title           VARCHAR(255) NOT NULL,
@@ -227,6 +237,7 @@ DDL_STATEMENTS: list[str] = [
         production_id        INT NULL,
         role_id              INT NULL,
         actor_id             INT NULL,
+        voice_actor_id       INT NULL,
         voice_actor_name     VARCHAR(255) NULL,
         language             VARCHAR(32) NOT NULL DEFAULT 'de',
         relevance            TINYINT NOT NULL DEFAULT 1,
@@ -236,10 +247,37 @@ DDL_STATEMENTS: list[str] = [
         FOREIGN KEY (production_id) REFERENCES productions(id) ON DELETE CASCADE,
         FOREIGN KEY (role_id) REFERENCES roles(id) ON DELETE SET NULL,
         FOREIGN KEY (actor_id) REFERENCES actors(id) ON DELETE SET NULL,
+        FOREIGN KEY (voice_actor_id) REFERENCES voice_actors(id) ON DELETE SET NULL,
         UNIQUE KEY uq_persona (production_id, role_id, language),
         INDEX idx_persona_prod (production_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
+    """
+    CREATE TABLE IF NOT EXISTS role_cast_assignments (
+        id              INT AUTO_INCREMENT PRIMARY KEY,
+        production_id   INT NOT NULL,
+        role_id         INT NOT NULL,
+        actor_id        INT NULL,
+        voice_actor_id  INT NOT NULL,
+        language        VARCHAR(32) NOT NULL DEFAULT 'de',
+        relevance       TINYINT NOT NULL DEFAULT 1,
+        start_season    INT NOT NULL DEFAULT 1,
+        start_episode   INT NOT NULL DEFAULT 1,
+        notes           TEXT NULL,
+        created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        FOREIGN KEY (production_id) REFERENCES productions(id) ON DELETE CASCADE,
+        FOREIGN KEY (role_id) REFERENCES roles(id) ON DELETE CASCADE,
+        FOREIGN KEY (actor_id) REFERENCES actors(id) ON DELETE SET NULL,
+        FOREIGN KEY (voice_actor_id) REFERENCES voice_actors(id) ON DELETE CASCADE,
+        UNIQUE KEY uq_role_cast_start (production_id, role_id, language, start_season, start_episode),
+        INDEX idx_role_cast_lookup (production_id, role_id, language, start_season, start_episode)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+]
+
+MIGRATION_STATEMENTS: list[str] = [
+    "ALTER TABLE persona_catalog ADD COLUMN IF NOT EXISTS voice_actor_id INT NULL",
 ]
 
 
@@ -328,6 +366,12 @@ def ensure_schema() -> None:
         cur = conn.cursor()
         for ddl in DDL_STATEMENTS:
             cur.execute(ddl)
+        for ddl in MIGRATION_STATEMENTS:
+            try:
+                cur.execute(ddl)
+            except mariadb.Error:
+                # Keep startup resilient across MariaDB minor versions.
+                continue
         conn.commit()
     finally:
         conn.close()
@@ -619,6 +663,7 @@ def list_library(conn: mariadb.Connection) -> list[dict[str, Any]]:
             v.video_path,
             v.scan_status,
             v.duration_ms,
+            v.metadata_json,
             COUNT(DISTINCT t.id) AS track_count,
             SUM(CASE WHEN t.is_clear THEN 1 ELSE 0 END) AS clear_track_count
         FROM productions p
@@ -626,6 +671,7 @@ def list_library(conn: mariadb.Connection) -> list[dict[str, Any]]:
         LEFT JOIN face_tracks t ON t.video_id = v.id
         GROUP BY p.id, p.title, p.production_type, p.season_label,
                  v.id, v.title, v.episode_code, v.video_path, v.scan_status, v.duration_ms
+                 , v.metadata_json
         ORDER BY p.title ASC, v.title ASC
         """
     )
@@ -644,6 +690,8 @@ def list_library(conn: mariadb.Connection) -> list[dict[str, Any]]:
         )
         if row[4] is None:
             continue
+        metadata = _video_workflow(row[10])
+        workflow = metadata.get("workflow", {})
         prod["videos"].append(
             {
                 "id": int(row[4]),
@@ -652,8 +700,11 @@ def list_library(conn: mariadb.Connection) -> list[dict[str, Any]]:
                 "video_path": row[7],
                 "scan_status": row[8],
                 "duration_ms": row[9],
-                "track_count": int(row[10] or 0),
-                "clear_track_count": int(row[11] or 0),
+                "metadata": metadata,
+                "workflow": workflow,
+                "expansion_released": bool(workflow.get("expansion_released", False)),
+                "track_count": int(row[11] or 0),
+                "clear_track_count": int(row[12] or 0),
             }
         )
     return list(grouped.values())
@@ -818,6 +869,24 @@ def create_actor(conn: mariadb.Connection, name: str, description: str = "") -> 
     )
     conn.commit()
     cur.execute("SELECT id FROM actors WHERE name=?", (name.strip(),))
+    return int(cur.fetchone()[0])
+
+
+def list_voice_actors(conn: mariadb.Connection) -> list[dict[str, Any]]:
+    cur = conn.cursor()
+    cur.execute("SELECT id, name, notes FROM voice_actors ORDER BY name ASC")
+    return [{"id": int(r[0]), "name": r[1], "notes": r[2] or ""} for r in cur.fetchall()]
+
+
+def create_voice_actor(conn: mariadb.Connection, name: str, notes: str = "") -> int:
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO voice_actors (name, notes) VALUES (?, ?) "
+        "ON DUPLICATE KEY UPDATE notes = VALUES(notes)",
+        (name.strip(), _clean_optional_text(notes, limit=1000)),
+    )
+    conn.commit()
+    cur.execute("SELECT id FROM voice_actors WHERE name=?", (name.strip(),))
     return int(cur.fetchone()[0])
 
 
@@ -1214,7 +1283,7 @@ def list_visual_seeds(
     cur.execute(
         f"""
         SELECT s.id, s.group_id, s.track_id, s.detection_id, s.image_path,
-               s.area_ratio, s.sharpness, s.confidence, s.seed_quality_score,
+               s.embedding_json, s.area_ratio, s.sharpness, s.confidence, s.seed_quality_score,
                s.is_removed, s.notes, s.created_at
         FROM visual_seeds s
         {where}
@@ -1229,13 +1298,14 @@ def list_visual_seeds(
             "track_id": r[2],
             "detection_id": r[3],
             "image_path": r[4],
-            "area_ratio": r[5],
-            "sharpness": r[6],
-            "confidence": r[7],
-            "seed_quality_score": r[8],
-            "is_removed": bool(r[9]),
-            "notes": r[10],
-            "created_at": str(r[11]),
+            "embedding": _from_json(r[5], []),
+            "area_ratio": r[6],
+            "sharpness": r[7],
+            "confidence": r[8],
+            "seed_quality_score": r[9],
+            "is_removed": bool(r[10]),
+            "notes": r[11],
+            "created_at": str(r[12]),
         }
         for r in cur.fetchall()
     ]
@@ -1434,12 +1504,14 @@ def list_persona_catalog(
         SELECT pc.id, pc.production_id, p.title,
                pc.role_id, r.name,
                pc.actor_id, a.name,
+               pc.voice_actor_id, va.name,
                pc.voice_actor_name, pc.language, pc.relevance, pc.notes,
                pc.created_at, pc.updated_at
         FROM persona_catalog pc
         LEFT JOIN productions p ON p.id = pc.production_id
         LEFT JOIN roles r ON r.id = pc.role_id
         LEFT JOIN actors a ON a.id = pc.actor_id
+        LEFT JOIN voice_actors va ON va.id = pc.voice_actor_id
         WHERE {where}
         ORDER BY pc.relevance DESC, r.name ASC
         """,
@@ -1454,12 +1526,13 @@ def list_persona_catalog(
             "role_name": r[4],
             "actor_id": r[5],
             "actor_name": r[6],
-            "voice_actor_name": r[7],
-            "language": r[8],
-            "relevance": int(r[9]),
-            "notes": r[10],
-            "created_at": str(r[11]),
-            "updated_at": str(r[12]),
+            "voice_actor_id": r[7],
+            "voice_actor_name": r[8] or r[9],
+            "language": r[10],
+            "relevance": int(r[11]),
+            "notes": r[12],
+            "created_at": str(r[13]),
+            "updated_at": str(r[14]),
         }
         for r in cur.fetchall()
     ]
@@ -1471,6 +1544,7 @@ def upsert_persona_catalog(
     production_id: int | None,
     role_id: int | None,
     actor_id: int | None = None,
+    voice_actor_id: int | None = None,
     voice_actor_name: str | None = None,
     language: str = "de",
     relevance: int = 1,
@@ -1480,10 +1554,11 @@ def upsert_persona_catalog(
     cur.execute(
         """
         INSERT INTO persona_catalog
-            (production_id, role_id, actor_id, voice_actor_name, language, relevance, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+            (production_id, role_id, actor_id, voice_actor_id, voice_actor_name, language, relevance, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON DUPLICATE KEY UPDATE
             actor_id = COALESCE(VALUES(actor_id), actor_id),
+            voice_actor_id = COALESCE(VALUES(voice_actor_id), voice_actor_id),
             voice_actor_name = COALESCE(VALUES(voice_actor_name), voice_actor_name),
             relevance = VALUES(relevance),
             notes = COALESCE(VALUES(notes), notes)
@@ -1492,6 +1567,7 @@ def upsert_persona_catalog(
             production_id,
             role_id,
             actor_id,
+            voice_actor_id,
             _clean_optional_text(voice_actor_name, limit=255),
             language.strip()[:32] if language else "de",
             max(0, min(int(relevance), 3)),
@@ -1510,6 +1586,119 @@ def upsert_persona_catalog(
 def delete_persona_catalog_entry(conn: mariadb.Connection, entry_id: int) -> bool:
     cur = conn.cursor()
     cur.execute("DELETE FROM persona_catalog WHERE id=?", (entry_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+def list_role_cast_assignments(
+    conn: mariadb.Connection,
+    production_id: int | None = None,
+) -> list[dict[str, Any]]:
+    cur = conn.cursor()
+    params: list[Any] = []
+    where = "1=1"
+    if production_id is not None:
+        where = "rca.production_id = ?"
+        params.append(production_id)
+    cur.execute(
+        f"""
+        SELECT rca.id, rca.production_id, p.title,
+               rca.role_id, r.name,
+               rca.actor_id, a.name,
+               rca.voice_actor_id, va.name,
+               rca.language, rca.relevance, rca.start_season, rca.start_episode,
+               rca.notes, rca.created_at, rca.updated_at
+        FROM role_cast_assignments rca
+        JOIN productions p ON p.id = rca.production_id
+        JOIN roles r ON r.id = rca.role_id
+        LEFT JOIN actors a ON a.id = rca.actor_id
+        JOIN voice_actors va ON va.id = rca.voice_actor_id
+        WHERE {where}
+        ORDER BY p.title ASC, r.name ASC, rca.language ASC, rca.start_season ASC, rca.start_episode ASC
+        """,
+        tuple(params),
+    )
+    return [
+        {
+            "id": int(r[0]),
+            "production_id": int(r[1]),
+            "production_title": r[2],
+            "role_id": int(r[3]),
+            "role_name": r[4],
+            "actor_id": r[5],
+            "actor_name": r[6],
+            "voice_actor_id": int(r[7]),
+            "voice_actor_name": r[8],
+            "language": r[9],
+            "relevance": int(r[10]),
+            "start_season": int(r[11]),
+            "start_episode": int(r[12]),
+            "notes": r[13],
+            "created_at": str(r[14]),
+            "updated_at": str(r[15]),
+        }
+        for r in cur.fetchall()
+    ]
+
+
+def upsert_role_cast_assignment(
+    conn: mariadb.Connection,
+    *,
+    production_id: int,
+    role_id: int,
+    voice_actor_id: int,
+    actor_id: int | None = None,
+    language: str = "de",
+    relevance: int = 1,
+    start_season: int = 1,
+    start_episode: int = 1,
+    notes: str | None = None,
+) -> int:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO role_cast_assignments
+            (production_id, role_id, actor_id, voice_actor_id, language, relevance, start_season, start_episode, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+            actor_id = COALESCE(VALUES(actor_id), actor_id),
+            voice_actor_id = VALUES(voice_actor_id),
+            relevance = VALUES(relevance),
+            notes = COALESCE(VALUES(notes), notes)
+        """,
+        (
+            production_id,
+            role_id,
+            actor_id,
+            voice_actor_id,
+            (language or "de").strip()[:32],
+            max(0, min(int(relevance), 3)),
+            max(1, int(start_season)),
+            max(1, int(start_episode)),
+            _clean_optional_text(notes, limit=500),
+        ),
+    )
+    conn.commit()
+    cur.execute(
+        """
+        SELECT id FROM role_cast_assignments
+        WHERE production_id=? AND role_id=? AND language=? AND start_season=? AND start_episode=?
+        """,
+        (
+            production_id,
+            role_id,
+            (language or "de").strip()[:32],
+            max(1, int(start_season)),
+            max(1, int(start_episode)),
+        ),
+    )
+    row = cur.fetchone()
+    return int(row[0]) if row else int(cur.lastrowid)
+
+
+def delete_role_cast_assignment(conn: mariadb.Connection, assignment_id: int) -> bool:
+    cur = conn.cursor()
+    cur.execute("DELETE FROM role_cast_assignments WHERE id=?", (assignment_id,))
     conn.commit()
     return cur.rowcount > 0
 
@@ -1583,6 +1772,7 @@ def run_expansion_for_group(
     *,
     match_threshold: float = 0.70,
     top_seeds: int = 10,
+    allowed_video_ids: list[int] | None = None,
 ) -> dict[str, Any]:
     """Step 1C: Find unassigned clear tracks in the same production that match
     a confirmed group's seed centroid and assign them to the group.
@@ -1651,17 +1841,25 @@ def run_expansion_for_group(
         centroid = centroid / cnorm
     centroid_list: list[float] = centroid.tolist()
 
-    # All clear, unignored tracks in the same production
+    # All clear, unignored tracks in the same production.
+    # Optional episode gate: only tracks from explicitly released videos.
+    params: list[Any] = [production_id]
+    where_video = ""
+    if allowed_video_ids:
+        placeholders = ", ".join(["?"] * len(allowed_video_ids))
+        where_video = f" AND v.id IN ({placeholders})"
+        params.extend(int(v) for v in allowed_video_ids)
     cur.execute(
-        """
+        f"""
         SELECT t.id, t.embedding_json, t.representative_image_path, t.quality_score, t.metadata_json
         FROM face_tracks t
         JOIN videos v ON v.id = t.video_id
         WHERE v.production_id = ?
           AND t.is_clear = TRUE
           AND t.status NOT IN ('ignored', 'background')
+          {where_video}
         """,
-        (production_id,),
+        tuple(params),
     )
     all_tracks = cur.fetchall()
 
@@ -1902,42 +2100,88 @@ def rematch_tracks(
     }
 
 
+def _video_workflow(metadata_json: str | None) -> dict[str, Any]:
+    metadata = _from_json(metadata_json, {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    workflow = metadata.get("workflow", {})
+    if not isinstance(workflow, dict):
+        workflow = {}
+    workflow.setdefault("seed_scanned", False)
+    workflow.setdefault("review_state", "pending")
+    workflow.setdefault("expansion_released", False)
+    metadata["workflow"] = workflow
+    return metadata
+
+
+def set_video_expansion_release(
+    conn: mariadb.Connection,
+    video_id: int,
+    *,
+    released: bool,
+) -> dict[str, Any]:
+    cur = conn.cursor()
+    cur.execute("SELECT metadata_json FROM videos WHERE id=?", (video_id,))
+    row = cur.fetchone()
+    if not row:
+        raise ValueError(f"Video {video_id} not found")
+    metadata = _video_workflow(row[0])
+    metadata["workflow"]["expansion_released"] = bool(released)
+    cur.execute("UPDATE videos SET metadata_json=? WHERE id=?", (_to_json(metadata), video_id))
+    conn.commit()
+    return {
+        "video_id": video_id,
+        "expansion_released": bool(released),
+        "workflow": metadata["workflow"],
+    }
+
+
 def list_videos(conn: mariadb.Connection, production_id: int | None = None) -> list[dict[str, Any]]:
     cur = conn.cursor()
     if production_id is None:
         cur.execute(
-            "SELECT id, production_id, title, episode_code, video_path, duration_ms, scan_status FROM videos ORDER BY title ASC"
+            "SELECT id, production_id, title, episode_code, video_path, duration_ms, scan_status, metadata_json "
+            "FROM videos ORDER BY title ASC"
         )
     else:
         cur.execute(
-            "SELECT id, production_id, title, episode_code, video_path, duration_ms, scan_status "
+            "SELECT id, production_id, title, episode_code, video_path, duration_ms, scan_status, metadata_json "
             "FROM videos WHERE production_id=? ORDER BY title ASC",
             (production_id,),
         )
-    return [
-        {
-            "id": int(r[0]),
-            "production_id": r[1],
-            "title": r[2],
-            "episode_code": r[3],
-            "video_path": r[4],
-            "duration_ms": r[5],
-            "scan_status": r[6],
-        }
-        for r in cur.fetchall()
-    ]
+    out: list[dict[str, Any]] = []
+    for r in cur.fetchall():
+        metadata = _video_workflow(r[7])
+        workflow = metadata.get("workflow", {})
+        out.append(
+            {
+                "id": int(r[0]),
+                "production_id": r[1],
+                "title": r[2],
+                "episode_code": r[3],
+                "video_path": r[4],
+                "duration_ms": r[5],
+                "scan_status": r[6],
+                "metadata": metadata,
+                "workflow": workflow,
+                "expansion_released": bool(workflow.get("expansion_released", False)),
+            }
+        )
+    return out
 
 
 def get_video(conn: mariadb.Connection, video_id: int) -> dict[str, Any] | None:
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, production_id, title, episode_code, video_path, duration_ms, scan_status "
+        "SELECT id, production_id, title, episode_code, video_path, duration_ms, scan_status, metadata_json "
         "FROM videos WHERE id=?",
         (video_id,),
     )
     row = cur.fetchone()
     if not row:
         return None
+    metadata = _video_workflow(row[7])
+    workflow = metadata.get("workflow", {})
     return {
         "id": int(row[0]),
         "production_id": row[1],
@@ -1946,6 +2190,9 @@ def get_video(conn: mariadb.Connection, video_id: int) -> dict[str, Any] | None:
         "video_path": row[4],
         "duration_ms": row[5],
         "scan_status": row[6],
+        "metadata": metadata,
+        "workflow": workflow,
+        "expansion_released": bool(workflow.get("expansion_released", False)),
     }
 
 

@@ -30,10 +30,14 @@ from db.database import (  # noqa: E402
     clear_video_scan_data,
     create_face_detection,
     create_face_track,
+    create_visual_group,
     create_visual_seed,
     ensure_schema,
     get_connection,
+    list_videos,
+    list_visual_groups,
     rebuild_overlay_for_video,
+    run_expansion_for_group,
     set_video_scan_status,
     upsert_production_and_video,
 )
@@ -609,6 +613,36 @@ class Track:
         return self.detections[-1].bbox
 
 
+def _load_existing_group_centroids(conn, production_id: int) -> list[dict]:
+    groups = list_visual_groups(conn, production_id=production_id, include_seeds=True)
+    out: list[dict] = []
+    for g in groups:
+        seeds = g.get("seeds") or []
+        vectors: list[np.ndarray] = []
+        for seed in seeds:
+            emb = seed.get("embedding")
+            if isinstance(emb, list) and emb:
+                try:
+                    vectors.append(np.asarray(emb, dtype=np.float32))
+                except Exception:  # noqa: BLE001
+                    continue
+        if not vectors:
+            continue
+        centroid = np.mean(np.stack(vectors, axis=0), axis=0)
+        norm = float(np.linalg.norm(centroid))
+        if norm > 1e-9:
+            centroid = centroid / norm
+        out.append(
+            {
+                "id": int(g["id"]),
+                "label": g["label"],
+                "centroid": centroid,
+                "count": len(vectors),
+            }
+        )
+    return out
+
+
 def scan_video(
     video_path: str,
     *,
@@ -632,6 +666,7 @@ def scan_video(
     prefer_gpu: bool = True,
     gpu_device_id: int = 0,
     gpu_diagnostics: bool = True,
+    seed_group_similarity_threshold: float = 0.90,
 ) -> dict:
     try:
         import cv2
@@ -670,7 +705,7 @@ def scan_video(
         episode_code=ep_code,
         duration_ms=duration_ms,
         production_meta={"scanner": "visual-step1"},
-        video_meta={"sample_fps": sample_fps},
+        video_meta={"sample_fps": sample_fps, "workflow": {"seed_scanned": True}},
     )
 
     logger.info("Scanning video_id=%s (%s)", video_id, source)
@@ -736,12 +771,16 @@ def scan_video(
             facenet_runtime.get("backend", "pixel_hash_fallback"),
         )
 
-    active_tracks: list[Track] = []
-    finished_tracks: list[Track] = []
     frame_index = -1
     sampled_frames = 0
-    detection_count = 0
+    detections_considered = 0
+    low_quality_rejected = 0
+    seeds_accepted = 0
     verifier_rejected_count = 0
+    groups_created = 0
+    groups_matched = 0
+    pseudo_tracks = 0
+    group_centroids = _load_existing_group_centroids(conn, production_id)
 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     total_sample_frames = max(1, total_frames // frame_step) if total_frames > 0 else None
@@ -750,11 +789,11 @@ def scan_video(
 
     if duration_s_est:
         logger.info(
-            "Starting scan: %s | duration ~%.0fs | ~%d frames to sample at %.1f fps",
+            "Starting seed discovery: %s | duration ~%.0fs | ~%d frames to sample at %.1f fps",
             source.name, duration_s_est, total_sample_frames or 0, sample_fps,
         )
     else:
-        logger.info("Starting scan: %s | sampling at %.1f fps", source.name, sample_fps)
+        logger.info("Starting seed discovery: %s | sampling at %.1f fps", source.name, sample_fps)
 
     while True:
         ok, frame = cap.read()
@@ -772,19 +811,21 @@ def scan_video(
         timestamp_ms = int((frame_index / native_fps) * 1000.0)
 
         raw_faces = _torch_detect_faces(face_detector, frame, dnn_confidence, min_face_size_px)
-
-        frame_detections: list[Detection] = []
         for i, (x, y, fw, fh, conf) in enumerate(raw_faces):
+            detections_considered += 1
             fw = int(min(fw, w - x))
             fh = int(min(fh, h - y))
             if fw <= 0 or fh <= 0:
+                low_quality_rejected += 1
                 continue
             # Skip detections with extreme aspect ratios – real faces are roughly square.
             aspect = fw / fh
             if aspect < 0.5 or aspect > 2.0:
+                low_quality_rejected += 1
                 continue
             crop = frame[y : y + fh, x : x + fw]
             if crop.size == 0:
+                low_quality_rejected += 1
                 continue
             verifier_meta = {"score": 0.0, "area_ratio": 0.0, "center_offset": 0.0}
             if verifier is not None:
@@ -804,6 +845,9 @@ def scan_video(
                     continue
             sharpness = float(cv2.Laplacian(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), cv2.CV_64F).var())
             area_ratio = (fw * fh) / frame_area
+            if area_ratio < min_face_area_ratio or sharpness < min_sharpness:
+                low_quality_rejected += 1
+                continue
             descriptor = _build_face_embedding(crop, facenet_model, torch_device)
 
             crop_name = f"f{frame_index:08d}_d{i:02d}.jpg"
@@ -835,34 +879,105 @@ def scan_video(
                 embedding=descriptor.astype(float).tolist(),
                 metadata={"area_ratio": area_ratio, "verifier": verifier_meta},
             )
-            frame_detections.append(det)
-            detection_count += 1
+            pseudo_tracks += 1
+            track_id = create_face_track(
+                conn,
+                video_id=video_id,
+                start_ms=timestamp_ms,
+                end_ms=timestamp_ms,
+                frame_count=1,
+                mean_face_area=area_ratio,
+                mean_sharpness=sharpness,
+                mean_confidence=conf,
+                stability_score=1.0,
+                quality_score=min(1.0, 0.5 * conf + 0.5 * min(sharpness / max(min_sharpness, 1.0), 1.0)),
+                relevance_score=min(1.0, 0.4 + 0.6 * area_ratio / max(min_face_area_ratio, 1e-6)),
+                is_clear=True,
+                status="candidate",
+                representative_image_path=det.crop_path,
+                embedding=descriptor.astype(float).tolist(),
+                metadata={
+                    "duration_seconds": 0.0,
+                    "seed_workflow": {
+                        "mode": "seed_first",
+                        "stage": "review",
+                        "review_state": "pending",
+                        "group_label": None,
+                        "expansion_state": "blocked",
+                        "notes": None,
+                    },
+                    "tracking_role": "seed_observation",
+                    "thresholds": {
+                        "min_face_area_ratio": min_face_area_ratio,
+                        "min_sharpness": min_sharpness,
+                        "seed_group_similarity_threshold": seed_group_similarity_threshold,
+                        "verifier_enabled": verifier is not None,
+                        "verifier_score_threshold": verifier_score_threshold,
+                    },
+                    "runtime": {
+                        "detector_backend": detector_runtime.get("backend"),
+                        "detector_target": detector_runtime.get("target"),
+                        "verifier_backend": verifier_runtime.get("backend"),
+                        "verifier_target": verifier_runtime.get("target"),
+                    },
+                },
+            )
+            assign_detection_to_track(conn, det.db_id, track_id)
 
-        for track in list(active_tracks):
-            if timestamp_ms - track.last_ts_ms > track_max_gap_ms:
-                finished_tracks.append(track)
-                active_tracks.remove(track)
+            best_group = None
+            best_sim = -1.0
+            for g in group_centroids:
+                sim = _cosine_similarity(g["centroid"], det.embedding)
+                if sim > best_sim:
+                    best_sim = sim
+                    best_group = g
+            if best_group is not None and best_sim >= seed_group_similarity_threshold:
+                group_id = int(best_group["id"])
+                group_label = str(best_group["label"])
+                n = int(best_group["count"]) + 1
+                best_group["centroid"] = (best_group["centroid"] * (n - 1) + det.embedding) / n
+                norm = float(np.linalg.norm(best_group["centroid"]))
+                if norm > 1e-9:
+                    best_group["centroid"] = best_group["centroid"] / norm
+                best_group["count"] = n
+                groups_matched += 1
+            else:
+                group_id = create_visual_group(
+                    conn,
+                    production_id=production_id,
+                    review_state="pending",
+                    expansion_state="blocked",
+                    representative_image_path=det.crop_path,
+                )
+                created = list_visual_groups(conn, production_id=production_id)
+                created_group = next((x for x in created if int(x["id"]) == int(group_id)), None)
+                group_label = created_group["label"] if created_group else f"visual_person_{group_id:03d}"
+                group_centroids.append(
+                    {
+                        "id": group_id,
+                        "label": group_label,
+                        "centroid": det.embedding.copy(),
+                        "count": 1,
+                    }
+                )
+                groups_created += 1
+                best_sim = 1.0
 
-        unmatched = frame_detections[:]
-        for det in frame_detections:
-            best_track = None
-            best_score = -1.0
-            for track in active_tracks:
-                iou = _iou(track.last_bbox, det.bbox)
-                sim = _cosine_similarity(track.detections[-1].embedding, det.embedding)
-                score = 0.7 * iou + 0.3 * max(0.0, sim)
-                if iou >= iou_threshold and sim >= descriptor_threshold and score > best_score:
-                    best_score = score
-                    best_track = track
-            if best_track is not None:
-                best_track.append(det)
-                if det in unmatched:
-                    unmatched.remove(det)
-
-        for det in unmatched:
-            t = Track()
-            t.append(det)
-            active_tracks.append(t)
+            q = float(det.confidence) * 0.5 + min(float(det.sharpness) / 300.0, 1.0) * 0.5
+            create_visual_seed(
+                conn,
+                group_id=group_id,
+                track_id=track_id,
+                detection_id=det.db_id,
+                image_path=det.crop_path,
+                embedding=det.embedding.astype(float).tolist(),
+                area_ratio=float(det.area_ratio),
+                sharpness=float(det.sharpness),
+                confidence=float(det.confidence),
+                seed_quality_score=q,
+                notes=f"auto seed; group_sim={best_sim:.3f}",
+            )
+            seeds_accepted += 1
 
         # Progress reporting every 5 % of the video (or every 50 sampled frames as fallback)
         if total_sample_frames:
@@ -872,193 +987,41 @@ def scan_video(
                 _last_pct_reported = pct_milestone
                 elapsed_s = timestamp_ms / 1000.0
                 logger.info(
-                    "[%d%%] %.0fs / %.0fs | faces accepted: %d | verifier rejects: %d | active tracks: %d | finished tracks: %d",
+                    "[%d%%] %.0fs / %.0fs | sampled frames: %d | detections considered: %d | low-quality rejected: %d | verifier rejects: %d | high-quality seeds accepted: %d | new visual groups: %d | matched to existing groups: %d",
                     pct_milestone,
                     elapsed_s,
                     duration_s_est or 0.0,
-                    detection_count,
+                    sampled_frames,
+                    detections_considered,
+                    low_quality_rejected,
                     verifier_rejected_count,
-                    len(active_tracks),
-                    len(finished_tracks),
+                    seeds_accepted,
+                    groups_created,
+                    groups_matched,
                 )
         elif sampled_frames % 50 == 0:
             elapsed_s = timestamp_ms / 1000.0
             logger.info(
-                "[frame %d sampled] %.0fs elapsed | faces accepted: %d | verifier rejects: %d | active tracks: %d",
-                sampled_frames, elapsed_s, detection_count, verifier_rejected_count, len(active_tracks),
+                "[frame %d sampled] %.0fs elapsed | detections considered: %d | low-quality rejected: %d | verifier rejects: %d | seeds accepted: %d",
+                sampled_frames, elapsed_s, detections_considered, low_quality_rejected, verifier_rejected_count, seeds_accepted,
             )
 
     cap.release()
-    finished_tracks.extend(active_tracks)
-
-    persisted_tracks = 0
-    clear_tracks = 0
-
-    for track_idx, track in enumerate(finished_tracks, start=1):
-        if not track.detections:
-            continue
-        duration_s = (track.detections[-1].timestamp_ms - track.detections[0].timestamp_ms) / 1000.0
-        mean_area = float(np.mean([d.area_ratio for d in track.detections]))
-        mean_sharpness_val = float(np.mean([d.sharpness for d in track.detections]))
-        mean_conf = float(np.mean([d.confidence for d in track.detections]))
-        frame_count = len(track.detections)
-
-        ious = []
-        for i in range(1, frame_count):
-            ious.append(_iou(track.detections[i - 1].bbox, track.detections[i].bbox))
-        stability = float(np.mean(ious)) if ious else 0.0
-
-        quality_score = (
-            0.35 * _clamp(mean_area / max(min_face_area_ratio, 1e-6), 0.0, 1.0)
-            + 0.35 * _clamp(mean_sharpness_val / max(min_sharpness, 1.0), 0.0, 1.0)
-            + 0.30 * _clamp(stability / max(min_stability, 1e-6), 0.0, 1.0)
-        )
-        relevance_score = (
-            0.50 * _clamp(duration_s / max(min_clear_seconds, 1e-6), 0.0, 1.0)
-            + 0.20 * _clamp(frame_count / max(sample_fps * min_clear_seconds, 1.0), 0.0, 1.0)
-            + 0.30 * _clamp(mean_area / max(min_face_area_ratio, 1e-6), 0.0, 1.0)
-        )
-        is_clear = (
-            duration_s >= min_clear_seconds
-            and mean_area >= min_face_area_ratio
-            and mean_sharpness_val >= min_sharpness
-            and stability >= min_stability
-            and frame_count >= int(sample_fps * min_clear_seconds)
-        )
-        status = "candidate" if is_clear else "background"
-        if is_clear:
-            clear_tracks += 1
-
-        top_seed_candidates = sorted(
-            track.detections,
-            key=lambda d: (d.area_ratio, d.sharpness, d.confidence),
-            reverse=True,
-        )[:3]
-        best_det = max(
-            track.detections,
-            key=lambda d: (d.sharpness * (0.5 + d.area_ratio)),
-        )
-        rep_src = data_root / best_det.crop_path
-        rep_name = f"track_{track_idx:05d}.jpg"
-        rep_path = reps_root / rep_name
-        try:
-            rep_img = cv2.imread(str(rep_src))
-            if rep_img is not None:
-                cv2.imwrite(str(rep_path), rep_img)
-                rep_rel = _safe_relpath(rep_path, data_root)
-            else:
-                rep_rel = best_det.crop_path
-        except Exception:
-            rep_rel = best_det.crop_path
-
-        track_embedding = np.mean(np.array([d.embedding for d in track.detections]), axis=0)
-        track_id = create_face_track(
-            conn,
-            video_id=video_id,
-            start_ms=track.detections[0].timestamp_ms,
-            end_ms=track.detections[-1].timestamp_ms,
-            frame_count=frame_count,
-            mean_face_area=mean_area,
-            mean_sharpness=mean_sharpness_val,
-            mean_confidence=mean_conf,
-            stability_score=stability,
-            quality_score=quality_score,
-            relevance_score=relevance_score,
-            is_clear=is_clear,
-            status=status,
-            representative_image_path=rep_rel,
-            embedding=track_embedding.astype(float).tolist(),
-            metadata={
-                "duration_seconds": duration_s,
-                "global_rule": "step1_clear_track_rule",
-                "seed_workflow": {
-                    "mode": "seed_first",
-                    "stage": "review" if is_clear else "seed_discovery",
-                    "review_state": "pending",
-                    "group_label": None,
-                    "expansion_state": "blocked",
-                    "notes": None,
-                },
-                "seed_candidates": [
-                    {
-                        "detection_id": det.db_id,
-                        "timestamp_ms": det.timestamp_ms,
-                        "crop_image_path": det.crop_path,
-                        "area_ratio": round(float(det.area_ratio), 6),
-                        "sharpness": round(float(det.sharpness), 3),
-                        "confidence": round(float(det.confidence), 4),
-                    }
-                    for det in top_seed_candidates
-                ],
-                "tracking_role": "support_container",
-                "thresholds": {
-                    "min_clear_seconds": min_clear_seconds,
-                    "min_face_area_ratio": min_face_area_ratio,
-                    "min_sharpness": min_sharpness,
-                    "min_stability": min_stability,
-                    "dnn_confidence": dnn_confidence,
-                    "detector_score_threshold": dnn_confidence,
-                    "min_face_size_px": min_face_size_px,
-                    "verifier_enabled": verifier is not None,
-                    "verifier_score_threshold": verifier_score_threshold,
-                    "verifier_min_area_ratio": verifier_min_area_ratio,
-                    "verifier_max_center_offset": verifier_max_center_offset,
-                },
-                "runtime": {
-                    "detector_backend": detector_runtime.get("backend"),
-                    "detector_target": detector_runtime.get("target"),
-                    "verifier_backend": verifier_runtime.get("backend"),
-                    "verifier_target": verifier_runtime.get("target"),
-                },
-            },
-        )
-        persisted_tracks += 1
-        for det in track.detections:
-            if det.db_id is not None:
-                assign_detection_to_track(conn, det.db_id, track_id)
-
-        # Step 1A: auto-create ungrouped visual_seeds from the top-3 detections of
-        # every clear track so the seed pipeline is populated immediately after scanning
-        # (group assignment happens later via cluster_tracks_into_groups / run_expansion).
-        if is_clear:
-            top_seed_dets = sorted(
-                track.detections,
-                key=lambda d: (d.area_ratio, d.sharpness, d.confidence),
-                reverse=True,
-            )[:3]
-            for det in top_seed_dets:
-                if det.db_id is None:
-                    continue
-                q = float(det.confidence) * 0.5 + min(float(det.sharpness) / 300.0, 1.0) * 0.5
-                try:
-                    create_visual_seed(
-                        conn,
-                        group_id=None,
-                        track_id=track_id,
-                        detection_id=det.db_id,
-                        image_path=det.crop_path,
-                        embedding=det.embedding.astype(float).tolist(),
-                        area_ratio=float(det.area_ratio),
-                        sharpness=float(det.sharpness),
-                        confidence=float(det.confidence),
-                        seed_quality_score=q,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("Auto-seed creation failed for track_id=%d det_id=%d: %s", track_id, det.db_id, exc)
-
     rebuild_overlay_for_video(conn, video_id)
     set_video_scan_status(conn, video_id, "completed")
     conn.close()
 
     logger.info(
-        "Scan finished: %s | sampled %d frames | %d accepted detections | %d verifier rejects | %d tracks (%d clear / %d background)",
+        "Seed discovery finished: %s | sampled frames=%d | detections considered=%d | low-quality rejected=%d | verifier rejects=%d | high-quality seeds accepted=%d | pseudo tracks=%d | groups created=%d | matched existing groups=%d",
         source.name,
         sampled_frames,
-        detection_count,
+        detections_considered,
+        low_quality_rejected,
         verifier_rejected_count,
-        persisted_tracks,
-        clear_tracks,
-        persisted_tracks - clear_tracks,
+        seeds_accepted,
+        pseudo_tracks,
+        groups_created,
+        groups_matched,
     )
 
     return {
@@ -1066,10 +1029,14 @@ def scan_video(
         "video_id": video_id,
         "video_path": str(source),
         "sampled_frames": sampled_frames,
-        "detections": detection_count,
+        "detections_considered": detections_considered,
+        "low_quality_rejections": low_quality_rejected,
+        "seeds_accepted": seeds_accepted,
         "verifier_rejections": verifier_rejected_count,
-        "tracks": persisted_tracks,
-        "clear_tracks": clear_tracks,
+        "groups_created": groups_created,
+        "groups_matched": groups_matched,
+        "tracks": pseudo_tracks,
+        "clear_tracks": pseudo_tracks,
         "sample_fps": sample_fps,
         "detector_backend": detector_runtime.get("backend"),
         "detector_target": detector_runtime.get("target"),
@@ -1164,17 +1131,85 @@ def scan_directory(
     }
 
 
+def run_expansion_orchestrator(
+    *,
+    match_threshold: float = 0.70,
+) -> dict:
+    """Run Step-1C expansion only for explicitly released episodes/groups."""
+    ensure_schema()
+    conn = get_connection()
+    try:
+        videos = list_videos(conn)
+        released_video_ids = {
+            int(v["id"])
+            for v in videos
+            if bool(v.get("expansion_released")) and str(v.get("scan_status")) == "completed"
+        }
+        if not released_video_ids:
+            logger.info("Expansion orchestrator: no released+completed episodes found.")
+            return {"groups_run": 0, "groups_skipped": 0, "released_videos": 0, "results": []}
+
+        groups = list_visual_groups(conn)
+        runnable_groups = []
+        skipped = 0
+        for g in groups:
+            if g.get("review_state") in {"ignored", "irrelevant"}:
+                skipped += 1
+                continue
+            if g.get("review_state") != "confirmed":
+                skipped += 1
+                continue
+            if g.get("expansion_state") != "ready":
+                skipped += 1
+                continue
+            prod_id = g.get("production_id")
+            if prod_id is None:
+                skipped += 1
+                continue
+            prod_video_ids = {int(v["id"]) for v in videos if v.get("production_id") == prod_id}
+            allowed_ids = sorted(prod_video_ids & released_video_ids)
+            if not allowed_ids:
+                skipped += 1
+                continue
+            runnable_groups.append((int(g["id"]), allowed_ids))
+
+        results: list[dict] = []
+        for group_id, allowed_video_ids in runnable_groups:
+            logger.info(
+                "Expansion orchestrator: running group_id=%d on %d released episodes",
+                group_id,
+                len(allowed_video_ids),
+            )
+            result = run_expansion_for_group(
+                conn,
+                group_id,
+                match_threshold=match_threshold,
+                allowed_video_ids=allowed_video_ids,
+            )
+            result["allowed_video_ids"] = allowed_video_ids
+            results.append(result)
+
+        return {
+            "groups_run": len(runnable_groups),
+            "groups_skipped": skipped,
+            "released_videos": len(released_video_ids),
+            "results": results,
+        }
+    finally:
+        conn.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Step-1 visual face/track scanner",
+        description="Step-1 scanner (seed discovery with --video, expansion orchestrator without video)",
         epilog=(
             "Examples:\n"
-            "  # Single video (re-scan always replaces old data)\n"
+            "  # Mode A: single episode seed discovery (seed-first)\n"
             "  python scanner.py --video /data/ShowName.S01E02.mkv\n\n"
-            "  # Whole directory (skip already-completed videos)\n"
+            "  # Mode A (batch): whole directory seed discovery\n"
             "  python scanner.py --dir /data/ShowName/ --production 'Show Name'\n\n"
-            "  # Whole directory, force re-scan of completed videos too\n"
-            "  python scanner.py --dir /data/ShowName/ --rescan\n"
+            "  # Mode B: expansion orchestrator (only confirmed+ready groups on released episodes)\n"
+            "  python scanner.py\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -1280,9 +1315,6 @@ def main() -> None:
             raise SystemExit(2) from exc
         return
 
-    if not args.video and not args.directory:
-        parser.error("one of --video or --dir is required (unless --diagnose-torch is used)")
-
     scan_kwargs = dict(
         sample_fps=args.fps,
         min_clear_seconds=args.min_clear_seconds,
@@ -1298,9 +1330,20 @@ def main() -> None:
         prefer_gpu=_env_bool("FACE_GPU_ENABLED", True) and not args.cpu_only,
         gpu_device_id=args.gpu_device_id,
         gpu_diagnostics=args.gpu_diagnostics,
+        seed_group_similarity_threshold=float(os.getenv("FACE_SEED_GROUP_SIMILARITY_THRESHOLD", "0.90")),
     )
 
-    if args.directory:
+    if not args.video and not args.directory:
+        result = run_expansion_orchestrator(
+            match_threshold=float(os.getenv("FACE_EXPAND_THRESHOLD", "0.70"))
+        )
+        logger.info(
+            "Expansion orchestrator completed: %d groups run, %d groups skipped, %d released videos",
+            result["groups_run"],
+            result["groups_skipped"],
+            result["released_videos"],
+        )
+    elif args.directory:
         result = scan_directory(
             args.directory,
             production=args.production,

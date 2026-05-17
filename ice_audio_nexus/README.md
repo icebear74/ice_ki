@@ -5,13 +5,14 @@ The current follow-up direction is a **seed-first** review flow: find strong vis
 
 ## Step-1 goal
 
-For each video the scanner now:
+For each video in seed mode (`--video`) the scanner now:
 
 1. samples frames (default `4 FPS`)
 2. detects faces
-3. builds short local tracks
-4. persists local track containers for nearby detections
-5. stores detections, tracks, representative crops, embeddings/descriptors and seed-review metadata
+3. applies strict quality gates (size/sharpness/verifier)
+4. accepts high-quality face seeds
+5. assigns seeds conservatively to visual groups (high-similarity only)
+6. stores detections, seed containers and seed-review metadata
 
 This phase is intentionally person-centric and review-driven. Full role/speaker resolution is left for later phases.
 `README_FIRST.md` is the binding project goal: Step 1 must prefer identity purity over raw detection count because these visual anchors later seed audio / speaker attribution.
@@ -32,16 +33,20 @@ This phase is intentionally person-centric and review-driven. Full role/speaker 
 - New samples let the system learn appearance changes (beard, haircuts, lighting, pose).
 - `POST /api/rematch` re-evaluates tracks against confirmed actor samples.
 
-## Scanner usage
+## Scanner usage (2 modes)
 
 ```bash
 cd ice_audio_nexus
 source venv/bin/activate
 
+# Mode A: seed discovery for one episode/file
 python -m processor.scanner \
   --video /absolute/path/to/video.mkv \
   --production "The Big Bang Theory" \
   --title "S05E01 The Skank Reflex Analysis"
+
+# Mode B: expansion orchestrator (without --video/--dir)
+python -m processor.scanner
 ```
 
 Useful options:
