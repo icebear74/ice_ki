@@ -1,5 +1,5 @@
 """
-Enhanced Runtime Configuration Manager - 7-Frame VSR Training System
+Enhanced Runtime Configuration Manager - VSR Training System
 
 NEW Features:
 - Model configuration (n_frames, n_feats, n_blocks, precision)
@@ -86,12 +86,12 @@ DEFAULT_CONFIG = {
 
 class EnhancedRuntimeConfigManager:
     """
-    Enhanced Runtime Configuration Manager for 7-Frame VSR Training
+    Enhanced Runtime Configuration Manager for VSR Training
     
     Args:
         config_path: Path to runtime_config.json
         base_config: Base configuration dict (optional, for legacy support)
-        use_new_structure: Use new 7-frame structure (default: True)
+        use_new_structure: Use new structure (default: True)
     """
     
     def __init__(
@@ -134,7 +134,7 @@ class EnhancedRuntimeConfigManager:
         return 'model' in self.config and 'training' in self.config
     
     def _initialize_new_structure(self):
-        """Initialize with new 7-frame structure"""
+        """Initialize with new structure."""
         with self.lock:
             self.config = DEFAULT_CONFIG.copy()
             
@@ -219,11 +219,11 @@ class EnhancedRuntimeConfigManager:
             if 'model' in config:
                 model = config['model']
 
-                # n_frames is fixed to 7 (only 7-frame model is supported).
-                # The train.py startup already enforces this via arch validation;
-                # runtime_config validation is an additional safety net.
-                if model.get('n_frames', 0) != 7:
-                    errors.append(f"n_frames must be 7 (only 7-frame model supported), got {model.get('n_frames')}")
+                n_frames = int(model.get('n_frames', 0))
+                if n_frames < 3 or n_frames % 2 == 0:
+                    errors.append(
+                        f"n_frames must be an odd integer >= 3, got {model.get('n_frames')}"
+                    )
 
                 if model.get('n_feats', 0) < 32 or model.get('n_feats', 0) > 128:
                     errors.append(f"n_feats should be 32-128, got {model.get('n_feats')}")

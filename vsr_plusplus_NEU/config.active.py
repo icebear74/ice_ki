@@ -21,15 +21,15 @@ VSR++ 7-Frame Configuration - TEMPLATE / ACTIVE REFERENCE
 """
 
 # ============================================================================
-# MODEL ARCHITECTURE PARAMETERS (7-Frame Optimized)
+# MODEL ARCHITECTURE PARAMETERS (default n_frames=7 optimized)
 # ============================================================================
 
-# Number of feature channels - Optimized for 7-frame model
+# Number of feature channels - optimized for the default runtime profile
 # 72 features provides good capacity while staying within VRAM limits
 N_FEATS = 72
 
 # Total number of residual blocks - Optimized for quality
-# 26 blocks provides excellent capacity for 7-frame processing
+# 26 blocks provides excellent capacity for the default runtime profile
 N_BLOCKS = 28
 
 
@@ -372,7 +372,7 @@ def print_config():
     for size_key in ADAPTIVE_BATCH_CONFIG:
         print(f"    Training {size_key}:")
         print(f"      {DATASET_ROOT}/{DEFAULT_DATASET_NAME}/patches/{size_key}/GT/")
-        print(f"      {DATASET_ROOT}/{DEFAULT_DATASET_NAME}/patches/{size_key}/LR_7frames/")
+        print(f"      {DATASET_ROOT}/{DEFAULT_DATASET_NAME}/patches/{size_key}/LR_{{n}}frames/  (or LR for n=5)")
     print(f"    Validation:")
     for size_key in ADAPTIVE_BATCH_CONFIG:
         print(f"      {DATASET_ROOT}/{DEFAULT_DATASET_NAME}/val/{size_key}/GT/")
@@ -388,11 +388,11 @@ def print_config():
 
     print("\n" + "="*80)
     print("CONFIGURATION NOTES:")
-    print("  - 7-frame model with 72 features and 26 blocks")
+    print("  - n_frames is loaded from dataset_architecture.json and propagated at runtime")
     print("  - Dataset structure matches dataset_generator_v2 output")
     print("  - Lowercase category names (master, universal, space, toon)")
     print("  - Size-specific directories: patches/{size_key}/ and val/{size_key}/")
-    print("  - Validation LR files auto-found in patches/{size_key}/LR_7frames/")
+    print("  - Validation LR files auto-found in patches/{size_key}/LR_{n}frames/ (LR for n=5)")
     print("  - VGG perceptual loss enabled for quality")
     print("  - Gradient accumulation for per-size optimized effective batch sizes")
     print("="*80 + "\n")

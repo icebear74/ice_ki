@@ -4,9 +4,9 @@
     "dataset_name": "master",
     "paths": {
       "train_gt": "patches/{size_key}/GT",
-      "train_lr": "patches/{size_key}/LR_7frames",
+      "train_lr": "patches/{size_key}/LR_{n_frames}frames",
       "val_gt": "val/{size_key}/GT",
-      "val_lr": "patches/{size_key}/LR_7frames"
+      "val_lr": "patches/{size_key}/LR_{n_frames}frames"
     }
   },
   "validation": {

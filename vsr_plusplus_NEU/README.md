@@ -31,7 +31,7 @@ vsr_plusplus_NEU/
 ├── config.py.example       # ⭐ Copy to config.py and edit!
 ├── train.py                # Entry point
 ├── core/
-│   ├── model_7frame.py     # VSRBidirectional_7frames_3x
+│   ├── model_7frame.py     # VSRBidirectional_3x (configurable odd n_frames)
 │   ├── loss.py             # HybridLoss
 │   ├── dataset.py          # VSRDataset (V2 bucket + flat layout)
 │   ├── dataloader.py       # MultiSizeDataLoader + DataStrategyScheduler
@@ -139,18 +139,19 @@ Phase 2 is gated on `MIN_CROP_FILES_TRAINING = 10000` non-warmup GT images on di
 
 ## Model Architecture
 
-**Fixed**: 7 frames input, 3× upscale.  Any architecture mismatch causes early abort.
+`n_frames` is loaded from `{DATASET_ROOT}/dataset_architecture.json` (must be odd, >=3).
+The model outputs the upscaled center frame (`center = n_frames // 2`) and keeps 3× upscale.
 
-Input:  `[B, 7, 3, H_lr, W_lr]` — 7 LR frames stacked vertically by the generator
-Output: `[B, 3, H_gt, W_gt]`    — 1 HR frame (GT dimensions)
+Input:  `[B, n_frames, 3, H_lr, W_lr]` — LR frame window from generator layout
+Output: `[B, 3, H_gt, W_gt]`           — 1 HR center frame
 
 ## Troubleshooting
 
 **CHECKPOINT COMPATIBILITY ERROR**: Config differs from `training_run_locked.json`.
 → Restore the original config values or start fresh with `L`.
 
-**MODEL ARCHITECTURE MISMATCH**: `dataset_architecture.json` says `n_frames != 7`.
-→ Use the correct architecture file for your dataset.
+**MODEL ARCHITECTURE MISMATCH**: runtime/checkpoint/run-lock `n_frames` differs.
+→ Use a matching dataset/checkpoint or start a fresh run.
 
 **No GT/LR matches**: Basenames in `patches/{template}/GT/` and `LR_{n}frames/` must match.
 → Check `DATASET_ROOT` and `DEFAULT_DATASET_NAME` in `config.py`.
@@ -159,4 +160,3 @@ Output: `[B, 3, H_gt, W_gt]`    — 1 HR frame (GT dimensions)
 with `batch=1`.
 
 See `DATASET_STRUCTURE.md` for the full dataset layout and validation workflow.
-

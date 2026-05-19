@@ -45,6 +45,17 @@ class CheckpointManager:
         """Return True if step is in range for best checking (2k-8k window)"""
         step_in_cycle = step % 10000
         return 2000 <= step_in_cycle <= 8000
+
+    @staticmethod
+    def _get_model_config(model):
+        """Extract minimal model config metadata for compatibility checks."""
+        return {
+            'class_name': model.__class__.__name__,
+            'n_frames': int(getattr(model, 'n_frames', 7)),
+            'n_feats': int(getattr(model, 'n_feats', 0)),
+            'n_blocks': int(getattr(model, 'n_blocks', 0)),
+            'scale': 3,
+        }
     
     def save_checkpoint(self, model, optimizer, scheduler, step, metrics, log_file, size_tracker=None):
         """
@@ -67,6 +78,7 @@ class CheckpointManager:
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'scheduler_state_dict': scheduler,
+            'model_config': self._get_model_config(model),
             'metrics': metrics,
             'timestamp': datetime.now().isoformat()
         }
@@ -143,6 +155,7 @@ class CheckpointManager:
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'scheduler_state_dict': scheduler,
+            'model_config': self._get_model_config(model),
             'metrics': metrics,
             'timestamp': datetime.now().isoformat()
         }
