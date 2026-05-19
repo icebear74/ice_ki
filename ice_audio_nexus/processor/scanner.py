@@ -769,15 +769,6 @@ def scan_video(
     crops_root = data_root / "crops" / source.stem
     reps_root = data_root / "tracks" / source.stem
 
-    # Remove stale image data on every (re-)scan so the disk stays in sync with the DB.
-    for stale_dir in (crops_root, reps_root):
-        if stale_dir.exists():
-            shutil.rmtree(stale_dir)
-            logger.info("Removed stale scan images: %s", stale_dir)
-
-    crops_root.mkdir(parents=True, exist_ok=True)
-    reps_root.mkdir(parents=True, exist_ok=True)
-
     ensure_schema()
     conn = get_connection()
     production_id, video_id = upsert_production_and_video(
@@ -794,7 +785,13 @@ def scan_video(
 
     logger.info("Scanning video_id=%s (%s)", video_id, source)
     set_video_scan_status(conn, video_id, "scanning")
+    # clear_video_scan_data removes all stale DB rows AND deletes crops/tracks
+    # image directories for this video stem – so create the dirs AFTER the call.
     clear_video_scan_data(conn, video_id)
+
+    crops_root.mkdir(parents=True, exist_ok=True)
+    reps_root.mkdir(parents=True, exist_ok=True)
+    logger.info("Output directories ready: %s | %s", crops_root, reps_root)
 
     cap = cv2.VideoCapture(str(source))
     if not cap.isOpened():

@@ -56,6 +56,7 @@ from db.database import (  # noqa: E402
     list_voice_actors,
     list_visual_groups,
     list_visual_seeds,
+    purge_empty_visual_groups,
     rematch_tracks,
     remove_visual_seed,
     run_expansion_for_group,
@@ -142,17 +143,19 @@ async def lifespan(_: FastAPI):
     global _NVENC_AVAILABLE
     ensure_schema()
     _NVENC_AVAILABLE = _probe_nvenc()
-    FACE_DATA_DIR.mkdir(parents=True, exist_ok=True)
     logger.info("NVENC available: %s", _NVENC_AVAILABLE)
     yield
 
+
+# Ensure face-data directory exists at module-load time so the static mount
+# always succeeds (creating it in lifespan would be too late).
+FACE_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="ice_audio_nexus", version="3.0.0", lifespan=lifespan)
 
 if VIDEO_DIR.exists():
     app.mount("/videos", StaticFiles(directory=str(VIDEO_DIR)), name="videos")
-if FACE_DATA_DIR.exists():
-    app.mount("/faces", StaticFiles(directory=str(FACE_DATA_DIR)), name="faces")
+app.mount("/faces", StaticFiles(directory=str(FACE_DATA_DIR)), name="faces")
 
 
 def _resolve_video_path(path: str) -> Path:
@@ -505,15 +508,31 @@ def api_create_visual_group(payload: dict = Body(...)) -> JSONResponse:
 def api_update_visual_group(group_id: int, payload: dict = Body(...)) -> JSONResponse:
     conn = get_connection()
     try:
+        update_kwargs: dict = {
+            "label": payload.get("label"),
+            "review_state": payload.get("review_state"),
+            "expansion_state": payload.get("expansion_state"),
+            "notes": payload.get("notes"),
+        }
+
+        new_actor_name = (payload.get("new_actor_name") or "").strip()
+        if "assigned_actor_id" in payload or new_actor_name:
+            actor_id = payload.get("assigned_actor_id")
+            if actor_id is None and new_actor_name:
+                actor_id = create_actor(conn, new_actor_name, payload.get("new_actor_description", ""))
+            update_kwargs["assigned_actor_id"] = int(actor_id) if actor_id else None
+
+        new_role_name = (payload.get("new_role_name") or "").strip()
+        if "assigned_role_id" in payload or new_role_name:
+            role_id = payload.get("assigned_role_id")
+            if role_id is None and new_role_name:
+                role_id = create_role(conn, new_role_name, "")
+            update_kwargs["assigned_role_id"] = int(role_id) if role_id else None
+
         result = update_visual_group(
             conn,
             group_id,
-            label=payload.get("label"),
-            review_state=payload.get("review_state"),
-            expansion_state=payload.get("expansion_state"),
-            assigned_actor_id=int(payload["assigned_actor_id"]) if payload.get("assigned_actor_id") else None,
-            assigned_role_id=int(payload["assigned_role_id"]) if payload.get("assigned_role_id") else None,
-            notes=payload.get("notes"),
+            **update_kwargs,
         )
         return JSONResponse({"ok": True, **result})
     except ValueError as exc:
@@ -530,6 +549,17 @@ def api_remove_visual_seed(seed_id: int) -> JSONResponse:
         if not ok:
             raise HTTPException(status_code=404, detail="Seed not found")
         return JSONResponse({"ok": True, "seed_id": seed_id})
+    finally:
+        conn.close()
+
+
+@app.post("/api/visual_groups/purge_empty")
+def api_purge_empty_visual_groups() -> JSONResponse:
+    """Delete all visual_groups that have no active (non-removed) seeds."""
+    conn = get_connection()
+    try:
+        deleted = purge_empty_visual_groups(conn)
+        return JSONResponse({"ok": True, "deleted": deleted})
     finally:
         conn.close()
 

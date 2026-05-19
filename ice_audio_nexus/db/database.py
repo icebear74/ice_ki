@@ -5,8 +5,11 @@ ice_audio_nexus – visual-first Step-1 persistence layer.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
+import shutil
+from pathlib import Path
 from typing import Any
 
 import mariadb
@@ -17,6 +20,8 @@ load_dotenv()
 SEED_WORKFLOW_STAGES = {"seed_discovery", "review", "finished", "expansion"}
 SEED_REVIEW_STATES = {"pending", "confirmed", "needs_split", "ignored", "irrelevant"}
 SEED_EXPANSION_STATES = {"blocked", "ready", "running", "done"}
+_UNSET = object()
+logger = logging.getLogger(__name__)
 
 
 DDL_STATEMENTS: list[str] = [
@@ -438,11 +443,99 @@ def set_video_scan_status(conn: mariadb.Connection, video_id: int, status: str) 
     conn.commit()
 
 
+def purge_empty_visual_groups(conn: mariadb.Connection) -> int:
+    """Delete every visual_group that has no active (non-removed) seeds.
+
+    Returns the number of groups deleted.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id FROM visual_groups
+        WHERE id NOT IN (
+            SELECT DISTINCT group_id FROM visual_seeds
+            WHERE group_id IS NOT NULL AND is_removed = FALSE
+        )
+        """
+    )
+    empty_ids = [int(r[0]) for r in cur.fetchall()]
+    if empty_ids:
+        placeholders = ", ".join(["?"] * len(empty_ids))
+        cur.execute(f"DELETE FROM visual_groups WHERE id IN ({placeholders})", tuple(empty_ids))
+        conn.commit()
+        logger.info("Purged %d empty visual_groups: %s", len(empty_ids), empty_ids)
+    return len(empty_ids)
+
+
 def clear_video_scan_data(conn: mariadb.Connection, video_id: int) -> None:
     cur = conn.cursor()
+    cur.execute("SELECT video_path, metadata_json FROM videos WHERE id=?", (video_id,))
+    video_row = cur.fetchone()
+    if not video_row:
+        return
+
+    video_stem = Path(str(video_row[0])).stem
+    group_ids_to_recheck: set[int] = set()
+
+    seed_params: list[Any] = [video_id, video_id, f"crops/{video_stem}/%", f"tracks/{video_stem}/%"]
+    cur.execute(
+        """
+        SELECT DISTINCT s.id, s.group_id
+        FROM visual_seeds s
+        LEFT JOIN face_detections d ON d.id = s.detection_id
+        LEFT JOIN face_tracks t ON t.id = s.track_id
+        WHERE d.video_id = ?
+           OR t.video_id = ?
+           OR s.image_path LIKE ?
+           OR s.image_path LIKE ?
+        """,
+        tuple(seed_params),
+    )
+    seed_rows = cur.fetchall()
+    seed_ids = [int(r[0]) for r in seed_rows]
+    for _, group_id in seed_rows:
+        if group_id is not None:
+            group_ids_to_recheck.add(int(group_id))
+
+    if seed_ids:
+        placeholders = ", ".join(["?"] * len(seed_ids))
+        cur.execute(f"DELETE FROM visual_seeds WHERE id IN ({placeholders})", tuple(seed_ids))
+
     cur.execute("DELETE FROM overlay_events WHERE video_id=?", (video_id,))
     cur.execute("DELETE FROM face_detections WHERE video_id=?", (video_id,))
     cur.execute("DELETE FROM face_tracks WHERE video_id=?", (video_id,))
+
+    for group_id in sorted(group_ids_to_recheck):
+        cur.execute(
+            "SELECT COUNT(*) FROM visual_seeds WHERE group_id=? AND is_removed=FALSE",
+            (group_id,),
+        )
+        if int(cur.fetchone()[0] or 0) > 0:
+            continue
+        cur.execute("DELETE FROM visual_groups WHERE id=?", (group_id,))
+        logger.info("Deleted empty visual_group id=%s (video-linked seed cleanup)", group_id)
+
+    # Additionally purge every other visual_group that has no active seeds.
+    purge_empty_visual_groups(conn)
+
+    metadata = _from_json(video_row[1], {})
+    if isinstance(metadata, dict):
+        metadata.pop("scan", None)
+        metadata.pop("scan_stats", None)
+        metadata.pop("scan_debug", None)
+        metadata.pop("last_scan_result", None)
+        cur.execute(
+            "UPDATE videos SET metadata_json=?, last_scanned_at=NULL WHERE id=?",
+            (_to_json(metadata), video_id),
+        )
+    else:
+        cur.execute("UPDATE videos SET last_scanned_at=NULL WHERE id=?", (video_id,))
+
+    data_root = Path(os.getenv("FACE_DATA_DIR", "data/faces")).resolve()
+    for stale_dir in (data_root / "crops" / video_stem, data_root / "tracks" / video_stem):
+        if stale_dir.exists():
+            shutil.rmtree(stale_dir)
+            logger.info("Removed stale scan images during cleanup: %s", stale_dir)
     conn.commit()
 
 
@@ -1174,8 +1267,8 @@ def update_visual_group(
     label: str | None = None,
     review_state: str | None = None,
     expansion_state: str | None = None,
-    assigned_actor_id: int | None = None,
-    assigned_role_id: int | None = None,
+    assigned_actor_id: int | None | object = _UNSET,
+    assigned_role_id: int | None | object = _UNSET,
     representative_image_path: str | None = None,
     notes: str | None = None,
 ) -> dict[str, Any]:
@@ -1200,10 +1293,10 @@ def update_visual_group(
             raise ValueError(f"Invalid expansion_state: {expansion_state}")
         updates.append("expansion_state=?")
         params.append(expansion_state)
-    if assigned_actor_id is not None:
+    if assigned_actor_id is not _UNSET:
         updates.append("assigned_actor_id=?")
         params.append(assigned_actor_id)
-    if assigned_role_id is not None:
+    if assigned_role_id is not _UNSET:
         updates.append("assigned_role_id=?")
         params.append(assigned_role_id)
     if representative_image_path is not None:

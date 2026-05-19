@@ -136,6 +136,19 @@ Beim (Re-)Scan werden alte Bilddaten (`data/faces/crops/<video>` und
 `data/faces/tracks/<video>`) vor dem neuen Lauf gelöscht, damit Festplatte und DB
 synchron bleiben.
 
+Zusätzlich räumt der Video-Rescan jetzt die scanbezogenen DB-Artefakte dieses Videos
+konsequent auf:
+
+- `overlay_events` des Videos
+- `face_detections` des Videos
+- `face_tracks` des Videos
+- `visual_seeds`, die auf diesen Detections/Tracks oder deren Crop-Pfaden basieren
+- betroffene `visual_groups` werden bei leerem Seed-Bestand kontrolliert auf
+  `review_state=ignored` + `expansion_state=blocked` gesetzt (statt blind zu löschen)
+
+Globale Stammdaten (`actors`, `voice_actors`, `roles`, Persona-/Cast-Stammdaten)
+bleiben beim Rescan unberührt.
+
 ## Verifikation nach Merge (Self-Checks)
 
 1. **GPU vs CPU aktiv?**
@@ -161,9 +174,10 @@ uvicorn web_ui.api:app --host 0.0.0.0 --port 8765
 UI provides:
 
 - browse productions/videos
+- **Group-first Step-1 Review**: review state, expansion gate, actor/role assignment direkt auf `visual_groups` (inkl. Neuanlage Actor/Rolle)
+- vollständige Group-Zuordnung auch ohne bereits brauchbare Tracks
+- tracks als Support-Ebene für spätere Kontrolle/Bereinigung/Expansion
 - inspect discovered tracks and representative crops
-- capture seed-review metadata (anonymous visual group label, review state, expansion readiness)
-- assign track to existing actor or create new actor (+ optional existing/new role)
 - mark track as unknown/background/ignored
 - precomputed video overlay (bbox + label)
 - re-match button for post-assignment re-evaluation

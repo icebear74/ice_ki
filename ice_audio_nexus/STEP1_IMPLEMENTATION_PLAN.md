@@ -46,6 +46,21 @@ Stand: 2026-05-17
 - Persona-Bereich auf wiederverwendbare Entitäten erweitert (Schauspieler/Rolle/Synchronsprecher per Auswahl; Freitext nur Fallback für Neu-Anlage).
 - Stammdaten-Schnellerfassung für Schauspieler/Synchronsprecher/Rollen ergänzt.
 - Rollen-/Besetzungszuordnung inkl. Startregel „ab Staffel X Folge Y“ erfassbar gemacht.
+- Group-Panel ist jetzt die primäre Step-1-Zuordnung:
+  - `review_state` (`pending|confirmed|needs_split|ignored|irrelevant`)
+  - `expansion_state` (`blocked|ready|running|done`)
+  - Actor/Role-Zuordnung direkt auf `visual_groups` (inkl. Neu-Anlage von Actor/Rolle)
+  - Zuordnung funktioniert unabhängig davon, ob schon sinnvolle Tracks existieren
+- Track-Panel bleibt als Support-/Bereinigungsebene erhalten (nicht als Primäridentität).
+
+### Rescan (einzelnes Video)
+- `clear_video_scan_data(video_id)` räumt jetzt video-spezifisch auf:
+  - `overlay_events`, `face_detections`, `face_tracks`
+  - `visual_seeds`, die aus Detections/Tracks/Crop-Pfaden dieses Videos stammen
+  - Crop-/Track-Bildordner (`data/faces/crops/<video>`, `data/faces/tracks/<video>`)
+- Gruppen mit Seeds aus mehreren Videos bleiben erhalten; entfernt werden nur Seeds des betroffenen Videos.
+- Wird eine Gruppe dadurch leer, wird sie kontrolliert auf `ignored + blocked` gesetzt und markiert (`[auto-empty-after-video-rescan]`) statt blind gelöscht.
+- Globale/manuelle Stammdaten (`actors`, `voice_actors`, `roles`, Persona-/Cast-Tabellen) bleiben unberührt.
 
 ---
 
@@ -75,6 +90,7 @@ Stand: 2026-05-17
 - [x] 4. UI-Strukturen für Schauspieler, Synchronsprecher, Produktionen und Rollen bereitstellen
 - [x] 5. Rollen-/Besetzungszuordnung in der UI erfassbar machen
 - [x] 6. Ignore / Irrelevant sauber in UI und API durchziehen
+- [x] 7. Group-first Zuordnung (Review + Actor/Rolle + Expansion-Gate) unabhängig von Tracks
 
 ### Änderungsplan C – Datenmodell
 - [x] 1. Prüfen, welche bestehenden Tabellen wiederverwendet werden können
@@ -88,3 +104,12 @@ Stand: 2026-05-17
 - [x] 3. Dokumentieren, was in dieser PR korrigiert wurde
 - [x] 4. Offen dokumentieren, was noch offen bleibt
 - [x] 5. README/Doku ergänzen, falls nötig
+
+### Verbindliche Abnahme (dieser Stand)
+- [x] 1. `visual_groups` sind die primäre manuelle Zuordnungseinheit in Step 1
+- [x] 2. Gruppen können ohne vorab brauchbare Tracks reviewt/zugeordnet werden
+- [x] 3. Tracks sind als Folge-/Support-Ebene sichtbar, nicht als Primäridentität
+- [x] 4. Expansion arbeitet weiter mit bestätigten Groups
+- [x] 5. Rescan entfernt scanbezogene Alt-Daten pro Video sauber
+- [x] 6. Manuell gepflegte globale Stammdaten bleiben erhalten
+- [x] 7. Diese Logik ist in Plan/README dokumentiert
