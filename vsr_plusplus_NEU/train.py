@@ -304,15 +304,16 @@ def main():
     n_feats = config['N_FEATS']
     n_blocks = config['N_BLOCKS']
     
-    # Create model - USING 7-FRAME MODEL (as intended by dataset_generator_v2)
-    print("Creating 7-frame model...")
+    # Create model
+    print(f"Creating {arch_n_frames}-frame model...")
     device = select_gpu()
     use_checkpointing = config.get('USE_CHECKPOINTING', True)
     use_amp = config.get('USE_AMP', False)
     model = VSRBidirectional_7frames_3x(
-        n_feats=n_feats, 
+        n_feats=n_feats,
         n_blocks=n_blocks,
-        use_checkpointing=use_checkpointing
+        use_checkpointing=use_checkpointing,
+        n_frames=arch_n_frames,
     ).to(device)
 
     # Verify FP32: ensure model parameters are in the expected dtype.
@@ -468,21 +469,20 @@ def main():
         arch_size_keys   = []
 
     # ------------------------------------------------------------------
-    # Model constraint validation (early abort on architecture mismatch).
+    # Model constraint validation (early abort on unsupported n_frames).
     #
-    # The training model is fixed to 7 frames and 3× scale.  If the
-    # architecture file says something different, training must not start
-    # so checkpoints remain compatible.
+    # The model supports any odd frame count ≥ 3 (e.g. 3, 5, 7, 9).
+    # Abort early if the architecture file specifies an invalid value so
+    # that checkpoints remain compatible.
     # ------------------------------------------------------------------
-    FIXED_N_FRAMES = 7
-    FIXED_SCALE    = 3
+    FIXED_SCALE = 3
 
-    if arch_n_frames != FIXED_N_FRAMES:
+    if arch_n_frames < 3 or arch_n_frames % 2 == 0:
         print(f"\n{C_RED}{'='*72}{C_RESET}")
-        print(f"{C_RED}❌  MODEL ARCHITECTURE MISMATCH{C_RESET}")
+        print(f"{C_RED}❌  INVALID N_FRAMES{C_RESET}")
         print(f"{C_RED}    dataset_architecture.json says n_frames={arch_n_frames}{C_RESET}")
-        print(f"{C_RED}    but the training model is fixed to n_frames={FIXED_N_FRAMES}.{C_RESET}")
-        print(f"{C_RED}    Training aborted — update the model or the architecture file.{C_RESET}")
+        print(f"{C_RED}    Supported values: odd numbers ≥ 3 (e.g. 3, 5, 7, 9).{C_RESET}")
+        print(f"{C_RED}    Training aborted — update the architecture file.{C_RESET}")
         print(f"{C_RED}{'='*72}{C_RESET}\n")
         return
 
@@ -906,6 +906,7 @@ def main():
             'N_FEATS':           config.get('N_FEATS', 72),
             'N_BLOCKS':          config.get('N_BLOCKS', 24),
             'USE_CHECKPOINTING': config.get('USE_CHECKPOINTING', False),
+            'n_frames':          arch_n_frames,
             'L1_WEIGHT':         config.get('L1_WEIGHT', 0.60),
             'MS_WEIGHT':         config.get('MS_WEIGHT', 0.20),
             'GRAD_WEIGHT':       config.get('GRAD_WEIGHT', 0.20),

@@ -319,15 +319,25 @@ class VSRComparator:
         try:
             from vsr_plusplus_NEU.core.model_7frame import VSRBidirectional_7frames_3x
 
-            # Model uses 24 blocks (12 backward + 12 forward)
+            # Model architecture — read from config.py if available, else use defaults
             n_blocks = 24
-            n_feats = 72
+            n_feats  = 72
+            n_frames = 7
+            try:
+                import config as _cfg
+                _c = _cfg.get_config()
+                n_feats  = _c.get("N_FEATS",  n_feats)
+                n_blocks = _c.get("N_BLOCKS", n_blocks)
+                n_frames = _c.get("n_frames", n_frames)
+            except Exception:
+                pass
 
             # Let cuDNN auto-select the fastest conv kernels for the fixed input size
             torch.backends.cudnn.benchmark = True
 
-            print(f"  Loading VSR model (n_blocks={n_blocks}, n_feats={n_feats})...")
-            self.model = VSRBidirectional_7frames_3x(n_feats=n_feats, n_blocks=n_blocks)
+            print(f"  Loading VSR model (n_blocks={n_blocks}, n_feats={n_feats}, n_frames={n_frames})...")
+            self.model = VSRBidirectional_7frames_3x(n_feats=n_feats, n_blocks=n_blocks,
+                                                     n_frames=n_frames)
 
             # Load checkpoint to CPU first — avoids doubling GPU peak memory during load
             print(f"  Loading checkpoint: {checkpoint_path}")

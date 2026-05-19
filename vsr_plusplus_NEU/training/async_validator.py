@@ -495,7 +495,9 @@ def run_async_validator(checkpoint_dir, data_root, dataset_name, log_dir, gpu_in
         try:
             n_feats  = req_config.get('N_FEATS',  72)
             n_blocks = req_config.get('N_BLOCKS', 28)
-            model = VSRBidirectional_7frames_3x(n_feats=n_feats, n_blocks=n_blocks)
+            n_frames = req_config.get('n_frames', 7)
+            model = VSRBidirectional_7frames_3x(n_feats=n_feats, n_blocks=n_blocks,
+                                                n_frames=n_frames)
 
             # Activate gradient checkpointing if training used it (saves VRAM)
             if req_config.get('USE_CHECKPOINTING', False) and hasattr(model, 'enable_checkpointing'):

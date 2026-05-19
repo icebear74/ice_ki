@@ -1,5 +1,8 @@
 """
-7-Frame Bidirectional VSR Model — P4-Optimized Architecture v2
+Bidirectional VSR Model — P4-Optimized Architecture v2
+
+Supports any odd frame count N ≥ 3 (e.g. 3, 5, 7, 9).
+Default is N=7 for backward compatibility with existing checkpoints.
 
 Improvements over v1:
     1. AttentionGate on ResidualBlock skip connections:
@@ -281,40 +284,42 @@ class FusionBlock(nn.Module):
 
 class VSRBidirectional_7frames_3x(nn.Module):
     """
-    7-Frame Bidirectional VSR Model — P4-Optimized Architecture v2
+    Bidirectional VSR Model — P4-Optimized Architecture v2
 
-    Input:  [B, 7, 3, H, W]   (7 LR frames, F1..F7)
-    Output: [B, 3, H*3, W*3]  (3x upscaled center frame F4)
+    Supports any odd frame count N ≥ 3 (e.g. 3, 5, 7, 9).
+    Default is N=7 for backward compatibility with existing checkpoints.
 
-    ── Which frames does each component touch? ───────────────────────────────
+    Input:  [B, N, 3, H, W]   (N LR frames; center frame = N//2)
+    Output: [B, 3, H*3, W*3]  (3x upscaled center frame)
 
-        F1   F2   F3  [F4]  F5   F6   F7
-        │    │    │    │    │    │    │
-        └────┴────┴───►│◄───┴────┴────┘
-                  feat_extract         ← ALL 7 frames (single shared Conv2d)
+    ── Data flow (example: N=7, center=3) ───────────────────────────────────
 
-        F4 is center (starting point, never passed through fuse/align directly)
+        [N frames] → feat_extract → [N feature maps]
 
-        Backward direction — processes F5, F6, F7 (3 frames AFTER center):
-            F5 → TemporalAlignBlock + GatedFusionBlock + trunk
-            F6 → TemporalAlignBlock + GatedFusionBlock + trunk
-            F7 → TemporalAlignBlock + GatedFusionBlock + trunk
+        center = N // 2                        (e.g. 3 for N=7)
 
-        Forward direction — processes F3, F2, F1 (3 frames BEFORE center):
-            F3 → TemporalAlignBlock + GatedFusionBlock + trunk
-            F2 → TemporalAlignBlock + GatedFusionBlock + trunk
-            F1 → TemporalAlignBlock + GatedFusionBlock + trunk
+        Backward: center → center+1 → … → N-1
+            for each i in range(center+1, N):
+                aligned_i = backward_align(back_prop, feats[:, i])   ← TemporalAlign
+                fused = backward_fuse(cat([back_prop, aligned_i]))    ← GatedFusion
+                back_prop = trunk(fused)                              ← AttentionGate inside
 
-        Final fusion — combines bidirectional results:
-            GatedFusionBlock(cat[back_prop, forw_prop])
+        Forward: center → center-1 → … → 0
+            for each i in range(center-1, -1, -1):
+                aligned_i = forward_align(forw_prop, feats[:, i])    ← TemporalAlign
+                fused = forward_fuse(cat([forw_prop, aligned_i]))     ← GatedFusion
+                forw_prop = trunk(fused)                              ← AttentionGate inside
+
+        final = fusion(cat([back_prop, forw_prop]))                   ← GatedFusion
+        output = upsample(final) + bilinear_base(x[:, center])
 
     ── Component scope summary ───────────────────────────────────────────────
 
-        feat_extract       : ALL 7 frames (F1–F7)
-        TemporalAlignBlock : 6 neighbor frames (F5,F6,F7 backward + F3,F2,F1 forward)
-        GatedFusionBlock   : 6 neighbor frames + 1 final fusion = 7 fusion steps total
-        AttentionGate      : inside every ResidualBlock (trunk), fired 6×n_blocks times
-        Center frame F4    : starting point only — features never go through fuse/align
+        feat_extract       : ALL N frames
+        TemporalAlignBlock : N-1 neighbor frames
+        GatedFusionBlock   : N-1 neighbors + 1 final fusion = N fusion steps total
+        AttentionGate      : inside every ResidualBlock (trunk)
+        Center frame       : starting point only — never goes through fuse/align
 
     ── Improvements over v1 ──────────────────────────────────────────────────
 
@@ -331,38 +336,23 @@ class VSRBidirectional_7frames_3x(nn.Module):
        Filters the skip connection based on what the block processed.
        Prevents film grain and motion blur from being copied through residual paths.
 
-    ── Data flow ─────────────────────────────────────────────────────────────
-
-        [7 frames] → feat_extract → [7 feature maps]
-
-        back_prop = forward_prop = center_feat = feats[:, 3]
-
-        Backward: F4 → F5 → F6 → F7
-            for each neighbor i in [4, 5, 6]:
-                aligned_i = backward_align(back_prop, feats[:, i])   ← TemporalAlign
-                fused = backward_fuse(cat([back_prop, aligned_i]))    ← GatedFusion
-                back_prop = trunk(fused)                              ← AttentionGate inside
-
-        Forward: F4 → F3 → F2 → F1
-            for each neighbor i in [2, 1, 0]:
-                aligned_i = forward_align(forw_prop, feats[:, i])    ← TemporalAlign
-                fused = forward_fuse(cat([forw_prop, aligned_i]))     ← GatedFusion
-                forw_prop = trunk(fused)                              ← AttentionGate inside
-
-        final = fusion(cat([back_prop, forw_prop]))                   ← GatedFusion
-        output = upsample(final) + bilinear_base
-
-    ── VRAM estimate vs v1 (n_feats=72, n_blocks=26) ────────────────────────
+    ── VRAM estimate (n_feats=72, n_blocks=26) ──────────────────────────────
         TemporalAlignBlocks (2x): ~20 MB
         AttentionGates (26x):     ~8 MB
         GatedFusionBlock extra:   ~2 MB
         Total overhead:           ~30 MB  (P4-safe, plenty of headroom)
     """
 
-    def __init__(self, n_feats=72, n_blocks=26, use_checkpointing=False):
+    def __init__(self, n_feats=72, n_blocks=26, use_checkpointing=False, n_frames=7):
+        if n_frames < 3 or n_frames % 2 == 0:
+            raise ValueError(
+                f"n_frames must be an odd number ≥ 3, got {n_frames}. "
+                "Supported values: 3, 5, 7, 9, …"
+            )
         super().__init__()
-        self.n_feats = n_feats
+        self.n_feats  = n_feats
         self.n_blocks = n_blocks
+        self.n_frames = n_frames
 
         half_blocks = max(1, n_blocks // 2)
 
@@ -402,23 +392,24 @@ class VSRBidirectional_7frames_3x(nn.Module):
         Forward pass.
 
         Args:
-            x: Input tensor [B, 7, 3, H, W]
+            x: Input tensor [B, N, 3, H, W]  where N = self.n_frames
 
         Returns:
             Output tensor [B, 3, H*3, W*3]
         """
         B, T, C, H, W = x.size()
+        center = self.n_frames // 2  # e.g. 3 for N=7, 1 for N=3, 2 for N=5
 
-        # Extract features from all 7 frames
+        # Extract features from all N frames
         feats = self.feat_extract(x.view(-1, C, H, W))
         feats = feats.view(B, T, self.n_feats, H, W)
 
-        # Initialize propagation from center frame (index 3)
-        center_feat = feats[:, 3].clone()
+        # Initialize propagation from center frame
+        center_feat = feats[:, center].clone()
 
-        # ── Backward propagation: center → F5 → F6 → F7 ──────────────────────
+        # ── Backward propagation: center → center+1 → … → N-1 ───────────────
         back_prop = center_feat
-        for i in [4, 5, 6]:
+        for i in range(center + 1, self.n_frames):
             # STEP 1: Align neighbor frame to propagated features (motion compensation)
             aligned = self.backward_align(back_prop, feats[:, i])
             # STEP 2: Gated fusion of propagated + aligned neighbor
@@ -428,9 +419,9 @@ class VSRBidirectional_7frames_3x(nn.Module):
                 fused = block(fused)
             back_prop = fused
 
-        # ── Forward propagation: center → F3 → F2 → F1 ───────────────────────
+        # ── Forward propagation: center → center-1 → … → 0 ──────────────────
         forw_prop = center_feat
-        for i in [2, 1, 0]:
+        for i in range(center - 1, -1, -1):
             # STEP 1: Align neighbor frame to propagated features
             aligned = self.forward_align(forw_prop, feats[:, i])
             # STEP 2: Gated fusion of propagated + aligned neighbor
@@ -444,7 +435,7 @@ class VSRBidirectional_7frames_3x(nn.Module):
         fused = self.fusion(torch.cat([back_prop, forw_prop], dim=1))
 
         # ── Upsample with bilinear residual connection ────────────────────────
-        base      = F.interpolate(x[:, 3], scale_factor=3, mode='bilinear', align_corners=False)
+        base      = F.interpolate(x[:, center], scale_factor=3, mode='bilinear', align_corners=False)
         upsampled = self.upsample(fused)
 
         return upsampled + base

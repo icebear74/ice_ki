@@ -411,16 +411,13 @@ def create_model(n_frames: int, n_feats: int, n_blocks: int,
     """
     Instantiate the appropriate VSR model on CUDA.
 
-    For N=7 the production `VSRBidirectional_7frames_3x` is used directly.
-    For N=9 and N=11 the generalised `VSRBidirectional_Nframes_3x` is used.
+    The production model `VSRBidirectional_7frames_3x` now accepts ``n_frames``
+    as a parameter and supports any odd frame count ≥ 3.  It is used for all
+    frame counts, making `VSRBidirectional_Nframes_3x` redundant but kept for
+    backward compatibility.
     """
-    if n_frames == 7:
-        # Use the production model for N=7 to validate identical behaviour
-        model = VSRBidirectional_7frames_3x(n_feats=n_feats, n_blocks=n_blocks)
-    else:
-        model = VSRBidirectional_Nframes_3x(n_frames=n_frames,
-                                             n_feats=n_feats,
-                                             n_blocks=n_blocks)
+    model = VSRBidirectional_7frames_3x(n_feats=n_feats, n_blocks=n_blocks,
+                                         n_frames=n_frames)
     model = model.cuda()
     if precision == 'float16':
         model = model.half()

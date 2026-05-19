@@ -73,18 +73,20 @@ def load_model(checkpoint_path: str, device: str):
     ckpt = torch.load(str(ckpt_path), map_location=device, weights_only=False)
 
     # Konfig — aus lokalem config.py falls vorhanden, sonst Defaults
-    n_feats, n_blocks = 72, 28
+    n_feats, n_blocks, n_frames = 72, 28, 7
     try:
         import config as cfg
         c = cfg.get_config()
-        n_feats  = c.get("N_FEATS",  n_feats)
-        n_blocks = c.get("N_BLOCKS", n_blocks)
-        print(f"   ✅ config.py: N_FEATS={n_feats}, N_BLOCKS={n_blocks}")
+        n_feats  = c.get("N_FEATS",   n_feats)
+        n_blocks = c.get("N_BLOCKS",  n_blocks)
+        n_frames = c.get("n_frames",  n_frames)
+        print(f"   ✅ config.py: N_FEATS={n_feats}, N_BLOCKS={n_blocks}, n_frames={n_frames}")
     except Exception:
-        print(f"   ℹ️  config.py nicht gefunden — Defaults: N_FEATS={n_feats}, N_BLOCKS={n_blocks}")
+        print(f"   ℹ️  config.py nicht gefunden — Defaults: N_FEATS={n_feats}, N_BLOCKS={n_blocks}, n_frames={n_frames}")
 
     from vsr_plusplus_NEU.core.model_7frame import VSRBidirectional_7frames_3x
-    model = VSRBidirectional_7frames_3x(n_feats=n_feats, n_blocks=n_blocks).to(device)
+    model = VSRBidirectional_7frames_3x(n_feats=n_feats, n_blocks=n_blocks,
+                                        n_frames=n_frames).to(device)
 
     # state_dict kann direkt oder in 'model_state_dict' liegen
     state = ckpt.get("model_state_dict", ckpt)
@@ -92,13 +94,14 @@ def load_model(checkpoint_path: str, device: str):
     model.eval()
 
     info = {
-        "step":    ckpt.get("step",  "?"),
-        "epoch":   ckpt.get("epoch", "?"),
-        "n_feats": n_feats,
+        "step":     ckpt.get("step",  "?"),
+        "epoch":    ckpt.get("epoch", "?"),
+        "n_feats":  n_feats,
         "n_blocks": n_blocks,
+        "n_frames": n_frames,
     }
     print(f"✅ Modell geladen — Step {info['step']}, Epoch {info['epoch']}, "
-          f"N_FEATS={n_feats}, N_BLOCKS={n_blocks}")
+          f"N_FEATS={n_feats}, N_BLOCKS={n_blocks}, n_frames={n_frames}")
     return model, info
 
 
