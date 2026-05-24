@@ -141,6 +141,26 @@ def is_tensorboard_running(port=6006):
         return False
 
 
+def _find_tensorboard_exe():
+    """
+    Resolve the TensorBoard executable that belongs to the current Python
+    environment so that the correct venv's TensorBoard is always started.
+
+    Resolution order:
+    1. <current sys.executable's bin dir>/tensorboard   (venv-local binary)
+    2. ``shutil.which('tensorboard')`` — PATH fallback
+    3. Plain ``'tensorboard'`` as last resort (legacy behaviour)
+    """
+    import shutil
+    venv_bin = os.path.join(os.path.dirname(sys.executable), 'tensorboard')
+    if os.path.isfile(venv_bin) and os.access(venv_bin, os.X_OK):
+        return venv_bin
+    which_result = shutil.which('tensorboard')
+    if which_result:
+        return which_result
+    return 'tensorboard'
+
+
 def start_tensorboard(log_dir, port=6006):
     """Start TensorBoard subprocess"""
     try:
@@ -148,9 +168,15 @@ def start_tensorboard(log_dir, port=6006):
         subprocess.run(['pkill', '-f', 'tensorboard'], stderr=subprocess.DEVNULL)
         time.sleep(1)
         
+        # Resolve the tensorboard binary from the active venv so the correct
+        # installation is used even when multiple Python environments exist on
+        # the same machine.
+        tensorboard_exe = _find_tensorboard_exe()
+        print(f"{C_CYAN}  TensorBoard binary: {tensorboard_exe}{C_RESET}")
+
         # Start new tensorboard - point to active_run subdirectory
         active_run_dir = os.path.join(log_dir, "active_run")
-        cmd = ['tensorboard', f'--logdir={active_run_dir}', f'--port={port}', '--bind_all', '--reload_interval=5']
+        cmd = [tensorboard_exe, f'--logdir={active_run_dir}', f'--port={port}', '--bind_all', '--reload_interval=5']
         subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         
         # Wait for it to start (max 5 seconds)
