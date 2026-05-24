@@ -1926,7 +1926,7 @@ class DatasetGeneratorV2UHD:
         Args:
             video_path: Path to video
             start_time: Start timestamp
-            n_frames: Number of frames (7 or 5)
+            n_frames: Number of frames (odd integer, >=3)
             is_hdr: Override HDR detection; ``None`` → auto-detect.
 
         Returns:
@@ -2453,7 +2453,7 @@ class DatasetGeneratorV2UHD:
             video_path: Path to video file
             duration: Video duration in seconds
             format_distribution: Dict of {category: {format_name: target_count}}
-            n_frames: Number of frames to extract (5 or 7)
+            n_frames: Number of frames to extract (odd integer, >=3)
             video_name: Video name for logging
             fps: Video frame rate (default 25.0)
             is_hdr: Whether the source video uses HDR transfer (PQ/HLG).

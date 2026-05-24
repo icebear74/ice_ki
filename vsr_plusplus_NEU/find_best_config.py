@@ -27,7 +27,7 @@ from datetime import datetime
 # Add module to path
 sys.path.insert(0, os.path.dirname(__file__))
 
-from core.model_7frame import VSRBidirectional_7frames_3x
+from core.model_7frame import VSRBidirectional_3x
 from core.loss import HybridLoss
 
 # Setup dual logging (screen + file)
@@ -57,9 +57,9 @@ class DualLogger:
     def close(self):
         self.log.close()
 
-# Test parameters - 7-FRAME ONLY
+# Test parameters
 TEST_CONFIGS = {
-    'frames': [7],  # Only 7-frame model
+    'frames': [5, 7, 9],
     'batch_size': [1, 2],
     'n_blocks': [24, 26, 28],
     'n_feats': [64, 72, 80],
@@ -97,12 +97,11 @@ def get_lr_size(gt_size):
 
 def create_model(frames, n_feats, n_blocks, precision):
     """Create model instance."""
-    if frames == 5:
-        model = VSRBidirectional_5frames_3x(n_feats=n_feats, n_blocks=n_blocks)
-    elif frames == 7:
-        model = VSRBidirectional_7frames_3x(n_feats=n_feats, n_blocks=n_blocks)
-    else:
-        raise ValueError(f"Invalid frames: {frames}")
+    frames = int(frames)
+    if frames < 3 or frames % 2 == 0:
+        raise ValueError(f"Invalid frames: {frames} (must be odd and >= 3)")
+
+    model = VSRBidirectional_3x(n_frames=frames, n_feats=n_feats, n_blocks=n_blocks)
     
     model = model.cuda()
     
@@ -117,7 +116,7 @@ def create_dummy_batch(frames, batch_size, lr_size, gt_size, precision):
     Create dummy input/target tensors matching real training format.
     
     Args:
-        frames: Number of frames (only 7 supported)
+        frames: Number of frames (odd integer, >=3)
         batch_size: Batch size
         lr_size: LR frame size (H, W)
         gt_size: GT frame size (H*3, W*3)

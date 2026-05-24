@@ -27,7 +27,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # Add current directory to path for local config.py
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from vsr_plusplus_NEU.core.model_7frame import VSRBidirectional_7frames_3x
+from vsr_plusplus_NEU.core.model_7frame import VSRBidirectional_3x
 from vsr_plusplus_NEU.core.loss import HybridLoss
 from vsr_plusplus_NEU.core.dataset import VSRDataset
 from vsr_plusplus_NEU.training.trainer import VSRTrainer
@@ -141,6 +141,26 @@ def is_tensorboard_running(port=6006):
         return False
 
 
+def _find_tensorboard_exe():
+    """
+    Resolve the TensorBoard executable that belongs to the current Python
+    environment so that the correct venv's TensorBoard is always started.
+
+    Resolution order:
+    1. <current sys.executable's bin dir>/tensorboard   (venv-local binary)
+    2. ``shutil.which('tensorboard')`` — PATH fallback
+    3. Plain ``'tensorboard'`` as last resort (legacy behaviour)
+    """
+    import shutil
+    venv_bin = os.path.join(os.path.dirname(sys.executable), 'tensorboard')
+    if os.path.isfile(venv_bin) and os.access(venv_bin, os.X_OK):
+        return venv_bin
+    which_result = shutil.which('tensorboard')
+    if which_result:
+        return which_result
+    return 'tensorboard'
+
+
 def start_tensorboard(log_dir, port=6006):
     """Start TensorBoard subprocess"""
     try:
@@ -148,9 +168,15 @@ def start_tensorboard(log_dir, port=6006):
         subprocess.run(['pkill', '-f', 'tensorboard'], stderr=subprocess.DEVNULL)
         time.sleep(1)
         
+        # Resolve the tensorboard binary from the active venv so the correct
+        # installation is used even when multiple Python environments exist on
+        # the same machine.
+        tensorboard_exe = _find_tensorboard_exe()
+        print(f"{C_CYAN}  TensorBoard binary: {tensorboard_exe}{C_RESET}")
+
         # Start new tensorboard - point to active_run subdirectory
         active_run_dir = os.path.join(log_dir, "active_run")
-        cmd = ['tensorboard', f'--logdir={active_run_dir}', f'--port={port}', '--bind_all', '--reload_interval=5']
+        cmd = [tensorboard_exe, f'--logdir={active_run_dir}', f'--port={port}', '--bind_all', '--reload_interval=5']
         subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         
         # Wait for it to start (max 5 seconds)
@@ -303,14 +329,66 @@ def main():
     # Extract parameters from config
     n_feats = config['N_FEATS']
     n_blocks = config['N_BLOCKS']
-    
-    # Create model - USING 7-FRAME MODEL (as intended by dataset_generator_v2)
-    print("Creating 7-frame model...")
+
+    # All paths come from config.py
+    data_root = DATASET_ROOT
+
+    # ------------------------------------------------------------------
+    # dataset_architecture.json is the single source of truth for n_frames
+    # and dataset layout (including LR directory naming).
+    # ------------------------------------------------------------------
+    from vsr_plusplus_NEU.utils.dataset_architecture import load_dataset_architecture
+    arch = load_dataset_architecture(data_root)
+    if arch is None:
+        print(f"\n{C_RED}{'='*72}{C_RESET}")
+        print(f"{C_RED}❌  DATASET ARCHITECTURE FILE REQUIRED{C_RESET}")
+        print(f"{C_RED}    Missing: {os.path.join(data_root, 'dataset_architecture.json')}{C_RESET}")
+        print(f"{C_RED}    Training aborted — generate/update dataset_architecture.json first.{C_RESET}")
+        print(f"{C_RED}{'='*72}{C_RESET}\n")
+        return
+
+    print(f"{C_GREEN}✓ Loaded dataset_architecture.json: {arch}{C_RESET}")
+    arch_n_frames = arch.n_frames
+    if arch_n_frames < 3 or arch_n_frames % 2 == 0:
+        print(f"\n{C_RED}{'='*72}{C_RESET}")
+        print(f"{C_RED}❌  INVALID DATASET ARCHITECTURE{C_RESET}")
+        print(f"{C_RED}    n_frames must be an odd integer >= 3, got {arch_n_frames}{C_RESET}")
+        print(f"{C_RED}{'='*72}{C_RESET}\n")
+        return
+    arch_img_ext = arch.img_ext
+    arch_lr_dir_name = arch.get_lr_dir_name()
+    arch_size_keys = arch.get_templates_for_category(dataset_name) or []
+    if arch_size_keys:
+        print(f"{C_CYAN}  Templates for category '{dataset_name}': {', '.join(arch_size_keys)}{C_RESET}")
+    else:
+        print(f"{C_YELLOW}  ⚠ No templates found for category '{dataset_name}' in architecture file{C_RESET}")
+
+    # Keep scale lock strict against architecture metadata.
+    FIXED_SCALE = 3
+    arch_scales = {
+        int(entry.get('scale', FIXED_SCALE))
+        for entry in (arch.get('format_templates', {}) or {}).values()
+        if isinstance(entry, dict)
+    }
+    if arch_scales and (len(arch_scales) != 1 or FIXED_SCALE not in arch_scales):
+        print(f"\n{C_RED}{'='*72}{C_RESET}")
+        print(f"{C_RED}❌  MODEL SCALE MISMATCH{C_RESET}")
+        print(f"{C_RED}    dataset_architecture.json scales={sorted(arch_scales)}{C_RESET}")
+        print(f"{C_RED}    but this model supports scale={FIXED_SCALE} only.{C_RESET}")
+        print(f"{C_RED}{'='*72}{C_RESET}\n")
+        return
+
+    # Make runtime n_frames explicit for downstream utilities (async validator, trainer).
+    config['RUNTIME_N_FRAMES'] = arch_n_frames
+
+    # Create model
+    print(f"Creating model for n_frames={arch_n_frames}...")
     device = select_gpu()
     use_checkpointing = config.get('USE_CHECKPOINTING', True)
     use_amp = config.get('USE_AMP', False)
-    model = VSRBidirectional_7frames_3x(
-        n_feats=n_feats, 
+    model = VSRBidirectional_3x(
+        n_frames=arch_n_frames,
+        n_feats=n_feats,
         n_blocks=n_blocks,
         use_checkpointing=use_checkpointing
     ).to(device)
@@ -439,56 +517,7 @@ def main():
     # Create datasets
     print("Loading datasets...")
 
-    # All paths come from config.py
-    data_root    = DATASET_ROOT
-
-    # ------------------------------------------------------------------
-    # Load dataset_architecture.json to discover format keys, n_frames,
-    # and output image format.  Falls back gracefully when not present.
-    # ------------------------------------------------------------------
-    from vsr_plusplus_NEU.utils.dataset_architecture import load_dataset_architecture
-    arch = load_dataset_architecture(data_root)
-    if arch is not None:
-        print(f"{C_GREEN}✓ Loaded dataset_architecture.json: {arch}{C_RESET}")
-        arch_n_frames = arch.n_frames
-        arch_img_ext  = arch.img_ext          # e.g. ".bmp" or ".png"
-        arch_lr_dir_name = arch.get_lr_dir_name()   # e.g. "LR_7frames"
-        # Size keys from the architecture JSON take priority over KNOWN_SIZE_KEYS
-        arch_size_keys = arch.get_templates_for_category(dataset_name)
-        if arch_size_keys:
-            print(f"{C_CYAN}  Templates for category '{dataset_name}': {', '.join(arch_size_keys)}{C_RESET}")
-        else:
-            print(f"{C_YELLOW}  ⚠ No templates found for category '{dataset_name}' in architecture file{C_RESET}")
-            arch_size_keys = []
-    else:
-        print(f"{C_YELLOW}⚠ dataset_architecture.json not found at {data_root} — using defaults{C_RESET}")
-        arch_n_frames    = 7
-        arch_img_ext     = ".png"             # legacy default
-        arch_lr_dir_name = "LR_7frames"
-        arch_size_keys   = []
-
-    # ------------------------------------------------------------------
-    # Model constraint validation (early abort on architecture mismatch).
-    #
-    # The training model is fixed to 7 frames and 3× scale.  If the
-    # architecture file says something different, training must not start
-    # so checkpoints remain compatible.
-    # ------------------------------------------------------------------
-    FIXED_N_FRAMES = 7
-    FIXED_SCALE    = 3
-
-    if arch_n_frames != FIXED_N_FRAMES:
-        print(f"\n{C_RED}{'='*72}{C_RESET}")
-        print(f"{C_RED}❌  MODEL ARCHITECTURE MISMATCH{C_RESET}")
-        print(f"{C_RED}    dataset_architecture.json says n_frames={arch_n_frames}{C_RESET}")
-        print(f"{C_RED}    but the training model is fixed to n_frames={FIXED_N_FRAMES}.{C_RESET}")
-        print(f"{C_RED}    Training aborted — update the model or the architecture file.{C_RESET}")
-        print(f"{C_RED}{'='*72}{C_RESET}\n")
-        return
-
-    # scale is not stored in the architecture file but is implicit in the LR
-    # directory dimensions; we simply document the expectation here.
-    print(f"{C_GREEN}✅ Architecture validated: n_frames={arch_n_frames}, scale={FIXED_SCALE} (fixed){C_RESET}")
+    print(f"{C_GREEN}✅ Architecture validated: n_frames={arch_n_frames}, scale={FIXED_SCALE}{C_RESET}")
 
     train_gt_pattern = 'patches/{size_key}/GT'
     train_lr_pattern = f'patches/{{size_key}}/{arch_lr_dir_name}'
@@ -813,6 +842,17 @@ def main():
         # Use weights_only=False for compatibility with PyTorch 2.6+
         # Our checkpoints contain custom classes (AdaptiveLRScheduler) which are safe to load
         checkpoint = torch.load(selected_checkpoint_path, map_location=device, weights_only=False)
+
+        ckpt_cfg = checkpoint.get('model_config', {}) if isinstance(checkpoint, dict) else {}
+        ckpt_n_frames = ckpt_cfg.get('n_frames')
+        if ckpt_n_frames is not None and int(ckpt_n_frames) != int(arch_n_frames):
+            print(f"\n{C_RED}{'='*72}{C_RESET}")
+            print(f"{C_RED}❌  CHECKPOINT FRAME COUNT MISMATCH{C_RESET}")
+            print(f"{C_RED}    checkpoint n_frames={ckpt_n_frames}{C_RESET}")
+            print(f"{C_RED}    runtime n_frames={arch_n_frames} (dataset_architecture.json){C_RESET}")
+            print(f"{C_RED}    Aborting resume to protect checkpoint compatibility.{C_RESET}")
+            print(f"{C_RED}{'='*72}{C_RESET}\n")
+            return
         
         model.load_state_dict(checkpoint['model_state_dict'])
         
@@ -905,6 +945,7 @@ def main():
         config_snapshot = {
             'N_FEATS':           config.get('N_FEATS', 72),
             'N_BLOCKS':          config.get('N_BLOCKS', 24),
+            'N_FRAMES':          arch_n_frames,
             'USE_CHECKPOINTING': config.get('USE_CHECKPOINTING', False),
             'L1_WEIGHT':         config.get('L1_WEIGHT', 0.60),
             'MS_WEIGHT':         config.get('MS_WEIGHT', 0.20),

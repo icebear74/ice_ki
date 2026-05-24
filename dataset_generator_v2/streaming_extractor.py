@@ -1846,7 +1846,7 @@ def create_patch_pair(
     requested resize target a warning is logged.
 
     Args:
-        frames:       BGR numpy arrays, length 5 or 7.
+        frames:       BGR numpy arrays, odd length >= 3.
         format_name:  Format key string (used for logging only — all functional
                       decisions are driven by *format_cfg*).
         format_cfg:   Dict with at minimum ``'gt_size': [W, H]``,
@@ -1868,7 +1868,7 @@ def create_patch_pair(
         ValueError: When ``format_cfg["source_mode"]`` is missing or invalid.
     """
     n = len(frames)
-    if n not in (5, 7):
+    if n < 3 or n % 2 == 0:
         return None, None
 
     gt_w, gt_h = format_cfg["gt_size"]

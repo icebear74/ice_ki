@@ -1693,6 +1693,7 @@ class VSRTrainer:
         config_snapshot = {
             'N_FEATS':            self.config.get('N_FEATS', 72),
             'N_BLOCKS':           self.config.get('N_BLOCKS', 28),
+            'N_FRAMES':           int(self.config.get('RUNTIME_N_FRAMES', getattr(self.model, 'n_frames', 7))),
             'USE_CHECKPOINTING':  self.config.get('USE_CHECKPOINTING', False),
             'L1_WEIGHT':          self.config.get('L1_WEIGHT', 0.60),
             'MS_WEIGHT':          self.config.get('MS_WEIGHT', 0.20),
@@ -2439,23 +2440,26 @@ class VSRTrainer:
                 frame_files = sorted([f for f in os.listdir(frames_dir) if f.endswith('.png')])
                 total_frames = len(frame_files)
                 
-                if total_frames < 7:
-                    self.train_logger.log_event(f"❌ Not enough frames ({total_frames} < 7)")
+                n_frames = int(getattr(self.model, 'n_frames', 7))
+                half = n_frames // 2
+
+                if total_frames < n_frames:
+                    self.train_logger.log_event(f"❌ Not enough frames ({total_frames} < {n_frames})")
                     return
                 
                 self.train_logger.log_event(f"✅ Extracted {total_frames} frames")
                 
-                # Process frames with sliding window (7 frames)
-                self.train_logger.log_event("🔄 Processing frames with 7-frame model...")
+                # Process frames with sliding window
+                self.train_logger.log_event(f"🔄 Processing frames with {n_frames}-frame model...")
                 processed_count = 0
                 
                 with torch.no_grad():
-                    # We need 7 frames for the sliding window, with center frame (index 3) being upscaled
-                    # Process from frame 3 to frame (total-3) to always have context
-                    for i in range(3, total_frames - 3):
-                        # Load 7 consecutive frames (i-3 to i+3, with i being center)
+                    # We need n_frames for the sliding window, with center frame
+                    # (index n_frames//2) being upscaled.
+                    for i in range(half, total_frames - half):
+                        # Load n_frames consecutive frames centered around i.
                         window_frames = []
-                        for offset in range(-3, 4):  # -3, -2, -1, 0, 1, 2, 3
+                        for offset in range(-half, half + 1):
                             frame_path = os.path.join(frames_dir, frame_files[i + offset])
                             frame = cv2.imread(frame_path)
                             if frame is None:
@@ -2466,10 +2470,10 @@ class VSRTrainer:
                             frame = frame.astype(np.float32) / 255.0
                             window_frames.append(frame)
                         
-                        if len(window_frames) != 7:
+                        if len(window_frames) != n_frames:
                             continue
                         
-                        # Stack frames and convert to tensor [1, 7, 3, H, W]
+                        # Stack frames and convert to tensor [1, n_frames, 3, H, W]
                         frames_tensor = torch.from_numpy(np.stack(window_frames)).permute(0, 3, 1, 2).unsqueeze(0)
                         frames_tensor = frames_tensor.to(self.device)
                         
@@ -2481,15 +2485,15 @@ class VSRTrainer:
                         output_img = np.clip(output_img * 255.0, 0, 255).astype(np.uint8)
                         output_img = cv2.cvtColor(output_img, cv2.COLOR_RGB2BGR)
                         
-                        # Save output frame (first iteration at i=3 produces frame_00000.png)
-                        output_path = os.path.join(output_frames_dir, f'frame_{i-3:05d}.png')
+                        # Save output frame (first iteration produces frame_00000.png)
+                        output_path = os.path.join(output_frames_dir, f'frame_{i-half:05d}.png')
                         cv2.imwrite(output_path, output_img)
                         
                         processed_count += 1
                         
                         # Log progress every 30 frames
                         if processed_count % 30 == 0:
-                            self.train_logger.log_event(f"  Processed {processed_count}/{total_frames-6} frames...")
+                            self.train_logger.log_event(f"  Processed {processed_count}/{total_frames-(2*half)} frames...")
                 
                 self.train_logger.log_event(f"✅ Processed {processed_count} frames")
                 
@@ -2718,4 +2722,3 @@ class VSRTrainer:
                 self.web_monitor.terminate()
             except Exception:
                 pass
-

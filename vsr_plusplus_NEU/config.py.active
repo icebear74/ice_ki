@@ -1,5 +1,5 @@
 """
-VSR++ 7-Frame Configuration - Example Template
+VSR++ Configuration - Example Template
 
 ⚠️  IMPORTANT: Copy this file to config.py before using!
 
@@ -8,7 +8,7 @@ VSR++ 7-Frame Configuration - Example Template
 The config.py file is in .gitignore and will NOT be committed.
 Edit config.py for your local setup.
 
-This configuration is optimized for 7-frame VSR training on Tesla P4 hardware (8GB VRAM).
+This configuration is optimized for default n_frames=7 on Tesla P4 hardware (8GB VRAM).
 Key parameters:
 - 72 feature channels (benchmark-validated default)
 - 24 residual blocks (balanced choice from benchmarks — 26/28 are more expensive without
@@ -20,7 +20,7 @@ Lighter alternative: N_FEATS=72, N_BLOCKS=20 (if VRAM is tight)
 """
 
 # ============================================================================
-# MODEL ARCHITECTURE PARAMETERS (7-Frame, 3x Scale — FIXED)
+# MODEL ARCHITECTURE PARAMETERS (n_frames from dataset_architecture.json, 3x scale)
 # ============================================================================
 
 # Number of feature channels — benchmark-validated default
@@ -319,7 +319,7 @@ def print_config():
     print("CONFIGURATION NOTES:")
     print("  - Default: N_FEATS=72, N_BLOCKS=24 (benchmark-validated)")
     print("  - Lighter alternative: N_BLOCKS=20 (less VRAM, slightly lower quality)")
-    print("  - Model is fixed to 7 frames and 3× scale — mismatch causes early abort")
+    print("  - n_frames is loaded from dataset_architecture.json (must be odd, >=3)")
     print("  - Templates discovered dynamically from dataset_architecture.json")
     print("  - Supports V2 bucket subdirs (0000/, 0001/, …) and legacy flat layouts")
     print("  - Validation GT-only: place GT images in val/{template}/GT/")

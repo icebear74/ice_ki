@@ -191,12 +191,12 @@ def _run_validation_on_device(model, val_loaders, loss_fn, device, global_step,
                 del loss_dict
 
                 # ── Center-frame extraction ──────────────────────────────────
-                # lr_stack shape: [B, 7, 3, H_lr, W_lr] — 7 LR frames, RGB.
-                # The VSR model uses all 7 frames but produces the upscaled
-                # CENTER frame as output (frame index n_frames//2 = 3 of 0–6).
+                # lr_stack shape: [B, T, 3, H_lr, W_lr] — T LR frames, RGB.
+                # The VSR model uses all T frames but produces the upscaled
+                # CENTER frame as output (frame index n_frames//2).
                 # LR, bicubic, and SR baselines MUST use the same center frame
                 # for a fair comparison against the GT.
-                center_idx       = lr_stack.size(1) // 2   # = 3 for 7-frame model
+                center_idx       = lr_stack.size(1) // 2
                 lr_center        = lr_stack[:, center_idx]  # [B, 3, H_lr, W_lr]
                 # Bilinear upscale (reference for LR quality tile)
                 lr_upscaled      = F.interpolate(lr_center, scale_factor=3, mode='bilinear', align_corners=False)
@@ -405,7 +405,7 @@ def run_async_validator(checkpoint_dir, data_root, dataset_name, log_dir, gpu_in
         config_snapshot: Optional dict with model/training config (used to
                          reconstruct the model if not embedded in checkpoint).
     """
-    from vsr_plusplus_NEU.core.model_7frame import VSRBidirectional_7frames_3x
+    from vsr_plusplus_NEU.core.model_7frame import VSRBidirectional_3x
     from vsr_plusplus_NEU.core.loss import HybridLoss
     from vsr_plusplus_NEU.core.dataset import VSRDataset
     from torch.utils.data import DataLoader
@@ -495,7 +495,12 @@ def run_async_validator(checkpoint_dir, data_root, dataset_name, log_dir, gpu_in
         try:
             n_feats  = req_config.get('N_FEATS',  72)
             n_blocks = req_config.get('N_BLOCKS', 28)
-            model = VSRBidirectional_7frames_3x(n_feats=n_feats, n_blocks=n_blocks)
+            n_frames = int(req_config.get('N_FRAMES', 7))
+            model = VSRBidirectional_3x(
+                n_frames=n_frames,
+                n_feats=n_feats,
+                n_blocks=n_blocks,
+            )
 
             # Activate gradient checkpointing if training used it (saves VRAM)
             if req_config.get('USE_CHECKPOINTING', False) and hasattr(model, 'enable_checkpointing'):
@@ -557,6 +562,7 @@ def run_async_validator(checkpoint_dir, data_root, dataset_name, log_dir, gpu_in
                     size_key=size_key,
                     mode='val',
                     augment=False,
+                    n_frames=n_frames,
                     paths_config=None,
                 )
                 if len(val_ds) == 0:

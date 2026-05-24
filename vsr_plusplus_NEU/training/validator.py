@@ -122,12 +122,12 @@ class VSRValidator:
                 del loss_dict  # Free loss tensors immediately
 
                 # ── Center-frame extraction ──────────────────────────────────
-                # lr_stack shape: [B, 7, 3, H_lr, W_lr] — 7 LR frames, RGB.
-                # The VSR model uses all 7 frames but produces the upscaled
-                # CENTER frame as output (frame index n_frames//2 = 3).
+                # lr_stack shape: [B, T, 3, H_lr, W_lr] — T LR frames, RGB.
+                # The VSR model uses all T frames but produces the upscaled
+                # CENTER frame as output (frame index n_frames//2).
                 # LR, bicubic, and SR baselines MUST use the same center frame
                 # for a fair comparison against the GT.
-                center_idx      = lr_stack.size(1) // 2   # = 3 for 7-frame model
+                center_idx      = lr_stack.size(1) // 2
                 lr_center       = lr_stack[:, center_idx]  # [B, 3, H_lr, W_lr]
                 # Bilinear upscale (matches original pre-model input preprocessing)
                 lr_upscaled     = F.interpolate(lr_center, scale_factor=3, mode='bilinear', align_corners=False)
@@ -301,4 +301,3 @@ class VSRValidator:
             result['sr_psnr']    = avg_sr_psnr
             result['sr_ssim']    = avg_sr_ssim
         return result
-

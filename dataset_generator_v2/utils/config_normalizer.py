@@ -9,8 +9,7 @@ Mapping (V2 → internal)
 base_settings.output_base_dir      ← root_path
 base_settings.temp_dir             ← root_path/temp
 base_settings.status_file          ← root_path/.generator_status.json
-base_settings.lr_versions          ← ['7frames'] if processing.n_frames == 7
-                                       else ['5frames']
+base_settings.lr_versions          ← ['{n_frames}frames'] (dynamic)
 base_settings.min_detail_threshold ← quality.blur_threshold  (default 80.0)
 
 category_targets                   ← category_patches  (patch count per category)
@@ -38,7 +37,7 @@ def normalize_config(config: dict) -> dict:
         'output_base_dir':      root_path,
         'temp_dir':             os.path.join(root_path, 'temp'),
         'status_file':          os.path.join(root_path, '.generator_status.json'),
-        'lr_versions':          ['7frames'] if n_frames == 7 else ['5frames'],
+        'lr_versions':          [f'{int(n_frames)}frames'],
         'min_detail_threshold': quality.get('blur_threshold', 80.0),
     }
 

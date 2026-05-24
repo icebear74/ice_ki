@@ -367,6 +367,13 @@ def validate_active_config(config: dict, templates: dict) -> List[str]:
     fmt_tmpls = templates.get("format_templates", {}) if isinstance(templates, dict) else {}
     deg_tmpls = templates.get("degradation_templates", {}) if isinstance(templates, dict) else {}
 
+    processing = config.get("processing", {})
+    n_frames = processing.get("n_frames")
+    if not (isinstance(n_frames, int) and n_frames >= 3 and n_frames % 2 == 1):
+        errors.append(
+            f"processing.n_frames: must be an odd integer >= 3 (got {n_frames!r})"
+        )
+
     categories = config.get("categories")
     if not isinstance(categories, dict):
         errors.append("config.categories must be a JSON object")
