@@ -449,6 +449,65 @@ class GenerationPlan:
         self.plan["plan_updated_at"] = datetime.now().isoformat()
         self.save()
 
+    def accumulate_item_completed(
+        self,
+        plan_item_id: str,
+        new_per_category:             Dict[str, int],
+        new_per_format_template:      Optional[Dict[str, int]] = None,
+        new_per_degradation_template: Optional[Dict[str, int]] = None,
+    ) -> None:
+        """
+        Accumulate completed patch counts onto any previously stored counts.
+
+        Unlike :meth:`update_item_completed` (which overwrites completed
+        data), this method **adds** *new_* counts to whatever was already
+        recorded.  Use this for the streaming-friendly resume workflow where
+        only the *remaining* patches were processed in the current run and
+        the prior partial completion must be preserved:
+
+        1. Run is interrupted mid-video → ``status = "in_progress"``,
+           ``completed.per_category = {cat: N}``
+        2. On next run, :func:`build_remaining_assignments` plans only the
+           remaining work.
+        3. After the remaining extraction finishes, call
+           ``accumulate_item_completed`` so the plan reflects
+           ``completed = prior + new`` rather than only *new*.
+
+        Args:
+            plan_item_id:                 Stable item ID.
+            new_per_category:             Freshly completed ``{category: count}``
+                                          from the extractor result.
+            new_per_format_template:      Freshly completed per-format counts.
+            new_per_degradation_template: Freshly completed per-degradation counts.
+        """
+        item = self._index_by_id.get(plan_item_id)
+        if item is None:
+            return
+
+        prior = item.get("completed", {})
+
+        def _merge(old: Dict[str, int], new: Optional[Dict[str, int]]) -> Dict[str, int]:
+            merged = dict(old)
+            for k, v in (new or {}).items():
+                merged[k] = merged.get(k, 0) + v
+            return merged
+
+        merged_cat = _merge(prior.get("per_category", {}),             new_per_category)
+        merged_fmt = _merge(prior.get("per_format_template", {}),      new_per_format_template)
+        merged_deg = _merge(prior.get("per_degradation_template", {}), new_per_degradation_template)
+
+        item["status"]     = "done"
+        item["updated_at"] = datetime.now().isoformat()
+        item["completed"]  = {
+            "total":                      sum(merged_cat.values()),
+            "per_category":               merged_cat,
+            "per_format_template":        merged_fmt,
+            "per_degradation_template":   merged_deg,
+        }
+        self._recompute_global()
+        self.plan["plan_updated_at"] = datetime.now().isoformat()
+        self.save()
+
     def get_item_by_path(self, video_path: str) -> Optional[Dict[str, Any]]:
         """Return the plan item for *video_path*, or ``None``."""
         return self._index_by_path.get(video_path)

@@ -56,6 +56,7 @@ from utils.config_io import (
 from utils.format_definitions import get_output_dirs_for_format
 from streaming_extractor import (
     build_assignments_per_category,
+    build_remaining_assignments,
     extract_and_save_streaming_distributed,
     STREAM_4K_WIDTH,
     STREAM_4K_HEIGHT,
@@ -3071,12 +3072,59 @@ class DatasetGeneratorV2UHD:
                             stream_states[stream_id]["state"] = "idle"
                         continue
 
-                    assignments = build_assignments_per_category(
-                        format_distribution=format_distribution,
-                        duration=duration,
-                        fps=fps,
-                        n_frames=n_frames,
-                    )
+                    # ── Streaming-friendly resume: plan only remaining work ──
+                    # If the plan shows this video was interrupted mid-stream
+                    # (status "in_progress" with non-zero completed counts),
+                    # replan only the unfinished remainder rather than the full
+                    # target.  The extractor will fast-seek (FFmpeg -ss) to the
+                    # estimated resume timestamp, skipping the already-decoded
+                    # prefix entirely and leaving all existing patches on disk.
+                    _prior_completed_cat: Dict[str, int] = {}
+                    _prior_completed_fmt: Dict[str, int] = {}
+                    if (
+                        _plan_item is not None
+                        and _plan_item.get("status") == "in_progress"
+                    ):
+                        _prior_completed_cat = (
+                            _plan_item.get("completed", {}).get("per_category", {})
+                        )
+                        _prior_completed_fmt = (
+                            _plan_item.get("completed", {}).get(
+                                "per_format_template", {}
+                            )
+                        )
+                    _prior_completed_total = sum(_prior_completed_cat.values())
+
+                    if _prior_completed_total > 0:
+                        # Remaining-only replanning (streaming-friendly resume).
+                        # Already-generated patches on disk are not touched.
+                        resume_ts, assignments = build_remaining_assignments(
+                            format_distribution=format_distribution,
+                            completed_per_category=_prior_completed_cat,
+                            completed_per_format_template=_prior_completed_fmt,
+                            duration=duration,
+                            fps=fps,
+                            n_frames=n_frames,
+                        )
+                        self.logger.info(
+                            f"♻️  [Resume replan] {video_name}: "
+                            f"{_prior_completed_total:,} patches already done — "
+                            f"replanning REMAINING work only "
+                            f"(start_ts={resume_ts:.1f}s / "
+                            f"{resume_ts / duration * 100:.1f}% of "
+                            f"{duration:.0f}s). "
+                            f"Existing patches preserved on disk."
+                        )
+                    else:
+                        # No prior completion: build full assignments from scratch.
+                        resume_ts = 0.0
+                        assignments = build_assignments_per_category(
+                            format_distribution=format_distribution,
+                            duration=duration,
+                            fps=fps,
+                            n_frames=n_frames,
+                        )
+
                     if not assignments:
                         video_queue.task_done()
                         with streams_lock:
@@ -3122,6 +3170,8 @@ class DatasetGeneratorV2UHD:
                     # ── Run extraction via libplacebo ────────────────────
                     # use_cuda=False forces the libplacebo path (Vulkan-based).
                     # vulkan_device selects the specific GPU for this stream.
+                    # start_ts=resume_ts tells the extractor to fast-seek past
+                    # the already-processed prefix (no-op when resume_ts==0).
                     result = extract_and_save_streaming_distributed(
                         video_path=video_path,
                         assignments=assignments,
@@ -3143,6 +3193,7 @@ class DatasetGeneratorV2UHD:
                         color_trc=color_trc,
                         vulkan_device=vulkan_device,
                         output_format=output_format,
+                        start_ts=resume_ts,
                     )
 
                     # ── Update progress tracking ─────────────────────────
@@ -3188,14 +3239,50 @@ class DatasetGeneratorV2UHD:
                                 current_video_index=idx + 1,
                                 patches_created=patches_created,
                             )
-                            # Update plan with full completion data.
-                            self.plan.update_item_completed(
-                                plan_item_id=_plan_item_id,
-                                completed_per_category=result,
-                                completed_per_format_template=_comp_fmt,
-                                completed_per_degradation_template=flat_degrade,
-                            )
+                            # Update plan with completion data.
+                            # For a resume run (_prior_completed_total > 0),
+                            # accumulate new counts on top of prior counts so
+                            # the plan reflects the full lifetime total for
+                            # this video (prior + new), not only this run.
+                            if _prior_completed_total > 0:
+                                self.plan.accumulate_item_completed(
+                                    plan_item_id=_plan_item_id,
+                                    new_per_category=result,
+                                    new_per_format_template=_comp_fmt,
+                                    new_per_degradation_template=flat_degrade,
+                                )
+                                self.logger.info(
+                                    f"♻️  [Resume done] {video_name}: "
+                                    f"accumulated {patches_created:,} new patches "
+                                    f"onto {_prior_completed_total:,} prior "
+                                    f"→ plan updated (done)"
+                                )
+                            else:
+                                self.plan.update_item_completed(
+                                    plan_item_id=_plan_item_id,
+                                    completed_per_category=result,
+                                    completed_per_format_template=_comp_fmt,
+                                    completed_per_degradation_template=flat_degrade,
+                                )
                             # Refresh the global plan summary in ui_state.
+                            self.ui_state["plan_summary"] = self.plan.get_global_stats()
+                        elif _prior_completed_total > 0:
+                            # Resume run produced 0 new patches (e.g., remaining
+                            # portion too short or all quality-rejected) but the
+                            # prior partial completion is real data — mark done
+                            # so this video is not retried indefinitely.
+                            self.tracker.update_progress(patches_created=0)
+                            self.plan.accumulate_item_completed(
+                                plan_item_id=_plan_item_id,
+                                new_per_category={},
+                                new_per_format_template=None,
+                                new_per_degradation_template=None,
+                            )
+                            self.logger.info(
+                                f"♻️  [Resume done] {video_name}: 0 new patches "
+                                f"(prior {_prior_completed_total:,} retained) "
+                                f"— marking done"
+                            )
                             self.ui_state["plan_summary"] = self.plan.get_global_stats()
                         else:
                             self.tracker.update_progress(patches_created=0)

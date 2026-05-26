@@ -41,6 +41,16 @@ snap_assignments_to_centers()
     shared representative center, reducing redundant work when multiple
     categories are active.
 
+build_remaining_assignments()
+    Resume-aware counterpart to ``build_assignments_per_category``.  Given
+    already-completed patch counts from the plan, subtracts them from the
+    configured targets, estimates a resume timestamp, and returns only the
+    assignments for the unfinished remainder — starting from that timestamp.
+    Combine with the ``start_ts`` parameter of
+    ``extract_and_save_streaming_distributed`` to skip the already-processed
+    portion of the video entirely (FFmpeg fast seek), preserving all
+    existing patches and avoiding redundant decoding.
+
 extract_and_save_streaming_distributed()
     Single-stream entry point for all formats.  Launches one FFmpeg process,
     streams yuv420p frames at ``STREAM_OPT_WIDTH × STREAM_OPT_HEIGHT`` by
@@ -49,6 +59,9 @@ extract_and_save_streaming_distributed()
     (``tonemap_cuda`` + ``scale_cuda`` or ``scale_cuda`` alone) when available;
     falls back to libplacebo (if present) or CPU zscale automatically.
     Passes the filter chain via a temp file, avoiding OS ARG_MAX limits.
+    Accepts an optional ``start_ts`` parameter: when > 0 an FFmpeg ``-ss``
+    fast-seek is inserted before the input so only frames from that timestamp
+    onwards are decoded, skipping the already-processed prefix entirely.
 
 extract_and_save_streaming_dual()
     Deprecated compatibility shim.  Forwards all arguments to
@@ -1214,6 +1227,123 @@ def build_assignments_per_category(
     return sorted(all_assignments, key=lambda x: x[0])
 
 
+def build_remaining_assignments(
+    format_distribution: Dict[str, Dict[str, int]],
+    completed_per_category: Dict[str, int],
+    completed_per_format_template: Dict[str, int],
+    duration: float,
+    fps: float,
+    n_frames: int = 7,
+) -> Tuple[float, List[Tuple[int, str, str]]]:
+    """
+    Build streaming assignments for the REMAINING unfinished work only.
+
+    This is the resume-aware counterpart to
+    :func:`build_assignments_per_category`.  It reads already-completed patch
+    counts from the persisted plan, subtracts them from the configured targets
+    to compute a *remaining distribution*, then estimates a resume timestamp
+    based on the fraction of work already done.  Only frames **after** that
+    timestamp are assigned, so the caller can combine the returned
+    ``resume_ts`` with the ``start_ts`` parameter of
+    :func:`extract_and_save_streaming_distributed` to let FFmpeg fast-seek
+    past the already-processed portion — avoiding redundant decoding and
+    leaving all previously generated patches intact.
+
+    Behaviour
+    ---------
+    * If no patches are completed yet (``total_completed == 0``), falls back
+      to :func:`build_assignments_per_category` (full plan, no seek).
+    * The resume timestamp is estimated as
+      ``(total_completed / total_planned) × duration``.  This assumes patches
+      were extracted at approximately uniform density across the video, which
+      is true for the default even-spacing strategy.
+    * Per-format remaining counts use stored ``completed_per_format_template``
+      entries when available; missing entries are estimated proportionally from
+      the category-level completion ratio.
+    * This function does **not** touch any files or the plan on disk — it is a
+      pure planning utility.  The caller is responsible for accumulating the
+      new completed counts with prior counts when updating the plan.
+
+    Args:
+        format_distribution:           ``{category: {format_name: target_count}}``.
+        completed_per_category:        Already-done patch counts per category,
+                                       from
+                                       ``plan_item["completed"]["per_category"]``.
+        completed_per_format_template: Already-done patch counts per format
+                                       template (summed across categories), from
+                                       ``plan_item["completed"]["per_format_template"]``.
+        duration:                      Video duration in seconds.
+        fps:                           Video frame rate.
+        n_frames:                      Frames per patch window (default 7).
+
+    Returns:
+        ``(resume_ts, assignments)`` where *resume_ts* is the estimated resume
+        timestamp in seconds (0.0 when no prior completion) and *assignments*
+        is a sorted list of ``(center_frame_idx, category, format_name)``
+        tuples with frame indices **absolute** (relative to the video start,
+        not to *resume_ts*).  Pass *resume_ts* as ``start_ts`` to
+        :func:`extract_and_save_streaming_distributed` and the extractor will
+        seek to that position automatically.
+    """
+    total_planned = sum(
+        cnt for formats in format_distribution.values() for cnt in formats.values()
+    )
+    total_completed = sum(completed_per_category.values())
+
+    if total_planned <= 0 or total_completed <= 0:
+        # Nothing completed yet — full plan from the start, no seek.
+        return 0.0, build_assignments_per_category(
+            format_distribution, duration, fps, n_frames
+        )
+
+    if total_completed >= total_planned:
+        # All work already done — nothing to assign.
+        return duration, []
+
+    # --- Estimate resume timestamp ----------------------------------------
+    # Clamped to [0, 0.99] to prevent rounding artefacts from placing the
+    # resume point at or past the video end.
+    resume_fraction = min(0.99, total_completed / total_planned)
+    resume_ts = resume_fraction * duration
+    remaining_duration = duration - resume_ts
+
+    # --- Build remaining distribution per category/format ----------------
+    remaining_distribution: Dict[str, Dict[str, int]] = {}
+    for category, formats in format_distribution.items():
+        cat_remaining: Dict[str, int] = {}
+        for fmt, target in formats.items():
+            # Prefer stored per-format completed counts; fall back to a
+            # proportional estimate when per-format data is unavailable.
+            completed_fmt = completed_per_format_template.get(fmt, 0)
+            if completed_fmt == 0 and total_planned > 0:
+                fmt_fraction = target / total_planned
+                completed_fmt = int(total_completed * fmt_fraction)
+            remaining = max(0, target - completed_fmt)
+            if remaining > 0:
+                cat_remaining[fmt] = remaining
+        if cat_remaining:
+            remaining_distribution[category] = cat_remaining
+
+    if not remaining_distribution:
+        return resume_ts, []
+
+    # --- Generate assignments for the remaining [resume_ts, duration] ----
+    # build_assignments_per_category produces indices relative to a video
+    # that starts at 0 and has duration `remaining_duration`.  Offset all
+    # returned frame indices by `resume_frame_offset` to get absolute
+    # positions within the original video so the caller gets a consistent
+    # frame-index space regardless of whether a seek is used.
+    sub_asgn = build_assignments_per_category(
+        remaining_distribution, remaining_duration, fps, n_frames
+    )
+    resume_frame_offset = int(resume_ts * fps)
+    abs_asgn: List[Tuple[int, str, str]] = [
+        (fi + resume_frame_offset, cat, fmt)
+        for fi, cat, fmt in sub_asgn
+    ]
+    return resume_ts, sorted(abs_asgn, key=lambda x: x[0])
+
+
 def snap_assignments_to_centers(
     assignments: List[Tuple[int, str, str]],
     fps: float,
@@ -2206,13 +2336,16 @@ def extract_and_save_streaming_distributed(
     vulkan_device: Optional[int] = None,
     output_format: OutputFormat = OutputFormat.PNG,
     ring_buffer_bytes_limit: int = RING_BUFFER_DEFAULT_BYTES_LIMIT,
+    start_ts: float = 0.0,
 ) -> Dict[str, int]:
     """
     Stream the video once and save patches as frames pass through the buffer.
 
-    A single FFmpeg process reads the video linearly (no ``-ss`` seeking).
-    Frames are piped as raw BGR24 data at *stream_width* × *stream_height*
-    (default 1920×1080).  A rolling dictionary buffer keeps the last
+    A single FFmpeg process reads the video linearly.  When *start_ts* > 0 an
+    FFmpeg ``-ss`` fast-seek is inserted before the input so that only frames
+    from *start_ts* onwards are decoded — the already-processed prefix of the
+    video is skipped entirely and all previously generated patches are
+    preserved untouched.  A rolling dictionary buffer keeps the last
     ``n_frames`` decoded frames in memory.  When a target centre frame has
     been decoded and all ``n_frames`` of its window are in the buffer, the
     patch is created and saved immediately.
@@ -2221,7 +2354,10 @@ def extract_and_save_streaming_distributed(
 
     Args:
         video_path:          Path to input video.
-        assignments:         Output of :func:`build_assignments_per_category`.
+        assignments:         Output of :func:`build_assignments_per_category`
+                             or :func:`build_remaining_assignments`.  Frame
+                             indices must be **absolute** (relative to the
+                             start of the video, not to *start_ts*).
         n_frames:            Frames per patch window (default 7).
         format_config:       ``{category: {format_name: {'gt_size': …, 'lr_size': …}}}``.
         base_dir:            Root dataset output directory.
@@ -2315,6 +2451,18 @@ def extract_and_save_streaming_distributed(
         ring_buffer_bytes_limit: Hard memory cap for the internal frame ring
                              buffer in bytes (default 8 GiB).  Oldest frames
                              are evicted when the limit is reached.
+        start_ts:            Resume seek offset in seconds (default 0.0 =
+                             start from the beginning).  When > 0 an FFmpeg
+                             ``-ss`` fast-seek is added before the input so
+                             only frames from this position onwards are
+                             decoded.  Assignments must use absolute frame
+                             indices (as returned by
+                             :func:`build_remaining_assignments`); the
+                             extractor subtracts the offset internally so
+                             the 0-based frame counter in the read loop
+                             matches correctly.  Patch filenames always use
+                             the absolute video timestamp so they are unique
+                             even across multiple partial runs.
 
     Returns:
         ``{category: patches_saved_count}``
@@ -2353,10 +2501,23 @@ def extract_and_save_streaming_distributed(
 
     sorted_asgn = sorted(snapped_asgn, key=lambda x: x[0])
 
+    # --- Resume seek: adjust frame indices to be relative to start_ts ----
+    # When start_ts > 0 the caller supplies absolute frame indices (relative
+    # to the video start) but FFmpeg will output frames beginning at 0 after
+    # the fast seek.  Subtract the seek offset from every assignment so the
+    # 0-based _actual_frame counter in the read loop matches the adjusted
+    # pending_centers.  The original absolute offset is kept in
+    # start_frame_offset for use in patch filenames (so every patch has a
+    # unique name based on its true video timestamp, not its position within
+    # the remaining portion).
+    start_frame_offset: int = max(0, int(start_ts * fps)) if start_ts > 0.0 else 0
+
     # Build mapping: center_frame_idx → [(category, format_name), …]
+    # Frame indices are adjusted to be relative to the seek point.
     center_map: Dict[int, List[Tuple[str, str]]] = {}
     for frame_idx, category, fmt_name in sorted_asgn:
-        center_map.setdefault(frame_idx, []).append((category, fmt_name))
+        rel_idx = frame_idx - start_frame_offset
+        center_map.setdefault(rel_idx, []).append((category, fmt_name))
 
     pending_centers: List[int] = sorted(center_map.keys())
     last_needed: int = pending_centers[-1] + half if pending_centers else 0
@@ -2446,7 +2607,11 @@ def extract_and_save_streaming_distributed(
                 _t_phases["n_workers_active"] = _active_workers_ctr[0]
             try:
                 center, window_frames, cat_fmt_list = item
-                ts = center / fps
+                # center is a relative frame index (0-based from seek point).
+                # Add start_frame_offset to get the absolute video timestamp
+                # so that patch filenames are unique across partial runs and
+                # remain consistent with patches written in earlier runs.
+                ts = (center + start_frame_offset) / fps
                 center_raw = window_frames[n_frames // 2]
 
                 # --- Black-frame check (once per extraction point) --------
@@ -2454,7 +2619,10 @@ def extract_and_save_streaming_distributed(
                     with _patches_lock:
                         _n_black_ctr[0] += 1
                     if logger:
-                        logger.info(f"  ⏭ frame {center} skipped (black frame)")
+                        logger.info(
+                            f"  ⏭ frame {center + start_frame_offset} "
+                            f"(ts {ts:.2f}s) skipped (black frame)"
+                        )
                     # Do NOT call task_done() here — the finally block handles it.
                     continue
 
@@ -2635,17 +2803,27 @@ def extract_and_save_streaming_distributed(
     _pipe_mb_per_frame = stream_width * stream_height * 1.5 / (1024 * 1024)
 
     _log(
-        f"🎬 Continuous-stream extractor: {len(sorted_asgn)} assignments, "
+        f"🎬 Streaming extractor: {len(sorted_asgn)} assignments, "
         f"{len(pending_centers)} unique centers, "
-        f"last frame needed: {last_needed}, "
-        f"stream={stream_width}×{stream_height}, "
+        f"last rel. frame needed: {last_needed}"
+        + (f" (abs {last_needed + start_frame_offset})" if start_frame_offset else "")
+        + f", stream={stream_width}×{stream_height}, "
         f"pipeline={pipeline_label}, nice={nice_level}"
     )
-    _log(
-        f"🎯 Mode: continuous linear FFmpeg stream — "
-        f"Python reads frames 0..{last_needed} ({last_needed + 1} total), "
-        f"snapshots {len(pending_centers)} 7-frame windows asynchronously"
-    )
+    if start_frame_offset > 0:
+        _log(
+            f"🎯 Mode: resume stream — FFmpeg fast-seek to {start_ts:.2f}s "
+            f"(≈ abs frame {start_frame_offset}), "
+            f"reads rel frames 0..{last_needed} "
+            f"(abs {start_frame_offset}..{start_frame_offset + last_needed}), "
+            f"snapshots {len(pending_centers)} {n_frames}-frame windows"
+        )
+    else:
+        _log(
+            f"🎯 Mode: full stream from start — "
+            f"reads frames 0..{last_needed} ({last_needed + 1} total), "
+            f"snapshots {len(pending_centers)} {n_frames}-frame windows asynchronously"
+        )
     _log(
         f"📦 Pipe: yuv420p {stream_width}×{stream_height} "
         f"= {_pipe_mb_per_frame:.2f} MB/frame"
@@ -2866,19 +3044,25 @@ def extract_and_save_streaming_distributed(
 
         # ------------------------------------------------------------------
         # --- CONTINUOUS STREAM MODE (single FFmpeg pass) ------------------
-        # FFmpeg behaves as a pure continuous producer: it decodes, tone-maps
-        # (libplacebo/Vulkan), and resizes every frame linearly, writing
-        # yuv420p frames into the pipe without any seek, jump, or select-
-        # filter frame-pruning.  Python reads the stream, tracks the frame
-        # counter, and enqueues 7-frame windows when extraction points are
+        # FFmpeg behaves as a continuous producer: it decodes, tone-maps
+        # (libplacebo/Vulkan), and resizes frames linearly, writing yuv420p
+        # frames into the pipe.  Python reads the stream, tracks the frame
+        # counter, and enqueues n_frames windows when extraction points are
         # reached.  All heavy image work runs in the background worker pool.
+        #
+        # When start_ts > 0 a fast-seek (-ss before -i) is injected so that
+        # FFmpeg begins decoding from that timestamp.  This avoids re-decoding
+        # the portion of the video that was already processed in a previous
+        # run, preserving all existing patches on disk.
         # ------------------------------------------------------------------
+        _seek_args = ["-ss", f"{start_ts:.3f}"] if start_ts > 0.0 else []
         cmd = [
             "ffmpeg",
             "-threads", "0",
             "-filter_threads", "0",
             "-loglevel", "warning",
             *hw_args,
+            *_seek_args,          # fast seek before input (no-op when start_ts==0)
             "-probesize", "100M",
             "-analyzeduration", "100M",
             "-i", video_path,
