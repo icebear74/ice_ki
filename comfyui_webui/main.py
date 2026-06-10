@@ -307,14 +307,29 @@ async def generate_images(payload: GenerateRequest) -> dict[str, Any]:
                 f"{COMFYUI_BASE_URL}/prompt",
                 json={"prompt": workflow, "client_id": client_id},
             )
-        response.raise_for_status()
+        if not response.is_success:
+            # Capture ComfyUI's error body so the user sees the real validation message
+            try:
+                body = response.json()
+                comfy_error = (
+                    body.get("error", {}).get("message")
+                    or body.get("error")
+                    or body.get("detail")
+                    or str(body)
+                )
+            except Exception:
+                comfy_error = response.text[:500] or f"HTTP {response.status_code}"
+            raise HTTPException(
+                status_code=502,
+                detail=f"ComfyUI-Fehler ({response.status_code}): {comfy_error}",
+            )
         prompt_id = response.json().get("prompt_id")
         if not prompt_id:
             raise HTTPException(status_code=502, detail="ComfyUI hat keine prompt_id zurückgegeben.")
     except HTTPException:
         raise
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"ComfyUI-Fehler: {exc}") from exc
+        raise HTTPException(status_code=502, detail=f"ComfyUI nicht erreichbar: {exc}") from exc
 
     return {
         "translated_prompt": translated_prompt,
@@ -533,7 +548,7 @@ def _build_workflow(payload: GenerateRequest, translated_prompt: str, translated
     workflow["4"]["inputs"]["height"] = max(64, payload.height // 8 * 8)
     workflow["4"]["inputs"]["batch_size"] = max(1, min(payload.image_count, 8))
 
-    seed = payload.seed if payload.seed >= 0 else int.from_bytes(os.urandom(8), "big")
+    seed = payload.seed if payload.seed >= 0 else int.from_bytes(os.urandom(4), "big")
     workflow["5"]["inputs"].update(
         {
             "seed": seed,
