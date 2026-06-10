@@ -644,6 +644,33 @@ async function discoverLocalTemplates() {
   }
 }
 
+async function uploadTemplate(file) {
+  const status = $("adminDiscoverStatus");
+  status.classList.remove("error");
+  status.textContent = `Lade hoch: ${file.name} …`;
+  const formData = new FormData();
+  formData.append("file", file);
+  try {
+    const response = await fetch("/api/admin/templates/upload", {
+      method: "POST",
+      body: formData,
+    });
+    if (!response.ok) {
+      if (response.status === 401) { showLogin(); return; }
+      let detail = `${response.status} ${response.statusText}`;
+      try { const p = await response.json(); detail = p.detail || JSON.stringify(p); } catch { /* ignore */ }
+      throw new Error(detail);
+    }
+    const record = await response.json();
+    status.textContent = `Template "${record.display_name}" erfolgreich hochgeladen und registriert.`;
+    await loadAdminTemplates();
+    await loadTemplates();
+  } catch (err) {
+    status.textContent = `Fehler beim Hochladen: ${err.message}`;
+    status.classList.add("error");
+  }
+}
+
 async function addTemplate() {
   const name = $("newTplName").value.trim();
   const display_name = $("newTplDisplay").value.trim();
@@ -920,6 +947,15 @@ $("followupCheck").addEventListener("change", () => {
 // ---------------------------------------------------------------------------
 $("adminDiscoverBtn").addEventListener("click", discoverTemplates);
 $("adminDiscoverLocalBtn").addEventListener("click", discoverLocalTemplates);
+
+$("adminUploadTemplateBtn").addEventListener("click", () => {
+  $("adminUploadTemplateInput").value = "";
+  $("adminUploadTemplateInput").click();
+});
+$("adminUploadTemplateInput").addEventListener("change", () => {
+  const file = $("adminUploadTemplateInput").files[0];
+  if (file) uploadTemplate(file);
+});
 
 $("adminAddTemplateBtn").addEventListener("click", () => {
   $("addTemplateForm").classList.toggle("hidden");

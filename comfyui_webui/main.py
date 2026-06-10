@@ -12,7 +12,7 @@ from urllib.parse import urlencode
 
 import httpx
 import websockets
-from fastapi import Cookie, Depends, FastAPI, HTTPException, Request
+from fastapi import Cookie, Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -390,6 +390,68 @@ async def admin_discover_local_templates(
     """
     registered = _registry.discover_local_templates()
     return {"found": len(registered), "templates": [t["name"] for t in registered]}
+
+
+@app.post("/api/admin/templates/upload", status_code=201)
+async def admin_upload_template(
+    file: UploadFile = File(...),
+    _: dict[str, str] = Depends(require_admin),
+) -> dict[str, Any]:
+    """Upload a ComfyUI workflow JSON file and register it as a template.
+
+    The file is saved to ``data/templates/`` and immediately registered as an
+    approved + enabled template (same behaviour as *Lokale Templates laden*).
+    """
+    if not file.filename or not file.filename.lower().endswith(".json"):
+        raise HTTPException(status_code=400, detail="Nur JSON-Dateien erlaubt.")
+
+    raw = await file.read()
+    if len(raw) > 10 * 1024 * 1024:  # 10 MB safety limit
+        raise HTTPException(status_code=413, detail="Datei zu groß (max. 10 MB).")
+
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail=f"Ungültige JSON-Datei: {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="JSON muss ein Objekt sein (ComfyUI workflow).")
+
+    # Sanitise filename: keep only safe chars
+    safe_name = Path(file.filename).name
+    safe_name = "".join(c for c in safe_name if c.isalnum() or c in ("_", "-", "."))
+    if not safe_name:
+        safe_name = "workflow.json"
+    if not safe_name.lower().endswith(".json"):
+        safe_name += ".json"
+
+    dest = _registry.TEMPLATES_DIR / safe_name
+    _registry.TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(raw)
+
+    # Register (same logic as discover_local_templates for a single file)
+    stem = Path(safe_name).stem
+    slug = stem.lower().replace(" ", "_").replace("-", "_")
+    display_name = stem.replace("_", " ").replace("-", " ").title()
+    existing = _registry.get_template(slug)
+    if existing is None:
+        record = _registry.register_template(
+            name=slug,
+            display_name=display_name,
+            source="local",
+            description=f"Hochgeladen: {safe_name}",
+            filename=safe_name,
+            approved=True,
+            enabled=True,
+        )
+    else:
+        record = _registry.register_template(
+            name=slug,
+            display_name=existing.get("display_name", display_name),
+            source=existing.get("source", "local"),
+            filename=safe_name,
+        )
+    return record
 
 
 def _load_default_workflow() -> dict[str, dict[str, Any]]:
