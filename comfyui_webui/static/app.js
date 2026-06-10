@@ -4,7 +4,9 @@
 const state = {
   currentUser: null,   // { username, role }
   ollamaModels: [],
-  checkpoints: [],
+  checkpoints: [],     // all raw models from ComfyUI (including [unet] prefix)
+  checkpointNote: "",  // last note from /api/comfy/checkpoints
+  modelAliases: {},    // { "technical_name": "alias" }
   samplers: [],
   schedulers: [],
   templates: [],
@@ -118,6 +120,7 @@ function showTab(name) {
   }
   if (name === "Admin") {
     loadAdminTemplates();
+    loadAdminModelAliases();
     loadAdminUsers();
   }
 }
@@ -134,6 +137,7 @@ function setStatus(message, isError = false) {
 function setButtons(disabled) {
   $("generateBtn").disabled = disabled;
   $("translateBtn").disabled = disabled;
+  $("refinePromptBtn").disabled = disabled;
 }
 
 function showProgress(visible) {
@@ -230,75 +234,94 @@ async function loadCheckpoints() {
 
   const allModels = data.checkpoints || [];
   state.checkpoints = allModels;
-
-  const select = $("checkpoint");
-  const manualWrap = $("checkpointManualWrap");
-  const currentVal = select.value;
-  select.innerHTML = "";
-
-  if (allModels.length === 0) {
-    const opt = document.createElement("option");
-    opt.value = "";
-    opt.textContent = "– keine gefunden –";
-    select.appendChild(opt);
-    manualWrap.classList.remove("hidden");
-  } else {
-    manualWrap.classList.add("hidden");
-
-    const ckptModels = allModels.filter((m) => !m.startsWith("[unet] "));
-    const unetModels = allModels.filter((m) => m.startsWith("[unet] "));
-
-    function addOptions(names, parent) {
-      for (const name of names) {
-        const opt = document.createElement("option");
-        opt.value = name;
-        opt.textContent = name.replace(/^\[unet\] /, "");
-        parent.appendChild(opt);
-      }
-    }
-
-    if (ckptModels.length > 0) {
-      const grp = document.createElement("optgroup");
-      grp.label = "Checkpoints";
-      addOptions(ckptModels, grp);
-      select.appendChild(grp);
-    }
-    if (unetModels.length > 0) {
-      const grp = document.createElement("optgroup");
-      grp.label = "UNet / Diffusion (FLUX, Zimage …)";
-      addOptions(unetModels, grp);
-      select.appendChild(grp);
-    }
-
-    if (currentVal && allModels.includes(currentVal)) {
-      select.value = currentVal;
-    }
+  state.checkpointNote = data.note || "";
+  if (data.aliases) {
+    state.modelAliases = { ...state.modelAliases, ...data.aliases };
   }
 
-  $("checkpointNote").textContent = data.note || "";
   const unetCount = (data.unet_models || []).length;
   const ckptCount = allModels.length - unetCount;
   setStatus(`Modelle geladen: ${ckptCount} Checkpoints, ${unetCount} UNet`);
 
-  function updateUnetWarning() {
-    const val = selectValue("checkpoint", "checkpointManual", "checkpointManualWrap");
-    const note = $("checkpointNote");
-    if (val && val.startsWith("[unet] ")) {
-      note.textContent =
-        "⚠ UNet-/Diffusion-Modell gewählt: Dieses Modell benötigt eine " +
-        "workflow_template.json mit UNETLoader-, CLIPLoader- und VAELoader-Knoten. " +
-        "Das Standard-Template unterstützt nur Checkpoint-Modelle.";
-      note.classList.add("error");
-    } else if (!data.note) {
-      note.textContent = "";
-      note.classList.remove("error");
-    } else {
-      note.textContent = data.note;
-      note.classList.remove("error");
-    }
+  // Rebuild filtered checkpoint select based on the currently selected workflow
+  onWorkflowChange();
+}
+
+// Return the model_type required by the currently selected workflow template
+function getWorkflowModelType() {
+  const tplName = $("workflowTemplate").value;
+  if (!tplName || tplName === "default") return "checkpoint";
+  const tpl = state.templates.find((t) => t.name === tplName);
+  return (tpl && tpl.model_type) ? tpl.model_type : "any";
+}
+
+// Filter the full checkpoint list by the model_type
+function filterCheckpointsByType(models, modelType) {
+  if (modelType === "checkpoint") return models.filter((m) => !m.startsWith("[unet] "));
+  if (modelType === "unet") return models.filter((m) => m.startsWith("[unet] "));
+  return models;
+}
+
+// Rebuild the #checkpoint select from a (possibly filtered) list, applying aliases
+function rebuildCheckpointSelect(models) {
+  const select = $("checkpoint");
+  const manualWrap = $("checkpointManualWrap");
+  const prevVal = select.value;
+  select.innerHTML = "";
+
+  if (models.length === 0) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "– keine passenden Modelle –";
+    select.appendChild(opt);
+    manualWrap.classList.remove("hidden");
+    return;
   }
-  select.addEventListener("change", updateUnetWarning);
-  updateUnetWarning();
+
+  manualWrap.classList.add("hidden");
+  for (const name of models) {
+    const opt = document.createElement("option");
+    opt.value = name;
+    const technical = name.replace(/^\[unet\] /, "");
+    const alias = state.modelAliases[technical] || state.modelAliases[name] || null;
+    opt.textContent = alias || technical;
+    select.appendChild(opt);
+  }
+  // Restore previous selection if still in list, otherwise pre-select first
+  if (prevVal && models.includes(prevVal)) {
+    select.value = prevVal;
+  } else if (models.length > 0) {
+    select.value = models[0];
+  }
+  updateCheckpointNote();
+}
+
+function updateCheckpointNote() {
+  const val = selectValue("checkpoint", "checkpointManual", "checkpointManualWrap");
+  const note = $("checkpointNote");
+  if (val && val.startsWith("[unet] ")) {
+    note.textContent =
+      "⚠ UNet-/Diffusion-Modell gewählt: Workflow muss UNETLoader- oder DiffusionModelLoader-Knoten verwenden.";
+    note.classList.add("error");
+  } else {
+    note.textContent = state.checkpointNote;
+    note.classList.remove("error");
+  }
+}
+
+// Called whenever the workflow selection changes
+function onWorkflowChange() {
+  const modelType = getWorkflowModelType();
+  const filtered = filterCheckpointsByType(state.checkpoints, modelType);
+  rebuildCheckpointSelect(filtered);
+  const note = $("templateNote");
+  if (note) {
+    const tplName = $("workflowTemplate").value;
+    const tpl = state.templates.find((t) => t.name === tplName);
+    const mt = (tpl && tpl.model_type) ? tpl.model_type : (tplName === "default" ? "checkpoint" : "any");
+    const mtLabel = mt === "checkpoint" ? "Checkpoints" : mt === "unet" ? "UNet/Diffusion" : "alle Modelle";
+    note.textContent = `Zeige: ${mtLabel}. ${state.templates.length <= 1 ? "Admins können weitere Templates freigeben." : state.templates.length + " Template(s) verfügbar."}`;
+  }
 }
 
 async function loadSamplers() {
@@ -341,13 +364,9 @@ async function loadTemplates() {
   }
 
   if (currentVal) select.value = currentVal;
-  const note = $("templateNote");
-  if (state.templates.length <= 1) {
-    note.textContent =
-      "Nur das Standard-Template verfügbar. Admins können weitere Templates freigeben.";
-  } else {
-    note.textContent = `${state.templates.length} Template(s) verfügbar.`;
-  }
+
+  // Update note + re-filter checkpoints for the now-selected workflow
+  onWorkflowChange();
 }
 
 // ---------------------------------------------------------------------------
@@ -395,6 +414,52 @@ function showFollowupSection(translatedPrompt) {
       ? translatedPrompt.slice(0, 80) + "…"
       : translatedPrompt;
   hint.textContent = `Letzter Prompt: „${preview}"`;
+}
+
+// ---------------------------------------------------------------------------
+// Prompt refinement (Änderungs-Feld)
+// ---------------------------------------------------------------------------
+async function refinePrompt() {
+  const base = $("promptDe").value.trim();
+  const changes = $("changesPromptDe").value.trim();
+  const model = selectValue("ollamaModel", "ollamaModelManual", "ollamaModelManualWrap");
+  const statusEl = $("refineStatus");
+  statusEl.classList.remove("error");
+
+  if (!base) {
+    statusEl.textContent = "Bitte zuerst einen Basis-Prompt eingeben.";
+    statusEl.classList.add("error");
+    return;
+  }
+  if (!changes) {
+    statusEl.textContent = "Bitte Änderungen eingeben.";
+    statusEl.classList.add("error");
+    return;
+  }
+  if (!model) {
+    statusEl.textContent = "Bitte zuerst ein Ollama-Modell wählen.";
+    statusEl.classList.add("error");
+    return;
+  }
+
+  $("refinePromptBtn").disabled = true;
+  statusEl.textContent = "Verfeinere Prompt …";
+  try {
+    const data = await api("/api/refine_prompt", {
+      method: "POST",
+      body: JSON.stringify({ base_prompt_de: base, changes_de: changes, model }),
+    });
+    $("promptDe").value = data.refined_prompt_de;
+    $("changesPromptDe").value = "";
+    $("translatedPrompt").value = "";  // clear stale translation
+    statusEl.textContent = "✓ Prompt aktualisiert";
+    setTimeout(() => { statusEl.textContent = ""; }, 3000);
+  } catch (err) {
+    statusEl.textContent = `Fehler: ${err.message}`;
+    statusEl.classList.add("error");
+  } finally {
+    $("refinePromptBtn").disabled = false;
+  }
 }
 
 async function translateOnly() {
@@ -552,23 +617,101 @@ async function generateImages() {
 // ---------------------------------------------------------------------------
 async function loadAdminTemplates() {
   const tbody = $("adminTemplateBody");
-  tbody.innerHTML = "<tr><td colspan='6' class='hint'>Lade …</td></tr>";
+  tbody.innerHTML = "<tr><td colspan='7' class='hint'>Lade …</td></tr>";
   try {
     const data = await api("/api/admin/templates");
     tbody.innerHTML = "";
     for (const tpl of data.templates) {
+      const mt = tpl.model_type || "any";
       const tr = document.createElement("tr");
       tr.innerHTML = `
         <td>${escHtml(tpl.name)}</td>
-        <td>${escHtml(tpl.display_name)}</td>
+        <td class="tpl-display-cell">
+          <span class="tpl-display-text">${escHtml(tpl.display_name)}</span>
+          <button class="btn-sm tpl-edit-name" data-name="${escHtml(tpl.name)}" type="button" title="Anzeigename bearbeiten">&#9998;</button>
+          <span class="tpl-edit-wrap hidden" style="display:none">
+            <input class="tpl-name-input" value="${escHtml(tpl.display_name)}" style="width:auto;display:inline;margin-right:0.25rem" />
+            <button class="btn-sm tpl-save-name" data-name="${escHtml(tpl.name)}" type="button">&#10003;</button>
+            <button class="btn-sm btn-secondary tpl-cancel-name" type="button">&#10005;</button>
+          </span>
+        </td>
         <td>${escHtml(tpl.source || "")}</td>
+        <td>
+          <select class="tpl-modeltype" data-name="${escHtml(tpl.name)}">
+            <option value="checkpoint" ${mt === "checkpoint" ? "selected" : ""}>Checkpoint</option>
+            <option value="unet" ${mt === "unet" ? "selected" : ""}>UNet</option>
+            <option value="any" ${mt === "any" ? "selected" : ""}>Beliebig</option>
+          </select>
+        </td>
         <td><input type="checkbox" class="tpl-approved" data-name="${escHtml(tpl.name)}" ${tpl.approved ? "checked" : ""} /></td>
         <td><input type="checkbox" class="tpl-enabled" data-name="${escHtml(tpl.name)}" ${tpl.enabled ? "checked" : ""} /></td>
-        <td><button class="btn-sm btn-danger tpl-delete" data-name="${escHtml(tpl.name)}" type="button">Löschen</button></td>
+        <td><button class="btn-sm btn-danger tpl-delete" data-name="${escHtml(tpl.name)}" type="button">L&ouml;schen</button></td>
       `;
       tbody.appendChild(tr);
     }
-    // Attach inline-toggle handlers
+
+    // Inline display_name editing
+    tbody.querySelectorAll(".tpl-edit-name").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const cell = btn.closest(".tpl-display-cell");
+        cell.querySelector(".tpl-display-text").style.display = "none";
+        btn.style.display = "none";
+        const wrap = cell.querySelector(".tpl-edit-wrap");
+        wrap.style.display = "";
+        wrap.classList.remove("hidden");
+        wrap.querySelector(".tpl-name-input").focus();
+      });
+    });
+    tbody.querySelectorAll(".tpl-cancel-name").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const cell = btn.closest(".tpl-display-cell");
+        cell.querySelector(".tpl-display-text").style.display = "";
+        cell.querySelector(".tpl-edit-name").style.display = "";
+        cell.querySelector(".tpl-edit-wrap").style.display = "none";
+      });
+    });
+    tbody.querySelectorAll(".tpl-save-name").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const name = btn.dataset.name;
+        const cell = btn.closest(".tpl-display-cell");
+        const newName = cell.querySelector(".tpl-name-input").value.trim();
+        if (!newName) return;
+        try {
+          await api(`/api/admin/templates/${encodeURIComponent(name)}`, {
+            method: "PATCH",
+            body: JSON.stringify({ display_name: newName }),
+          });
+          cell.querySelector(".tpl-display-text").textContent = newName;
+          cell.querySelector(".tpl-display-text").style.display = "";
+          cell.querySelector(".tpl-edit-name").style.display = "";
+          cell.querySelector(".tpl-edit-wrap").style.display = "none";
+          await loadTemplates();
+        } catch (err) {
+          alert(`Fehler: ${err.message}`);
+        }
+      });
+    });
+
+    // model_type inline select
+    tbody.querySelectorAll(".tpl-modeltype").forEach((sel) => {
+      sel.addEventListener("change", async () => {
+        const name = sel.dataset.name;
+        try {
+          await api(`/api/admin/templates/${encodeURIComponent(name)}`, {
+            method: "PATCH",
+            body: JSON.stringify({ model_type: sel.value }),
+          });
+          // Update state.templates so onWorkflowChange picks up the new type
+          const idx = state.templates.findIndex((t) => t.name === name);
+          if (idx >= 0) state.templates[idx].model_type = sel.value;
+          onWorkflowChange();
+        } catch (err) {
+          alert(`Fehler: ${err.message}`);
+        }
+      });
+    });
+
+    // Attach inline-toggle handlers for approved / enabled
     tbody.querySelectorAll(".tpl-approved, .tpl-enabled").forEach((cb) => {
       cb.addEventListener("change", async () => {
         const name = cb.dataset.name;
@@ -578,7 +721,7 @@ async function loadAdminTemplates() {
             method: "PATCH",
             body: JSON.stringify({ [field]: cb.checked }),
           });
-          await loadTemplates(); // refresh user-visible template select
+          await loadTemplates();
         } catch (err) {
           alert(`Fehler: ${err.message}`);
           cb.checked = !cb.checked; // revert
@@ -600,7 +743,7 @@ async function loadAdminTemplates() {
       });
     });
   } catch (err) {
-    tbody.innerHTML = `<tr><td colspan='6' class='error'>${escHtml(err.message)}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan='7' class='error'>${escHtml(err.message)}</td></tr>`;
   }
 }
 
@@ -692,6 +835,86 @@ async function addTemplate() {
     await loadTemplates();
   } catch (err) {
     alert(`Fehler: ${err.message}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Admin – model aliases
+// ---------------------------------------------------------------------------
+async function loadAdminModelAliases() {
+  const tbody = $("modelAliasBody");
+  tbody.innerHTML = "<tr><td colspan='3' class='hint'>Lade …</td></tr>";
+  try {
+    const data = await api("/api/admin/model_aliases");
+    state.modelAliases = data.aliases || {};
+    tbody.innerHTML = "";
+    const entries = Object.entries(data.aliases || {});
+    if (entries.length === 0) {
+      tbody.innerHTML = "<tr><td colspan='3' class='hint'>Noch keine Aliase definiert.</td></tr>";
+      return;
+    }
+    for (const [techName, alias] of entries) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td>${escHtml(techName)}</td>
+        <td>${escHtml(alias)}</td>
+        <td>
+          <button class="btn-sm" data-tech="${escHtml(techName)}" data-alias="${escHtml(alias)}" type="button" onclick="editAliasInForm(this)">&#9998;</button>
+          <button class="btn-sm btn-danger alias-delete" data-tech="${escHtml(techName)}" type="button">&#10005;</button>
+        </td>
+      `;
+      tbody.appendChild(tr);
+    }
+    tbody.querySelectorAll(".alias-delete").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const tech = btn.dataset.tech;
+        if (!confirm(`Alias für „${tech}" löschen?`)) return;
+        try {
+          await api(`/api/admin/model_aliases/${encodeURIComponent(tech)}`, { method: "DELETE" });
+          await loadAdminModelAliases();
+          await loadCheckpoints(); // refresh display names in model select
+        } catch (err) {
+          alert(`Fehler: ${err.message}`);
+        }
+      });
+    });
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan='3' class='error'>${escHtml(err.message)}</td></tr>`;
+  }
+}
+
+function editAliasInForm(btn) {
+  $("aliasNameInput").value = btn.dataset.tech;
+  $("aliasDisplayInput").value = btn.dataset.alias;
+  $("aliasNameInput").focus();
+}
+
+async function saveModelAlias() {
+  const techName = $("aliasNameInput").value.trim();
+  const alias = $("aliasDisplayInput").value.trim();
+  const statusEl = $("modelAliasStatus");
+  statusEl.classList.remove("error");
+
+  if (!techName || !alias) {
+    statusEl.textContent = "Modellname und Alias sind Pflichtfelder.";
+    statusEl.classList.add("error");
+    return;
+  }
+
+  try {
+    await api("/api/admin/model_aliases", {
+      method: "PUT",
+      body: JSON.stringify({ technical_name: techName, alias }),
+    });
+    $("aliasNameInput").value = "";
+    $("aliasDisplayInput").value = "";
+    statusEl.textContent = "✓ Alias gespeichert";
+    setTimeout(() => { statusEl.textContent = ""; }, 3000);
+    await loadAdminModelAliases();
+    await loadCheckpoints(); // refresh display names in model select
+  } catch (err) {
+    statusEl.textContent = `Fehler: ${err.message}`;
+    statusEl.classList.add("error");
   }
 }
 
@@ -923,6 +1146,10 @@ $("translateBtn").addEventListener("click", async () => {
   }
 });
 
+$("refinePromptBtn").addEventListener("click", refinePrompt);
+$("workflowTemplate").addEventListener("change", onWorkflowChange);
+$("checkpoint").addEventListener("change", updateCheckpointNote);
+
 $("generateBtn").addEventListener("click", async () => {
   try {
     await generateImages();
@@ -972,6 +1199,7 @@ $("addUserSubmitBtn").addEventListener("click", addUser);
 $("addUserCancelBtn").addEventListener("click", () => {
   $("addUserForm").classList.add("hidden");
 });
+$("aliasSaveBtn").addEventListener("click", saveModelAlias);
 
 // ---------------------------------------------------------------------------
 // Bootstrap: check session, show login or app

@@ -64,40 +64,18 @@
           <label for="promptDe">Deutscher Prompt</label>
           <textarea id="promptDe" rows="4" placeholder="z. B. Ein futuristisches Stadtbild bei Sonnenuntergang"></textarea>
 
-          <label for="negativePrompt">Negative Prompt</label>
+          <label for="changesPromptDe" style="margin-top:0.75rem">&#9998; &Auml;nderungen am Prompt (Deutsch, optional)</label>
+          <div class="inline">
+            <textarea id="changesPromptDe" rows="2" placeholder="z. B. Mache den Himmel r&ouml;ter, f&uuml;ge eine Katze hinzu, entferne die Menschen"></textarea>
+            <button id="refinePromptBtn" type="button" title="Prompt mit &Auml;nderungen verfeinern" style="align-self:flex-end">&#10003; Verfeinern</button>
+          </div>
+          <small id="refineStatus" class="hint"></small>
+
+          <label for="negativePrompt" style="margin-top:0.75rem">Negative Prompt</label>
           <textarea id="negativePrompt" rows="2" placeholder="z. B. blurry, low quality"></textarea>
         </section>
 
-        <section class="card grid-2">
-          <div>
-            <label for="ollamaModel">Ollama-Modell (&Uuml;bersetzung)</label>
-            <div class="inline">
-              <select id="ollamaModel">
-                <option value="">&ndash; Modelle laden &ndash;</option>
-              </select>
-              <button id="refreshModelsBtn" type="button">&#8635;</button>
-            </div>
-            <div id="ollamaModelManualWrap" class="manual-wrap hidden">
-              <input id="ollamaModelManual" placeholder="Modellname manuell eingeben &hellip;" />
-            </div>
-            <small id="ollamaModelNote" class="hint"></small>
-          </div>
-          <div>
-            <label for="checkpoint">ComfyUI Checkpoint</label>
-            <div class="inline">
-              <select id="checkpoint">
-                <option value="">&ndash; Checkpoints laden &ndash;</option>
-              </select>
-              <button id="refreshCheckpointsBtn" type="button">&#8635;</button>
-            </div>
-            <div id="checkpointManualWrap" class="manual-wrap hidden">
-              <input id="checkpointManual" placeholder="Checkpoint-Namen manuell eingeben &hellip;" />
-            </div>
-            <small id="checkpointNote" class="hint"></small>
-          </div>
-        </section>
-
-        <!-- Template selection -->
+        <!-- Workflow + Modell (workflow zuerst, Modell darunter gefiltert) -->
         <section class="card">
           <label for="workflowTemplate">Workflow-Template</label>
           <div class="inline">
@@ -106,7 +84,34 @@
             </select>
             <button id="refreshTemplatesBtn" type="button">&#8635;</button>
           </div>
-          <small id="templateNote" class="hint">Nur freigegebene Templates sichtbar. Admins k&ouml;nnen Templates unter &#9881; Admin freigeben.</small>
+          <small id="templateNote" class="hint">Nur freigegebene Templates sichtbar.</small>
+
+          <label for="checkpoint" style="margin-top:0.75rem">Modell (passend zum Workflow)</label>
+          <div class="inline">
+            <select id="checkpoint">
+              <option value="">&ndash; Modelle laden &ndash;</option>
+            </select>
+            <button id="refreshCheckpointsBtn" type="button">&#8635;</button>
+          </div>
+          <div id="checkpointManualWrap" class="manual-wrap hidden">
+            <input id="checkpointManual" placeholder="Modell-Namen manuell eingeben &hellip;" />
+          </div>
+          <small id="checkpointNote" class="hint"></small>
+        </section>
+
+        <!-- Ollama -->
+        <section class="card">
+          <label for="ollamaModel">Ollama-Modell (&Uuml;bersetzung)</label>
+          <div class="inline">
+            <select id="ollamaModel">
+              <option value="">&ndash; Modelle laden &ndash;</option>
+            </select>
+            <button id="refreshModelsBtn" type="button">&#8635;</button>
+          </div>
+          <div id="ollamaModelManualWrap" class="manual-wrap hidden">
+            <input id="ollamaModelManual" placeholder="Modellname manuell eingeben &hellip;" />
+          </div>
+          <small id="ollamaModelNote" class="hint"></small>
         </section>
 
         <section class="card grid-4">
@@ -198,6 +203,7 @@
                 <th>Name</th>
                 <th>Anzeigename</th>
                 <th>Quelle</th>
+                <th>Modelltyp</th>
                 <th>Freigegeben</th>
                 <th>Aktiv</th>
                 <th>Aktionen</th>
@@ -205,6 +211,37 @@
             </thead>
             <tbody id="adminTemplateBody"></tbody>
           </table>
+        </section>
+
+        <!-- Model Aliases -->
+        <section class="card">
+          <h2>Modell-Aliase</h2>
+          <p class="hint">Technische Modell-Dateinamen mit lesbaren Anzeigenamen versehen. Der Alias wird in der Modell-Auswahl angezeigt.</p>
+          <div id="modelAliasStatus" class="hint"></div>
+
+          <table id="modelAliasTable" class="admin-table">
+            <thead>
+              <tr>
+                <th>Modellname (technisch)</th>
+                <th>Alias (Anzeigename)</th>
+                <th>Aktion</th>
+              </tr>
+            </thead>
+            <tbody id="modelAliasBody"></tbody>
+          </table>
+
+          <div class="admin-form card-inner" style="margin-top:0.75rem">
+            <h3>Alias hinzuf&uuml;gen / bearbeiten</h3>
+            <div class="grid-2">
+              <label>Modellname (technisch)
+                <input id="aliasNameInput" placeholder="z. B. v1-5-pruned.safetensors" />
+              </label>
+              <label>Alias (Anzeigename)
+                <input id="aliasDisplayInput" placeholder="z. B. Stable Diffusion 1.5" />
+              </label>
+            </div>
+            <button id="aliasSaveBtn" type="button" style="margin-top:0.5rem">Alias speichern</button>
+          </div>
         </section>
 
         <!-- Users -->

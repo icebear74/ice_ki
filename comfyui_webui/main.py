@@ -121,6 +121,7 @@ async def _startup() -> None:
             filename=None,
             approved=True,
             enabled=True,
+            model_type="checkpoint",
         )
     # Auto-discover workflow JSON files placed in data/templates/
     local_found = _registry.discover_local_templates()
@@ -287,6 +288,7 @@ class RegisterTemplateRequest(BaseModel):
     description: str = ""
     approved: bool = False
     enabled: bool = True
+    model_type: str = "any"
 
 
 class UpdateTemplateRequest(BaseModel):
@@ -294,6 +296,7 @@ class UpdateTemplateRequest(BaseModel):
     enabled: bool | None = None
     display_name: str | None = None
     description: str | None = None
+    model_type: str | None = None
 
 
 @app.get("/api/templates")
@@ -326,6 +329,7 @@ async def admin_register_template(
         description=payload.description,
         approved=payload.approved,
         enabled=payload.enabled,
+        model_type=payload.model_type,
     )
     return record
 
@@ -417,6 +421,8 @@ async def admin_upload_template(
     if not isinstance(data, dict):
         raise HTTPException(status_code=400, detail="JSON muss ein Objekt sein (ComfyUI workflow).")
 
+    model_type = _registry.detect_model_type(data)
+
     # Sanitise filename: keep only safe chars
     safe_name = Path(file.filename).name
     safe_name = "".join(c for c in safe_name if c.isalnum() or c in ("_", "-", "."))
@@ -443,6 +449,7 @@ async def admin_upload_template(
             filename=safe_name,
             approved=True,
             enabled=True,
+            model_type=model_type,
         )
     else:
         record = _registry.register_template(
@@ -450,6 +457,7 @@ async def admin_upload_template(
             display_name=existing.get("display_name", display_name),
             source=existing.get("source", "local"),
             filename=safe_name,
+            model_type=model_type,
         )
     return record
 
@@ -464,6 +472,66 @@ def _load_default_workflow() -> dict[str, dict[str, Any]]:
     except (OSError, json.JSONDecodeError):
         pass
     return DEFAULT_WORKFLOW
+
+
+# ---------------------------------------------------------------------------
+# Model aliases  {technical_filename: display_alias}
+# ---------------------------------------------------------------------------
+
+_ALIASES_FILE = APP_DIR / "data" / "model_aliases.json"
+
+
+def _load_aliases() -> dict[str, str]:
+    if not _ALIASES_FILE.exists():
+        return {}
+    try:
+        data = json.loads(_ALIASES_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return {str(k): str(v) for k, v in data.items()}
+    except (OSError, json.JSONDecodeError):
+        pass
+    return {}
+
+
+def _save_aliases(aliases: dict[str, str]) -> None:
+    _ALIASES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _ALIASES_FILE.write_text(json.dumps(aliases, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+class ModelAliasRequest(BaseModel):
+    name: str = Field(min_length=1)   # technical model filename
+    alias: str = Field(min_length=1)  # human-readable display name
+
+
+@app.get("/api/admin/model_aliases")
+async def admin_get_model_aliases(
+    _: dict[str, str] = Depends(require_admin),
+) -> dict[str, Any]:
+    return {"aliases": _load_aliases()}
+
+
+@app.put("/api/admin/model_aliases")
+async def admin_set_model_alias(
+    payload: ModelAliasRequest,
+    _: dict[str, str] = Depends(require_admin),
+) -> dict[str, str]:
+    aliases = _load_aliases()
+    aliases[payload.name] = payload.alias
+    _save_aliases(aliases)
+    return {"name": payload.name, "alias": payload.alias}
+
+
+@app.delete("/api/admin/model_aliases/{name:path}")
+async def admin_delete_model_alias(
+    name: str,
+    _: dict[str, str] = Depends(require_admin),
+) -> dict[str, str]:
+    aliases = _load_aliases()
+    if name not in aliases:
+        raise HTTPException(status_code=404, detail="Alias nicht gefunden.")
+    del aliases[name]
+    _save_aliases(aliases)
+    return {"status": "deleted"}
 
 
 @app.get("/")
@@ -508,6 +576,31 @@ async def translate_prompt(
 ) -> dict[str, str]:
     translated = await _translate_german_to_english(payload.prompt_de, payload.model, payload.context_prompt)
     return {"translated_prompt": translated}
+
+
+class RefinePromptRequest(BaseModel):
+    base_prompt_de: str = Field(min_length=1)
+    changes_de: str = Field(min_length=1)
+    model: str = Field(min_length=1)
+
+
+@app.post("/api/refine_prompt")
+async def refine_prompt_endpoint(
+    payload: RefinePromptRequest,
+    _: dict[str, str] = Depends(require_user),
+) -> dict[str, str]:
+    """Merge a base German prompt with change instructions into a new German prompt."""
+    instruction = (
+        "Du bist ein Experte für Bild-Prompts für KI-Bildgeneratoren. "
+        "Gegeben ist ein Basis-Prompt und eine Beschreibung der gewünschten Änderungen. "
+        "Erstelle daraus einen einzigen, vollständigen, klaren deutschen Bild-Prompt, "
+        "der alle Anforderungen präzise enthält. "
+        "Antworte NUR mit dem neuen deutschen Prompt, ohne Erklärungen, ohne Anführungszeichen.\n\n"
+        f"Basis-Prompt: {payload.base_prompt_de}\n"
+        f"Gewünschte Änderungen: {payload.changes_de}"
+    )
+    new_prompt = await _call_ollama_raw(instruction, payload.model)
+    return {"refined_prompt_de": new_prompt}
 
 
 def _extract_object_info_names(data: Any, node_key: str, input_key: str) -> list[str]:
@@ -627,6 +720,7 @@ async def get_comfy_checkpoints(
         "unet_models": list(unet_set),
         "sources": sources,
         "note": note,
+        "aliases": _load_aliases(),
     }
 
 
@@ -844,30 +938,17 @@ async def comfy_image_proxy(
     return Response(content=response.content, media_type=content_type)
 
 
-async def _translate_german_to_english(prompt_de: str, model: str, context_prompt: str | None = None) -> str:
-    """Translate German prompt to English via Ollama, optionally refining an existing prompt.
+async def _call_ollama_raw(instruction: str, model: str) -> str:
+    """Send *instruction* to Ollama and return the response text.
 
-    Tries /api/chat first (modern Ollama ≥ 0.1.14), then falls back to
-    /api/generate for older installations.
+    Tries ``/api/chat`` first (modern Ollama ≥ 0.1.14), then falls back to
+    ``/api/generate`` for older installations.  Raises ``HTTPException(502)``
+    on any failure so callers don't need to handle Ollama errors themselves.
     """
-    if context_prompt:
-        instruction = (
-            "You previously created an image with this English prompt:\n"
-            f'"{context_prompt}"\n\n'
-            "The user wants to modify it with this German instruction:\n"
-            f'"{prompt_de}"\n\n'
-            "Return only the updated English image prompt. No explanations, no quotes, no additional text."
-        )
-    else:
-        instruction = (
-            "Translate the following German image prompt into natural, precise English "
-            "for text-to-image models. Return only the English prompt, no explanations, "
-            "no quotes, no additional text.\n\n"
-            f"German: {prompt_de}"
-        )
-
-    # --- Primary: /api/chat (supported by all current Ollama versions) ---
     chat_url = f"{OLLAMA_BASE_URL}/api/chat"
+    generate_url = f"{OLLAMA_BASE_URL}/api/generate"
+
+    # --- Primary: /api/chat ---
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
@@ -881,19 +962,13 @@ async def _translate_german_to_english(prompt_de: str, model: str, context_promp
                 },
             )
         if response.status_code < 400:
-            translated = (
-                response.json()
-                .get("message", {})
-                .get("content", "")
-                .strip()
-            )
-            if translated:
-                return translated
+            text = response.json().get("message", {}).get("content", "").strip()
+            if text:
+                return text
     except httpx.HTTPError:
         pass  # fall through to /api/generate
 
-    # --- Fallback: /api/generate (older Ollama / alternative endpoint) ---
-    generate_url = f"{OLLAMA_BASE_URL}/api/generate"
+    # --- Fallback: /api/generate ---
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
@@ -911,19 +986,38 @@ async def _translate_german_to_english(prompt_de: str, model: str, context_promp
         raise HTTPException(
             status_code=502,
             detail=(
-                f"Ollama nicht erreichbar oder Fehler beim Übersetzen. "
-                f"Geprüfte URLs: {chat_url} und {generate_url}. "
-                f"Fehler: {exc}"
+                f"Ollama nicht erreichbar oder Fehler. "
+                f"Geprüfte URLs: {chat_url} und {generate_url}. Fehler: {exc}"
             ),
         ) from exc
 
-    translated = response.json().get("response", "").strip()
-    if not translated:
+    text = response.json().get("response", "").strip()
+    if not text:
         raise HTTPException(
             status_code=502,
-            detail=f"Ollama lieferte keinen Übersetzungstext (Modell: {model}, URL: {generate_url}).",
+            detail=f"Ollama lieferte keinen Text (Modell: {model}, URL: {generate_url}).",
         )
-    return translated
+    return text
+
+
+async def _translate_german_to_english(prompt_de: str, model: str, context_prompt: str | None = None) -> str:
+    """Translate German prompt to English via Ollama, optionally refining an existing prompt."""
+    if context_prompt:
+        instruction = (
+            "You previously created an image with this English prompt:\n"
+            f'"{context_prompt}"\n\n'
+            "The user wants to modify it with this German instruction:\n"
+            f'"{prompt_de}"\n\n'
+            "Return only the updated English image prompt. No explanations, no quotes, no additional text."
+        )
+    else:
+        instruction = (
+            "Translate the following German image prompt into natural, precise English "
+            "for text-to-image models. Return only the English prompt, no explanations, "
+            "no quotes, no additional text.\n\n"
+            f"German: {prompt_de}"
+        )
+    return await _call_ollama_raw(instruction, model)
 
 
 def _find_node_by_class(

@@ -81,6 +81,23 @@ def get_template(name: str) -> dict[str, Any] | None:
 # Mutations
 # ---------------------------------------------------------------------------
 
+def detect_model_type(workflow_json: dict) -> str:
+    """Inspect a ComfyUI workflow JSON and return the required model type.
+
+    Returns ``'unet'`` if a UNETLoader/DiffusionModelLoader node is found,
+    ``'checkpoint'`` if a CheckpointLoaderSimple node is found, or ``'any'`` otherwise.
+    """
+    for node in workflow_json.values():
+        if not isinstance(node, dict):
+            continue
+        ct = node.get("class_type", "")
+        if ct in ("UNETLoader", "DiffusionModelLoader"):
+            return "unet"
+        if ct == "CheckpointLoaderSimple":
+            return "checkpoint"
+    return "any"
+
+
 def register_template(
     name: str,
     display_name: str,
@@ -89,6 +106,7 @@ def register_template(
     filename: str | None = None,
     approved: bool = False,
     enabled: bool = True,
+    model_type: str = "any",
 ) -> dict[str, Any]:
     """Register a new template or update last_seen if it already exists."""
     templates = load_templates()
@@ -99,6 +117,9 @@ def register_template(
             t["display_name"] = display_name
             if filename is not None:
                 t["filename"] = filename
+            # Update model_type if a specific type was detected, or if not yet set
+            if model_type != "any" or "model_type" not in t:
+                t["model_type"] = model_type
             save_templates(templates)
             return t
 
@@ -110,6 +131,7 @@ def register_template(
         "filename": filename,
         "approved": approved,
         "enabled": enabled,
+        "model_type": model_type,
         "last_seen": now,
         "created_at": now,
     }
@@ -120,7 +142,7 @@ def register_template(
 
 def update_template(name: str, **fields: Any) -> dict[str, Any] | None:
     """Update allowed fields for a template record."""
-    allowed = {"approved", "enabled", "display_name", "description"}
+    allowed = {"approved", "enabled", "display_name", "description", "model_type"}
     templates = load_templates()
     for t in templates:
         if t["name"] == name:
@@ -165,6 +187,7 @@ def discover_local_templates() -> list[dict[str, Any]]:
             if not isinstance(data, dict):
                 logger.warning("discover_local_templates: %s is not a JSON object – skipped", json_file.name)
                 continue
+            model_type = detect_model_type(data)
         except (OSError, json.JSONDecodeError) as exc:
             logger.warning("discover_local_templates: cannot parse %s: %s", json_file.name, exc)
             continue
@@ -179,6 +202,7 @@ def discover_local_templates() -> list[dict[str, Any]]:
                 filename=json_file.name,
                 approved=True,
                 enabled=True,
+                model_type=model_type,
             )
             logger.info("discover_local_templates: registered new template %r from %s", slug, json_file.name)
         else:
@@ -188,6 +212,7 @@ def discover_local_templates() -> list[dict[str, Any]]:
                 display_name=existing.get("display_name", display_name),
                 source=existing.get("source", "local"),
                 filename=json_file.name,
+                model_type=model_type,
             )
             logger.debug("discover_local_templates: updated filename for existing template %r", slug)
         registered.append(record)
