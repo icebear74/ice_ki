@@ -606,10 +606,16 @@ async function loadAdminTemplates() {
 
 async function discoverTemplates() {
   const status = $("adminDiscoverStatus");
+  status.classList.remove("error");
   status.textContent = "Suche nach ComfyUI-Templates …";
   try {
     const data = await api("/api/admin/templates/discover", { method: "POST" });
-    status.textContent = `Gefunden: ${data.discovered}, Neu hinzugefügt: ${data.added}`;
+    if (data.error) {
+      status.textContent = `Gefunden: ${data.discovered}, Neu hinzugefügt: ${data.added}. Hinweis: ${data.error}`;
+      status.classList.add("error");
+    } else {
+      status.textContent = `Gefunden: ${data.discovered}, Neu hinzugefügt: ${data.added}`;
+    }
     await loadAdminTemplates();
   } catch (err) {
     status.textContent = `Fehler: ${err.message}`;
@@ -709,6 +715,67 @@ async function addUser() {
 }
 
 // ---------------------------------------------------------------------------
+// Change password
+// ---------------------------------------------------------------------------
+function openChangePw() {
+  $("cpCurrentPw").value = "";
+  $("cpNewPw").value = "";
+  $("cpNewPw2").value = "";
+  $("cpError").classList.add("hidden");
+  $("cpError").textContent = "";
+  $("cpSuccess").classList.add("hidden");
+  $("cpSuccess").textContent = "";
+  $("changePwOverlay").classList.remove("hidden");
+}
+
+function closeChangePw() {
+  $("changePwOverlay").classList.add("hidden");
+}
+
+async function submitChangePw() {
+  const current = $("cpCurrentPw").value;
+  const newPw = $("cpNewPw").value;
+  const newPw2 = $("cpNewPw2").value;
+  $("cpError").classList.add("hidden");
+  $("cpSuccess").classList.add("hidden");
+
+  if (!current || !newPw || !newPw2) {
+    $("cpError").textContent = "Bitte alle Felder ausfüllen.";
+    $("cpError").classList.remove("hidden");
+    return;
+  }
+  if (newPw !== newPw2) {
+    $("cpError").textContent = "Die neuen Passwörter stimmen nicht überein.";
+    $("cpError").classList.remove("hidden");
+    return;
+  }
+  if (newPw.length < 8) {
+    $("cpError").textContent = "Das neue Passwort muss mindestens 8 Zeichen lang sein.";
+    $("cpError").classList.remove("hidden");
+    return;
+  }
+
+  $("cpSubmitBtn").disabled = true;
+  try {
+    await api("/api/auth/change_password", {
+      method: "POST",
+      body: JSON.stringify({ current_password: current, new_password: newPw }),
+    });
+    $("cpSuccess").textContent = "Passwort erfolgreich geändert.";
+    $("cpSuccess").classList.remove("hidden");
+    $("cpCurrentPw").value = "";
+    $("cpNewPw").value = "";
+    $("cpNewPw2").value = "";
+    setTimeout(closeChangePw, 1500);
+  } catch (err) {
+    $("cpError").textContent = err.message;
+    $("cpError").classList.remove("hidden");
+  } finally {
+    $("cpSubmitBtn").disabled = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Utility
 // ---------------------------------------------------------------------------
 function escHtml(str) {
@@ -763,6 +830,10 @@ $("loginPassword").addEventListener("keydown", (e) => {
 // Event listeners – app shell
 // ---------------------------------------------------------------------------
 $("logoutBtn").addEventListener("click", doLogout);
+$("changePwBtn").addEventListener("click", openChangePw);
+$("cpSubmitBtn").addEventListener("click", submitChangePw);
+$("cpCancelBtn").addEventListener("click", closeChangePw);
+$("cpNewPw2").addEventListener("keydown", (e) => { if (e.key === "Enter") submitChangePw(); });
 $("tabGenerate").addEventListener("click", () => showTab("Generate"));
 $("tabAdmin").addEventListener("click", () => showTab("Admin"));
 

@@ -205,6 +205,22 @@ def update_user(username: str, **fields: Any) -> dict[str, Any] | None:
     return None
 
 
+def change_password(username: str, new_password: str) -> bool:
+    """Update the password for an existing user.
+
+    Returns ``True`` on success, ``False`` if the user was not found.
+    """
+    users = load_users()
+    for user in users:
+        if user["username"] == username:
+            pw_hash, salt = _hash_password(new_password)
+            user["password_hash"] = pw_hash
+            user["salt"] = salt
+            save_users(users)
+            return True
+    return False
+
+
 def public_user(user: dict[str, Any]) -> dict[str, Any]:
     """Return a safe public representation (no password fields)."""
     return {

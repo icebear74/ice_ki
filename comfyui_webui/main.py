@@ -166,6 +166,11 @@ class UpdateUserRequest(BaseModel):
     role: str | None = None
 
 
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=1)
+    new_password: str = Field(min_length=8)
+
+
 # ---------------------------------------------------------------------------
 # Auth endpoints
 # ---------------------------------------------------------------------------
@@ -203,6 +208,20 @@ async def me(session: dict[str, str] | None = Depends(_get_session)) -> dict[str
     if session is None:
         raise HTTPException(status_code=401, detail="Nicht eingeloggt.")
     return {"username": session["username"], "role": session["role"]}
+
+
+@app.post("/api/auth/change_password")
+async def change_password(
+    payload: ChangePasswordRequest,
+    session: dict[str, str] = Depends(require_user),
+) -> dict[str, str]:
+    username = session["username"]
+    # Verify the current password before allowing the change
+    if _auth.authenticate(username, payload.current_password) is None:
+        raise HTTPException(status_code=400, detail="Aktuelles Passwort ist falsch.")
+    if not _auth.change_password(username, payload.new_password):
+        raise HTTPException(status_code=404, detail="Benutzer nicht gefunden.")
+    return {"status": "ok"}
 
 
 # ---------------------------------------------------------------------------
@@ -337,7 +356,7 @@ async def admin_discover_templates(
     _: dict[str, str] = Depends(require_admin),
 ) -> dict[str, Any]:
     """Attempt to fetch workflow templates from ComfyUI and add unseen ones."""
-    discovered = await _registry.discover_comfyui_templates(COMFYUI_BASE_URL)
+    discovered, error_msg = await _registry.discover_comfyui_templates(COMFYUI_BASE_URL)
     added = 0
     for item in discovered:
         existing = _registry.get_template(item["name"])
@@ -349,7 +368,10 @@ async def admin_discover_templates(
                 description=item.get("description", ""),
             )
             added += 1
-    return {"discovered": len(discovered), "added": added}
+    result: dict[str, Any] = {"discovered": len(discovered), "added": added}
+    if error_msg:
+        result["error"] = error_msg
+    return result
 
 
 def _load_default_workflow() -> dict[str, dict[str, Any]]:

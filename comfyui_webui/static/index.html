@@ -31,9 +31,29 @@
       </nav>
       <div class="user-info">
         <span id="userBadge" class="user-badge"></span>
+        <button id="changePwBtn" class="btn-sm btn-secondary" type="button">Passwort &auml;ndern</button>
         <button id="logoutBtn" class="btn-sm" type="button">Abmelden</button>
       </div>
     </header>
+
+    <!-- ── CHANGE PASSWORD MODAL ── -->
+    <div id="changePwOverlay" class="overlay hidden">
+      <div class="login-box card">
+        <h2>Passwort &auml;ndern</h2>
+        <label for="cpCurrentPw">Aktuelles Passwort</label>
+        <input id="cpCurrentPw" type="password" autocomplete="current-password" />
+        <label for="cpNewPw">Neues Passwort (min. 8 Zeichen)</label>
+        <input id="cpNewPw" type="password" autocomplete="new-password" />
+        <label for="cpNewPw2">Neues Passwort wiederholen</label>
+        <input id="cpNewPw2" type="password" autocomplete="new-password" />
+        <div id="cpError" class="hint error hidden"></div>
+        <div id="cpSuccess" class="hint hidden" style="color:var(--success)"></div>
+        <div class="inline" style="margin-top:0.5rem">
+          <button id="cpSubmitBtn" type="button">Speichern</button>
+          <button id="cpCancelBtn" class="btn-secondary" type="button">Abbrechen</button>
+        </div>
+      </div>
+    </div>
 
     <!-- ── GENERATE TAB ── -->
     <div id="panelGenerate">

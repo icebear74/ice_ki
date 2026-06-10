@@ -145,44 +145,69 @@ def delete_template(name: str) -> bool:
 # ComfyUI template discovery
 # ---------------------------------------------------------------------------
 
-async def discover_comfyui_templates(comfyui_base_url: str) -> list[dict[str, Any]]:
+async def discover_comfyui_templates(
+    comfyui_base_url: str,
+) -> tuple[list[dict[str, Any]], str | None]:
     """Try to fetch workflow templates from ComfyUI's built-in template API.
 
-    Returns a list of newly-discovered template records (not yet saved).
-    Callers should persist with register_template() as needed.
+    Returns ``(discovered, error_message)``.  *discovered* is a list of
+    newly-discovered template records (not yet saved); callers should persist
+    them with :func:`register_template` as needed.  *error_message* is
+    ``None`` on success or a human-readable string when no templates could be
+    fetched.
     """
     import httpx  # local import to keep module import-time clean
 
-    discovered: list[dict[str, Any]] = []
-    url = f"{comfyui_base_url}/api/workflow_templates"
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(url)
-        response.raise_for_status()
-        data = response.json()
-        # ComfyUI returns a list or dict of template metadata
-        items: list[Any] = data if isinstance(data, list) else list(data.values())
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            tname = item.get("name") or item.get("title") or ""
-            if not tname:
-                continue
-            slug = tname.lower().replace(" ", "_").replace("/", "_")
-            discovered.append(
-                {
-                    "name": slug,
-                    "display_name": tname,
-                    "source": "comfyui",
-                    "description": item.get("description", ""),
-                    "filename": None,
-                }
+    # ComfyUI has served workflow templates under different paths across versions.
+    # Try them in order and return as soon as one succeeds.
+    candidate_urls = [
+        f"{comfyui_base_url}/api/workflow_templates",
+        f"{comfyui_base_url}/workflow_templates",
+    ]
+
+    last_error: str | None = None
+    for url in candidate_urls:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url)
+            response.raise_for_status()
+            data = response.json()
+            # ComfyUI returns a list or dict of template metadata
+            items: list[Any] = data if isinstance(data, list) else list(data.values())
+            discovered: list[dict[str, Any]] = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                tname = item.get("name") or item.get("title") or ""
+                if not tname:
+                    continue
+                slug = tname.lower().replace(" ", "_").replace("/", "_")
+                discovered.append(
+                    {
+                        "name": slug,
+                        "display_name": tname,
+                        "source": "comfyui",
+                        "description": item.get("description", ""),
+                        "filename": None,
+                    }
+                )
+            logger.info(
+                "template_registry: discovered %d templates from ComfyUI (%s)",
+                len(discovered),
+                url,
             )
-        logger.info(
-            "template_registry: discovered %d templates from ComfyUI", len(discovered)
-        )
-    except Exception as exc:
-        logger.warning(
-            "template_registry: ComfyUI template discovery failed (%s): %s", url, exc
-        )
-    return discovered
+            return discovered, None
+        except Exception as exc:
+            last_error = str(exc)
+            logger.warning(
+                "template_registry: ComfyUI template discovery failed (%s): %s",
+                url,
+                exc,
+            )
+
+    error_msg = (
+        f"Kein kompatibles Template-Endpunkt gefunden. "
+        f"Getestete URLs: {', '.join(candidate_urls)}. "
+        f"Letzter Fehler: {last_error}"
+    )
+    return [], error_msg
