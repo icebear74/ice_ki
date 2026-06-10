@@ -128,14 +128,63 @@ async function loadOllamaModels() {
 }
 
 async function loadCheckpoints() {
-  setStatus("Lade ComfyUI-Checkpoints …");
+  setStatus("Lade ComfyUI-Modelle …");
   console.log("loadCheckpoints: fetching /api/comfy/checkpoints");
   const data = await api("/api/comfy/checkpoints");
   console.log("loadCheckpoints: response", data);
-  state.checkpoints = data.checkpoints || [];
-  fillSelect("checkpoint", "checkpointManualWrap", state.checkpoints);
+
+  const allModels = data.checkpoints || [];
+  const unetSet = new Set(data.unet_models || []);
+  state.checkpoints = allModels;
+
+  const select = $("checkpoint");
+  const manualWrap = $("checkpointManualWrap");
+  const currentVal = select.value;
+  select.innerHTML = "";
+
+  if (allModels.length === 0) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "– keine gefunden –";
+    select.appendChild(opt);
+    manualWrap.classList.remove("hidden");
+  } else {
+    manualWrap.classList.add("hidden");
+
+    const ckptModels = allModels.filter(m => !m.startsWith("[unet] "));
+    const unetModels = allModels.filter(m => m.startsWith("[unet] "));
+
+    function addOptions(names, parent) {
+      for (const name of names) {
+        const opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name.replace(/^\[unet\] /, "");
+        parent.appendChild(opt);
+      }
+    }
+
+    if (ckptModels.length > 0) {
+      const grp = document.createElement("optgroup");
+      grp.label = "Checkpoints";
+      addOptions(ckptModels, grp);
+      select.appendChild(grp);
+    }
+    if (unetModels.length > 0) {
+      const grp = document.createElement("optgroup");
+      grp.label = "UNet / Diffusion (FLUX, Zimage …)";
+      addOptions(unetModels, grp);
+      select.appendChild(grp);
+    }
+
+    if (currentVal && allModels.includes(currentVal)) {
+      select.value = currentVal;
+    }
+  }
+
   $("checkpointNote").textContent = data.note || "";
-  setStatus(`Checkpoints geladen: ${state.checkpoints.length}`);
+  const unetCount = (data.unet_models || []).length;
+  const ckptCount = allModels.length - unetCount;
+  setStatus(`Modelle geladen: ${ckptCount} Checkpoints, ${unetCount} UNet`);
 }
 
 async function loadSamplers() {

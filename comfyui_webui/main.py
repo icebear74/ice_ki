@@ -132,31 +132,40 @@ async def translate_prompt(payload: TranslateRequest) -> dict[str, str]:
     return {"translated_prompt": translated}
 
 
+def _extract_object_info_names(data: Any, node_key: str, input_key: str) -> list[str]:
+    """Extract the name list from a ComfyUI /object_info/<NodeType> response."""
+    raw = (
+        data.get(node_key, {})
+        .get("input", {})
+        .get("required", {})
+        .get(input_key, [[]])[0]
+    )
+    if isinstance(raw, list):
+        return [str(item) for item in raw if item]
+    return []
+
+
 @app.get("/api/comfy/checkpoints")
 async def get_comfy_checkpoints() -> dict[str, Any]:
     sources: list[str] = []
     checkpoints: list[str] = []
+    unet_models: list[str] = []
 
+    # ── Checkpoints (CheckpointLoaderSimple) ──────────────────────────────
     logger.info("get_comfy_checkpoints: trying %s/object_info/CheckpointLoaderSimple", COMFYUI_BASE_URL)
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(f"{COMFYUI_BASE_URL}/object_info/CheckpointLoaderSimple")
         response.raise_for_status()
-        ckpt_names = (
-            response.json()
-            .get("CheckpointLoaderSimple", {})
-            .get("input", {})
-            .get("required", {})
-            .get("ckpt_name", [[]])[0]
-        )
-        if isinstance(ckpt_names, list):
-            checkpoints = [str(item) for item in ckpt_names if item]
+        names = _extract_object_info_names(response.json(), "CheckpointLoaderSimple", "ckpt_name")
+        if names:
+            checkpoints = names
             sources.append("/object_info/CheckpointLoaderSimple")
             logger.info("get_comfy_checkpoints: found %d checkpoints via object_info", len(checkpoints))
     except Exception as exc:
         logger.warning("get_comfy_checkpoints: object_info failed: %s", exc)
 
-    # Newer ComfyUI API
+    # Newer ComfyUI API – checkpoints
     if not checkpoints:
         logger.info("get_comfy_checkpoints: trying %s/api/models/checkpoints", COMFYUI_BASE_URL)
         try:
@@ -185,16 +194,60 @@ async def get_comfy_checkpoints() -> dict[str, Any]:
         except Exception as exc:
             logger.warning("get_comfy_checkpoints: /models failed: %s", exc)
 
+    # ── UNet / Diffusion models (UNETLoader / DiffusionModelLoader) ───────
+    logger.info("get_comfy_checkpoints: trying %s/object_info/UNETLoader", COMFYUI_BASE_URL)
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(f"{COMFYUI_BASE_URL}/object_info/UNETLoader")
+        response.raise_for_status()
+        names = _extract_object_info_names(response.json(), "UNETLoader", "unet_name")
+        if names:
+            unet_models = names
+            sources.append("/object_info/UNETLoader")
+            logger.info("get_comfy_checkpoints: found %d unet models via UNETLoader object_info", len(unet_models))
+    except Exception as exc:
+        logger.warning("get_comfy_checkpoints: UNETLoader object_info failed: %s", exc)
+
+    # Newer ComfyUI API – unet models
+    if not unet_models:
+        logger.info("get_comfy_checkpoints: trying %s/api/models/unet", COMFYUI_BASE_URL)
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(f"{COMFYUI_BASE_URL}/api/models/unet")
+            response.raise_for_status()
+            data = response.json()
+            if isinstance(data, list):
+                unet_models = [str(item) for item in data if item]
+                sources.append("/api/models/unet")
+                logger.info("get_comfy_checkpoints: found %d unet models via /api/models/unet", len(unet_models))
+        except Exception as exc:
+            logger.warning("get_comfy_checkpoints: /api/models/unet failed: %s", exc)
+
+    # ── Merge: unet models are shown tagged so the UI can distinguish them ─
+    unet_set = set(unet_models)
+    all_models = checkpoints + [f"[unet] {name}" for name in unet_models if name not in set(checkpoints)]
+
     note = ""
-    if not checkpoints:
-        logger.warning("get_comfy_checkpoints: no checkpoints found via any source (ComfyUI URL: %s)", COMFYUI_BASE_URL)
+    if not all_models:
+        logger.warning("get_comfy_checkpoints: no models found via any source (ComfyUI URL: %s)", COMFYUI_BASE_URL)
         note = (
-            "Keine Checkpoints gefunden. "
-            "Modelle müssen im Verzeichnis ComfyUI/models/checkpoints/ liegen "
+            "Keine Modelle gefunden. "
+            "Checkpoints müssen in ComfyUI/models/checkpoints/ liegen, "
+            "UNet-Modelle (FLUX/Zimage) in ComfyUI/models/unet/ – "
             "oder über extra_model_paths.yaml eingebunden sein."
         )
+    elif unet_models:
+        logger.info(
+            "get_comfy_checkpoints: total %d checkpoints + %d unet models",
+            len(checkpoints), len(unet_models),
+        )
 
-    return {"checkpoints": checkpoints, "sources": sources, "note": note}
+    return {
+        "checkpoints": all_models,
+        "unet_models": list(unet_set),
+        "sources": sources,
+        "note": note,
+    }
 
 
 _DEFAULT_SAMPLERS = [
@@ -468,7 +521,13 @@ def _build_workflow(payload: GenerateRequest, translated_prompt: str, translated
     workflow["3"]["inputs"]["text"] = translated_negative
 
     if payload.checkpoint:
-        workflow["1"]["inputs"]["ckpt_name"] = payload.checkpoint
+        # Strip the [unet] tag added by get_comfy_checkpoints for display purposes
+        model_name = payload.checkpoint.removeprefix("[unet] ")
+        node1_type = workflow.get("1", {}).get("class_type", "")
+        if node1_type in ("UNETLoader", "DiffusionModelLoader"):
+            workflow["1"]["inputs"]["unet_name"] = model_name
+        else:
+            workflow["1"]["inputs"]["ckpt_name"] = model_name
 
     workflow["4"]["inputs"]["width"] = max(64, payload.width // 8 * 8)
     workflow["4"]["inputs"]["height"] = max(64, payload.height // 8 * 8)
