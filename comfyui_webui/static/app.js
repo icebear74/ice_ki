@@ -1,19 +1,32 @@
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
 const state = {
+  currentUser: null,   // { username, role }
   ollamaModels: [],
   checkpoints: [],
   samplers: [],
   schedulers: [],
+  templates: [],
   lastTranslatedPrompt: "",
 };
 
 const $ = (id) => document.getElementById(id);
 
+// ---------------------------------------------------------------------------
+// Generic API helper
+// ---------------------------------------------------------------------------
 async function api(path, options = {}) {
   const response = await fetch(path, {
     headers: { "Content-Type": "application/json" },
     ...options,
   });
   if (!response.ok) {
+    if (response.status === 401) {
+      // Session expired – show login again
+      showLogin();
+      throw new Error("Sitzung abgelaufen. Bitte erneut anmelden.");
+    }
     let detail = `${response.status} ${response.statusText}`;
     try {
       const payload = await response.json();
@@ -26,6 +39,92 @@ async function api(path, options = {}) {
   return response.json();
 }
 
+// ---------------------------------------------------------------------------
+// Auth / login / logout
+// ---------------------------------------------------------------------------
+function showLogin() {
+  $("loginOverlay").classList.remove("hidden");
+  $("mainApp").classList.add("hidden");
+  $("loginError").classList.add("hidden");
+  $("loginError").textContent = "";
+}
+
+function showApp(user) {
+  state.currentUser = user;
+  $("loginOverlay").classList.add("hidden");
+  $("mainApp").classList.remove("hidden");
+  $("userBadge").textContent = `${user.username} (${user.role})`;
+  // Show admin tab only for admins
+  if (user.role === "admin") {
+    $("tabAdmin").classList.remove("hidden");
+  } else {
+    $("tabAdmin").classList.add("hidden");
+  }
+}
+
+async function tryAutoLogin() {
+  try {
+    const user = await api("/api/auth/me");
+    showApp(user);
+    await initAppData();
+  } catch {
+    showLogin();
+  }
+}
+
+async function doLogin() {
+  const username = $("loginUsername").value.trim();
+  const password = $("loginPassword").value;
+  if (!username || !password) {
+    $("loginError").textContent = "Bitte Benutzernamen und Passwort eingeben.";
+    $("loginError").classList.remove("hidden");
+    return;
+  }
+  $("loginBtn").disabled = true;
+  try {
+    const user = await api("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    });
+    $("loginPassword").value = "";
+    showApp(user);
+    await initAppData();
+  } catch (err) {
+    $("loginError").textContent = err.message;
+    $("loginError").classList.remove("hidden");
+  } finally {
+    $("loginBtn").disabled = false;
+  }
+}
+
+async function doLogout() {
+  try {
+    await api("/api/auth/logout", { method: "POST" });
+  } catch {
+    // ignore
+  }
+  state.currentUser = null;
+  showLogin();
+}
+
+// ---------------------------------------------------------------------------
+// Tab switching
+// ---------------------------------------------------------------------------
+function showTab(name) {
+  const tabs = ["Generate", "Admin"];
+  for (const t of tabs) {
+    $(`panel${t}`).classList.toggle("hidden", t !== name);
+    $(`tab${t}`)?.classList.toggle("active", t === name);
+  }
+  if (name === "Admin") {
+    loadAdminTemplates();
+    loadAdminUsers();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Status helpers
+// ---------------------------------------------------------------------------
 function setStatus(message, isError = false) {
   const status = $("status");
   status.textContent = message;
@@ -53,10 +152,9 @@ function setProgressBar(step, total, eta) {
     total > 0 ? `${step} / ${total} Schritte (${pct}%)${etaStr}` : "";
 }
 
-/**
- * Fill a <select> element with option values.
- * Keeps a leading "manual" placeholder option if no values are available.
- */
+// ---------------------------------------------------------------------------
+// Select helpers
+// ---------------------------------------------------------------------------
 function fillSelect(selectId, manualWrapId, values) {
   const select = $(selectId);
   const currentVal = select.value;
@@ -78,7 +176,6 @@ function fillSelect(selectId, manualWrapId, values) {
     opt.textContent = value;
     select.appendChild(opt);
   }
-  // Restore previous selection if still in list
   if (currentVal && values.includes(currentVal)) {
     select.value = currentVal;
   }
@@ -101,7 +198,6 @@ function fillSelectSimple(selectId, values, defaultValue) {
   }
 }
 
-/** Return the effective value: select element, or manual input if visible. */
 function selectValue(selectId, manualInputId, manualWrapId) {
   const wrap = $(manualWrapId);
   if (wrap && !wrap.classList.contains("hidden")) {
@@ -110,11 +206,12 @@ function selectValue(selectId, manualInputId, manualWrapId) {
   return $(selectId).value.trim();
 }
 
+// ---------------------------------------------------------------------------
+// Data loaders
+// ---------------------------------------------------------------------------
 async function loadOllamaModels() {
   setStatus("Lade Ollama-Modelle …");
-  console.log("loadOllamaModels: fetching /api/ollama/models");
   const data = await api("/api/ollama/models");
-  console.log("loadOllamaModels: response", data);
   state.ollamaModels = data.models || [];
   fillSelect("ollamaModel", "ollamaModelManualWrap", state.ollamaModels);
   const note = $("ollamaModelNote");
@@ -129,12 +226,9 @@ async function loadOllamaModels() {
 
 async function loadCheckpoints() {
   setStatus("Lade ComfyUI-Modelle …");
-  console.log("loadCheckpoints: fetching /api/comfy/checkpoints");
   const data = await api("/api/comfy/checkpoints");
-  console.log("loadCheckpoints: response", data);
 
   const allModels = data.checkpoints || [];
-  const unetSet = new Set(data.unet_models || []);
   state.checkpoints = allModels;
 
   const select = $("checkpoint");
@@ -151,8 +245,8 @@ async function loadCheckpoints() {
   } else {
     manualWrap.classList.add("hidden");
 
-    const ckptModels = allModels.filter(m => !m.startsWith("[unet] "));
-    const unetModels = allModels.filter(m => m.startsWith("[unet] "));
+    const ckptModels = allModels.filter((m) => !m.startsWith("[unet] "));
+    const unetModels = allModels.filter((m) => m.startsWith("[unet] "));
 
     function addOptions(names, parent) {
       for (const name of names) {
@@ -186,7 +280,6 @@ async function loadCheckpoints() {
   const ckptCount = allModels.length - unetCount;
   setStatus(`Modelle geladen: ${ckptCount} Checkpoints, ${unetCount} UNet`);
 
-  // Warn when a UNet model is selected, since it needs a custom workflow template
   function updateUnetWarning() {
     const val = selectValue("checkpoint", "checkpointManual", "checkpointManualWrap");
     const note = $("checkpointNote");
@@ -221,6 +314,45 @@ async function loadSamplers() {
   fillSelectSimple("scheduler", state.schedulers, "normal");
 }
 
+async function loadTemplates() {
+  try {
+    const data = await api("/api/templates");
+    state.templates = data.templates || [];
+  } catch {
+    state.templates = [];
+  }
+  const select = $("workflowTemplate");
+  const currentVal = select.value;
+  select.innerHTML = "";
+
+  // Always include built-in default
+  const opt0 = document.createElement("option");
+  opt0.value = "default";
+  opt0.textContent = "Standard (CheckpointLoaderSimple)";
+  select.appendChild(opt0);
+
+  for (const tpl of state.templates) {
+    if (tpl.name === "default") continue; // already added above
+    const opt = document.createElement("option");
+    opt.value = tpl.name;
+    opt.textContent = tpl.display_name || tpl.name;
+    if (tpl.description) opt.title = tpl.description;
+    select.appendChild(opt);
+  }
+
+  if (currentVal) select.value = currentVal;
+  const note = $("templateNote");
+  if (state.templates.length <= 1) {
+    note.textContent =
+      "Nur das Standard-Template verfügbar. Admins können weitere Templates freigeben.";
+  } else {
+    note.textContent = `${state.templates.length} Template(s) verfügbar.`;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Generate flow
+// ---------------------------------------------------------------------------
 function collectPayload() {
   const isFollowup = $("followupCheck") && $("followupCheck").checked;
   return {
@@ -231,6 +363,7 @@ function collectPayload() {
     translated_negative_prompt: $("translatedNegativePrompt").value.trim() || null,
     context_prompt: isFollowup && state.lastTranslatedPrompt ? state.lastTranslatedPrompt : null,
     checkpoint: selectValue("checkpoint", "checkpointManual", "checkpointManualWrap") || null,
+    workflow_template: $("workflowTemplate").value || "default",
     steps: Number($("steps").value),
     cfg: Number($("cfg").value),
     seed: Number($("seed").value),
@@ -310,7 +443,6 @@ async function generateImages() {
   showProgress(false);
 
   try {
-    // Step 1: Translate if no translated prompt(s) present yet
     const translateTasks = [];
     if (!payload.translated_prompt) {
       translateTasks.push(
@@ -346,7 +478,6 @@ async function generateImages() {
       await Promise.all(translateTasks);
     }
 
-    // Step 2: Submit job to ComfyUI
     setStatus("Sende an ComfyUI …");
     const submitData = await api("/api/generate", {
       method: "POST",
@@ -362,7 +493,6 @@ async function generateImages() {
     }
     showFollowupSection(translated_prompt || payload.translated_prompt);
 
-    // Step 3: Stream progress via SSE
     showProgress(true);
     setProgressBar(0, 0, null);
 
@@ -417,14 +547,189 @@ async function generateImages() {
   }
 }
 
-async function init() {
-  console.log("ComfyUI WebUI init() started");
+// ---------------------------------------------------------------------------
+// Admin – templates
+// ---------------------------------------------------------------------------
+async function loadAdminTemplates() {
+  const tbody = $("adminTemplateBody");
+  tbody.innerHTML = "<tr><td colspan='6' class='hint'>Lade …</td></tr>";
+  try {
+    const data = await api("/api/admin/templates");
+    tbody.innerHTML = "";
+    for (const tpl of data.templates) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td>${escHtml(tpl.name)}</td>
+        <td>${escHtml(tpl.display_name)}</td>
+        <td>${escHtml(tpl.source || "")}</td>
+        <td><input type="checkbox" class="tpl-approved" data-name="${escHtml(tpl.name)}" ${tpl.approved ? "checked" : ""} /></td>
+        <td><input type="checkbox" class="tpl-enabled" data-name="${escHtml(tpl.name)}" ${tpl.enabled ? "checked" : ""} /></td>
+        <td><button class="btn-sm btn-danger tpl-delete" data-name="${escHtml(tpl.name)}" type="button">Löschen</button></td>
+      `;
+      tbody.appendChild(tr);
+    }
+    // Attach inline-toggle handlers
+    tbody.querySelectorAll(".tpl-approved, .tpl-enabled").forEach((cb) => {
+      cb.addEventListener("change", async () => {
+        const name = cb.dataset.name;
+        const field = cb.classList.contains("tpl-approved") ? "approved" : "enabled";
+        try {
+          await api(`/api/admin/templates/${encodeURIComponent(name)}`, {
+            method: "PATCH",
+            body: JSON.stringify({ [field]: cb.checked }),
+          });
+          await loadTemplates(); // refresh user-visible template select
+        } catch (err) {
+          alert(`Fehler: ${err.message}`);
+          cb.checked = !cb.checked; // revert
+        }
+      });
+    });
+    tbody.querySelectorAll(".tpl-delete").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        if (!confirm(`Template "${btn.dataset.name}" wirklich löschen?`)) return;
+        try {
+          await api(`/api/admin/templates/${encodeURIComponent(btn.dataset.name)}`, {
+            method: "DELETE",
+          });
+          await loadAdminTemplates();
+          await loadTemplates();
+        } catch (err) {
+          alert(`Fehler: ${err.message}`);
+        }
+      });
+    });
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan='6' class='error'>${escHtml(err.message)}</td></tr>`;
+  }
+}
+
+async function discoverTemplates() {
+  const status = $("adminDiscoverStatus");
+  status.textContent = "Suche nach ComfyUI-Templates …";
+  try {
+    const data = await api("/api/admin/templates/discover", { method: "POST" });
+    status.textContent = `Gefunden: ${data.discovered}, Neu hinzugefügt: ${data.added}`;
+    await loadAdminTemplates();
+  } catch (err) {
+    status.textContent = `Fehler: ${err.message}`;
+    status.classList.add("error");
+  }
+}
+
+async function addTemplate() {
+  const name = $("newTplName").value.trim();
+  const display_name = $("newTplDisplay").value.trim();
+  const source = $("newTplSource").value.trim() || "local";
+  const description = $("newTplDesc").value.trim();
+  const approved = $("newTplApproved").checked;
+
+  if (!name || !display_name) {
+    alert("Bitte Name und Anzeigename angeben.");
+    return;
+  }
+  try {
+    await api("/api/admin/templates", {
+      method: "POST",
+      body: JSON.stringify({ name, display_name, source, description, approved, enabled: true }),
+    });
+    $("addTemplateForm").classList.add("hidden");
+    await loadAdminTemplates();
+    await loadTemplates();
+  } catch (err) {
+    alert(`Fehler: ${err.message}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Admin – users
+// ---------------------------------------------------------------------------
+async function loadAdminUsers() {
+  const tbody = $("adminUserBody");
+  tbody.innerHTML = "<tr><td colspan='5' class='hint'>Lade …</td></tr>";
+  try {
+    const data = await api("/api/admin/users");
+    tbody.innerHTML = "";
+    for (const user of data.users) {
+      const tr = document.createElement("tr");
+      const isSelf = state.currentUser && user.username === state.currentUser.username;
+      tr.innerHTML = `
+        <td>${escHtml(user.username)}</td>
+        <td>${escHtml(user.role)}</td>
+        <td>${user.disabled ? "Ja" : "Nein"}</td>
+        <td>${escHtml((user.created_at || "").slice(0, 10))}</td>
+        <td>
+          ${!isSelf
+            ? `<button class="btn-sm ${user.disabled ? "" : "btn-danger"} user-toggle" data-name="${escHtml(user.username)}" data-disabled="${user.disabled}" type="button">${user.disabled ? "Aktivieren" : "Deaktivieren"}</button>`
+            : "(eigenes Konto)"
+          }
+        </td>
+      `;
+      tbody.appendChild(tr);
+    }
+    tbody.querySelectorAll(".user-toggle").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const newDisabled = btn.dataset.disabled !== "true";
+        try {
+          await api(`/api/admin/users/${encodeURIComponent(btn.dataset.name)}`, {
+            method: "PATCH",
+            body: JSON.stringify({ disabled: newDisabled }),
+          });
+          await loadAdminUsers();
+        } catch (err) {
+          alert(`Fehler: ${err.message}`);
+        }
+      });
+    });
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan='5' class='error'>${escHtml(err.message)}</td></tr>`;
+  }
+}
+
+async function addUser() {
+  const username = $("newUserName").value.trim();
+  const password = $("newUserPass").value;
+  const role = $("newUserRole").value;
+  if (!username || !password) {
+    alert("Bitte Benutzername und Passwort angeben.");
+    return;
+  }
+  try {
+    await api("/api/admin/users", {
+      method: "POST",
+      body: JSON.stringify({ username, password, role }),
+    });
+    $("newUserName").value = "";
+    $("newUserPass").value = "";
+    $("addUserForm").classList.add("hidden");
+    await loadAdminUsers();
+  } catch (err) {
+    alert(`Fehler: ${err.message}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Utility
+// ---------------------------------------------------------------------------
+function escHtml(str) {
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+// ---------------------------------------------------------------------------
+// Init – after login, load all dynamic data
+// ---------------------------------------------------------------------------
+async function initAppData() {
   const errors = [];
+
+  await loadTemplates().catch((e) => errors.push(`Templates: ${e.message}`));
 
   try {
     await loadOllamaModels();
   } catch (error) {
-    console.error("loadOllamaModels failed:", error);
     errors.push(`Ollama: ${error.message}`);
     fillSelect("ollamaModel", "ollamaModelManualWrap", []);
     const note = $("ollamaModelNote");
@@ -434,7 +739,6 @@ async function init() {
   try {
     await loadCheckpoints();
   } catch (error) {
-    console.error("loadCheckpoints failed:", error);
     errors.push(`Checkpoints: ${error.message}`);
     fillSelect("checkpoint", "checkpointManualWrap", []);
     $("checkpointNote").textContent = `ComfyUI nicht erreichbar: ${error.message}`;
@@ -445,9 +749,26 @@ async function init() {
   if (errors.length > 0) {
     setStatus(errors.join(" | "), true);
   }
-  console.log("ComfyUI WebUI init() complete. Errors:", errors);
 }
 
+// ---------------------------------------------------------------------------
+// Event listeners – login
+// ---------------------------------------------------------------------------
+$("loginBtn").addEventListener("click", doLogin);
+$("loginPassword").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") doLogin();
+});
+
+// ---------------------------------------------------------------------------
+// Event listeners – app shell
+// ---------------------------------------------------------------------------
+$("logoutBtn").addEventListener("click", doLogout);
+$("tabGenerate").addEventListener("click", () => showTab("Generate"));
+$("tabAdmin").addEventListener("click", () => showTab("Admin"));
+
+// ---------------------------------------------------------------------------
+// Event listeners – generate tab
+// ---------------------------------------------------------------------------
 $("refreshModelsBtn").addEventListener("click", async () => {
   try {
     await loadOllamaModels();
@@ -463,6 +784,15 @@ $("refreshCheckpointsBtn").addEventListener("click", async () => {
   } catch (error) {
     setStatus(error.message, true);
     fillSelect("checkpoint", "checkpointManualWrap", []);
+  }
+});
+
+$("refreshTemplatesBtn").addEventListener("click", async () => {
+  try {
+    await loadTemplates();
+    setStatus("Templates aktualisiert.");
+  } catch (error) {
+    setStatus(error.message, true);
   }
 });
 
@@ -483,11 +813,9 @@ $("generateBtn").addEventListener("click", async () => {
 });
 
 $("followupCheck").addEventListener("change", () => {
-  const hint = $("followupHint");
   if ($("followupCheck").checked) {
     $("promptDe").placeholder =
       "Änderungsanweisung eingeben, z. B. \u201EMache die Sonne etwas dunkler\u201C";
-    // Clear translated prompt so it gets regenerated with context
     $("translatedPrompt").value = "";
   } else {
     $("promptDe").placeholder =
@@ -495,4 +823,28 @@ $("followupCheck").addEventListener("change", () => {
   }
 });
 
-init();
+// ---------------------------------------------------------------------------
+// Event listeners – admin tab
+// ---------------------------------------------------------------------------
+$("adminDiscoverBtn").addEventListener("click", discoverTemplates);
+
+$("adminAddTemplateBtn").addEventListener("click", () => {
+  $("addTemplateForm").classList.toggle("hidden");
+});
+$("addTemplateSubmitBtn").addEventListener("click", addTemplate);
+$("addTemplateCancelBtn").addEventListener("click", () => {
+  $("addTemplateForm").classList.add("hidden");
+});
+
+$("adminAddUserBtn").addEventListener("click", () => {
+  $("addUserForm").classList.toggle("hidden");
+});
+$("addUserSubmitBtn").addEventListener("click", addUser);
+$("addUserCancelBtn").addEventListener("click", () => {
+  $("addUserForm").classList.add("hidden");
+});
+
+// ---------------------------------------------------------------------------
+// Bootstrap: check session, show login or app
+// ---------------------------------------------------------------------------
+tryAutoLogin();

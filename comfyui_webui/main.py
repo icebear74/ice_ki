@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import secrets
 import uuid
 from pathlib import Path
 from typing import Any, AsyncGenerator
@@ -11,10 +12,13 @@ from urllib.parse import urlencode
 
 import httpx
 import websockets
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi import Cookie, Depends, FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+
+import auth as _auth
+import template_registry as _registry
 
 APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
@@ -67,6 +71,7 @@ class GenerateRequest(BaseModel):
     translated_negative_prompt: str | None = None
     context_prompt: str | None = None
     checkpoint: str | None = None
+    workflow_template: str | None = None  # name of template from registry
     steps: int = 30
     cfg: float = 7.0
     seed: int = -1
@@ -79,6 +84,269 @@ class GenerateRequest(BaseModel):
 
 app = FastAPI(title="ComfyUI Ollama WebUI", version="0.1.0")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+# ---------------------------------------------------------------------------
+# In-memory session store  {token: {"username": str, "role": str}}
+# Sessions are intentionally not persisted – users must log in again after
+# a server restart.  This is fine for a local self-hosted app.
+# ---------------------------------------------------------------------------
+_SESSION_COOKIE = "ki_session"
+_sessions: dict[str, dict[str, str]] = {}
+
+
+@app.on_event("startup")
+async def _startup() -> None:
+    """Bootstrap admin account and seed example templates on first run."""
+    pw = _auth.bootstrap_admin()
+    if pw:
+        print(
+            "\n" + "=" * 60 +
+            "\n  FIRST START – admin account created" +
+            f"\n  username : admin" +
+            f"\n  password : {pw}" +
+            "\n  See comfyui_webui/data/bootstrap_credentials.txt" +
+            "\n  Delete that file after first login!" +
+            "\n" + "=" * 60 + "\n"
+        )
+    # Seed a built-in "default" template so the registry is never empty
+    if not _registry.load_templates():
+        _registry.register_template(
+            name="default",
+            display_name="Standard (CheckpointLoaderSimple)",
+            source="local",
+            description="Built-in default workflow (CheckpointLoaderSimple + KSampler).",
+            filename=None,
+            approved=True,
+            enabled=True,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Auth helpers / FastAPI dependencies
+# ---------------------------------------------------------------------------
+
+def _get_session(ki_session: str | None = Cookie(default=None)) -> dict[str, str] | None:
+    if ki_session and ki_session in _sessions:
+        return _sessions[ki_session]
+    return None
+
+
+def require_user(session: dict[str, str] | None = Depends(_get_session)) -> dict[str, str]:
+    if session is None:
+        raise HTTPException(status_code=401, detail="Nicht eingeloggt.")
+    return session
+
+
+def require_admin(session: dict[str, str] = Depends(require_user)) -> dict[str, str]:
+    if session.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin-Berechtigung erforderlich.")
+    return session
+
+
+# ---------------------------------------------------------------------------
+# Auth request/response models
+# ---------------------------------------------------------------------------
+
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1)
+    password: str = Field(min_length=1)
+
+
+class CreateUserRequest(BaseModel):
+    username: str = Field(min_length=1)
+    password: str = Field(min_length=8)
+    role: str = "user"
+
+
+class UpdateUserRequest(BaseModel):
+    disabled: bool | None = None
+    role: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Auth endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/api/auth/login")
+async def login(payload: LoginRequest, response: Response) -> dict[str, Any]:
+    user = _auth.authenticate(payload.username, payload.password)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Ungültige Anmeldedaten.")
+    token = secrets.token_urlsafe(32)
+    _sessions[token] = {"username": user["username"], "role": user["role"]}
+    response.set_cookie(
+        key=_SESSION_COOKIE,
+        value=token,
+        httponly=True,
+        samesite="lax",
+        max_age=86400,  # 24 h
+    )
+    return {"username": user["username"], "role": user["role"]}
+
+
+@app.post("/api/auth/logout")
+async def logout(
+    response: Response,
+    ki_session: str | None = Cookie(default=None),
+) -> dict[str, str]:
+    if ki_session and ki_session in _sessions:
+        del _sessions[ki_session]
+    response.delete_cookie(_SESSION_COOKIE)
+    return {"status": "ok"}
+
+
+@app.get("/api/auth/me")
+async def me(session: dict[str, str] | None = Depends(_get_session)) -> dict[str, Any]:
+    if session is None:
+        raise HTTPException(status_code=401, detail="Nicht eingeloggt.")
+    return {"username": session["username"], "role": session["role"]}
+
+
+# ---------------------------------------------------------------------------
+# Admin – user management
+# ---------------------------------------------------------------------------
+
+@app.get("/api/admin/users")
+async def admin_list_users(
+    _: dict[str, str] = Depends(require_admin),
+) -> dict[str, Any]:
+    users = [_auth.public_user(u) for u in _auth.load_users()]
+    return {"users": users}
+
+
+@app.post("/api/admin/users", status_code=201)
+async def admin_create_user(
+    payload: CreateUserRequest,
+    _: dict[str, str] = Depends(require_admin),
+) -> dict[str, Any]:
+    if payload.role not in ("admin", "user"):
+        raise HTTPException(status_code=400, detail="Ungültige Rolle. Erlaubt: admin, user")
+    try:
+        user = _auth.create_user(payload.username, payload.password, payload.role)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _auth.public_user(user)
+
+
+@app.patch("/api/admin/users/{username}")
+async def admin_update_user(
+    username: str,
+    payload: UpdateUserRequest,
+    current: dict[str, str] = Depends(require_admin),
+) -> dict[str, Any]:
+    # Prevent admin from disabling themselves
+    if username == current["username"] and payload.disabled is True:
+        raise HTTPException(status_code=400, detail="Du kannst dich nicht selbst deaktivieren.")
+    fields: dict[str, Any] = {}
+    if payload.disabled is not None:
+        fields["disabled"] = payload.disabled
+    if payload.role is not None:
+        if payload.role not in ("admin", "user"):
+            raise HTTPException(status_code=400, detail="Ungültige Rolle.")
+        fields["role"] = payload.role
+    updated = _auth.update_user(username, **fields)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Benutzer nicht gefunden.")
+    return _auth.public_user(updated)
+
+
+# ---------------------------------------------------------------------------
+# Template registry endpoints
+# ---------------------------------------------------------------------------
+
+class RegisterTemplateRequest(BaseModel):
+    name: str = Field(min_length=1)
+    display_name: str = Field(min_length=1)
+    source: str = "local"
+    description: str = ""
+    approved: bool = False
+    enabled: bool = True
+
+
+class UpdateTemplateRequest(BaseModel):
+    approved: bool | None = None
+    enabled: bool | None = None
+    display_name: str | None = None
+    description: str | None = None
+
+
+@app.get("/api/templates")
+async def list_templates_for_user(
+    _: dict[str, str] = Depends(require_user),
+) -> dict[str, Any]:
+    """Return approved + enabled templates (visible to all authenticated users)."""
+    templates = _registry.get_approved_templates()
+    return {"templates": templates}
+
+
+@app.get("/api/admin/templates")
+async def admin_list_templates(
+    _: dict[str, str] = Depends(require_admin),
+) -> dict[str, Any]:
+    """Return all templates including unapproved ones (admin only)."""
+    templates = _registry.get_all_templates()
+    return {"templates": templates}
+
+
+@app.post("/api/admin/templates", status_code=201)
+async def admin_register_template(
+    payload: RegisterTemplateRequest,
+    _: dict[str, str] = Depends(require_admin),
+) -> dict[str, Any]:
+    record = _registry.register_template(
+        name=payload.name,
+        display_name=payload.display_name,
+        source=payload.source,
+        description=payload.description,
+        approved=payload.approved,
+        enabled=payload.enabled,
+    )
+    return record
+
+
+@app.patch("/api/admin/templates/{name}")
+async def admin_update_template(
+    name: str,
+    payload: UpdateTemplateRequest,
+    _: dict[str, str] = Depends(require_admin),
+) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        k: v for k, v in payload.model_dump().items() if v is not None
+    }
+    updated = _registry.update_template(name, **fields)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Template nicht gefunden.")
+    return updated
+
+
+@app.delete("/api/admin/templates/{name}")
+async def admin_delete_template(
+    name: str,
+    _: dict[str, str] = Depends(require_admin),
+) -> dict[str, str]:
+    if not _registry.delete_template(name):
+        raise HTTPException(status_code=404, detail="Template nicht gefunden.")
+    return {"status": "deleted"}
+
+
+@app.post("/api/admin/templates/discover")
+async def admin_discover_templates(
+    _: dict[str, str] = Depends(require_admin),
+) -> dict[str, Any]:
+    """Attempt to fetch workflow templates from ComfyUI and add unseen ones."""
+    discovered = await _registry.discover_comfyui_templates(COMFYUI_BASE_URL)
+    added = 0
+    for item in discovered:
+        existing = _registry.get_template(item["name"])
+        if existing is None:
+            _registry.register_template(
+                name=item["name"],
+                display_name=item["display_name"],
+                source=item["source"],
+                description=item.get("description", ""),
+            )
+            added += 1
+    return {"discovered": len(discovered), "added": added}
 
 
 def _load_default_workflow() -> dict[str, dict[str, Any]]:
@@ -107,7 +375,9 @@ def get_config() -> dict[str, str]:
 
 
 @app.get("/api/ollama/models")
-async def get_ollama_models() -> dict[str, list[str]]:
+async def get_ollama_models(
+    _: dict[str, str] = Depends(require_user),
+) -> dict[str, list[str]]:
     logger.info("get_ollama_models: querying %s/api/tags", OLLAMA_BASE_URL)
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -127,7 +397,10 @@ async def get_ollama_models() -> dict[str, list[str]]:
 
 
 @app.post("/api/translate")
-async def translate_prompt(payload: TranslateRequest) -> dict[str, str]:
+async def translate_prompt(
+    payload: TranslateRequest,
+    _: dict[str, str] = Depends(require_user),
+) -> dict[str, str]:
     translated = await _translate_german_to_english(payload.prompt_de, payload.model, payload.context_prompt)
     return {"translated_prompt": translated}
 
@@ -146,7 +419,9 @@ def _extract_object_info_names(data: Any, node_key: str, input_key: str) -> list
 
 
 @app.get("/api/comfy/checkpoints")
-async def get_comfy_checkpoints() -> dict[str, Any]:
+async def get_comfy_checkpoints(
+    _: dict[str, str] = Depends(require_user),
+) -> dict[str, Any]:
     sources: list[str] = []
     checkpoints: list[str] = []
     unet_models: list[str] = []
@@ -265,7 +540,9 @@ _DEFAULT_SCHEDULERS = [
 
 
 @app.get("/api/comfy/samplers")
-async def get_comfy_samplers() -> dict[str, list[str]]:
+async def get_comfy_samplers(
+    _: dict[str, str] = Depends(require_user),
+) -> dict[str, list[str]]:
     samplers = list(_DEFAULT_SAMPLERS)
     schedulers = list(_DEFAULT_SCHEDULERS)
     try:
@@ -285,7 +562,10 @@ async def get_comfy_samplers() -> dict[str, list[str]]:
 
 
 @app.post("/api/generate")
-async def generate_images(payload: GenerateRequest) -> dict[str, Any]:
+async def generate_images(
+    payload: GenerateRequest,
+    _: dict[str, str] = Depends(require_user),
+) -> dict[str, Any]:
     translated_prompt = payload.translated_prompt
     if not translated_prompt:
         translated_prompt = await _translate_german_to_english(
@@ -343,7 +623,12 @@ async def generate_images(payload: GenerateRequest) -> dict[str, Any]:
 
 
 @app.get("/api/comfy/progress/{prompt_id}")
-async def comfy_progress_sse(prompt_id: str, client_id: str, request: Request) -> StreamingResponse:
+async def comfy_progress_sse(
+    prompt_id: str,
+    client_id: str,
+    request: Request,
+    _: dict[str, str] = Depends(require_user),
+) -> StreamingResponse:
     async def event_stream() -> AsyncGenerator[str, None]:
         # Initial queue-position check via REST
         try:
@@ -436,7 +721,12 @@ async def comfy_progress_sse(prompt_id: str, client_id: str, request: Request) -
 
 
 @app.get("/api/comfy/image")
-async def comfy_image_proxy(filename: str, subfolder: str = "", type: str = "output") -> Response:
+async def comfy_image_proxy(
+    filename: str,
+    subfolder: str = "",
+    type: str = "output",
+    _: dict[str, str] = Depends(require_user),
+) -> Response:
     params = {"filename": filename, "subfolder": subfolder, "type": type}
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -532,8 +822,27 @@ async def _translate_german_to_english(prompt_de: str, model: str, context_promp
 
 
 def _build_workflow(payload: GenerateRequest, translated_prompt: str, translated_negative: str) -> dict[str, dict[str, Any]]:
-    workflow_template = _load_default_workflow()
-    workflow = {key: {"class_type": node["class_type"], "inputs": dict(node["inputs"])} for key, node in workflow_template.items()}
+    # Resolve workflow template: prefer registry-selected template file, then
+    # fall back to the global workflow_template.json / built-in default.
+    workflow_json: dict[str, Any] | None = None
+    if payload.workflow_template and payload.workflow_template != "default":
+        record = _registry.get_template(payload.workflow_template)
+        if record and record.get("filename"):
+            tpath = _registry.TEMPLATES_DIR / record["filename"]
+            try:
+                data = json.loads(tpath.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    workflow_json = data
+            except (OSError, json.JSONDecodeError) as exc:
+                logger.warning("_build_workflow: could not load template file %s: %s", tpath, exc)
+
+    if workflow_json is None:
+        workflow_json = _load_default_workflow()
+
+    workflow = {
+        key: {"class_type": node["class_type"], "inputs": dict(node["inputs"])}
+        for key, node in workflow_json.items()
+    }
 
     workflow["2"]["inputs"]["text"] = translated_prompt
     workflow["3"]["inputs"]["text"] = translated_negative
