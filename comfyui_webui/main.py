@@ -61,6 +61,7 @@ class GenerateRequest(BaseModel):
     negative_prompt: str = ""
     ollama_model: str = Field(min_length=1)
     translated_prompt: str | None = None
+    translated_negative_prompt: str | None = None
     context_prompt: str | None = None
     checkpoint: str | None = None
     steps: int = 30
@@ -222,7 +223,13 @@ async def generate_images(payload: GenerateRequest) -> dict[str, Any]:
             payload.prompt_de, payload.ollama_model, payload.context_prompt
         )
 
-    workflow = _build_workflow(payload, translated_prompt)
+    translated_negative = payload.translated_negative_prompt
+    if payload.negative_prompt and not translated_negative:
+        translated_negative = await _translate_german_to_english(
+            payload.negative_prompt, payload.ollama_model
+        )
+
+    workflow = _build_workflow(payload, translated_prompt, translated_negative or "")
     client_id = f"comfyui-webui-{uuid.uuid4()}"
 
     try:
@@ -242,6 +249,7 @@ async def generate_images(payload: GenerateRequest) -> dict[str, Any]:
 
     return {
         "translated_prompt": translated_prompt,
+        "translated_negative_prompt": translated_negative or "",
         "prompt_id": prompt_id,
         "client_id": client_id,
     }
@@ -436,12 +444,12 @@ async def _translate_german_to_english(prompt_de: str, model: str, context_promp
     return translated
 
 
-def _build_workflow(payload: GenerateRequest, translated_prompt: str) -> dict[str, dict[str, Any]]:
+def _build_workflow(payload: GenerateRequest, translated_prompt: str, translated_negative: str) -> dict[str, dict[str, Any]]:
     workflow_template = _load_default_workflow()
     workflow = {key: {"class_type": node["class_type"], "inputs": dict(node["inputs"])} for key, node in workflow_template.items()}
 
     workflow["2"]["inputs"]["text"] = translated_prompt
-    workflow["3"]["inputs"]["text"] = payload.negative_prompt
+    workflow["3"]["inputs"]["text"] = translated_negative
 
     if payload.checkpoint:
         workflow["1"]["inputs"]["ckpt_name"] = payload.checkpoint

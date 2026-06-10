@@ -104,3 +104,42 @@ select {
   border-radius: 8px;
   border: 1px solid #434653;
 }
+
+/* Progress bar */
+.progress-bar-outer {
+  background: #181a1f;
+  border-radius: 8px;
+  height: 10px;
+  margin: 0.4rem 0 0.2rem;
+  overflow: hidden;
+  border: 1px solid #434653;
+}
+.progress-bar-inner {
+  background: var(--accent);
+  height: 100%;
+  width: 0%;
+  transition: width 0.3s ease;
+  border-radius: 8px;
+}
+
+#progressWrap {
+  padding: 0 0.25rem;
+  margin-bottom: 0.5rem;
+}
+
+/* Follow-up checkbox */
+.inline-check {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+}
+.inline-check input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

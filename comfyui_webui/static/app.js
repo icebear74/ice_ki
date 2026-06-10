@@ -147,6 +147,7 @@ function collectPayload() {
     negative_prompt: $("negativePrompt").value.trim(),
     ollama_model: selectValue("ollamaModel", "ollamaModelManual", "ollamaModelManualWrap"),
     translated_prompt: $("translatedPrompt").value.trim() || null,
+    translated_negative_prompt: $("translatedNegativePrompt").value.trim() || null,
     context_prompt: isFollowup && state.lastTranslatedPrompt ? state.lastTranslatedPrompt : null,
     checkpoint: selectValue("checkpoint", "checkpointManual", "checkpointManualWrap") || null,
     steps: Number($("steps").value),
@@ -188,16 +189,33 @@ async function translateOnly() {
     throw new Error("Bitte deutschen Prompt und Ollama-Modell eingeben.");
   }
 
-  setStatus("Übersetze Prompt …");
-  const data = await api("/api/translate", {
-    method: "POST",
-    body: JSON.stringify({
-      prompt_de: payload.prompt_de,
-      model: payload.ollama_model,
-      context_prompt: payload.context_prompt,
+  setStatus("Übersetze Prompts …");
+  const tasks = [
+    api("/api/translate", {
+      method: "POST",
+      body: JSON.stringify({
+        prompt_de: payload.prompt_de,
+        model: payload.ollama_model,
+        context_prompt: payload.context_prompt,
+      }),
+    }).then((data) => {
+      $("translatedPrompt").value = data.translated_prompt || "";
     }),
-  });
-  $("translatedPrompt").value = data.translated_prompt || "";
+  ];
+  if (payload.negative_prompt) {
+    tasks.push(
+      api("/api/translate", {
+        method: "POST",
+        body: JSON.stringify({
+          prompt_de: payload.negative_prompt,
+          model: payload.ollama_model,
+        }),
+      }).then((data) => {
+        $("translatedNegativePrompt").value = data.translated_prompt || "";
+      })
+    );
+  }
+  await Promise.all(tasks);
   setStatus("Übersetzung abgeschlossen.");
 }
 
@@ -211,19 +229,40 @@ async function generateImages() {
   showProgress(false);
 
   try {
-    // Step 1: Translate if no translated prompt present yet
+    // Step 1: Translate if no translated prompt(s) present yet
+    const translateTasks = [];
     if (!payload.translated_prompt) {
-      setStatus("Übersetze Prompt …");
-      const trans = await api("/api/translate", {
-        method: "POST",
-        body: JSON.stringify({
-          prompt_de: payload.prompt_de,
-          model: payload.ollama_model,
-          context_prompt: payload.context_prompt,
-        }),
-      });
-      payload.translated_prompt = trans.translated_prompt || "";
-      $("translatedPrompt").value = payload.translated_prompt;
+      translateTasks.push(
+        api("/api/translate", {
+          method: "POST",
+          body: JSON.stringify({
+            prompt_de: payload.prompt_de,
+            model: payload.ollama_model,
+            context_prompt: payload.context_prompt,
+          }),
+        }).then((data) => {
+          payload.translated_prompt = data.translated_prompt || "";
+          $("translatedPrompt").value = payload.translated_prompt;
+        })
+      );
+    }
+    if (payload.negative_prompt && !payload.translated_negative_prompt) {
+      translateTasks.push(
+        api("/api/translate", {
+          method: "POST",
+          body: JSON.stringify({
+            prompt_de: payload.negative_prompt,
+            model: payload.ollama_model,
+          }),
+        }).then((data) => {
+          payload.translated_negative_prompt = data.translated_prompt || "";
+          $("translatedNegativePrompt").value = payload.translated_negative_prompt;
+        })
+      );
+    }
+    if (translateTasks.length > 0) {
+      setStatus("Übersetze Prompts …");
+      await Promise.all(translateTasks);
     }
 
     // Step 2: Submit job to ComfyUI
@@ -233,9 +272,12 @@ async function generateImages() {
       body: JSON.stringify(payload),
     });
 
-    const { prompt_id, client_id, translated_prompt } = submitData;
+    const { prompt_id, client_id, translated_prompt, translated_negative_prompt } = submitData;
     if (translated_prompt) {
       $("translatedPrompt").value = translated_prompt;
+    }
+    if (translated_negative_prompt) {
+      $("translatedNegativePrompt").value = translated_negative_prompt;
     }
     showFollowupSection(translated_prompt || payload.translated_prompt);
 
