@@ -23,18 +23,26 @@
       <div>
         <label for="ollamaModel">Ollama-Modell (Übersetzung)</label>
         <div class="inline">
-          <input id="ollamaModel" list="ollamaModels" placeholder="z. B. llama3.1" />
-          <button id="refreshModelsBtn" type="button">Modelle laden</button>
+          <select id="ollamaModel">
+            <option value="">– Modelle laden –</option>
+          </select>
+          <button id="refreshModelsBtn" type="button">↻</button>
         </div>
-        <datalist id="ollamaModels"></datalist>
+        <div id="ollamaModelManualWrap" class="manual-wrap hidden">
+          <input id="ollamaModelManual" placeholder="Modellname manuell eingeben …" />
+        </div>
       </div>
       <div>
         <label for="checkpoint">ComfyUI Checkpoint</label>
         <div class="inline">
-          <input id="checkpoint" list="checkpoints" placeholder="Optional: checkpoint.safetensors" />
-          <button id="refreshCheckpointsBtn" type="button">Checkpoints laden</button>
+          <select id="checkpoint">
+            <option value="">– Checkpoints laden –</option>
+          </select>
+          <button id="refreshCheckpointsBtn" type="button">↻</button>
         </div>
-        <datalist id="checkpoints"></datalist>
+        <div id="checkpointManualWrap" class="manual-wrap hidden">
+          <input id="checkpointManual" placeholder="Checkpoint-Namen manuell eingeben …" />
+        </div>
         <small id="checkpointNote" class="hint"></small>
       </div>
     </section>

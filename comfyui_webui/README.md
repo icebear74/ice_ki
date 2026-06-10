@@ -14,7 +14,7 @@ Lokale Python-Weboberfläche für:
 ## Setup (venv)
 
 ```bash
-cd /home/runner/work/ice_ki/ice_ki/icebear74/ice_ki/comfyui_webui
+cd comfyui_webui
 ./setup_env.sh
 source venv/bin/activate
 ```
@@ -72,3 +72,63 @@ Die App verwendet ein einfaches internes Standard-Workflow-Template mit diesen K
 
 Wenn dein ComfyUI-Setup andere Knoten/Parameter benötigt, passe `workflow_template.json` an.  
 Die App lädt dieses JSON automatisch (Fallback ist das interne Default-Template in `main.py`).
+
+---
+
+## Ollama auf eine bestimmte Grafikkarte begrenzen
+
+Ollama wählt standardmäßig die erste verfügbare GPU. Mit der Umgebungsvariable
+`CUDA_VISIBLE_DEVICES` kannst du den Prozess auf eine bestimmte Karte einschränken.
+
+### GPU-Index herausfinden
+
+```bash
+# nvidia-smi zeigt alle GPUs mit Index 0, 1, 2, …
+nvidia-smi -L
+```
+
+Beispielausgabe:
+```
+GPU 0: NVIDIA GeForce RTX 3090 (UUID: …)
+GPU 1: NVIDIA Tesla P100 (UUID: …)
+```
+
+### Ollama auf GPU 1 begrenzen
+
+```bash
+CUDA_VISIBLE_DEVICES=1 ollama serve
+```
+
+Oder dauerhaft als systemd-Service-Override:
+
+```bash
+sudo systemctl edit ollama
+```
+
+Inhalt (anpassen):
+```ini
+[Service]
+Environment="CUDA_VISIBLE_DEVICES=1"
+```
+
+Dann neu starten:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart ollama
+```
+
+### Mehrere GPUs zulassen (z. B. 0 und 2)
+
+```bash
+CUDA_VISIBLE_DEVICES=0,2 ollama serve
+```
+
+### GPU vollständig deaktivieren (CPU-only)
+
+```bash
+CUDA_VISIBLE_DEVICES="" ollama serve
+```
+
+> **Hinweis:** Die Umgebungsvariable muss gesetzt sein, **bevor** Ollama startet.
+> Wird sie nachträglich geändert, muss Ollama neugestartet werden.

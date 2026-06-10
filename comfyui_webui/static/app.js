@@ -29,24 +29,51 @@ function setStatus(message, isError = false) {
   status.classList.toggle("error", isError);
 }
 
-function fillDatalist(id, values) {
-  const datalist = $(id);
-  datalist.innerHTML = "";
-  for (const value of values) {
-    const option = document.createElement("option");
-    option.value = value;
-    datalist.appendChild(option);
+/**
+ * Fill a <select> element with option values.
+ * Keeps a leading "manual" placeholder option if no values are available.
+ */
+function fillSelect(selectId, manualWrapId, values) {
+  const select = $(selectId);
+  const currentVal = select.value;
+  select.innerHTML = "";
+
+  if (values.length === 0) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "– keine gefunden –";
+    select.appendChild(opt);
+    $(manualWrapId).classList.remove("hidden");
+    return;
   }
+
+  $(manualWrapId).classList.add("hidden");
+  for (const value of values) {
+    const opt = document.createElement("option");
+    opt.value = value;
+    opt.textContent = value;
+    select.appendChild(opt);
+  }
+  // Restore previous selection if still in list
+  if (currentVal && values.includes(currentVal)) {
+    select.value = currentVal;
+  }
+}
+
+/** Return the effective value: select element, or manual input if visible. */
+function selectValue(selectId, manualInputId, manualWrapId) {
+  const wrap = $(manualWrapId);
+  if (wrap && !wrap.classList.contains("hidden")) {
+    return $(manualInputId).value.trim();
+  }
+  return $(selectId).value.trim();
 }
 
 async function loadOllamaModels() {
   setStatus("Lade Ollama-Modelle …");
   const data = await api("/api/ollama/models");
   state.ollamaModels = data.models || [];
-  fillDatalist("ollamaModels", state.ollamaModels);
-  if (!$("ollamaModel").value && state.ollamaModels.length) {
-    $("ollamaModel").value = state.ollamaModels[0];
-  }
+  fillSelect("ollamaModel", "ollamaModelManualWrap", state.ollamaModels);
   setStatus(`Ollama-Modelle geladen: ${state.ollamaModels.length}`);
 }
 
@@ -54,11 +81,8 @@ async function loadCheckpoints() {
   setStatus("Lade ComfyUI-Checkpoints …");
   const data = await api("/api/comfy/checkpoints");
   state.checkpoints = data.checkpoints || [];
-  fillDatalist("checkpoints", state.checkpoints);
+  fillSelect("checkpoint", "checkpointManualWrap", state.checkpoints);
   $("checkpointNote").textContent = data.note || "";
-  if (!$("checkpoint").value && state.checkpoints.length) {
-    $("checkpoint").value = state.checkpoints[0];
-  }
   setStatus(`Checkpoints geladen: ${state.checkpoints.length}`);
 }
 
@@ -66,9 +90,9 @@ function collectPayload() {
   return {
     prompt_de: $("promptDe").value.trim(),
     negative_prompt: $("negativePrompt").value.trim(),
-    ollama_model: $("ollamaModel").value.trim(),
+    ollama_model: selectValue("ollamaModel", "ollamaModelManual", "ollamaModelManualWrap"),
     translated_prompt: $("translatedPrompt").value.trim() || null,
-    checkpoint: $("checkpoint").value.trim() || null,
+    checkpoint: selectValue("checkpoint", "checkpointManual", "checkpointManualWrap") || null,
     steps: Number($("steps").value),
     cfg: Number($("cfg").value),
     seed: Number($("seed").value),
@@ -131,12 +155,14 @@ async function init() {
     await loadOllamaModels();
   } catch (error) {
     setStatus(`Ollama-Modelle konnten nicht geladen werden: ${error.message}`, true);
+    fillSelect("ollamaModel", "ollamaModelManualWrap", []);
   }
 
   try {
     await loadCheckpoints();
   } catch (error) {
     setStatus(`Checkpoints konnten nicht geladen werden: ${error.message}`, true);
+    fillSelect("checkpoint", "checkpointManualWrap", []);
   }
 }
 
@@ -145,6 +171,7 @@ $("refreshModelsBtn").addEventListener("click", async () => {
     await loadOllamaModels();
   } catch (error) {
     setStatus(error.message, true);
+    fillSelect("ollamaModel", "ollamaModelManualWrap", []);
   }
 });
 
@@ -153,6 +180,7 @@ $("refreshCheckpointsBtn").addEventListener("click", async () => {
     await loadCheckpoints();
   } catch (error) {
     setStatus(error.message, true);
+    fillSelect("checkpoint", "checkpointManualWrap", []);
   }
 });
 

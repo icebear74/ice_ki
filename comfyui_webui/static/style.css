@@ -75,6 +75,23 @@ button:hover { filter: brightness(1.1); }
 
 .hint { color: var(--muted); }
 .error { color: var(--danger); }
+.hidden { display: none; }
+
+.manual-wrap {
+  margin-top: 0.4rem;
+}
+.manual-wrap input {
+  border-style: dashed;
+}
+
+select {
+  width: 100%;
+  background: #181a1f;
+  color: var(--text);
+  border: 1px solid #434653;
+  border-radius: 8px;
+  padding: 0.55rem;
+}
 
 .images {
   display: grid;

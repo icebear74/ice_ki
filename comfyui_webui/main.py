@@ -220,16 +220,49 @@ async def comfy_image_proxy(filename: str, subfolder: str = "", type: str = "out
 
 
 async def _translate_german_to_english(prompt_de: str, model: str) -> str:
+    """Translate German prompt to English via Ollama.
+
+    Tries /api/chat first (modern Ollama ≥ 0.1.14), then falls back to
+    /api/generate for older installations.
+    """
     instruction = (
-        "Übersetze den folgenden deutschen Bildprompt in natürliches, präzises Englisch für Text-zu-Bild-Modelle. "
-        "Gib ausschließlich den englischen Prompt zurück, ohne Erklärungen oder Anführungszeichen.\n\n"
-        f"Deutsch: {prompt_de}"
+        "Translate the following German image prompt into natural, precise English "
+        "for text-to-image models. Return only the English prompt, no explanations, "
+        "no quotes, no additional text.\n\n"
+        f"German: {prompt_de}"
     )
 
+    # --- Primary: /api/chat (supported by all current Ollama versions) ---
+    chat_url = f"{OLLAMA_BASE_URL}/api/chat"
     try:
-        async with httpx.AsyncClient(timeout=45.0) as client:
+        async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
-                f"{OLLAMA_BASE_URL}/api/generate",
+                chat_url,
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": instruction}],
+                    "stream": False,
+                    "options": {"temperature": 0.1},
+                },
+            )
+        if response.status_code < 400:
+            translated = (
+                response.json()
+                .get("message", {})
+                .get("content", "")
+                .strip()
+            )
+            if translated:
+                return translated
+    except httpx.HTTPError:
+        pass  # fall through to /api/generate
+
+    # --- Fallback: /api/generate (older Ollama / alternative endpoint) ---
+    generate_url = f"{OLLAMA_BASE_URL}/api/generate"
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                generate_url,
                 json={
                     "model": model,
                     "prompt": instruction,
@@ -239,11 +272,21 @@ async def _translate_german_to_english(prompt_de: str, model: str) -> str:
             )
         response.raise_for_status()
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"Ollama-Übersetzung fehlgeschlagen: {exc}") from exc
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Ollama nicht erreichbar oder Fehler beim Übersetzen. "
+                f"Geprüfte URLs: {chat_url} und {generate_url}. "
+                f"Fehler: {exc}"
+            ),
+        ) from exc
 
     translated = response.json().get("response", "").strip()
     if not translated:
-        raise HTTPException(status_code=502, detail="Ollama lieferte keinen Übersetzungstext.")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Ollama lieferte keinen Übersetzungstext (Modell: {model}, URL: {generate_url}).",
+        )
     return translated
 
 
