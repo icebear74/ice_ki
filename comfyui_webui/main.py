@@ -109,11 +109,13 @@ async def get_ollama_models() -> dict[str, list[str]]:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(f"{OLLAMA_BASE_URL}/api/tags")
         response.raise_for_status()
+        models = [item.get("name", "") for item in response.json().get("models", [])]
+        models = [name for name in models if name]
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"Ollama nicht erreichbar: {exc}") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Ollama-Antwort konnte nicht gelesen werden: {exc}") from exc
 
-    models = [item.get("name", "") for item in response.json().get("models", [])]
-    models = [name for name in models if name]
     return {"models": models}
 
 
@@ -142,7 +144,7 @@ async def get_comfy_checkpoints() -> dict[str, Any]:
         if isinstance(ckpt_names, list):
             checkpoints = [str(item) for item in ckpt_names if item]
             sources.append("/object_info/CheckpointLoaderSimple")
-    except httpx.HTTPError:
+    except Exception:
         pass
 
     # Newer ComfyUI API
@@ -155,7 +157,7 @@ async def get_comfy_checkpoints() -> dict[str, Any]:
             if isinstance(data, list):
                 checkpoints = [str(item) for item in data if item]
                 sources.append("/api/models/checkpoints")
-        except httpx.HTTPError:
+        except Exception:
             pass
 
     if not checkpoints:
@@ -167,7 +169,7 @@ async def get_comfy_checkpoints() -> dict[str, Any]:
             if isinstance(ckpt_names, list):
                 checkpoints = [str(item) for item in ckpt_names if item]
                 sources.append("/models")
-        except httpx.HTTPError:
+        except Exception:
             pass
 
     note = ""
@@ -210,7 +212,7 @@ async def get_comfy_samplers() -> dict[str, list[str]]:
             samplers = [str(x) for x in s if x]
         if isinstance(sc, list) and sc:
             schedulers = [str(x) for x in sc if x]
-    except httpx.HTTPError:
+    except Exception:
         pass
     return {"samplers": samplers, "schedulers": schedulers}
 
