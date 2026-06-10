@@ -189,11 +189,11 @@ def create_user(
 
 
 def update_user(username: str, **fields: Any) -> dict[str, Any] | None:
-    """Update allowed fields (disabled, role) for an existing user.
+    """Update allowed fields (disabled, role, can_advanced) for an existing user.
 
     Does not allow changing password_hash/salt/username directly.
     """
-    allowed = {"disabled", "role"}
+    allowed = {"disabled", "role", "can_advanced"}
     users = load_users()
     for user in users:
         if user["username"] == username:
@@ -227,5 +227,6 @@ def public_user(user: dict[str, Any]) -> dict[str, Any]:
         "username": user["username"],
         "role": user["role"],
         "disabled": user.get("disabled", False),
+        "can_advanced": user.get("can_advanced", False),
         "created_at": user.get("created_at", ""),
     }

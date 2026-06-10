@@ -282,3 +282,22 @@ button:disabled {
   /* used inside a .card for nested sections */
 }
 
+/* ── Erweitert – setting blocks with hints ──────────────────── */
+.setting-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.setting-hint {
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.35;
+  margin-top: 0.2rem;
+}
+
+.admin-form label .setting-hint {
+  display: block;
+  margin-bottom: 0.25rem;
+}
+

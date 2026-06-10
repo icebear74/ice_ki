@@ -27,6 +27,7 @@
       <span class="app-title">ComfyUI + Ollama WebUI</span>
       <nav class="app-nav">
         <button id="tabGenerate" class="tab-btn active" type="button">Generieren</button>
+        <button id="tabAdvanced" class="tab-btn hidden" type="button">&#9881; Erweitert</button>
         <button id="tabAdmin" class="tab-btn hidden" type="button">&#9881; Admin</button>
       </nav>
       <div class="user-info">
@@ -65,64 +66,22 @@
           <textarea id="promptDe" rows="4" placeholder="z. B. Ein futuristisches Stadtbild bei Sonnenuntergang"></textarea>
 
           <label for="changesPromptDe" style="margin-top:0.75rem">&#9998; &Auml;nderungen am Prompt (Deutsch, optional)</label>
-          <div class="inline">
-            <textarea id="changesPromptDe" rows="2" placeholder="z. B. Mache den Himmel r&ouml;ter, f&uuml;ge eine Katze hinzu, entferne die Menschen"></textarea>
-            <button id="refinePromptBtn" type="button" title="Prompt mit &Auml;nderungen verfeinern" style="align-self:flex-end">&#10003; Verfeinern</button>
-          </div>
-          <small id="refineStatus" class="hint"></small>
+          <textarea id="changesPromptDe" rows="2" placeholder="z. B. Mache den Himmel r&ouml;ter, f&uuml;ge eine Katze hinzu &ndash; wird beim Generieren automatisch angewendet"></textarea>
 
           <label for="negativePrompt" style="margin-top:0.75rem">Negative Prompt</label>
           <textarea id="negativePrompt" rows="2" placeholder="z. B. blurry, low quality"></textarea>
         </section>
 
-        <!-- Workflow + Modell (workflow zuerst, Modell darunter gefiltert) -->
+        <!-- Mapping-Auswahl -->
         <section class="card">
-          <label for="workflowTemplate">Workflow-Template</label>
+          <label for="mappingSelect">Workflow-Mapping</label>
           <div class="inline">
-            <select id="workflowTemplate">
-              <option value="default">Standard (CheckpointLoaderSimple)</option>
+            <select id="mappingSelect">
+              <option value="">&#8211; Bitte ausw&auml;hlen &ndash;</option>
             </select>
-            <button id="refreshTemplatesBtn" type="button">&#8635;</button>
+            <button id="refreshMappingsBtn" type="button" title="Mappings neu laden">&#8635;</button>
           </div>
-          <small id="templateNote" class="hint">Nur freigegebene Templates sichtbar.</small>
-
-          <label for="checkpoint" style="margin-top:0.75rem">Modell (passend zum Workflow)</label>
-          <div class="inline">
-            <select id="checkpoint">
-              <option value="">&ndash; Modelle laden &ndash;</option>
-            </select>
-            <button id="refreshCheckpointsBtn" type="button">&#8635;</button>
-          </div>
-          <div id="checkpointManualWrap" class="manual-wrap hidden">
-            <input id="checkpointManual" placeholder="Modell-Namen manuell eingeben &hellip;" />
-          </div>
-          <small id="checkpointNote" class="hint"></small>
-        </section>
-
-        <!-- Ollama -->
-        <section class="card">
-          <label for="ollamaModel">Ollama-Modell (&Uuml;bersetzung)</label>
-          <div class="inline">
-            <select id="ollamaModel">
-              <option value="">&ndash; Modelle laden &ndash;</option>
-            </select>
-            <button id="refreshModelsBtn" type="button">&#8635;</button>
-          </div>
-          <div id="ollamaModelManualWrap" class="manual-wrap hidden">
-            <input id="ollamaModelManual" placeholder="Modellname manuell eingeben &hellip;" />
-          </div>
-          <small id="ollamaModelNote" class="hint"></small>
-        </section>
-
-        <section class="card grid-4">
-          <label>Steps <input id="steps" type="number" value="30" min="1" max="200" /></label>
-          <label>CFG <input id="cfg" type="number" value="7" min="0" max="30" step="0.1" /></label>
-          <label>Seed <input id="seed" type="number" value="-1" /></label>
-          <label>Anzahl Bilder <input id="imageCount" type="number" value="1" min="1" max="8" /></label>
-          <label>Width <input id="width" type="number" value="1024" min="64" step="8" /></label>
-          <label>Height <input id="height" type="number" value="1024" min="64" step="8" /></label>
-          <label>Sampler <select id="sampler"></select></label>
-          <label>Scheduler <select id="scheduler"></select></label>
+          <small id="mappingNote" class="hint">W&auml;hle ein Mapping &ndash; alle Vorgaben (Modell, Steps, usw.) werden daraus geladen.</small>
         </section>
 
         <section class="card actions">
@@ -161,9 +120,165 @@
       </main>
     </div><!-- /panelGenerate -->
 
+    <!-- ── ERWEITERT TAB ── -->
+    <div id="panelAdvanced" class="hidden">
+      <main class="container">
+        <section class="card">
+          <h2>Erweiterte Einstellungen</h2>
+          <p class="hint">Diese Einstellungen &uuml;berschreiben die Vorgaben des gew&auml;hlten Mappings f&uuml;r die aktuelle Sitzung.</p>
+
+          <div class="grid-4" style="margin-top:0.75rem">
+
+            <div class="setting-block">
+              <label for="steps">Steps</label>
+              <input id="steps" type="number" value="30" min="1" max="200" />
+              <small class="setting-hint">Anzahl der Berechnungsschritte. Mehr Schritte = mehr Detail, aber l&auml;ngere Generierung. Empfehlung: 20&ndash;50.</small>
+            </div>
+
+            <div class="setting-block">
+              <label for="cfg">CFG-Scale</label>
+              <input id="cfg" type="number" value="7" min="0" max="30" step="0.1" />
+              <small class="setting-hint">Gibt an, wie stark der Prompt das Bild beeinflusst. Niedrig = freier/kreativer, Hoch = strikter. Empfehlung: 5&ndash;10.</small>
+            </div>
+
+            <div class="setting-block">
+              <label for="seed">Seed</label>
+              <input id="seed" type="number" value="-1" />
+              <small class="setting-hint">Zufallsseed. &minus;1 = bei jeder Generierung neu zuf&auml;llig. Gleicher Seed + gleiche Einstellungen = reproduzierbares Ergebnis.</small>
+            </div>
+
+            <div class="setting-block">
+              <label for="imageCount">Anzahl Bilder</label>
+              <input id="imageCount" type="number" value="1" min="1" max="8" />
+              <small class="setting-hint">Wie viele Bilder gleichzeitig generiert werden. H&ouml;here Anzahl ben&ouml;tigt mehr VRAM und dauert l&auml;nger.</small>
+            </div>
+
+            <div class="setting-block">
+              <label for="width">Breite (px)</label>
+              <input id="width" type="number" value="1024" min="64" step="8" />
+              <small class="setting-hint">Bildbreite in Pixeln. Sollte durch 8 teilbar sein. Mehr Pixel = mehr Detail, aber h&ouml;herer Speicherbedarf.</small>
+            </div>
+
+            <div class="setting-block">
+              <label for="height">H&ouml;he (px)</label>
+              <input id="height" type="number" value="1024" min="64" step="8" />
+              <small class="setting-hint">Bildh&ouml;he in Pixeln. Sollte durch 8 teilbar sein. Mehr Pixel = mehr Detail, aber h&ouml;herer Speicherbedarf.</small>
+            </div>
+
+            <div class="setting-block">
+              <label for="sampler">Sampler</label>
+              <select id="sampler"></select>
+              <small class="setting-hint">Algorithmus zur Bildberechnung. <em>euler</em> ist schnell und gut. <em>dpmpp_2m</em> liefert oft hochwertigere Ergebnisse.</small>
+            </div>
+
+            <div class="setting-block">
+              <label for="scheduler">Scheduler</label>
+              <select id="scheduler"></select>
+              <small class="setting-hint">Steuert den Rauschabbau-Zeitplan. <em>normal</em> und <em>karras</em> sind am h&auml;ufigsten genutzt und liefern stabile Resultate.</small>
+            </div>
+
+          </div>
+        </section>
+      </main>
+    </div><!-- /panelAdvanced -->
+
     <!-- ── ADMIN TAB ── -->
     <div id="panelAdmin" class="hidden">
       <main class="container">
+
+        <!-- Mappings -->
+        <section class="card">
+          <h2>Workflow-Mappings</h2>
+          <p class="hint">Ein Mapping verkn&uuml;pft ein Workflow-Template mit allen Generierungs-Vorgaben und erh&auml;lt einen benutzerfreundlichen Namen (z.&nbsp;B. &bdquo;KI Schnell&ldquo;).</p>
+          <div class="admin-toolbar">
+            <button id="adminAddMappingBtn" type="button">+ Mapping anlegen</button>
+          </div>
+
+          <div id="addMappingForm" class="hidden admin-form card-inner">
+            <h3 id="mappingFormTitle">Neues Mapping</h3>
+
+            <div class="grid-2">
+              <label>Name (Slug) <small class="setting-hint">Eindeutiger interner Bezeichner (nur Kleinbuchstaben, Ziffern, _)</small>
+                <input id="newMapName" placeholder="z. B. ki_schnell" />
+              </label>
+              <label>Anzeigename <small class="setting-hint">Name, den der Benutzer in der Auswahl sieht</small>
+                <input id="newMapDisplay" placeholder="z. B. KI Schnell" />
+              </label>
+            </div>
+
+            <div class="grid-2" style="margin-top:0.5rem">
+              <label>Workflow-Template <small class="setting-hint">Welches ComfyUI-Workflow-Template verwendet wird</small>
+                <select id="newMapTemplate">
+                  <option value="default">Standard (CheckpointLoaderSimple)</option>
+                </select>
+              </label>
+              <label>Modell (Checkpoint/UNet) <small class="setting-hint">Voreingestelltes Bildgenerierungs-Modell</small>
+                <input id="newMapCheckpoint" placeholder="z. B. v1-5-pruned.safetensors" />
+              </label>
+            </div>
+
+            <div class="grid-2" style="margin-top:0.5rem">
+              <label>Ollama-Modell <small class="setting-hint">Modell f&uuml;r die Prompt-&Uuml;bersetzung (Deutsch &rarr; Englisch)</small>
+                <input id="newMapOllamaModel" placeholder="z. B. llama3.2" />
+              </label>
+              <label>Anzahl Bilder <small class="setting-hint">Wie viele Bilder gleichzeitig generiert werden</small>
+                <input id="newMapImageCount" type="number" value="1" min="1" max="8" />
+              </label>
+            </div>
+
+            <div class="grid-4" style="margin-top:0.5rem">
+              <label>Steps <small class="setting-hint">Berechnungsschritte. Mehr = mehr Detail, aber langsamer. Empfehlung: 20&ndash;50.</small>
+                <input id="newMapSteps" type="number" value="30" min="1" max="200" />
+              </label>
+              <label>CFG-Scale <small class="setting-hint">Prompt-Einfluss. Niedrig = kreativer, Hoch = strikter. Empfehlung: 5&ndash;10.</small>
+                <input id="newMapCfg" type="number" value="7" min="0" max="30" step="0.1" />
+              </label>
+              <label>Seed <small class="setting-hint">&minus;1 = zuf&auml;llig. Fester Wert = reproduzierbares Ergebnis.</small>
+                <input id="newMapSeed" type="number" value="-1" />
+              </label>
+              <div><!-- spacer --></div>
+              <label>Breite (px) <small class="setting-hint">Bildbreite. Durch 8 teilbar. H&ouml;here Werte = mehr Speicher.</small>
+                <input id="newMapWidth" type="number" value="1024" min="64" step="8" />
+              </label>
+              <label>H&ouml;he (px) <small class="setting-hint">Bildh&ouml;he. Durch 8 teilbar. H&ouml;here Werte = mehr Speicher.</small>
+                <input id="newMapHeight" type="number" value="1024" min="64" step="8" />
+              </label>
+              <label>Sampler <small class="setting-hint">Algorithmus. euler = schnell, dpmpp_2m = hohe Qualit&auml;t.</small>
+                <select id="newMapSampler"></select>
+              </label>
+              <label>Scheduler <small class="setting-hint">Rauschabbau-Plan. normal und karras sind am stabilsten.</small>
+                <select id="newMapScheduler"></select>
+              </label>
+            </div>
+
+            <div style="margin-top:0.75rem">
+              <label class="inline-check">
+                <input type="checkbox" id="newMapEnabled" checked />
+                <span>Aktiv (f&uuml;r Benutzer sichtbar)</span>
+              </label>
+            </div>
+
+            <div style="margin-top:0.75rem">
+              <button id="saveMappingBtn" type="button">Speichern</button>
+              <button id="cancelMappingBtn" class="btn-secondary" type="button">Abbrechen</button>
+            </div>
+          </div>
+
+          <table id="adminMappingTable" class="admin-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Anzeigename</th>
+                <th>Template</th>
+                <th>Modell</th>
+                <th>Ollama</th>
+                <th>Aktiv</th>
+                <th>Aktionen</th>
+              </tr>
+            </thead>
+            <tbody id="adminMappingBody"></tbody>
+          </table>
+        </section>
 
         <!-- Templates -->
         <section class="card">
@@ -179,7 +294,7 @@
           <p class="hint" style="margin-top:0.25rem">
             <strong>Tipp:</strong> Workflow-JSON-Dateien in
             <code>comfyui_webui/data/templates/</code> ablegen, dann
-            <em>Lokale Templates laden</em> klicken – sie werden sofort als
+            <em>Lokale Templates laden</em> klicken &ndash; sie werden sofort als
             freigegebene Templates registriert.
           </p>
 
@@ -261,6 +376,10 @@
                 <option value="admin">admin</option>
               </select>
             </label>
+            <label class="inline-check" style="margin-top:0.5rem">
+              <input type="checkbox" id="newUserCanAdvanced" />
+              <span>Erweiterte Einstellungen erlauben</span>
+            </label>
             <button id="addUserSubmitBtn" type="button">Anlegen</button>
             <button id="addUserCancelBtn" class="btn-secondary" type="button">Abbrechen</button>
           </div>
@@ -270,6 +389,7 @@
               <tr>
                 <th>Benutzername</th>
                 <th>Rolle</th>
+                <th>Erweitert</th>
                 <th>Deaktiviert</th>
                 <th>Erstellt</th>
                 <th>Aktionen</th>

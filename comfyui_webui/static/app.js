@@ -2,15 +2,15 @@
 // State
 // ---------------------------------------------------------------------------
 const state = {
-  currentUser: null,   // { username, role }
+  currentUser: null,   // { username, role, can_advanced }
   ollamaModels: [],
   checkpoints: [],     // all raw models from ComfyUI (including [unet] prefix)
-  checkpointNote: "",  // last note from /api/comfy/checkpoints
-  modelAliases: {},    // { "technical_name": "alias" }
   samplers: [],
   schedulers: [],
   templates: [],
+  mappings: [],        // loaded from /api/mappings
   lastTranslatedPrompt: "",
+  editingMappingName: null,  // null = create, string = editing existing
 };
 
 const $ = (id) => document.getElementById(id);
@@ -25,7 +25,6 @@ async function api(path, options = {}) {
   });
   if (!response.ok) {
     if (response.status === 401) {
-      // Session expired – show login again
       showLogin();
       throw new Error("Sitzung abgelaufen. Bitte erneut anmelden.");
     }
@@ -56,11 +55,18 @@ function showApp(user) {
   $("loginOverlay").classList.add("hidden");
   $("mainApp").classList.remove("hidden");
   $("userBadge").textContent = `${user.username} (${user.role})`;
-  // Show admin tab only for admins
+  // Admin tab only for admins
   if (user.role === "admin") {
     $("tabAdmin").classList.remove("hidden");
   } else {
     $("tabAdmin").classList.add("hidden");
+  }
+  // Erweitert tab only for users with can_advanced (admins always have it)
+  const canAdv = user.can_advanced || user.role === "admin";
+  if (canAdv) {
+    $("tabAdvanced").classList.remove("hidden");
+  } else {
+    $("tabAdvanced").classList.add("hidden");
   }
 }
 
@@ -113,15 +119,18 @@ async function doLogout() {
 // Tab switching
 // ---------------------------------------------------------------------------
 function showTab(name) {
-  const tabs = ["Generate", "Admin"];
+  const tabs = ["Generate", "Advanced", "Admin"];
   for (const t of tabs) {
-    $(`panel${t}`).classList.toggle("hidden", t !== name);
+    const panel = $(`panel${t}`);
+    if (panel) panel.classList.toggle("hidden", t !== name);
     $(`tab${t}`)?.classList.toggle("active", t === name);
   }
   if (name === "Admin") {
+    loadAdminMappings();
     loadAdminTemplates();
     loadAdminModelAliases();
     loadAdminUsers();
+    populateMappingFormSelects();
   }
 }
 
@@ -137,7 +146,6 @@ function setStatus(message, isError = false) {
 function setButtons(disabled) {
   $("generateBtn").disabled = disabled;
   $("translateBtn").disabled = disabled;
-  $("refinePromptBtn").disabled = disabled;
 }
 
 function showProgress(visible) {
@@ -159,34 +167,9 @@ function setProgressBar(step, total, eta) {
 // ---------------------------------------------------------------------------
 // Select helpers
 // ---------------------------------------------------------------------------
-function fillSelect(selectId, manualWrapId, values) {
-  const select = $(selectId);
-  const currentVal = select.value;
-  select.innerHTML = "";
-
-  if (values.length === 0) {
-    const opt = document.createElement("option");
-    opt.value = "";
-    opt.textContent = "– keine gefunden –";
-    select.appendChild(opt);
-    $(manualWrapId).classList.remove("hidden");
-    return;
-  }
-
-  $(manualWrapId).classList.add("hidden");
-  for (const value of values) {
-    const opt = document.createElement("option");
-    opt.value = value;
-    opt.textContent = value;
-    select.appendChild(opt);
-  }
-  if (currentVal && values.includes(currentVal)) {
-    select.value = currentVal;
-  }
-}
-
 function fillSelectSimple(selectId, values, defaultValue) {
   const select = $(selectId);
+  if (!select) return;
   const currentVal = select.value || defaultValue;
   select.innerHTML = "";
   for (const value of values) {
@@ -202,125 +185,28 @@ function fillSelectSimple(selectId, values, defaultValue) {
   }
 }
 
-function selectValue(selectId, manualInputId, manualWrapId) {
-  const wrap = $(manualWrapId);
-  if (wrap && !wrap.classList.contains("hidden")) {
-    return $(manualInputId).value.trim();
-  }
-  return $(selectId).value.trim();
-}
-
 // ---------------------------------------------------------------------------
 // Data loaders
 // ---------------------------------------------------------------------------
 async function loadOllamaModels() {
-  setStatus("Lade Ollama-Modelle …");
-  const data = await api("/api/ollama/models");
-  state.ollamaModels = data.models || [];
-  fillSelect("ollamaModel", "ollamaModelManualWrap", state.ollamaModels);
-  const note = $("ollamaModelNote");
-  if (note) {
-    note.textContent =
-      state.ollamaModels.length === 0
-        ? "Keine Modelle gefunden – ist Ollama gestartet? (ollama list)"
-        : "";
+  try {
+    const data = await api("/api/ollama/models");
+    state.ollamaModels = data.models || [];
+  } catch {
+    state.ollamaModels = [];
   }
-  setStatus(`Ollama-Modelle geladen: ${state.ollamaModels.length}`);
 }
 
 async function loadCheckpoints() {
-  setStatus("Lade ComfyUI-Modelle …");
-  const data = await api("/api/comfy/checkpoints");
-
-  const allModels = data.checkpoints || [];
-  state.checkpoints = allModels;
-  state.checkpointNote = data.note || "";
-  if (data.aliases) {
-    state.modelAliases = { ...state.modelAliases, ...data.aliases };
-  }
-
-  const unetCount = (data.unet_models || []).length;
-  const ckptCount = allModels.length - unetCount;
-  setStatus(`Modelle geladen: ${ckptCount} Checkpoints, ${unetCount} UNet`);
-
-  // Rebuild filtered checkpoint select based on the currently selected workflow
-  onWorkflowChange();
-}
-
-// Return the model_type required by the currently selected workflow template
-function getWorkflowModelType() {
-  const tplName = $("workflowTemplate").value;
-  if (!tplName || tplName === "default") return "checkpoint";
-  const tpl = state.templates.find((t) => t.name === tplName);
-  return (tpl && tpl.model_type) ? tpl.model_type : "any";
-}
-
-// Filter the full checkpoint list by the model_type
-function filterCheckpointsByType(models, modelType) {
-  if (modelType === "checkpoint") return models.filter((m) => !m.startsWith("[unet] "));
-  if (modelType === "unet") return models.filter((m) => m.startsWith("[unet] "));
-  return models;
-}
-
-// Rebuild the #checkpoint select from a (possibly filtered) list, applying aliases
-function rebuildCheckpointSelect(models) {
-  const select = $("checkpoint");
-  const manualWrap = $("checkpointManualWrap");
-  const prevVal = select.value;
-  select.innerHTML = "";
-
-  if (models.length === 0) {
-    const opt = document.createElement("option");
-    opt.value = "";
-    opt.textContent = "– keine passenden Modelle –";
-    select.appendChild(opt);
-    manualWrap.classList.remove("hidden");
-    return;
-  }
-
-  manualWrap.classList.add("hidden");
-  for (const name of models) {
-    const opt = document.createElement("option");
-    opt.value = name;
-    const technical = name.replace(/^\[unet\] /, "");
-    const alias = state.modelAliases[technical] || state.modelAliases[name] || null;
-    opt.textContent = alias || technical;
-    select.appendChild(opt);
-  }
-  // Restore previous selection if still in list, otherwise pre-select first
-  if (prevVal && models.includes(prevVal)) {
-    select.value = prevVal;
-  } else if (models.length > 0) {
-    select.value = models[0];
-  }
-  updateCheckpointNote();
-}
-
-function updateCheckpointNote() {
-  const val = selectValue("checkpoint", "checkpointManual", "checkpointManualWrap");
-  const note = $("checkpointNote");
-  if (val && val.startsWith("[unet] ")) {
-    note.textContent =
-      "⚠ UNet-/Diffusion-Modell gewählt: Workflow muss UNETLoader- oder DiffusionModelLoader-Knoten verwenden.";
-    note.classList.add("error");
-  } else {
-    note.textContent = state.checkpointNote;
-    note.classList.remove("error");
-  }
-}
-
-// Called whenever the workflow selection changes
-function onWorkflowChange() {
-  const modelType = getWorkflowModelType();
-  const filtered = filterCheckpointsByType(state.checkpoints, modelType);
-  rebuildCheckpointSelect(filtered);
-  const note = $("templateNote");
-  if (note) {
-    const tplName = $("workflowTemplate").value;
-    const tpl = state.templates.find((t) => t.name === tplName);
-    const mt = (tpl && tpl.model_type) ? tpl.model_type : (tplName === "default" ? "checkpoint" : "any");
-    const mtLabel = mt === "checkpoint" ? "Checkpoints" : mt === "unet" ? "UNet/Diffusion" : "alle Modelle";
-    note.textContent = `Zeige: ${mtLabel}. ${state.templates.length <= 1 ? "Admins können weitere Templates freigeben." : state.templates.length + " Template(s) verfügbar."}`;
+  try {
+    const data = await api("/api/comfy/checkpoints");
+    state.checkpoints = data.checkpoints || [];
+    if (data.aliases) {
+      // store model aliases for display
+      state.modelAliases = { ...data.aliases };
+    }
+  } catch {
+    state.checkpoints = [];
   }
 }
 
@@ -344,53 +230,98 @@ async function loadTemplates() {
   } catch {
     state.templates = [];
   }
-  const select = $("workflowTemplate");
-  const currentVal = select.value;
+}
+
+async function loadMappings() {
+  try {
+    const data = await api("/api/mappings");
+    state.mappings = data.mappings || [];
+  } catch {
+    state.mappings = [];
+  }
+  const select = $("mappingSelect");
   select.innerHTML = "";
-
-  // Always include built-in default
   const opt0 = document.createElement("option");
-  opt0.value = "default";
-  opt0.textContent = "Standard (CheckpointLoaderSimple)";
+  opt0.value = "";
+  opt0.textContent = "– Bitte auswählen –";
   select.appendChild(opt0);
-
-  for (const tpl of state.templates) {
-    if (tpl.name === "default") continue; // already added above
+  for (const m of state.mappings) {
     const opt = document.createElement("option");
-    opt.value = tpl.name;
-    opt.textContent = tpl.display_name || tpl.name;
-    if (tpl.description) opt.title = tpl.description;
+    opt.value = m.name;
+    opt.textContent = m.display_name || m.name;
     select.appendChild(opt);
   }
+  const note = $("mappingNote");
+  if (state.mappings.length === 0) {
+    note.textContent = "Keine Mappings verfügbar. Ein Admin muss zuerst Mappings anlegen.";
+  } else {
+    note.textContent = `${state.mappings.length} Mapping(s) verfügbar. Wähle eines, um die Vorgaben zu laden.`;
+  }
+}
 
-  if (currentVal) select.value = currentVal;
-
-  // Update note + re-filter checkpoints for the now-selected workflow
-  onWorkflowChange();
+// Called when the user changes the mapping selector
+function onMappingChange() {
+  const name = $("mappingSelect").value;
+  const mapping = state.mappings.find((m) => m.name === name);
+  if (!mapping) return;
+  // Populate Erweitert fields from mapping defaults
+  $("steps").value = mapping.steps ?? 30;
+  $("cfg").value = mapping.cfg ?? 7;
+  $("seed").value = mapping.seed ?? -1;
+  $("imageCount").value = mapping.image_count ?? 1;
+  $("width").value = mapping.width ?? 1024;
+  $("height").value = mapping.height ?? 1024;
+  if (state.samplers.includes(mapping.sampler)) {
+    $("sampler").value = mapping.sampler;
+  }
+  if (state.schedulers.includes(mapping.scheduler)) {
+    $("scheduler").value = mapping.scheduler;
+  }
+  const note = $("mappingNote");
+  note.textContent = `Mapping geladen: ${mapping.display_name}`;
 }
 
 // ---------------------------------------------------------------------------
 // Generate flow
 // ---------------------------------------------------------------------------
+function getActiveMapping() {
+  const name = $("mappingSelect").value;
+  return state.mappings.find((m) => m.name === name) || null;
+}
+
 function collectPayload() {
+  const mapping = getActiveMapping();
   const isFollowup = $("followupCheck") && $("followupCheck").checked;
+  const canAdv = state.currentUser && (state.currentUser.can_advanced || state.currentUser.role === "admin");
+
+  // Generation parameters: use Erweitert overrides if user has permission,
+  // otherwise fall back to mapping values
+  const steps    = canAdv ? Number($("steps").value)     : (mapping ? (mapping.steps ?? 30)        : 30);
+  const cfg      = canAdv ? Number($("cfg").value)       : (mapping ? (mapping.cfg ?? 7)           : 7);
+  const seed     = canAdv ? Number($("seed").value)      : (mapping ? (mapping.seed ?? -1)         : -1);
+  const width    = canAdv ? Number($("width").value)     : (mapping ? (mapping.width ?? 1024)      : 1024);
+  const height   = canAdv ? Number($("height").value)    : (mapping ? (mapping.height ?? 1024)     : 1024);
+  const imgCount = canAdv ? Number($("imageCount").value): (mapping ? (mapping.image_count ?? 1)   : 1);
+  const sampler  = canAdv ? $("sampler").value.trim()    : (mapping ? (mapping.sampler || "euler") : "euler");
+  const sched    = canAdv ? $("scheduler").value.trim()  : (mapping ? (mapping.scheduler || "normal") : "normal");
+
   return {
     prompt_de: $("promptDe").value.trim(),
     negative_prompt: $("negativePrompt").value.trim(),
-    ollama_model: selectValue("ollamaModel", "ollamaModelManual", "ollamaModelManualWrap"),
+    ollama_model: (mapping && mapping.ollama_model) || "",
     translated_prompt: $("translatedPrompt").value.trim() || null,
     translated_negative_prompt: $("translatedNegativePrompt").value.trim() || null,
     context_prompt: isFollowup && state.lastTranslatedPrompt ? state.lastTranslatedPrompt : null,
-    checkpoint: selectValue("checkpoint", "checkpointManual", "checkpointManualWrap") || null,
-    workflow_template: $("workflowTemplate").value || "default",
-    steps: Number($("steps").value),
-    cfg: Number($("cfg").value),
-    seed: Number($("seed").value),
-    width: Number($("width").value),
-    height: Number($("height").value),
-    sampler: $("sampler").value.trim(),
-    scheduler: $("scheduler").value.trim(),
-    image_count: Number($("imageCount").value),
+    checkpoint: (mapping && mapping.checkpoint) || null,
+    workflow_template: (mapping && mapping.template_name) || "default",
+    steps,
+    cfg,
+    seed,
+    width,
+    height,
+    sampler,
+    scheduler: sched,
+    image_count: imgCount,
   };
 }
 
@@ -416,79 +347,57 @@ function showFollowupSection(translatedPrompt) {
   hint.textContent = `Letzter Prompt: „${preview}"`;
 }
 
-// ---------------------------------------------------------------------------
-// Prompt refinement (Änderungs-Feld)
-// ---------------------------------------------------------------------------
-async function refinePrompt() {
-  const base = $("promptDe").value.trim();
-  const changes = $("changesPromptDe").value.trim();
-  const model = selectValue("ollamaModel", "ollamaModelManual", "ollamaModelManualWrap");
-  const statusEl = $("refineStatus");
-  statusEl.classList.remove("error");
-
-  if (!base) {
-    statusEl.textContent = "Bitte zuerst einen Basis-Prompt eingeben.";
-    statusEl.classList.add("error");
-    return;
-  }
-  if (!changes) {
-    statusEl.textContent = "Bitte Änderungen eingeben.";
-    statusEl.classList.add("error");
-    return;
-  }
-  if (!model) {
-    statusEl.textContent = "Bitte zuerst ein Ollama-Modell wählen.";
-    statusEl.classList.add("error");
-    return;
-  }
-
-  $("refinePromptBtn").disabled = true;
-  statusEl.textContent = "Verfeinere Prompt …";
+// Auto-refine prompt if changes are present; resolves to (possibly updated) prompt_de
+async function autoRefineIfNeeded(promptDe, changesDe, ollamaModel) {
+  if (!changesDe || !changesDe.trim()) return promptDe;
+  if (!ollamaModel) return promptDe;
   try {
     const data = await api("/api/refine_prompt", {
       method: "POST",
-      body: JSON.stringify({ base_prompt_de: base, changes_de: changes, model }),
+      body: JSON.stringify({ base_prompt_de: promptDe, changes_de: changesDe.trim(), model: ollamaModel }),
     });
     $("promptDe").value = data.refined_prompt_de;
     $("changesPromptDe").value = "";
-    $("translatedPrompt").value = "";  // clear stale translation
-    statusEl.textContent = "✓ Prompt aktualisiert";
-    setTimeout(() => { statusEl.textContent = ""; }, 3000);
-  } catch (err) {
-    statusEl.textContent = `Fehler: ${err.message}`;
-    statusEl.classList.add("error");
-  } finally {
-    $("refinePromptBtn").disabled = false;
+    $("translatedPrompt").value = "";
+    return data.refined_prompt_de;
+  } catch {
+    // If refinement fails, proceed with original prompt
+    return promptDe;
   }
 }
 
 async function translateOnly() {
-  const payload = collectPayload();
-  if (!payload.prompt_de || !payload.ollama_model) {
-    throw new Error("Bitte deutschen Prompt und Ollama-Modell eingeben.");
-  }
+  const mapping = getActiveMapping();
+  if (!mapping) throw new Error("Bitte zuerst ein Mapping auswählen.");
+
+  let promptDe = $("promptDe").value.trim();
+  const changesDe = $("changesPromptDe").value.trim();
+  const ollamaModel = mapping.ollama_model || "";
+
+  if (!promptDe) throw new Error("Bitte einen Prompt eingeben.");
+  if (!ollamaModel) throw new Error("Das gewählte Mapping hat kein Ollama-Modell konfiguriert.");
 
   setStatus("Übersetze Prompts …");
+
+  if (changesDe) {
+    setStatus("Verfeinere Prompt …");
+    promptDe = await autoRefineIfNeeded(promptDe, changesDe, ollamaModel);
+  }
+
   const tasks = [
     api("/api/translate", {
       method: "POST",
-      body: JSON.stringify({
-        prompt_de: payload.prompt_de,
-        model: payload.ollama_model,
-        context_prompt: payload.context_prompt,
-      }),
+      body: JSON.stringify({ prompt_de: promptDe, model: ollamaModel }),
     }).then((data) => {
       $("translatedPrompt").value = data.translated_prompt || "";
     }),
   ];
-  if (payload.negative_prompt) {
+  const negPrompt = $("negativePrompt").value.trim();
+  if (negPrompt) {
     tasks.push(
       api("/api/translate", {
         method: "POST",
-        body: JSON.stringify({
-          prompt_de: payload.negative_prompt,
-          model: payload.ollama_model,
-        }),
+        body: JSON.stringify({ prompt_de: negPrompt, model: ollamaModel }),
       }).then((data) => {
         $("translatedNegativePrompt").value = data.translated_prompt || "";
       })
@@ -499,15 +408,28 @@ async function translateOnly() {
 }
 
 async function generateImages() {
-  const payload = collectPayload();
-  if (!payload.prompt_de || !payload.ollama_model) {
-    throw new Error("Bitte deutschen Prompt und Ollama-Modell eingeben.");
-  }
+  const mapping = getActiveMapping();
+  if (!mapping) throw new Error("Bitte zuerst ein Mapping auswählen.");
+
+  let promptDe = $("promptDe").value.trim();
+  const changesDe = $("changesPromptDe").value.trim();
+  const ollamaModel = mapping.ollama_model || "";
+
+  if (!promptDe) throw new Error("Bitte einen Prompt eingeben.");
+  if (!ollamaModel) throw new Error("Das gewählte Mapping hat kein Ollama-Modell konfiguriert.");
 
   setButtons(true);
   showProgress(false);
 
   try {
+    if (changesDe) {
+      setStatus("Verfeinere Prompt …");
+      promptDe = await autoRefineIfNeeded(promptDe, changesDe, ollamaModel);
+    }
+
+    const payload = collectPayload();
+    payload.prompt_de = promptDe;
+
     const translateTasks = [];
     if (!payload.translated_prompt) {
       translateTasks.push(
@@ -515,7 +437,7 @@ async function generateImages() {
           method: "POST",
           body: JSON.stringify({
             prompt_de: payload.prompt_de,
-            model: payload.ollama_model,
+            model: ollamaModel,
             context_prompt: payload.context_prompt,
           }),
         }).then((data) => {
@@ -528,10 +450,7 @@ async function generateImages() {
       translateTasks.push(
         api("/api/translate", {
           method: "POST",
-          body: JSON.stringify({
-            prompt_de: payload.negative_prompt,
-            model: payload.ollama_model,
-          }),
+          body: JSON.stringify({ prompt_de: payload.negative_prompt, model: ollamaModel }),
         }).then((data) => {
           payload.translated_negative_prompt = data.translated_prompt || "";
           $("translatedNegativePrompt").value = payload.translated_negative_prompt;
@@ -550,12 +469,8 @@ async function generateImages() {
     });
 
     const { prompt_id, client_id, translated_prompt, translated_negative_prompt } = submitData;
-    if (translated_prompt) {
-      $("translatedPrompt").value = translated_prompt;
-    }
-    if (translated_negative_prompt) {
-      $("translatedNegativePrompt").value = translated_negative_prompt;
-    }
+    if (translated_prompt) $("translatedPrompt").value = translated_prompt;
+    if (translated_negative_prompt) $("translatedNegativePrompt").value = translated_negative_prompt;
     showFollowupSection(translated_prompt || payload.translated_prompt);
 
     showProgress(true);
@@ -567,11 +482,7 @@ async function generateImages() {
 
       evtSource.onmessage = (event) => {
         let data;
-        try {
-          data = JSON.parse(event.data);
-        } catch {
-          return;
-        }
+        try { data = JSON.parse(event.data); } catch { return; }
 
         if (data.type === "queued") {
           const pos = data.position ? ` (Position ${data.position})` : "";
@@ -613,6 +524,185 @@ async function generateImages() {
 }
 
 // ---------------------------------------------------------------------------
+// Admin – mappings
+// ---------------------------------------------------------------------------
+async function loadAdminMappings() {
+  const tbody = $("adminMappingBody");
+  tbody.innerHTML = "<tr><td colspan='7' class='hint'>Lade …</td></tr>";
+  try {
+    const data = await api("/api/admin/mappings");
+    tbody.innerHTML = "";
+    if (data.mappings.length === 0) {
+      tbody.innerHTML = "<tr><td colspan='7' class='hint'>Noch keine Mappings angelegt.</td></tr>";
+      return;
+    }
+    for (const m of data.mappings) {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td>${escHtml(m.name)}</td>
+        <td>${escHtml(m.display_name)}</td>
+        <td>${escHtml(m.template_name || "default")}</td>
+        <td><small>${escHtml(m.checkpoint || "–")}</small></td>
+        <td><small>${escHtml(m.ollama_model || "–")}</small></td>
+        <td><input type="checkbox" class="map-enabled" data-name="${escHtml(m.name)}" ${m.enabled ? "checked" : ""} /></td>
+        <td>
+          <button class="btn-sm map-edit" data-name="${escHtml(m.name)}" type="button">&#9998; Bearbeiten</button>
+          <button class="btn-sm btn-danger map-delete" data-name="${escHtml(m.name)}" type="button">L&ouml;schen</button>
+        </td>
+      `;
+      tbody.appendChild(tr);
+    }
+    tbody.querySelectorAll(".map-enabled").forEach((cb) => {
+      cb.addEventListener("change", async () => {
+        try {
+          await api(`/api/admin/mappings/${encodeURIComponent(cb.dataset.name)}`, {
+            method: "PATCH",
+            body: JSON.stringify({ enabled: cb.checked }),
+          });
+          await loadMappings();
+        } catch (err) {
+          alert(`Fehler: ${err.message}`);
+          cb.checked = !cb.checked;
+        }
+      });
+    });
+    tbody.querySelectorAll(".map-edit").forEach((btn) => {
+      btn.addEventListener("click", () => openMappingForm(btn.dataset.name));
+    });
+    tbody.querySelectorAll(".map-delete").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        if (!confirm(`Mapping „${btn.dataset.name}" wirklich löschen?`)) return;
+        try {
+          await api(`/api/admin/mappings/${encodeURIComponent(btn.dataset.name)}`, { method: "DELETE" });
+          await loadAdminMappings();
+          await loadMappings();
+        } catch (err) {
+          alert(`Fehler: ${err.message}`);
+        }
+      });
+    });
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan='7' class='error'>${escHtml(err.message)}</td></tr>`;
+  }
+}
+
+function populateMappingFormSelects() {
+  // Populate template dropdown
+  const tplSel = $("newMapTemplate");
+  if (!tplSel) return;
+  const prevTpl = tplSel.value;
+  tplSel.innerHTML = "";
+  const defOpt = document.createElement("option");
+  defOpt.value = "default";
+  defOpt.textContent = "Standard (CheckpointLoaderSimple)";
+  tplSel.appendChild(defOpt);
+  for (const tpl of state.templates) {
+    if (tpl.name === "default") continue;
+    const opt = document.createElement("option");
+    opt.value = tpl.name;
+    opt.textContent = tpl.display_name || tpl.name;
+    tplSel.appendChild(opt);
+  }
+  if (prevTpl) tplSel.value = prevTpl;
+
+  // Populate sampler/scheduler dropdowns in form
+  fillSelectSimple("newMapSampler", state.samplers.length ? state.samplers : ["euler", "dpmpp_2m", "ddim"], "euler");
+  fillSelectSimple("newMapScheduler", state.schedulers.length ? state.schedulers : ["normal", "karras", "simple"], "normal");
+}
+
+function openMappingForm(editName) {
+  const form = $("addMappingForm");
+  form.classList.remove("hidden");
+  populateMappingFormSelects();
+
+  if (editName) {
+    // Find the mapping from admin data (need to refetch)
+    state.editingMappingName = editName;
+    $("mappingFormTitle").textContent = `Mapping bearbeiten: ${editName}`;
+    $("newMapName").disabled = true;
+    api(`/api/admin/mappings`).then((data) => {
+      const m = (data.mappings || []).find((x) => x.name === editName);
+      if (!m) return;
+      $("newMapName").value = m.name;
+      $("newMapDisplay").value = m.display_name;
+      $("newMapTemplate").value = m.template_name || "default";
+      $("newMapCheckpoint").value = m.checkpoint || "";
+      $("newMapOllamaModel").value = m.ollama_model || "";
+      $("newMapSteps").value = m.steps ?? 30;
+      $("newMapCfg").value = m.cfg ?? 7;
+      $("newMapSeed").value = m.seed ?? -1;
+      $("newMapWidth").value = m.width ?? 1024;
+      $("newMapHeight").value = m.height ?? 1024;
+      $("newMapImageCount").value = m.image_count ?? 1;
+      if (state.samplers.includes(m.sampler)) $("newMapSampler").value = m.sampler;
+      if (state.schedulers.includes(m.scheduler)) $("newMapScheduler").value = m.scheduler;
+      $("newMapEnabled").checked = m.enabled !== false;
+    }).catch(() => {});
+  } else {
+    state.editingMappingName = null;
+    $("mappingFormTitle").textContent = "Neues Mapping";
+    $("newMapName").disabled = false;
+    $("newMapName").value = "";
+    $("newMapDisplay").value = "";
+    $("newMapTemplate").value = "default";
+    $("newMapCheckpoint").value = "";
+    $("newMapOllamaModel").value = "";
+    $("newMapSteps").value = 30;
+    $("newMapCfg").value = 7;
+    $("newMapSeed").value = -1;
+    $("newMapWidth").value = 1024;
+    $("newMapHeight").value = 1024;
+    $("newMapImageCount").value = 1;
+    $("newMapEnabled").checked = true;
+  }
+}
+
+async function saveMapping() {
+  const display = $("newMapDisplay").value.trim();
+  const name = $("newMapName").value.trim();
+  if (!display || !name) {
+    alert("Bitte Name und Anzeigename angeben.");
+    return;
+  }
+  const body = {
+    name,
+    display_name: display,
+    template_name: $("newMapTemplate").value || "default",
+    checkpoint: $("newMapCheckpoint").value.trim(),
+    ollama_model: $("newMapOllamaModel").value.trim(),
+    steps: Number($("newMapSteps").value),
+    cfg: Number($("newMapCfg").value),
+    seed: Number($("newMapSeed").value),
+    width: Number($("newMapWidth").value),
+    height: Number($("newMapHeight").value),
+    sampler: $("newMapSampler").value,
+    scheduler: $("newMapScheduler").value,
+    image_count: Number($("newMapImageCount").value),
+    enabled: $("newMapEnabled").checked,
+  };
+  try {
+    if (state.editingMappingName) {
+      await api(`/api/admin/mappings/${encodeURIComponent(state.editingMappingName)}`, {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      });
+    } else {
+      await api("/api/admin/mappings", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+    }
+    $("addMappingForm").classList.add("hidden");
+    state.editingMappingName = null;
+    $("newMapName").disabled = false;
+    await loadAdminMappings();
+    await loadMappings();
+  } catch (err) {
+    alert(`Fehler: ${err.message}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Admin – templates
 // ---------------------------------------------------------------------------
 async function loadAdminTemplates() {
@@ -650,7 +740,6 @@ async function loadAdminTemplates() {
       tbody.appendChild(tr);
     }
 
-    // Inline display_name editing
     tbody.querySelectorAll(".tpl-edit-name").forEach((btn) => {
       btn.addEventListener("click", () => {
         const cell = btn.closest(".tpl-display-cell");
@@ -686,13 +775,12 @@ async function loadAdminTemplates() {
           cell.querySelector(".tpl-edit-name").style.display = "";
           cell.querySelector(".tpl-edit-wrap").style.display = "none";
           await loadTemplates();
+          populateMappingFormSelects();
         } catch (err) {
           alert(`Fehler: ${err.message}`);
         }
       });
     });
-
-    // model_type inline select
     tbody.querySelectorAll(".tpl-modeltype").forEach((sel) => {
       sel.addEventListener("change", async () => {
         const name = sel.dataset.name;
@@ -701,17 +789,13 @@ async function loadAdminTemplates() {
             method: "PATCH",
             body: JSON.stringify({ model_type: sel.value }),
           });
-          // Update state.templates so onWorkflowChange picks up the new type
           const idx = state.templates.findIndex((t) => t.name === name);
           if (idx >= 0) state.templates[idx].model_type = sel.value;
-          onWorkflowChange();
         } catch (err) {
           alert(`Fehler: ${err.message}`);
         }
       });
     });
-
-    // Attach inline-toggle handlers for approved / enabled
     tbody.querySelectorAll(".tpl-approved, .tpl-enabled").forEach((cb) => {
       cb.addEventListener("change", async () => {
         const name = cb.dataset.name;
@@ -724,7 +808,7 @@ async function loadAdminTemplates() {
           await loadTemplates();
         } catch (err) {
           alert(`Fehler: ${err.message}`);
-          cb.checked = !cb.checked; // revert
+          cb.checked = !cb.checked;
         }
       });
     });
@@ -732,11 +816,10 @@ async function loadAdminTemplates() {
       btn.addEventListener("click", async () => {
         if (!confirm(`Template "${btn.dataset.name}" wirklich löschen?`)) return;
         try {
-          await api(`/api/admin/templates/${encodeURIComponent(btn.dataset.name)}`, {
-            method: "DELETE",
-          });
+          await api(`/api/admin/templates/${encodeURIComponent(btn.dataset.name)}`, { method: "DELETE" });
           await loadAdminTemplates();
           await loadTemplates();
+          populateMappingFormSelects();
         } catch (err) {
           alert(`Fehler: ${err.message}`);
         }
@@ -761,6 +844,7 @@ async function discoverTemplates() {
     }
     await loadAdminTemplates();
     await loadTemplates();
+    populateMappingFormSelects();
   } catch (err) {
     status.textContent = `Fehler: ${err.message}`;
     status.classList.add("error");
@@ -774,13 +858,13 @@ async function discoverLocalTemplates() {
   try {
     const data = await api("/api/admin/templates/discover_local", { method: "POST" });
     if (data.found === 0) {
-      status.textContent =
-        "Keine lokalen Templates gefunden. Lege Workflow-JSON-Dateien in comfyui_webui/data/templates/ ab und klicke erneut.";
+      status.textContent = "Keine lokalen Templates gefunden. Lege Workflow-JSON-Dateien in comfyui_webui/data/templates/ ab und klicke erneut.";
     } else {
       status.textContent = `${data.found} lokales Template(s) geladen: ${data.templates.join(", ")}`;
     }
     await loadAdminTemplates();
     await loadTemplates();
+    populateMappingFormSelects();
   } catch (err) {
     status.textContent = `Fehler: ${err.message}`;
     status.classList.add("error");
@@ -808,6 +892,7 @@ async function uploadTemplate(file) {
     status.textContent = `Template "${record.display_name}" erfolgreich hochgeladen und registriert.`;
     await loadAdminTemplates();
     await loadTemplates();
+    populateMappingFormSelects();
   } catch (err) {
     status.textContent = `Fehler beim Hochladen: ${err.message}`;
     status.classList.add("error");
@@ -820,7 +905,6 @@ async function addTemplate() {
   const source = $("newTplSource").value.trim() || "local";
   const description = $("newTplDesc").value.trim();
   const approved = $("newTplApproved").checked;
-
   if (!name || !display_name) {
     alert("Bitte Name und Anzeigename angeben.");
     return;
@@ -833,6 +917,7 @@ async function addTemplate() {
     $("addTemplateForm").classList.add("hidden");
     await loadAdminTemplates();
     await loadTemplates();
+    populateMappingFormSelects();
   } catch (err) {
     alert(`Fehler: ${err.message}`);
   }
@@ -846,7 +931,6 @@ async function loadAdminModelAliases() {
   tbody.innerHTML = "<tr><td colspan='3' class='hint'>Lade …</td></tr>";
   try {
     const data = await api("/api/admin/model_aliases");
-    state.modelAliases = data.aliases || {};
     tbody.innerHTML = "";
     const entries = Object.entries(data.aliases || {});
     if (entries.length === 0) {
@@ -872,7 +956,6 @@ async function loadAdminModelAliases() {
         try {
           await api(`/api/admin/model_aliases/${encodeURIComponent(tech)}`, { method: "DELETE" });
           await loadAdminModelAliases();
-          await loadCheckpoints(); // refresh display names in model select
         } catch (err) {
           alert(`Fehler: ${err.message}`);
         }
@@ -894,24 +977,21 @@ async function saveModelAlias() {
   const alias = $("aliasDisplayInput").value.trim();
   const statusEl = $("modelAliasStatus");
   statusEl.classList.remove("error");
-
   if (!techName || !alias) {
     statusEl.textContent = "Modellname und Alias sind Pflichtfelder.";
     statusEl.classList.add("error");
     return;
   }
-
   try {
     await api("/api/admin/model_aliases", {
       method: "PUT",
-      body: JSON.stringify({ technical_name: techName, alias }),
+      body: JSON.stringify({ name: techName, alias }),
     });
     $("aliasNameInput").value = "";
     $("aliasDisplayInput").value = "";
     statusEl.textContent = "✓ Alias gespeichert";
     setTimeout(() => { statusEl.textContent = ""; }, 3000);
     await loadAdminModelAliases();
-    await loadCheckpoints(); // refresh display names in model select
   } catch (err) {
     statusEl.textContent = `Fehler: ${err.message}`;
     statusEl.classList.add("error");
@@ -923,7 +1003,7 @@ async function saveModelAlias() {
 // ---------------------------------------------------------------------------
 async function loadAdminUsers() {
   const tbody = $("adminUserBody");
-  tbody.innerHTML = "<tr><td colspan='5' class='hint'>Lade …</td></tr>";
+  tbody.innerHTML = "<tr><td colspan='6' class='hint'>Lade …</td></tr>";
   try {
     const data = await api("/api/admin/users");
     tbody.innerHTML = "";
@@ -933,6 +1013,12 @@ async function loadAdminUsers() {
       tr.innerHTML = `
         <td>${escHtml(user.username)}</td>
         <td>${escHtml(user.role)}</td>
+        <td>
+          <input type="checkbox" class="user-advanced" data-name="${escHtml(user.username)}"
+            ${user.can_advanced || user.role === "admin" ? "checked" : ""}
+            ${user.role === "admin" ? "disabled title='Admins haben immer Zugriff'" : ""}
+          />
+        </td>
         <td>${user.disabled ? "Ja" : "Nein"}</td>
         <td>${escHtml((user.created_at || "").slice(0, 10))}</td>
         <td>
@@ -958,8 +1044,22 @@ async function loadAdminUsers() {
         }
       });
     });
+    tbody.querySelectorAll(".user-advanced").forEach((cb) => {
+      if (cb.disabled) return;
+      cb.addEventListener("change", async () => {
+        try {
+          await api(`/api/admin/users/${encodeURIComponent(cb.dataset.name)}`, {
+            method: "PATCH",
+            body: JSON.stringify({ can_advanced: cb.checked }),
+          });
+        } catch (err) {
+          alert(`Fehler: ${err.message}`);
+          cb.checked = !cb.checked;
+        }
+      });
+    });
   } catch (err) {
-    tbody.innerHTML = `<tr><td colspan='5' class='error'>${escHtml(err.message)}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan='6' class='error'>${escHtml(err.message)}</td></tr>`;
   }
 }
 
@@ -967,17 +1067,26 @@ async function addUser() {
   const username = $("newUserName").value.trim();
   const password = $("newUserPass").value;
   const role = $("newUserRole").value;
+  const can_advanced = $("newUserCanAdvanced").checked;
   if (!username || !password) {
     alert("Bitte Benutzername und Passwort angeben.");
     return;
   }
   try {
-    await api("/api/admin/users", {
+    const user = await api("/api/admin/users", {
       method: "POST",
       body: JSON.stringify({ username, password, role }),
     });
+    // Set can_advanced if checked and role is not admin (admins always have it)
+    if (can_advanced && role !== "admin") {
+      await api(`/api/admin/users/${encodeURIComponent(user.username)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ can_advanced: true }),
+      });
+    }
     $("newUserName").value = "";
     $("newUserPass").value = "";
+    $("newUserCanAdvanced").checked = false;
     $("addUserForm").classList.add("hidden");
     await loadAdminUsers();
   } catch (err) {
@@ -1009,7 +1118,6 @@ async function submitChangePw() {
   const newPw2 = $("cpNewPw2").value;
   $("cpError").classList.add("hidden");
   $("cpSuccess").classList.add("hidden");
-
   if (!current || !newPw || !newPw2) {
     $("cpError").textContent = "Bitte alle Felder ausfüllen.";
     $("cpError").classList.remove("hidden");
@@ -1025,7 +1133,6 @@ async function submitChangePw() {
     $("cpError").classList.remove("hidden");
     return;
   }
-
   $("cpSubmitBtn").disabled = true;
   try {
     await api("/api/auth/change_password", {
@@ -1062,28 +1169,11 @@ function escHtml(str) {
 // ---------------------------------------------------------------------------
 async function initAppData() {
   const errors = [];
-
   await loadTemplates().catch((e) => errors.push(`Templates: ${e.message}`));
-
-  try {
-    await loadOllamaModels();
-  } catch (error) {
-    errors.push(`Ollama: ${error.message}`);
-    fillSelect("ollamaModel", "ollamaModelManualWrap", []);
-    const note = $("ollamaModelNote");
-    if (note) note.textContent = `Ollama nicht erreichbar: ${error.message}`;
-  }
-
-  try {
-    await loadCheckpoints();
-  } catch (error) {
-    errors.push(`Checkpoints: ${error.message}`);
-    fillSelect("checkpoint", "checkpointManualWrap", []);
-    $("checkpointNote").textContent = `ComfyUI nicht erreichbar: ${error.message}`;
-  }
-
+  await loadMappings().catch((e) => errors.push(`Mappings: ${e.message}`));
+  await loadOllamaModels().catch((e) => errors.push(`Ollama: ${e.message}`));
+  await loadCheckpoints().catch((e) => errors.push(`Checkpoints: ${e.message}`));
   await loadSamplers();
-
   if (errors.length > 0) {
     setStatus(errors.join(" | "), true);
   }
@@ -1106,33 +1196,17 @@ $("cpSubmitBtn").addEventListener("click", submitChangePw);
 $("cpCancelBtn").addEventListener("click", closeChangePw);
 $("cpNewPw2").addEventListener("keydown", (e) => { if (e.key === "Enter") submitChangePw(); });
 $("tabGenerate").addEventListener("click", () => showTab("Generate"));
+$("tabAdvanced").addEventListener("click", () => showTab("Advanced"));
 $("tabAdmin").addEventListener("click", () => showTab("Admin"));
 
 // ---------------------------------------------------------------------------
 // Event listeners – generate tab
 // ---------------------------------------------------------------------------
-$("refreshModelsBtn").addEventListener("click", async () => {
+$("mappingSelect").addEventListener("change", onMappingChange);
+$("refreshMappingsBtn").addEventListener("click", async () => {
   try {
-    await loadOllamaModels();
-  } catch (error) {
-    setStatus(error.message, true);
-    fillSelect("ollamaModel", "ollamaModelManualWrap", []);
-  }
-});
-
-$("refreshCheckpointsBtn").addEventListener("click", async () => {
-  try {
-    await loadCheckpoints();
-  } catch (error) {
-    setStatus(error.message, true);
-    fillSelect("checkpoint", "checkpointManualWrap", []);
-  }
-});
-
-$("refreshTemplatesBtn").addEventListener("click", async () => {
-  try {
-    await loadTemplates();
-    setStatus("Templates aktualisiert.");
+    await loadMappings();
+    setStatus("Mappings aktualisiert.");
   } catch (error) {
     setStatus(error.message, true);
   }
@@ -1146,10 +1220,6 @@ $("translateBtn").addEventListener("click", async () => {
   }
 });
 
-$("refinePromptBtn").addEventListener("click", refinePrompt);
-$("workflowTemplate").addEventListener("change", onWorkflowChange);
-$("checkpoint").addEventListener("change", updateCheckpointNote);
-
 $("generateBtn").addEventListener("click", async () => {
   try {
     await generateImages();
@@ -1160,18 +1230,31 @@ $("generateBtn").addEventListener("click", async () => {
 
 $("followupCheck").addEventListener("change", () => {
   if ($("followupCheck").checked) {
-    $("promptDe").placeholder =
-      "Änderungsanweisung eingeben, z. B. \u201EMache die Sonne etwas dunkler\u201C";
+    $("promptDe").placeholder = "Änderungsanweisung eingeben, z.\u00A0B. \u201EMache die Sonne etwas dunkler\u201C";
     $("translatedPrompt").value = "";
   } else {
-    $("promptDe").placeholder =
-      "z. B. Ein futuristisches Stadtbild bei Sonnenuntergang";
+    $("promptDe").placeholder = "z. B. Ein futuristisches Stadtbild bei Sonnenuntergang";
   }
 });
 
 // ---------------------------------------------------------------------------
 // Event listeners – admin tab
 // ---------------------------------------------------------------------------
+$("adminAddMappingBtn").addEventListener("click", () => {
+  const form = $("addMappingForm");
+  if (form.classList.contains("hidden")) {
+    openMappingForm(null);
+  } else {
+    form.classList.add("hidden");
+  }
+});
+$("saveMappingBtn").addEventListener("click", saveMapping);
+$("cancelMappingBtn").addEventListener("click", () => {
+  $("addMappingForm").classList.add("hidden");
+  state.editingMappingName = null;
+  $("newMapName").disabled = false;
+});
+
 $("adminDiscoverBtn").addEventListener("click", discoverTemplates);
 $("adminDiscoverLocalBtn").addEventListener("click", discoverLocalTemplates);
 
@@ -1205,3 +1288,4 @@ $("aliasSaveBtn").addEventListener("click", saveModelAlias);
 // Bootstrap: check session, show login or app
 // ---------------------------------------------------------------------------
 tryAutoLogin();
+

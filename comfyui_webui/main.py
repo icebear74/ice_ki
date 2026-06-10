@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 import auth as _auth
+import mapping_registry as _mappings
 import template_registry as _registry
 
 APP_DIR = Path(__file__).resolve().parent
@@ -169,6 +170,7 @@ class CreateUserRequest(BaseModel):
 class UpdateUserRequest(BaseModel):
     disabled: bool | None = None
     role: str | None = None
+    can_advanced: bool | None = None
 
 
 class ChangePasswordRequest(BaseModel):
@@ -212,7 +214,9 @@ async def logout(
 async def me(session: dict[str, str] | None = Depends(_get_session)) -> dict[str, Any]:
     if session is None:
         raise HTTPException(status_code=401, detail="Nicht eingeloggt.")
-    return {"username": session["username"], "role": session["role"]}
+    user = _auth.get_user(session["username"])
+    can_advanced = (user.get("can_advanced", False) if user else False) or session.get("role") == "admin"
+    return {"username": session["username"], "role": session["role"], "can_advanced": can_advanced}
 
 
 @app.post("/api/auth/change_password")
@@ -271,6 +275,8 @@ async def admin_update_user(
         if payload.role not in ("admin", "user"):
             raise HTTPException(status_code=400, detail="Ungültige Rolle.")
         fields["role"] = payload.role
+    if payload.can_advanced is not None:
+        fields["can_advanced"] = payload.can_advanced
     updated = _auth.update_user(username, **fields)
     if updated is None:
         raise HTTPException(status_code=404, detail="Benutzer nicht gefunden.")
@@ -472,6 +478,107 @@ def _load_default_workflow() -> dict[str, dict[str, Any]]:
     except (OSError, json.JSONDecodeError):
         pass
     return DEFAULT_WORKFLOW
+
+
+# ---------------------------------------------------------------------------
+# Workflow mappings  (template + all generation defaults, with a friendly name)
+# ---------------------------------------------------------------------------
+
+class RegisterMappingRequest(BaseModel):
+    name: str = Field(min_length=1)
+    display_name: str = Field(min_length=1)
+    template_name: str = "default"
+    checkpoint: str = ""
+    ollama_model: str = ""
+    steps: int = 30
+    cfg: float = 7.0
+    seed: int = -1
+    width: int = 1024
+    height: int = 1024
+    sampler: str = "euler"
+    scheduler: str = "normal"
+    image_count: int = 1
+    enabled: bool = True
+
+
+class UpdateMappingRequest(BaseModel):
+    display_name: str | None = None
+    template_name: str | None = None
+    checkpoint: str | None = None
+    ollama_model: str | None = None
+    steps: int | None = None
+    cfg: float | None = None
+    seed: int | None = None
+    width: int | None = None
+    height: int | None = None
+    sampler: str | None = None
+    scheduler: str | None = None
+    image_count: int | None = None
+    enabled: bool | None = None
+
+
+@app.get("/api/mappings")
+async def list_mappings(
+    _: dict[str, str] = Depends(require_user),
+) -> dict[str, Any]:
+    """Return enabled mappings visible to all authenticated users."""
+    return {"mappings": _mappings.get_enabled_mappings()}
+
+
+@app.get("/api/admin/mappings")
+async def admin_list_mappings(
+    _: dict[str, str] = Depends(require_admin),
+) -> dict[str, Any]:
+    return {"mappings": _mappings.get_all_mappings()}
+
+
+@app.post("/api/admin/mappings", status_code=201)
+async def admin_create_mapping(
+    payload: RegisterMappingRequest,
+    _: dict[str, str] = Depends(require_admin),
+) -> dict[str, Any]:
+    slug = payload.name.lower().replace(" ", "_").replace("-", "_")
+    if _mappings.get_mapping(slug) is not None:
+        raise HTTPException(status_code=409, detail="Mapping mit diesem Namen existiert bereits.")
+    return _mappings.register_mapping(
+        name=slug,
+        display_name=payload.display_name,
+        template_name=payload.template_name,
+        checkpoint=payload.checkpoint,
+        ollama_model=payload.ollama_model,
+        steps=payload.steps,
+        cfg=payload.cfg,
+        seed=payload.seed,
+        width=payload.width,
+        height=payload.height,
+        sampler=payload.sampler,
+        scheduler=payload.scheduler,
+        image_count=payload.image_count,
+        enabled=payload.enabled,
+    )
+
+
+@app.patch("/api/admin/mappings/{name}")
+async def admin_update_mapping(
+    name: str,
+    payload: UpdateMappingRequest,
+    _: dict[str, str] = Depends(require_admin),
+) -> dict[str, Any]:
+    fields = {k: v for k, v in payload.model_dump().items() if v is not None}
+    updated = _mappings.update_mapping(name, **fields)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Mapping nicht gefunden.")
+    return updated
+
+
+@app.delete("/api/admin/mappings/{name}")
+async def admin_delete_mapping(
+    name: str,
+    _: dict[str, str] = Depends(require_admin),
+) -> dict[str, str]:
+    if not _mappings.delete_mapping(name):
+        raise HTTPException(status_code=404, detail="Mapping nicht gefunden.")
+    return {"status": "deleted"}
 
 
 # ---------------------------------------------------------------------------
