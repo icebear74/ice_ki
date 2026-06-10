@@ -586,6 +586,79 @@ async function loadAdminMappings() {
   }
 }
 
+function _getTemplateModelType(templateName) {
+  if (templateName === "default") return "checkpoint";
+  const tpl = state.templates.find((t) => t.name === templateName);
+  return (tpl && tpl.model_type) ? tpl.model_type : "any";
+}
+
+function populateCheckpointSelect(currentValue) {
+  const sel = $("newMapCheckpoint");
+  if (!sel || sel.tagName !== "SELECT") return;
+  const prevValue = currentValue !== undefined ? currentValue : sel.value;
+  const templateName = $("newMapTemplate") ? $("newMapTemplate").value : "default";
+  const modelType = _getTemplateModelType(templateName);
+
+  sel.innerHTML = "";
+  const emptyOpt = document.createElement("option");
+  emptyOpt.value = "";
+  emptyOpt.textContent = "– Kein Modell –";
+  sel.appendChild(emptyOpt);
+
+  const models = (state.checkpoints || []).filter((m) => {
+    if (modelType === "checkpoint") return !m.startsWith("[unet]");
+    if (modelType === "unet") return m.startsWith("[unet]");
+    return true;
+  });
+
+  let found = false;
+  for (const m of models) {
+    const opt = document.createElement("option");
+    opt.value = m;
+    const alias = state.modelAliases && state.modelAliases[m];
+    opt.textContent = alias ? `${alias} (${m})` : m;
+    sel.appendChild(opt);
+    if (m === prevValue) found = true;
+  }
+
+  if (prevValue && !found) {
+    const opt = document.createElement("option");
+    opt.value = prevValue;
+    opt.textContent = `${prevValue} (nicht verfügbar)`;
+    sel.insertBefore(opt, sel.children[1] || null);
+  }
+  sel.value = prevValue || "";
+}
+
+function populateOllamaModelSelect(currentValue) {
+  const sel = $("newMapOllamaModel");
+  if (!sel || sel.tagName !== "SELECT") return;
+  const prevValue = currentValue !== undefined ? currentValue : sel.value;
+
+  sel.innerHTML = "";
+  const emptyOpt = document.createElement("option");
+  emptyOpt.value = "";
+  emptyOpt.textContent = "– Kein Ollama-Modell –";
+  sel.appendChild(emptyOpt);
+
+  let found = false;
+  for (const m of (state.ollamaModels || [])) {
+    const opt = document.createElement("option");
+    opt.value = m;
+    opt.textContent = m;
+    sel.appendChild(opt);
+    if (m === prevValue) found = true;
+  }
+
+  if (prevValue && !found) {
+    const opt = document.createElement("option");
+    opt.value = prevValue;
+    opt.textContent = `${prevValue} (nicht verfügbar)`;
+    sel.insertBefore(opt, sel.children[1] || null);
+  }
+  sel.value = prevValue || "";
+}
+
 function populateMappingFormSelects() {
   // Populate template dropdown
   const tplSel = $("newMapTemplate");
@@ -604,6 +677,13 @@ function populateMappingFormSelects() {
     tplSel.appendChild(opt);
   }
   if (prevTpl) tplSel.value = prevTpl;
+
+  // Re-filter checkpoint dropdown when template changes
+  tplSel.onchange = () => populateCheckpointSelect();
+
+  // Populate checkpoint and ollama model dropdowns
+  populateCheckpointSelect();
+  populateOllamaModelSelect();
 
   // Populate sampler/scheduler dropdowns in form
   fillSelectSimple("newMapSampler", state.samplers.length ? state.samplers : ["euler", "dpmpp_2m", "ddim"], "euler");
@@ -626,8 +706,8 @@ function openMappingForm(editName) {
       $("newMapName").value = m.name;
       $("newMapDisplay").value = m.display_name;
       $("newMapTemplate").value = m.template_name || "default";
-      $("newMapCheckpoint").value = m.checkpoint || "";
-      $("newMapOllamaModel").value = m.ollama_model || "";
+      populateCheckpointSelect(m.checkpoint || "");
+      populateOllamaModelSelect(m.ollama_model || "");
       $("newMapSteps").value = m.steps ?? 30;
       $("newMapCfg").value = m.cfg ?? 7;
       $("newMapSeed").value = m.seed ?? -1;
@@ -645,8 +725,8 @@ function openMappingForm(editName) {
     $("newMapName").value = "";
     $("newMapDisplay").value = "";
     $("newMapTemplate").value = "default";
-    $("newMapCheckpoint").value = "";
-    $("newMapOllamaModel").value = "";
+    populateCheckpointSelect("");
+    populateOllamaModelSelect("");
     $("newMapSteps").value = 30;
     $("newMapCfg").value = 7;
     $("newMapSeed").value = -1;

@@ -212,14 +212,14 @@
                   <option value="default">Standard (CheckpointLoaderSimple)</option>
                 </select>
               </label>
-              <label>Modell (Checkpoint/UNet) <small class="setting-hint">Voreingestelltes Bildgenerierungs-Modell</small>
-                <input id="newMapCheckpoint" placeholder="z. B. v1-5-pruned.safetensors" />
+              <label>Modell (Checkpoint/UNet) <small class="setting-hint">Voreingestelltes Bildgenerierungs-Modell – gefiltert nach Workflow-Typ</small>
+                <select id="newMapCheckpoint"><option value="">– Kein Modell –</option></select>
               </label>
             </div>
 
             <div class="grid-2" style="margin-top:0.5rem">
               <label>Ollama-Modell <small class="setting-hint">Modell f&uuml;r die Prompt-&Uuml;bersetzung (Deutsch &rarr; Englisch)</small>
-                <input id="newMapOllamaModel" placeholder="z. B. llama3.2" />
+                <select id="newMapOllamaModel"><option value="">– Kein Ollama-Modell –</option></select>
               </label>
               <label>Anzahl Bilder <small class="setting-hint">Wie viele Bilder gleichzeitig generiert werden</small>
                 <input id="newMapImageCount" type="number" value="1" min="1" max="8" />
