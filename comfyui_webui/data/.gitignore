@@ -1,0 +1,5 @@
+# Sensitive runtime data – never commit these
+users.json
+bootstrap_credentials.txt
+templates.json
+templates/*.json

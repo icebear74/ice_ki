@@ -90,3 +90,8 @@ TensorRT-*.tar.gz
 TensorRT-*/
 # cuDNN 8 compat libs extracted by setup_venv311_vsr.sh (large binaries, not committed)
 .cudnn8_compat/
+# comfyui_webui – runtime data (credentials, user DB, template registry)
+comfyui_webui/data/users.json
+comfyui_webui/data/bootstrap_credentials.txt
+comfyui_webui/data/templates.json
+comfyui_webui/data/templates/*.json

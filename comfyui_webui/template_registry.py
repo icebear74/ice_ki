@@ -1,0 +1,291 @@
+"""Template registry and approval store for comfyui_webui.
+
+Templates are persisted in ``data/templates.json``.  Each record contains:
+
+- ``name``         – unique identifier (slug-like, no spaces)
+- ``display_name`` – human-readable label shown in the UI
+- ``source``       – where the template came from (``"local"``, ``"comfyui"``, …)
+- ``description``  – optional free-text description
+- ``approved``     – bool; set by admin after reviewing/testing
+- ``enabled``      – bool; admin can temporarily disable without removing approval
+- ``filename``     – optional path to the JSON workflow file (relative to data/templates/)
+- ``last_seen``    – ISO timestamp of last discovery/import
+- ``created_at``   – ISO timestamp of first registration
+"""
+from __future__ import annotations
+
+import datetime
+import json
+import logging
+from pathlib import Path
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+DATA_DIR = Path(__file__).resolve().parent / "data"
+TEMPLATES_FILE = DATA_DIR / "templates.json"
+TEMPLATES_DIR = DATA_DIR / "templates"
+
+
+# ---------------------------------------------------------------------------
+# Persistence helpers
+# ---------------------------------------------------------------------------
+
+def _ensure_data_dir() -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def load_templates() -> list[dict[str, Any]]:
+    if not TEMPLATES_FILE.exists():
+        return []
+    try:
+        data = json.loads(TEMPLATES_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, list):
+            return data
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.error("template_registry: could not load templates: %s", exc)
+    return []
+
+
+def save_templates(templates: list[dict[str, Any]]) -> None:
+    _ensure_data_dir()
+    TEMPLATES_FILE.write_text(
+        json.dumps(templates, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Query helpers
+# ---------------------------------------------------------------------------
+
+def get_approved_templates() -> list[dict[str, Any]]:
+    """Return templates that are both approved and enabled (shown to normal users)."""
+    return [
+        t for t in load_templates() if t.get("approved") and t.get("enabled", True)
+    ]
+
+
+def get_all_templates() -> list[dict[str, Any]]:
+    return load_templates()
+
+
+def get_template(name: str) -> dict[str, Any] | None:
+    for t in load_templates():
+        if t.get("name") == name:
+            return t
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Mutations
+# ---------------------------------------------------------------------------
+
+def detect_model_type(workflow_json: dict) -> str:
+    """Inspect a ComfyUI workflow JSON and return the required model type.
+
+    Returns ``'unet'`` if a UNETLoader/DiffusionModelLoader node is found,
+    ``'checkpoint'`` if a CheckpointLoaderSimple node is found, or ``'any'`` otherwise.
+    """
+    for node in workflow_json.values():
+        if not isinstance(node, dict):
+            continue
+        ct = node.get("class_type", "")
+        if ct in ("UNETLoader", "DiffusionModelLoader"):
+            return "unet"
+        if ct == "CheckpointLoaderSimple":
+            return "checkpoint"
+    return "any"
+
+
+def register_template(
+    name: str,
+    display_name: str,
+    source: str = "local",
+    description: str = "",
+    filename: str | None = None,
+    approved: bool = False,
+    enabled: bool = True,
+    model_type: str = "any",
+) -> dict[str, Any]:
+    """Register a new template or update last_seen if it already exists."""
+    templates = load_templates()
+    now = datetime.datetime.utcnow().isoformat()
+    for t in templates:
+        if t["name"] == name:
+            t["last_seen"] = now
+            t["display_name"] = display_name
+            if filename is not None:
+                t["filename"] = filename
+            # Update model_type if a specific type was detected, or if not yet set
+            if model_type != "any" or "model_type" not in t:
+                t["model_type"] = model_type
+            save_templates(templates)
+            return t
+
+    record: dict[str, Any] = {
+        "name": name,
+        "display_name": display_name,
+        "source": source,
+        "description": description,
+        "filename": filename,
+        "approved": approved,
+        "enabled": enabled,
+        "model_type": model_type,
+        "last_seen": now,
+        "created_at": now,
+    }
+    templates.append(record)
+    save_templates(templates)
+    return record
+
+
+def update_template(name: str, **fields: Any) -> dict[str, Any] | None:
+    """Update allowed fields for a template record."""
+    allowed = {"approved", "enabled", "display_name", "description", "model_type"}
+    templates = load_templates()
+    for t in templates:
+        if t["name"] == name:
+            for key, value in fields.items():
+                if key in allowed:
+                    t[key] = value
+            save_templates(templates)
+            return t
+    return None
+
+
+def delete_template(name: str) -> bool:
+    templates = load_templates()
+    new = [t for t in templates if t["name"] != name]
+    if len(new) == len(templates):
+        return False
+    save_templates(new)
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Local template file discovery
+# ---------------------------------------------------------------------------
+
+def discover_local_templates() -> list[dict[str, Any]]:
+    """Scan ``data/templates/`` for ``.json`` workflow files and auto-register new ones.
+
+    Files found here are registered as *approved* + *enabled* because the admin
+    intentionally placed them in that directory.  If a template with the same
+    slug already exists its ``filename`` reference is updated but its
+    ``approved``/``enabled`` flags are **not** changed (so a deliberately
+    disabled template stays disabled).
+    """
+    _ensure_data_dir()
+    registered: list[dict[str, Any]] = []
+    for json_file in sorted(TEMPLATES_DIR.glob("*.json")):
+        stem = json_file.stem
+        slug = stem.lower().replace(" ", "_").replace("-", "_")
+        display_name = stem.replace("_", " ").replace("-", " ").title()
+        try:
+            data = json.loads(json_file.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                logger.warning("discover_local_templates: %s is not a JSON object – skipped", json_file.name)
+                continue
+            model_type = detect_model_type(data)
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("discover_local_templates: cannot parse %s: %s", json_file.name, exc)
+            continue
+
+        existing = get_template(slug)
+        if existing is None:
+            record = register_template(
+                name=slug,
+                display_name=display_name,
+                source="local",
+                description=f"Lokales Workflow-Template: {json_file.name}",
+                filename=json_file.name,
+                approved=True,
+                enabled=True,
+                model_type=model_type,
+            )
+            logger.info("discover_local_templates: registered new template %r from %s", slug, json_file.name)
+        else:
+            # Update the filename reference (register_template updates filename for existing entries)
+            record = register_template(
+                name=slug,
+                display_name=existing.get("display_name", display_name),
+                source=existing.get("source", "local"),
+                filename=json_file.name,
+                model_type=model_type,
+            )
+            logger.debug("discover_local_templates: updated filename for existing template %r", slug)
+        registered.append(record)
+    return registered
+
+
+# ---------------------------------------------------------------------------
+# ComfyUI template discovery
+# ---------------------------------------------------------------------------
+
+async def discover_comfyui_templates(
+    comfyui_base_url: str,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Try to fetch workflow templates from ComfyUI's built-in template API.
+
+    Returns ``(discovered, error_message)``.  *discovered* is a list of
+    newly-discovered template records (not yet saved); callers should persist
+    them with :func:`register_template` as needed.  *error_message* is
+    ``None`` on success or a human-readable string when no templates could be
+    fetched.
+    """
+    import httpx  # local import to keep module import-time clean
+
+    # ComfyUI has served workflow templates under different paths across versions.
+    # Try them in order and return as soon as one succeeds.
+    candidate_urls = [
+        f"{comfyui_base_url}/api/workflow_templates",
+        f"{comfyui_base_url}/workflow_templates",
+    ]
+
+    last_error: str | None = None
+    for url in candidate_urls:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url)
+            response.raise_for_status()
+            data = response.json()
+            # ComfyUI returns a list or dict of template metadata
+            items: list[Any] = data if isinstance(data, list) else list(data.values())
+            discovered: list[dict[str, Any]] = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                tname = item.get("name") or item.get("title") or ""
+                if not tname:
+                    continue
+                slug = tname.lower().replace(" ", "_").replace("/", "_")
+                discovered.append(
+                    {
+                        "name": slug,
+                        "display_name": tname,
+                        "source": "comfyui",
+                        "description": item.get("description", ""),
+                        "filename": None,
+                    }
+                )
+            logger.info(
+                "template_registry: discovered %d templates from ComfyUI (%s)",
+                len(discovered),
+                url,
+            )
+            return discovered, None
+        except Exception as exc:
+            last_error = str(exc)
+            logger.warning(
+                "template_registry: ComfyUI template discovery failed (%s): %s",
+                url,
+                exc,
+            )
+
+    error_msg = (
+        f"Kein kompatibles Template-Endpunkt gefunden. "
+        f"Getestete URLs: {', '.join(candidate_urls)}. "
+        f"Letzter Fehler: {last_error}"
+    )
+    return [], error_msg
