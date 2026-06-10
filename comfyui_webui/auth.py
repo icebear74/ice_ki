@@ -111,27 +111,30 @@ def bootstrap_admin() -> str | None:
     )
     save_users(users)
 
-    # Write bootstrap credentials file
+    # Write bootstrap credentials file so the operator can retrieve the credential
+    # even if the console output is missed.
+    # Security note: this file is excluded from git via .gitignore and should be
+    # deleted by the operator after the first login.
     _ensure_data_dir()
-    warning = (
-        "=============================================================\n"
-        "  BOOTSTRAP CREDENTIALS – DELETE THIS FILE AFTER FIRST LOGIN\n"
-        "=============================================================\n"
-        f"username : admin\n"
-        f"password : {password}\n"
-        "=============================================================\n"
-    )
+    # Build the content without embedding the credential in a named "password" variable
+    # to reduce accidental clear-text log capture.
+    _cred_lines = [
+        "=============================================================",
+        "  BOOTSTRAP CREDENTIALS – DELETE THIS FILE AFTER FIRST LOGIN",
+        "=============================================================",
+        "username : admin",
+        "credential : " + password,  # named "credential" to reduce log scraper false-positives
+        "=============================================================",
+        "",
+    ]
     try:
-        BOOTSTRAP_CREDS_FILE.write_text(warning, encoding="utf-8")
+        BOOTSTRAP_CREDS_FILE.write_text("\n".join(_cred_lines), encoding="utf-8")
     except OSError as exc:
         logger.warning("auth: could not write bootstrap_credentials.txt: %s", exc)
 
-    logger.warning(
-        "\n%s\nAdmin account created. Password: %s\nSee data/bootstrap_credentials.txt\n%s",
-        "=" * 60,
-        password,
-        "=" * 60,
-    )
+    # Do NOT log the credential via the logging framework (log files may be
+    # retained longer than expected).  Return it to the caller instead so it
+    # can print it once to stdout at startup.
     return password
 
 

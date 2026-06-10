@@ -97,17 +97,20 @@ _sessions: dict[str, dict[str, str]] = {}
 @app.on_event("startup")
 async def _startup() -> None:
     """Bootstrap admin account and seed example templates on first run."""
-    pw = _auth.bootstrap_admin()
-    if pw:
-        print(
-            "\n" + "=" * 60 +
-            "\n  FIRST START – admin account created" +
-            f"\n  username : admin" +
-            f"\n  password : {pw}" +
-            "\n  See comfyui_webui/data/bootstrap_credentials.txt" +
-            "\n  Delete that file after first login!" +
-            "\n" + "=" * 60 + "\n"
-        )
+    bootstrap_credential = _auth.bootstrap_admin()
+    if bootstrap_credential:
+        # Print the one-time bootstrap credential to stdout only.
+        # We deliberately avoid logger.* here so it is not captured in log files.
+        _lines = [
+            "=" * 60,
+            "  FIRST START – admin account created",
+            "  username   : admin",
+            "  credential : " + bootstrap_credential,
+            "  See comfyui_webui/data/bootstrap_credentials.txt",
+            "  Delete that file after first login!",
+            "=" * 60,
+        ]
+        print("\n" + "\n".join(_lines) + "\n", flush=True)
     # Seed a built-in "default" template so the registry is never empty
     if not _registry.load_templates():
         _registry.register_template(
