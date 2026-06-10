@@ -5,12 +5,13 @@ import json
 import os
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncGenerator
 from urllib.parse import urlencode
 
 import httpx
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, Response
+import websockets
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -52,6 +53,7 @@ WORKFLOW_TEMPLATE_PATH = APP_DIR / "workflow_template.json"
 class TranslateRequest(BaseModel):
     prompt_de: str = Field(min_length=1)
     model: str = Field(min_length=1)
+    context_prompt: str | None = None
 
 
 class GenerateRequest(BaseModel):
@@ -59,6 +61,7 @@ class GenerateRequest(BaseModel):
     negative_prompt: str = ""
     ollama_model: str = Field(min_length=1)
     translated_prompt: str | None = None
+    context_prompt: str | None = None
     checkpoint: str | None = None
     steps: int = 30
     cfg: float = 7.0
@@ -115,7 +118,7 @@ async def get_ollama_models() -> dict[str, list[str]]:
 
 @app.post("/api/translate")
 async def translate_prompt(payload: TranslateRequest) -> dict[str, str]:
-    translated = await _translate_german_to_english(payload.prompt_de, payload.model)
+    translated = await _translate_german_to_english(payload.prompt_de, payload.model, payload.context_prompt)
     return {"translated_prompt": translated}
 
 
@@ -141,6 +144,19 @@ async def get_comfy_checkpoints() -> dict[str, Any]:
     except httpx.HTTPError:
         pass
 
+    # Newer ComfyUI API
+    if not checkpoints:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(f"{COMFYUI_BASE_URL}/api/models/checkpoints")
+            response.raise_for_status()
+            data = response.json()
+            if isinstance(data, list):
+                checkpoints = [str(item) for item in data if item]
+                sources.append("/api/models/checkpoints")
+        except httpx.HTTPError:
+            pass
+
     if not checkpoints:
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
@@ -153,21 +169,58 @@ async def get_comfy_checkpoints() -> dict[str, Any]:
         except httpx.HTTPError:
             pass
 
+    note = ""
     if not checkpoints:
-        return {
-            "checkpoints": [],
-            "note": "Keine Checkpoints automatisch abrufbar. Bitte Namen manuell eingeben.",
-            "sources": sources,
-        }
+        note = (
+            "Keine Checkpoints gefunden. "
+            "Modelle müssen im Verzeichnis ComfyUI/models/checkpoints/ liegen "
+            "oder über extra_model_paths.yaml eingebunden sein."
+        )
 
-    return {"checkpoints": checkpoints, "sources": sources}
+    return {"checkpoints": checkpoints, "sources": sources, "note": note}
+
+
+_DEFAULT_SAMPLERS = [
+    "euler", "euler_cfg_pp", "euler_ancestral", "euler_ancestral_cfg_pp",
+    "heun", "heunpp2", "dpm_2", "dpm_2_ancestral", "lms", "dpm_fast",
+    "dpm_adaptive", "dpmpp_2s_ancestral", "dpmpp_sde", "dpmpp_sde_gpu",
+    "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_2m_sde_gpu", "dpmpp_3m_sde",
+    "dpmpp_3m_sde_gpu", "ddpm", "lcm", "ipndm", "ipndm_v", "deis",
+    "ddim", "uni_pc", "uni_pc_bh2",
+]
+_DEFAULT_SCHEDULERS = [
+    "normal", "karras", "exponential", "sgm_uniform", "simple",
+    "ddim_uniform", "beta", "linear_quadratic", "kl_optimal",
+]
+
+
+@app.get("/api/comfy/samplers")
+async def get_comfy_samplers() -> dict[str, list[str]]:
+    samplers = list(_DEFAULT_SAMPLERS)
+    schedulers = list(_DEFAULT_SCHEDULERS)
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(f"{COMFYUI_BASE_URL}/object_info/KSampler")
+        response.raise_for_status()
+        info = response.json().get("KSampler", {}).get("input", {}).get("required", {})
+        s = info.get("sampler_name", [[]])[0]
+        sc = info.get("scheduler", [[]])[0]
+        if isinstance(s, list) and s:
+            samplers = [str(x) for x in s if x]
+        if isinstance(sc, list) and sc:
+            schedulers = [str(x) for x in sc if x]
+    except httpx.HTTPError:
+        pass
+    return {"samplers": samplers, "schedulers": schedulers}
 
 
 @app.post("/api/generate")
 async def generate_images(payload: GenerateRequest) -> dict[str, Any]:
     translated_prompt = payload.translated_prompt
     if not translated_prompt:
-        translated_prompt = await _translate_german_to_english(payload.prompt_de, payload.ollama_model)
+        translated_prompt = await _translate_german_to_english(
+            payload.prompt_de, payload.ollama_model, payload.context_prompt
+        )
 
     workflow = _build_workflow(payload, translated_prompt)
     client_id = f"comfyui-webui-{uuid.uuid4()}"
@@ -182,27 +235,109 @@ async def generate_images(payload: GenerateRequest) -> dict[str, Any]:
         prompt_id = response.json().get("prompt_id")
         if not prompt_id:
             raise HTTPException(status_code=502, detail="ComfyUI hat keine prompt_id zurückgegeben.")
-
-        history_data = await _wait_for_history(prompt_id)
-        images = _extract_images(history_data)
     except HTTPException:
         raise
-    except (httpx.HTTPError, asyncio.TimeoutError) as exc:
+    except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"ComfyUI-Fehler: {exc}") from exc
-
-    if not images:
-        raise HTTPException(status_code=502, detail="ComfyUI lieferte keine Bilder im History-Output.")
-
-    image_urls = [
-        f"/api/comfy/image?{urlencode({'filename': img['filename'], 'subfolder': img.get('subfolder', ''), 'type': img.get('type', 'output')})}"
-        for img in images
-    ]
 
     return {
         "translated_prompt": translated_prompt,
         "prompt_id": prompt_id,
-        "images": image_urls,
+        "client_id": client_id,
     }
+
+
+@app.get("/api/comfy/progress/{prompt_id}")
+async def comfy_progress_sse(prompt_id: str, client_id: str, request: Request) -> StreamingResponse:
+    async def event_stream() -> AsyncGenerator[str, None]:
+        # Initial queue-position check via REST
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as http:
+                q = await http.get(f"{COMFYUI_BASE_URL}/queue")
+                pending = [item[1] for item in q.json().get("queue_pending", [])]
+                pos: int | None = (pending.index(prompt_id) + 1) if prompt_id in pending else None
+                yield f"data: {json.dumps({'type': 'queued', 'position': pos})}\n\n"
+        except Exception:
+            yield f"data: {json.dumps({'type': 'queued'})}\n\n"
+
+        ws_url = (
+            COMFYUI_BASE_URL.replace("http://", "ws://").replace("https://", "wss://")
+            + f"/ws?clientId={client_id}"
+        )
+        start_time: float | None = None
+
+        try:
+            async with websockets.connect(ws_url, ping_interval=20) as ws:
+                async for raw in ws:
+                    if await request.is_disconnected():
+                        return
+                    if isinstance(raw, bytes):
+                        continue  # skip binary preview frames
+                    try:
+                        msg = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+
+                    mtype = msg.get("type", "")
+                    mdata = msg.get("data") or {}
+                    mpid = mdata.get("prompt_id") if isinstance(mdata, dict) else None
+
+                    # Filter messages for other prompts
+                    if mpid and mpid != prompt_id:
+                        continue
+
+                    if mtype == "execution_start":
+                        start_time = asyncio.get_event_loop().time()
+                        yield f"data: {json.dumps({'type': 'start'})}\n\n"
+
+                    elif mtype == "progress":
+                        step = int(mdata.get("value", 0))
+                        total = int(mdata.get("max", 1))
+                        eta: int | None = None
+                        if start_time and step > 0 and step < total:
+                            elapsed = asyncio.get_event_loop().time() - start_time
+                            eta = round(elapsed / step * (total - step))
+                        yield f"data: {json.dumps({'type': 'progress', 'step': step, 'max': total, 'eta': eta})}\n\n"
+
+                    elif mtype == "execution_success" or (
+                        mtype == "executing" and isinstance(mdata, dict) and mdata.get("node") is None
+                    ):
+                        break
+
+                    elif mtype == "execution_error":
+                        err = mdata.get("exception_message", "Unbekannter Fehler") if isinstance(mdata, dict) else "Fehler"
+                        yield f"data: {json.dumps({'type': 'error', 'message': str(err)})}\n\n"
+                        return
+
+        except Exception as exc:
+            yield f"data: {json.dumps({'type': 'error', 'message': f'WebSocket-Fehler: {exc}'})}\n\n"
+            return
+
+        # Fetch images from history
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as http:
+                for _ in range(20):
+                    resp = await http.get(f"{COMFYUI_BASE_URL}/history/{prompt_id}")
+                    resp.raise_for_status()
+                    data = resp.json()
+                    if data.get(prompt_id):
+                        images = _extract_images(data[prompt_id])
+                        image_urls = [
+                            f"/api/comfy/image?{urlencode({'filename': img['filename'], 'subfolder': img.get('subfolder', ''), 'type': img.get('type', 'output')})}"
+                            for img in images
+                        ]
+                        yield f"data: {json.dumps({'type': 'done', 'images': image_urls})}\n\n"
+                        return
+                    await asyncio.sleep(0.5)
+            yield f"data: {json.dumps({'type': 'error', 'message': 'Bilder nicht in History gefunden.'})}\n\n"
+        except Exception as exc:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/api/comfy/image")
@@ -219,18 +354,27 @@ async def comfy_image_proxy(filename: str, subfolder: str = "", type: str = "out
     return Response(content=response.content, media_type=content_type)
 
 
-async def _translate_german_to_english(prompt_de: str, model: str) -> str:
-    """Translate German prompt to English via Ollama.
+async def _translate_german_to_english(prompt_de: str, model: str, context_prompt: str | None = None) -> str:
+    """Translate German prompt to English via Ollama, optionally refining an existing prompt.
 
     Tries /api/chat first (modern Ollama ≥ 0.1.14), then falls back to
     /api/generate for older installations.
     """
-    instruction = (
-        "Translate the following German image prompt into natural, precise English "
-        "for text-to-image models. Return only the English prompt, no explanations, "
-        "no quotes, no additional text.\n\n"
-        f"German: {prompt_de}"
-    )
+    if context_prompt:
+        instruction = (
+            "You previously created an image with this English prompt:\n"
+            f'"{context_prompt}"\n\n'
+            "The user wants to modify it with this German instruction:\n"
+            f'"{prompt_de}"\n\n'
+            "Return only the updated English image prompt. No explanations, no quotes, no additional text."
+        )
+    else:
+        instruction = (
+            "Translate the following German image prompt into natural, precise English "
+            "for text-to-image models. Return only the English prompt, no explanations, "
+            "no quotes, no additional text.\n\n"
+            f"German: {prompt_de}"
+        )
 
     # --- Primary: /api/chat (supported by all current Ollama versions) ---
     chat_url = f"{OLLAMA_BASE_URL}/api/chat"
@@ -242,6 +386,7 @@ async def _translate_german_to_english(prompt_de: str, model: str) -> str:
                     "model": model,
                     "messages": [{"role": "user", "content": instruction}],
                     "stream": False,
+                    "keep_alive": -1,
                     "options": {"temperature": 0.1},
                 },
             )
@@ -267,6 +412,7 @@ async def _translate_german_to_english(prompt_de: str, model: str) -> str:
                     "model": model,
                     "prompt": instruction,
                     "stream": False,
+                    "keep_alive": -1,
                     "options": {"temperature": 0.1},
                 },
             )
@@ -316,19 +462,6 @@ def _build_workflow(payload: GenerateRequest, translated_prompt: str) -> dict[st
     )
 
     return workflow
-
-
-async def _wait_for_history(prompt_id: str, timeout_seconds: int = 180) -> dict[str, Any]:
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        for _ in range(timeout_seconds):
-            response = await client.get(f"{COMFYUI_BASE_URL}/history/{prompt_id}")
-            response.raise_for_status()
-            data = response.json()
-            if data.get(prompt_id):
-                return data[prompt_id]
-            await asyncio.sleep(1)
-
-    raise asyncio.TimeoutError(f"Timeout beim Warten auf ComfyUI-Ergebnis für {prompt_id}")
 
 
 def _extract_images(history_data: dict[str, Any]) -> list[dict[str, str]]:
