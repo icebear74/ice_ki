@@ -68,10 +68,9 @@ button:hover { filter: brightness(1.1); }
 }
 
 .actions {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(180px, 220px)) 1fr;
+  display: flex;
+  flex-wrap: wrap;
   gap: 0.6rem;
-  align-items: center;
 }
 
 .hint { color: var(--muted); }

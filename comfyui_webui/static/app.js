@@ -9,7 +9,6 @@ const state = {
   schedulers: [],
   templates: [],
   mappings: [],        // loaded from /api/mappings
-  lastTranslatedPrompt: "",
   editingMappingName: null,  // null = create, string = editing existing
 };
 
@@ -291,7 +290,6 @@ function getActiveMapping() {
 
 function collectPayload() {
   const mapping = getActiveMapping();
-  const isFollowup = $("followupCheck") && $("followupCheck").checked;
   const canAdv = state.currentUser && (state.currentUser.can_advanced || state.currentUser.role === "admin");
 
   // Generation parameters: use Erweitert overrides if user has permission,
@@ -311,7 +309,7 @@ function collectPayload() {
     ollama_model: (mapping && mapping.ollama_model) || "",
     translated_prompt: $("translatedPrompt").value.trim() || null,
     translated_negative_prompt: $("translatedNegativePrompt").value.trim() || null,
-    context_prompt: isFollowup && state.lastTranslatedPrompt ? state.lastTranslatedPrompt : null,
+    context_prompt: null,
     checkpoint: (mapping && mapping.checkpoint) || null,
     workflow_template: (mapping && mapping.template_name) || "default",
     steps,
@@ -334,17 +332,6 @@ function showImages(urls) {
     img.alt = "Generated image";
     wrap.appendChild(img);
   }
-}
-
-function showFollowupSection(translatedPrompt) {
-  state.lastTranslatedPrompt = translatedPrompt;
-  $("followupSection").classList.remove("hidden");
-  const hint = $("followupHint");
-  const preview =
-    translatedPrompt.length > 80
-      ? translatedPrompt.slice(0, 80) + "…"
-      : translatedPrompt;
-  hint.textContent = `Letzter Prompt: „${preview}"`;
 }
 
 // Auto-refine prompt if changes are present; resolves to (possibly updated) prompt_de
@@ -429,6 +416,9 @@ async function generateImages() {
 
     const payload = collectPayload();
     payload.prompt_de = promptDe;
+    // Always re-translate so stale translations are never sent
+    payload.translated_prompt = null;
+    payload.translated_negative_prompt = null;
 
     const translateTasks = [];
     if (!payload.translated_prompt) {
@@ -471,7 +461,6 @@ async function generateImages() {
     const { prompt_id, client_id, translated_prompt, translated_negative_prompt } = submitData;
     if (translated_prompt) $("translatedPrompt").value = translated_prompt;
     if (translated_negative_prompt) $("translatedNegativePrompt").value = translated_negative_prompt;
-    showFollowupSection(translated_prompt || payload.translated_prompt);
 
     showProgress(true);
     setProgressBar(0, 0, null);
@@ -1305,15 +1294,6 @@ $("generateBtn").addEventListener("click", async () => {
     await generateImages();
   } catch (error) {
     setStatus(error.message, true);
-  }
-});
-
-$("followupCheck").addEventListener("change", () => {
-  if ($("followupCheck").checked) {
-    $("promptDe").placeholder = "Änderungsanweisung eingeben, z.\u00A0B. \u201EMache die Sonne etwas dunkler\u201C";
-    $("translatedPrompt").value = "";
-  } else {
-    $("promptDe").placeholder = "z. B. Ein futuristisches Stadtbild bei Sonnenuntergang";
   }
 });
 

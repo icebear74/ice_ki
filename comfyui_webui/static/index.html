@@ -87,8 +87,8 @@
         <section class="card actions">
           <button id="translateBtn" type="button">Nur &uuml;bersetzen</button>
           <button id="generateBtn" type="button">Bild(er) generieren</button>
-          <span id="status" class="hint"></span>
         </section>
+        <p id="status" class="hint" style="margin:0.25rem 0 0.5rem"></p>
 
         <div id="progressWrap" class="hidden">
           <div class="progress-bar-outer">
@@ -103,14 +103,6 @@
           <textarea id="translatedPrompt" rows="3" placeholder="Hier erscheint der &uuml;bersetzte Prompt."></textarea>
           <label for="translatedNegativePrompt">Negativer Prompt</label>
           <textarea id="translatedNegativePrompt" rows="2" placeholder="Hier erscheint der &uuml;bersetzte Negative Prompt."></textarea>
-        </section>
-
-        <section id="followupSection" class="card hidden">
-          <label class="inline-check">
-            <input type="checkbox" id="followupCheck" />
-            <span>Folgebefehl &ndash; Prompt oben als &Auml;nderungsanweisung verwenden</span>
-          </label>
-          <small id="followupHint" class="hint"></small>
         </section>
 
         <section class="card">
