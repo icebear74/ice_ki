@@ -416,7 +416,7 @@ $("followupCheck").addEventListener("change", () => {
   const hint = $("followupHint");
   if ($("followupCheck").checked) {
     $("promptDe").placeholder =
-      "Änderungsanweisung eingeben, z. B. „Mache die Sonne etwas dunkler"";
+      "Änderungsanweisung eingeben, z. B. \u201EMache die Sonne etwas dunkler\u201C";
     // Clear translated prompt so it gets regenerated with context
     $("translatedPrompt").value = "";
   } else {
