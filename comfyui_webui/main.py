@@ -298,7 +298,10 @@ async def generate_images(payload: GenerateRequest) -> dict[str, Any]:
             payload.negative_prompt, payload.ollama_model
         )
 
-    workflow = _build_workflow(payload, translated_prompt, translated_negative or "")
+    try:
+        workflow = _build_workflow(payload, translated_prompt, translated_negative or "")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     client_id = f"comfyui-webui-{uuid.uuid4()}"
 
     try:
@@ -537,10 +540,23 @@ def _build_workflow(payload: GenerateRequest, translated_prompt: str, translated
 
     if payload.checkpoint:
         # Strip the [unet] tag added by get_comfy_checkpoints for display purposes
+        is_unet = payload.checkpoint.startswith("[unet] ")
         model_name = payload.checkpoint.removeprefix("[unet] ")
         node1_type = workflow.get("1", {}).get("class_type", "")
         if node1_type in ("UNETLoader", "DiffusionModelLoader"):
             workflow["1"]["inputs"]["unet_name"] = model_name
+        elif is_unet:
+            # User selected a UNet/Diffusion model (e.g. FLUX, Zimage) but the
+            # workflow template still uses CheckpointLoaderSimple, which cannot
+            # load UNet-only models and causes ComfyUI to return 400 "Prompt
+            # outputs failed validation".  Raise a clear error instead.
+            raise ValueError(
+                f"Das Modell '{model_name}' ist ein UNet-/Diffusion-Modell (z. B. FLUX, Zimage) "
+                "und lässt sich nicht mit dem Standard-Template laden. "
+                "Erstelle eine workflow_template.json mit einem UNETLoader- (oder "
+                "DiffusionModelLoader-) Knoten als Node '1' sowie passenden "
+                "CLIPLoader/DualCLIPLoader- und VAELoader-Knoten."
+            )
         else:
             workflow["1"]["inputs"]["ckpt_name"] = model_name
 

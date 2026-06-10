@@ -185,6 +185,27 @@ async function loadCheckpoints() {
   const unetCount = (data.unet_models || []).length;
   const ckptCount = allModels.length - unetCount;
   setStatus(`Modelle geladen: ${ckptCount} Checkpoints, ${unetCount} UNet`);
+
+  // Warn when a UNet model is selected, since it needs a custom workflow template
+  function updateUnetWarning() {
+    const val = selectValue("checkpoint", "checkpointManual", "checkpointManualWrap");
+    const note = $("checkpointNote");
+    if (val && val.startsWith("[unet] ")) {
+      note.textContent =
+        "⚠ UNet-/Diffusion-Modell gewählt: Dieses Modell benötigt eine " +
+        "workflow_template.json mit UNETLoader-, CLIPLoader- und VAELoader-Knoten. " +
+        "Das Standard-Template unterstützt nur Checkpoint-Modelle.";
+      note.classList.add("error");
+    } else if (!data.note) {
+      note.textContent = "";
+      note.classList.remove("error");
+    } else {
+      note.textContent = data.note;
+      note.classList.remove("error");
+    }
+  }
+  select.addEventListener("change", updateUnetWarning);
+  updateUnetWarning();
 }
 
 async function loadSamplers() {
