@@ -112,15 +112,26 @@ function selectValue(selectId, manualInputId, manualWrapId) {
 
 async function loadOllamaModels() {
   setStatus("Lade Ollama-Modelle …");
+  console.log("loadOllamaModels: fetching /api/ollama/models");
   const data = await api("/api/ollama/models");
+  console.log("loadOllamaModels: response", data);
   state.ollamaModels = data.models || [];
   fillSelect("ollamaModel", "ollamaModelManualWrap", state.ollamaModels);
+  const note = $("ollamaModelNote");
+  if (note) {
+    note.textContent =
+      state.ollamaModels.length === 0
+        ? "Keine Modelle gefunden – ist Ollama gestartet? (ollama list)"
+        : "";
+  }
   setStatus(`Ollama-Modelle geladen: ${state.ollamaModels.length}`);
 }
 
 async function loadCheckpoints() {
   setStatus("Lade ComfyUI-Checkpoints …");
+  console.log("loadCheckpoints: fetching /api/comfy/checkpoints");
   const data = await api("/api/comfy/checkpoints");
+  console.log("loadCheckpoints: response", data);
   state.checkpoints = data.checkpoints || [];
   fillSelect("checkpoint", "checkpointManualWrap", state.checkpoints);
   $("checkpointNote").textContent = data.note || "";
@@ -337,21 +348,34 @@ async function generateImages() {
 }
 
 async function init() {
+  console.log("ComfyUI WebUI init() started");
+  const errors = [];
+
   try {
     await loadOllamaModels();
   } catch (error) {
-    setStatus(`Ollama-Modelle konnten nicht geladen werden: ${error.message}`, true);
+    console.error("loadOllamaModels failed:", error);
+    errors.push(`Ollama: ${error.message}`);
     fillSelect("ollamaModel", "ollamaModelManualWrap", []);
+    const note = $("ollamaModelNote");
+    if (note) note.textContent = `Ollama nicht erreichbar: ${error.message}`;
   }
 
   try {
     await loadCheckpoints();
   } catch (error) {
-    setStatus(`Checkpoints konnten nicht geladen werden: ${error.message}`, true);
+    console.error("loadCheckpoints failed:", error);
+    errors.push(`Checkpoints: ${error.message}`);
     fillSelect("checkpoint", "checkpointManualWrap", []);
+    $("checkpointNote").textContent = `ComfyUI nicht erreichbar: ${error.message}`;
   }
 
   await loadSamplers();
+
+  if (errors.length > 0) {
+    setStatus(errors.join(" | "), true);
+  }
+  console.log("ComfyUI WebUI init() complete. Errors:", errors);
 }
 
 $("refreshModelsBtn").addEventListener("click", async () => {

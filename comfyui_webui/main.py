@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import uuid
 from pathlib import Path
@@ -17,6 +18,8 @@ from pydantic import BaseModel, Field
 
 APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
+
+logger = logging.getLogger(__name__)
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
 COMFYUI_BASE_URL = os.getenv("COMFYUI_BASE_URL", "http://127.0.0.1:8188").rstrip("/")
@@ -105,15 +108,19 @@ def get_config() -> dict[str, str]:
 
 @app.get("/api/ollama/models")
 async def get_ollama_models() -> dict[str, list[str]]:
+    logger.info("get_ollama_models: querying %s/api/tags", OLLAMA_BASE_URL)
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(f"{OLLAMA_BASE_URL}/api/tags")
         response.raise_for_status()
         models = [item.get("name", "") for item in response.json().get("models", [])]
         models = [name for name in models if name]
+        logger.info("get_ollama_models: found %d models", len(models))
     except httpx.HTTPError as exc:
+        logger.warning("get_ollama_models: HTTP error: %s", exc)
         raise HTTPException(status_code=502, detail=f"Ollama nicht erreichbar: {exc}") from exc
     except Exception as exc:
+        logger.warning("get_ollama_models: unexpected error: %s", exc)
         raise HTTPException(status_code=502, detail=f"Ollama-Antwort konnte nicht gelesen werden: {exc}") from exc
 
     return {"models": models}
@@ -130,6 +137,7 @@ async def get_comfy_checkpoints() -> dict[str, Any]:
     sources: list[str] = []
     checkpoints: list[str] = []
 
+    logger.info("get_comfy_checkpoints: trying %s/object_info/CheckpointLoaderSimple", COMFYUI_BASE_URL)
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(f"{COMFYUI_BASE_URL}/object_info/CheckpointLoaderSimple")
@@ -144,11 +152,13 @@ async def get_comfy_checkpoints() -> dict[str, Any]:
         if isinstance(ckpt_names, list):
             checkpoints = [str(item) for item in ckpt_names if item]
             sources.append("/object_info/CheckpointLoaderSimple")
-    except Exception:
-        pass
+            logger.info("get_comfy_checkpoints: found %d checkpoints via object_info", len(checkpoints))
+    except Exception as exc:
+        logger.warning("get_comfy_checkpoints: object_info failed: %s", exc)
 
     # Newer ComfyUI API
     if not checkpoints:
+        logger.info("get_comfy_checkpoints: trying %s/api/models/checkpoints", COMFYUI_BASE_URL)
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.get(f"{COMFYUI_BASE_URL}/api/models/checkpoints")
@@ -157,10 +167,12 @@ async def get_comfy_checkpoints() -> dict[str, Any]:
             if isinstance(data, list):
                 checkpoints = [str(item) for item in data if item]
                 sources.append("/api/models/checkpoints")
-        except Exception:
-            pass
+                logger.info("get_comfy_checkpoints: found %d checkpoints via /api/models/checkpoints", len(checkpoints))
+        except Exception as exc:
+            logger.warning("get_comfy_checkpoints: /api/models/checkpoints failed: %s", exc)
 
     if not checkpoints:
+        logger.info("get_comfy_checkpoints: trying %s/models", COMFYUI_BASE_URL)
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.get(f"{COMFYUI_BASE_URL}/models")
@@ -169,11 +181,13 @@ async def get_comfy_checkpoints() -> dict[str, Any]:
             if isinstance(ckpt_names, list):
                 checkpoints = [str(item) for item in ckpt_names if item]
                 sources.append("/models")
-        except Exception:
-            pass
+                logger.info("get_comfy_checkpoints: found %d checkpoints via /models", len(checkpoints))
+        except Exception as exc:
+            logger.warning("get_comfy_checkpoints: /models failed: %s", exc)
 
     note = ""
     if not checkpoints:
+        logger.warning("get_comfy_checkpoints: no checkpoints found via any source (ComfyUI URL: %s)", COMFYUI_BASE_URL)
         note = (
             "Keine Checkpoints gefunden. "
             "Modelle müssen im Verzeichnis ComfyUI/models/checkpoints/ liegen "
