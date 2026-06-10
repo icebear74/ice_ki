@@ -142,6 +142,59 @@ def delete_template(name: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Local template file discovery
+# ---------------------------------------------------------------------------
+
+def discover_local_templates() -> list[dict[str, Any]]:
+    """Scan ``data/templates/`` for ``.json`` workflow files and auto-register new ones.
+
+    Files found here are registered as *approved* + *enabled* because the admin
+    intentionally placed them in that directory.  If a template with the same
+    slug already exists its ``filename`` reference is updated but its
+    ``approved``/``enabled`` flags are **not** changed (so a deliberately
+    disabled template stays disabled).
+    """
+    _ensure_data_dir()
+    registered: list[dict[str, Any]] = []
+    for json_file in sorted(TEMPLATES_DIR.glob("*.json")):
+        stem = json_file.stem
+        slug = stem.lower().replace(" ", "_").replace("-", "_")
+        display_name = stem.replace("_", " ").replace("-", " ").title()
+        try:
+            data = json.loads(json_file.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                logger.warning("discover_local_templates: %s is not a JSON object – skipped", json_file.name)
+                continue
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("discover_local_templates: cannot parse %s: %s", json_file.name, exc)
+            continue
+
+        existing = get_template(slug)
+        if existing is None:
+            record = register_template(
+                name=slug,
+                display_name=display_name,
+                source="local",
+                description=f"Lokales Workflow-Template: {json_file.name}",
+                filename=json_file.name,
+                approved=True,
+                enabled=True,
+            )
+            logger.info("discover_local_templates: registered new template %r from %s", slug, json_file.name)
+        else:
+            # Update the filename reference (register_template updates filename for existing entries)
+            record = register_template(
+                name=slug,
+                display_name=existing.get("display_name", display_name),
+                source=existing.get("source", "local"),
+                filename=json_file.name,
+            )
+            logger.debug("discover_local_templates: updated filename for existing template %r", slug)
+        registered.append(record)
+    return registered
+
+
+# ---------------------------------------------------------------------------
 # ComfyUI template discovery
 # ---------------------------------------------------------------------------
 

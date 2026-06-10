@@ -165,9 +165,16 @@
           <h2>Template-Verwaltung</h2>
           <div class="admin-toolbar">
             <button id="adminDiscoverBtn" type="button">&#8635; ComfyUI-Templates entdecken</button>
+            <button id="adminDiscoverLocalBtn" type="button">&#128194; Lokale Templates laden</button>
             <button id="adminAddTemplateBtn" type="button">+ Template hinzuf&uuml;gen</button>
           </div>
           <div id="adminDiscoverStatus" class="hint"></div>
+          <p class="hint" style="margin-top:0.25rem">
+            <strong>Tipp:</strong> Workflow-JSON-Dateien in
+            <code>comfyui_webui/data/templates/</code> ablegen, dann
+            <em>Lokale Templates laden</em> klicken – sie werden sofort als
+            freigegebene Templates registriert.
+          </p>
 
           <div id="addTemplateForm" class="hidden admin-form card-inner">
             <h3>Neues Template</h3>

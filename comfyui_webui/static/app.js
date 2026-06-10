@@ -617,6 +617,27 @@ async function discoverTemplates() {
       status.textContent = `Gefunden: ${data.discovered}, Neu hinzugefügt: ${data.added}`;
     }
     await loadAdminTemplates();
+    await loadTemplates();
+  } catch (err) {
+    status.textContent = `Fehler: ${err.message}`;
+    status.classList.add("error");
+  }
+}
+
+async function discoverLocalTemplates() {
+  const status = $("adminDiscoverStatus");
+  status.classList.remove("error");
+  status.textContent = "Suche lokale Templates in data/templates/ …";
+  try {
+    const data = await api("/api/admin/templates/discover_local", { method: "POST" });
+    if (data.found === 0) {
+      status.textContent =
+        "Keine lokalen Templates gefunden. Lege Workflow-JSON-Dateien in comfyui_webui/data/templates/ ab und klicke erneut.";
+    } else {
+      status.textContent = `${data.found} lokales Template(s) geladen: ${data.templates.join(", ")}`;
+    }
+    await loadAdminTemplates();
+    await loadTemplates();
   } catch (err) {
     status.textContent = `Fehler: ${err.message}`;
     status.classList.add("error");
@@ -898,6 +919,7 @@ $("followupCheck").addEventListener("change", () => {
 // Event listeners – admin tab
 // ---------------------------------------------------------------------------
 $("adminDiscoverBtn").addEventListener("click", discoverTemplates);
+$("adminDiscoverLocalBtn").addEventListener("click", discoverLocalTemplates);
 
 $("adminAddTemplateBtn").addEventListener("click", () => {
   $("addTemplateForm").classList.toggle("hidden");

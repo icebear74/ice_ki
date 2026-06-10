@@ -111,8 +111,8 @@ async def _startup() -> None:
             "=" * 60,
         ]
         print("\n" + "\n".join(_lines) + "\n", flush=True)
-    # Seed a built-in "default" template so the registry is never empty
-    if not _registry.load_templates():
+    # Always ensure the built-in "default" template exists
+    if _registry.get_template("default") is None:
         _registry.register_template(
             name="default",
             display_name="Standard (CheckpointLoaderSimple)",
@@ -122,6 +122,10 @@ async def _startup() -> None:
             approved=True,
             enabled=True,
         )
+    # Auto-discover workflow JSON files placed in data/templates/
+    local_found = _registry.discover_local_templates()
+    if local_found:
+        logger.info("startup: discovered %d local template(s)", len(local_found))
 
 
 # ---------------------------------------------------------------------------
@@ -372,6 +376,20 @@ async def admin_discover_templates(
     if error_msg:
         result["error"] = error_msg
     return result
+
+
+@app.post("/api/admin/templates/discover_local")
+async def admin_discover_local_templates(
+    _: dict[str, str] = Depends(require_admin),
+) -> dict[str, Any]:
+    """Scan ``data/templates/`` for workflow JSON files and auto-register them.
+
+    Drop any ``.json`` ComfyUI workflow file into the ``comfyui_webui/data/templates/``
+    directory and click this button – the file will be registered as an approved
+    template immediately.
+    """
+    registered = _registry.discover_local_templates()
+    return {"found": len(registered), "templates": [t["name"] for t in registered]}
 
 
 def _load_default_workflow() -> dict[str, dict[str, Any]]:
@@ -846,6 +864,27 @@ async def _translate_german_to_english(prompt_de: str, model: str, context_promp
     return translated
 
 
+def _find_node_by_class(
+    workflow: dict[str, Any], *class_types: str
+) -> tuple[str, dict[str, Any]] | tuple[None, None]:
+    """Return the first ``(key, node)`` whose ``class_type`` matches any of *class_types*."""
+    for key, node in workflow.items():
+        if node.get("class_type") in class_types:
+            return key, node
+    return None, None
+
+
+def _resolve_ref(
+    workflow: dict[str, Any], ref: Any
+) -> tuple[str, dict[str, Any]] | tuple[None, None]:
+    """Follow a ComfyUI node-reference ``[node_id, slot]`` and return ``(key, node)``."""
+    if isinstance(ref, list) and len(ref) >= 1:
+        key = str(ref[0])
+        if key in workflow:
+            return key, workflow[key]
+    return None, None
+
+
 def _build_workflow(payload: GenerateRequest, translated_prompt: str, translated_negative: str) -> dict[str, dict[str, Any]]:
     # Resolve workflow template: prefer registry-selected template file, then
     # fall back to the global workflow_template.json / built-in default.
@@ -864,50 +903,83 @@ def _build_workflow(payload: GenerateRequest, translated_prompt: str, translated
     if workflow_json is None:
         workflow_json = _load_default_workflow()
 
-    workflow = {
+    # Deep-copy: only keep class_type and inputs (drop _meta and other UI-only keys)
+    workflow: dict[str, dict[str, Any]] = {
         key: {"class_type": node["class_type"], "inputs": dict(node["inputs"])}
         for key, node in workflow_json.items()
+        if "class_type" in node and "inputs" in node
     }
 
-    workflow["2"]["inputs"]["text"] = translated_prompt
-    workflow["3"]["inputs"]["text"] = translated_negative
+    # ── Locate KSampler (or KSamplerAdvanced) ──────────────────────────────
+    ksampler_key, ksampler_node = _find_node_by_class(workflow, "KSampler", "KSamplerAdvanced")
+    if ksampler_node is None:
+        raise ValueError(
+            "Kein KSampler-Knoten im Workflow gefunden. "
+            "Das Template muss einen KSampler- oder KSamplerAdvanced-Knoten enthalten."
+        )
 
-    if payload.checkpoint:
-        # Strip the [unet] tag added by get_comfy_checkpoints for display purposes
-        is_unet = payload.checkpoint.startswith("[unet] ")
-        model_name = payload.checkpoint.removeprefix("[unet] ")
-        node1_type = workflow.get("1", {}).get("class_type", "")
-        if node1_type in ("UNETLoader", "DiffusionModelLoader"):
-            workflow["1"]["inputs"]["unet_name"] = model_name
-        elif is_unet:
-            # User selected a UNet/Diffusion model (e.g. FLUX, Zimage) but the
-            # workflow template still uses CheckpointLoaderSimple, which cannot
-            # load UNet-only models and causes ComfyUI to return 400 "Prompt
-            # outputs failed validation".  Raise a clear error instead.
-            raise ValueError(
-                f"Das Modell '{model_name}' ist ein UNet-/Diffusion-Modell (z. B. FLUX, Zimage) "
-                "und lässt sich nicht mit dem Standard-Template laden. "
-                "Erstelle eine workflow_template.json mit einem UNETLoader- (oder "
-                "DiffusionModelLoader-) Knoten als Node '1' sowie passenden "
-                "CLIPLoader/DualCLIPLoader- und VAELoader-Knoten."
-            )
-        else:
-            workflow["1"]["inputs"]["ckpt_name"] = model_name
+    # ── Inject positive prompt ──────────────────────────────────────────────
+    pos_key, pos_node = _resolve_ref(workflow, ksampler_node["inputs"].get("positive"))
+    if pos_node and pos_node.get("class_type") == "CLIPTextEncode":
+        pos_node["inputs"]["text"] = translated_prompt
+    else:
+        # Fallback: first CLIPTextEncode in the workflow
+        for node in workflow.values():
+            if node.get("class_type") == "CLIPTextEncode":
+                node["inputs"]["text"] = translated_prompt
+                break
 
-    workflow["4"]["inputs"]["width"] = max(64, payload.width // 8 * 8)
-    workflow["4"]["inputs"]["height"] = max(64, payload.height // 8 * 8)
-    workflow["4"]["inputs"]["batch_size"] = max(1, min(payload.image_count, 8))
+    # ── Inject negative prompt (only when target IS a CLIPTextEncode) ───────
+    # Workflows that use ConditioningZeroOut or similar as "negative" are left
+    # untouched – their negative conditioning is intentionally fixed.
+    neg_key, neg_node = _resolve_ref(workflow, ksampler_node["inputs"].get("negative"))
+    if neg_node and neg_node.get("class_type") == "CLIPTextEncode":
+        neg_node["inputs"]["text"] = translated_negative
 
+    # ── KSampler generation params ──────────────────────────────────────────
     seed = payload.seed if payload.seed >= 0 else int.from_bytes(os.urandom(4), "big")
-    workflow["5"]["inputs"].update(
+    is_advanced = ksampler_node.get("class_type") == "KSamplerAdvanced"
+    ksampler_node["inputs"].update(
         {
-            "seed": seed,
+            ("noise_seed" if is_advanced else "seed"): seed,
             "steps": max(1, min(payload.steps, 200)),
             "cfg": max(0.0, min(payload.cfg, 30.0)),
             "sampler_name": payload.sampler,
             "scheduler": payload.scheduler,
         }
     )
+
+    # ── Latent image dimensions ─────────────────────────────────────────────
+    _LATENT_TYPES = ("EmptyLatentImage", "EmptySD3LatentImage", "EmptyHunyuanLatentVideo")
+    latent_key, latent_node = _resolve_ref(workflow, ksampler_node["inputs"].get("latent_image"))
+    if latent_node and latent_node.get("class_type") in _LATENT_TYPES:
+        target = latent_node
+    else:
+        # Fallback: first EmptyLatentImage-like node in the workflow
+        _, target = _find_node_by_class(workflow, *_LATENT_TYPES)
+    if target is not None:
+        target["inputs"]["width"] = max(64, payload.width // 8 * 8)
+        target["inputs"]["height"] = max(64, payload.height // 8 * 8)
+        target["inputs"]["batch_size"] = max(1, min(payload.image_count, 8))
+
+    # ── Model loader ────────────────────────────────────────────────────────
+    if payload.checkpoint:
+        is_unet = payload.checkpoint.startswith("[unet] ")
+        model_name = payload.checkpoint.removeprefix("[unet] ")
+
+        unet_key, unet_node = _find_node_by_class(workflow, "UNETLoader", "DiffusionModelLoader")
+        ckpt_key, ckpt_node = _find_node_by_class(workflow, "CheckpointLoaderSimple")
+
+        if unet_node is not None:
+            unet_node["inputs"]["unet_name"] = model_name
+        elif ckpt_node is not None:
+            if is_unet:
+                raise ValueError(
+                    f"Das Modell '{model_name}' ist ein UNet-/Diffusion-Modell (z. B. FLUX, Zimage) "
+                    "und lässt sich nicht mit CheckpointLoaderSimple laden. "
+                    "Bitte ein Template mit einem UNETLoader- oder DiffusionModelLoader-Knoten verwenden."
+                )
+            ckpt_node["inputs"]["ckpt_name"] = model_name
 
     return workflow
 
