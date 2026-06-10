@@ -1,0 +1,498 @@
+const state = {
+  ollamaModels: [],
+  checkpoints: [],
+  samplers: [],
+  schedulers: [],
+  lastTranslatedPrompt: "",
+};
+
+const $ = (id) => document.getElementById(id);
+
+async function api(path, options = {}) {
+  const response = await fetch(path, {
+    headers: { "Content-Type": "application/json" },
+    ...options,
+  });
+  if (!response.ok) {
+    let detail = `${response.status} ${response.statusText}`;
+    try {
+      const payload = await response.json();
+      detail = payload.detail || JSON.stringify(payload);
+    } catch {
+      // ignore
+    }
+    throw new Error(detail);
+  }
+  return response.json();
+}
+
+function setStatus(message, isError = false) {
+  const status = $("status");
+  status.textContent = message;
+  status.classList.toggle("error", isError);
+}
+
+function setButtons(disabled) {
+  $("generateBtn").disabled = disabled;
+  $("translateBtn").disabled = disabled;
+}
+
+function showProgress(visible) {
+  $("progressWrap").classList.toggle("hidden", !visible);
+  if (!visible) {
+    $("progressBar").style.width = "0%";
+    $("progressLabel").textContent = "";
+  }
+}
+
+function setProgressBar(step, total, eta) {
+  const pct = total > 0 ? Math.round((step / total) * 100) : 0;
+  $("progressBar").style.width = `${pct}%`;
+  const etaStr = eta != null ? ` · ETA ${eta}s` : "";
+  $("progressLabel").textContent =
+    total > 0 ? `${step} / ${total} Schritte (${pct}%)${etaStr}` : "";
+}
+
+/**
+ * Fill a <select> element with option values.
+ * Keeps a leading "manual" placeholder option if no values are available.
+ */
+function fillSelect(selectId, manualWrapId, values) {
+  const select = $(selectId);
+  const currentVal = select.value;
+  select.innerHTML = "";
+
+  if (values.length === 0) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "– keine gefunden –";
+    select.appendChild(opt);
+    $(manualWrapId).classList.remove("hidden");
+    return;
+  }
+
+  $(manualWrapId).classList.add("hidden");
+  for (const value of values) {
+    const opt = document.createElement("option");
+    opt.value = value;
+    opt.textContent = value;
+    select.appendChild(opt);
+  }
+  // Restore previous selection if still in list
+  if (currentVal && values.includes(currentVal)) {
+    select.value = currentVal;
+  }
+}
+
+function fillSelectSimple(selectId, values, defaultValue) {
+  const select = $(selectId);
+  const currentVal = select.value || defaultValue;
+  select.innerHTML = "";
+  for (const value of values) {
+    const opt = document.createElement("option");
+    opt.value = value;
+    opt.textContent = value;
+    select.appendChild(opt);
+  }
+  if (currentVal && values.includes(currentVal)) {
+    select.value = currentVal;
+  } else if (defaultValue && values.includes(defaultValue)) {
+    select.value = defaultValue;
+  }
+}
+
+/** Return the effective value: select element, or manual input if visible. */
+function selectValue(selectId, manualInputId, manualWrapId) {
+  const wrap = $(manualWrapId);
+  if (wrap && !wrap.classList.contains("hidden")) {
+    return $(manualInputId).value.trim();
+  }
+  return $(selectId).value.trim();
+}
+
+async function loadOllamaModels() {
+  setStatus("Lade Ollama-Modelle …");
+  console.log("loadOllamaModels: fetching /api/ollama/models");
+  const data = await api("/api/ollama/models");
+  console.log("loadOllamaModels: response", data);
+  state.ollamaModels = data.models || [];
+  fillSelect("ollamaModel", "ollamaModelManualWrap", state.ollamaModels);
+  const note = $("ollamaModelNote");
+  if (note) {
+    note.textContent =
+      state.ollamaModels.length === 0
+        ? "Keine Modelle gefunden – ist Ollama gestartet? (ollama list)"
+        : "";
+  }
+  setStatus(`Ollama-Modelle geladen: ${state.ollamaModels.length}`);
+}
+
+async function loadCheckpoints() {
+  setStatus("Lade ComfyUI-Modelle …");
+  console.log("loadCheckpoints: fetching /api/comfy/checkpoints");
+  const data = await api("/api/comfy/checkpoints");
+  console.log("loadCheckpoints: response", data);
+
+  const allModels = data.checkpoints || [];
+  const unetSet = new Set(data.unet_models || []);
+  state.checkpoints = allModels;
+
+  const select = $("checkpoint");
+  const manualWrap = $("checkpointManualWrap");
+  const currentVal = select.value;
+  select.innerHTML = "";
+
+  if (allModels.length === 0) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "– keine gefunden –";
+    select.appendChild(opt);
+    manualWrap.classList.remove("hidden");
+  } else {
+    manualWrap.classList.add("hidden");
+
+    const ckptModels = allModels.filter(m => !m.startsWith("[unet] "));
+    const unetModels = allModels.filter(m => m.startsWith("[unet] "));
+
+    function addOptions(names, parent) {
+      for (const name of names) {
+        const opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name.replace(/^\[unet\] /, "");
+        parent.appendChild(opt);
+      }
+    }
+
+    if (ckptModels.length > 0) {
+      const grp = document.createElement("optgroup");
+      grp.label = "Checkpoints";
+      addOptions(ckptModels, grp);
+      select.appendChild(grp);
+    }
+    if (unetModels.length > 0) {
+      const grp = document.createElement("optgroup");
+      grp.label = "UNet / Diffusion (FLUX, Zimage …)";
+      addOptions(unetModels, grp);
+      select.appendChild(grp);
+    }
+
+    if (currentVal && allModels.includes(currentVal)) {
+      select.value = currentVal;
+    }
+  }
+
+  $("checkpointNote").textContent = data.note || "";
+  const unetCount = (data.unet_models || []).length;
+  const ckptCount = allModels.length - unetCount;
+  setStatus(`Modelle geladen: ${ckptCount} Checkpoints, ${unetCount} UNet`);
+
+  // Warn when a UNet model is selected, since it needs a custom workflow template
+  function updateUnetWarning() {
+    const val = selectValue("checkpoint", "checkpointManual", "checkpointManualWrap");
+    const note = $("checkpointNote");
+    if (val && val.startsWith("[unet] ")) {
+      note.textContent =
+        "⚠ UNet-/Diffusion-Modell gewählt: Dieses Modell benötigt eine " +
+        "workflow_template.json mit UNETLoader-, CLIPLoader- und VAELoader-Knoten. " +
+        "Das Standard-Template unterstützt nur Checkpoint-Modelle.";
+      note.classList.add("error");
+    } else if (!data.note) {
+      note.textContent = "";
+      note.classList.remove("error");
+    } else {
+      note.textContent = data.note;
+      note.classList.remove("error");
+    }
+  }
+  select.addEventListener("change", updateUnetWarning);
+  updateUnetWarning();
+}
+
+async function loadSamplers() {
+  try {
+    const data = await api("/api/comfy/samplers");
+    state.samplers = data.samplers || [];
+    state.schedulers = data.schedulers || [];
+  } catch {
+    state.samplers = ["euler", "euler_ancestral", "dpmpp_2m", "dpmpp_sde", "ddim", "lcm"];
+    state.schedulers = ["normal", "karras", "exponential", "sgm_uniform", "simple", "ddim_uniform"];
+  }
+  fillSelectSimple("sampler", state.samplers, "euler");
+  fillSelectSimple("scheduler", state.schedulers, "normal");
+}
+
+function collectPayload() {
+  const isFollowup = $("followupCheck") && $("followupCheck").checked;
+  return {
+    prompt_de: $("promptDe").value.trim(),
+    negative_prompt: $("negativePrompt").value.trim(),
+    ollama_model: selectValue("ollamaModel", "ollamaModelManual", "ollamaModelManualWrap"),
+    translated_prompt: $("translatedPrompt").value.trim() || null,
+    translated_negative_prompt: $("translatedNegativePrompt").value.trim() || null,
+    context_prompt: isFollowup && state.lastTranslatedPrompt ? state.lastTranslatedPrompt : null,
+    checkpoint: selectValue("checkpoint", "checkpointManual", "checkpointManualWrap") || null,
+    steps: Number($("steps").value),
+    cfg: Number($("cfg").value),
+    seed: Number($("seed").value),
+    width: Number($("width").value),
+    height: Number($("height").value),
+    sampler: $("sampler").value.trim(),
+    scheduler: $("scheduler").value.trim(),
+    image_count: Number($("imageCount").value),
+  };
+}
+
+function showImages(urls) {
+  const wrap = $("images");
+  wrap.innerHTML = "";
+  for (const url of urls) {
+    const img = document.createElement("img");
+    img.src = `${url}&_=${Date.now()}`;
+    img.alt = "Generated image";
+    wrap.appendChild(img);
+  }
+}
+
+function showFollowupSection(translatedPrompt) {
+  state.lastTranslatedPrompt = translatedPrompt;
+  $("followupSection").classList.remove("hidden");
+  const hint = $("followupHint");
+  const preview =
+    translatedPrompt.length > 80
+      ? translatedPrompt.slice(0, 80) + "…"
+      : translatedPrompt;
+  hint.textContent = `Letzter Prompt: „${preview}"`;
+}
+
+async function translateOnly() {
+  const payload = collectPayload();
+  if (!payload.prompt_de || !payload.ollama_model) {
+    throw new Error("Bitte deutschen Prompt und Ollama-Modell eingeben.");
+  }
+
+  setStatus("Übersetze Prompts …");
+  const tasks = [
+    api("/api/translate", {
+      method: "POST",
+      body: JSON.stringify({
+        prompt_de: payload.prompt_de,
+        model: payload.ollama_model,
+        context_prompt: payload.context_prompt,
+      }),
+    }).then((data) => {
+      $("translatedPrompt").value = data.translated_prompt || "";
+    }),
+  ];
+  if (payload.negative_prompt) {
+    tasks.push(
+      api("/api/translate", {
+        method: "POST",
+        body: JSON.stringify({
+          prompt_de: payload.negative_prompt,
+          model: payload.ollama_model,
+        }),
+      }).then((data) => {
+        $("translatedNegativePrompt").value = data.translated_prompt || "";
+      })
+    );
+  }
+  await Promise.all(tasks);
+  setStatus("Übersetzung abgeschlossen.");
+}
+
+async function generateImages() {
+  const payload = collectPayload();
+  if (!payload.prompt_de || !payload.ollama_model) {
+    throw new Error("Bitte deutschen Prompt und Ollama-Modell eingeben.");
+  }
+
+  setButtons(true);
+  showProgress(false);
+
+  try {
+    // Step 1: Translate if no translated prompt(s) present yet
+    const translateTasks = [];
+    if (!payload.translated_prompt) {
+      translateTasks.push(
+        api("/api/translate", {
+          method: "POST",
+          body: JSON.stringify({
+            prompt_de: payload.prompt_de,
+            model: payload.ollama_model,
+            context_prompt: payload.context_prompt,
+          }),
+        }).then((data) => {
+          payload.translated_prompt = data.translated_prompt || "";
+          $("translatedPrompt").value = payload.translated_prompt;
+        })
+      );
+    }
+    if (payload.negative_prompt && !payload.translated_negative_prompt) {
+      translateTasks.push(
+        api("/api/translate", {
+          method: "POST",
+          body: JSON.stringify({
+            prompt_de: payload.negative_prompt,
+            model: payload.ollama_model,
+          }),
+        }).then((data) => {
+          payload.translated_negative_prompt = data.translated_prompt || "";
+          $("translatedNegativePrompt").value = payload.translated_negative_prompt;
+        })
+      );
+    }
+    if (translateTasks.length > 0) {
+      setStatus("Übersetze Prompts …");
+      await Promise.all(translateTasks);
+    }
+
+    // Step 2: Submit job to ComfyUI
+    setStatus("Sende an ComfyUI …");
+    const submitData = await api("/api/generate", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+
+    const { prompt_id, client_id, translated_prompt, translated_negative_prompt } = submitData;
+    if (translated_prompt) {
+      $("translatedPrompt").value = translated_prompt;
+    }
+    if (translated_negative_prompt) {
+      $("translatedNegativePrompt").value = translated_negative_prompt;
+    }
+    showFollowupSection(translated_prompt || payload.translated_prompt);
+
+    // Step 3: Stream progress via SSE
+    showProgress(true);
+    setProgressBar(0, 0, null);
+
+    await new Promise((resolve, reject) => {
+      const url = `/api/comfy/progress/${encodeURIComponent(prompt_id)}?client_id=${encodeURIComponent(client_id)}`;
+      const evtSource = new EventSource(url);
+
+      evtSource.onmessage = (event) => {
+        let data;
+        try {
+          data = JSON.parse(event.data);
+        } catch {
+          return;
+        }
+
+        if (data.type === "queued") {
+          const pos = data.position ? ` (Position ${data.position})` : "";
+          setStatus(`In Warteschlange${pos} …`);
+        } else if (data.type === "start") {
+          setStatus("Generiere …");
+        } else if (data.type === "progress") {
+          const { step, max, eta } = data;
+          const etaStr = eta != null ? ` · ETA ${eta}s` : "";
+          setStatus(`Generiere … Schritt ${step}/${max}${etaStr}`);
+          setProgressBar(step, max, eta);
+        } else if (data.type === "done") {
+          evtSource.close();
+          showProgress(false);
+          showImages(data.images || []);
+          setStatus(`Fertig. Bilder: ${(data.images || []).length}`);
+          setButtons(false);
+          resolve();
+        } else if (data.type === "error") {
+          evtSource.close();
+          showProgress(false);
+          setButtons(false);
+          reject(new Error(data.message));
+        }
+      };
+
+      evtSource.onerror = () => {
+        evtSource.close();
+        showProgress(false);
+        setButtons(false);
+        reject(new Error("Verbindung zum Fortschritt-Stream unterbrochen."));
+      };
+    });
+  } catch (err) {
+    setButtons(false);
+    showProgress(false);
+    throw err;
+  }
+}
+
+async function init() {
+  console.log("ComfyUI WebUI init() started");
+  const errors = [];
+
+  try {
+    await loadOllamaModels();
+  } catch (error) {
+    console.error("loadOllamaModels failed:", error);
+    errors.push(`Ollama: ${error.message}`);
+    fillSelect("ollamaModel", "ollamaModelManualWrap", []);
+    const note = $("ollamaModelNote");
+    if (note) note.textContent = `Ollama nicht erreichbar: ${error.message}`;
+  }
+
+  try {
+    await loadCheckpoints();
+  } catch (error) {
+    console.error("loadCheckpoints failed:", error);
+    errors.push(`Checkpoints: ${error.message}`);
+    fillSelect("checkpoint", "checkpointManualWrap", []);
+    $("checkpointNote").textContent = `ComfyUI nicht erreichbar: ${error.message}`;
+  }
+
+  await loadSamplers();
+
+  if (errors.length > 0) {
+    setStatus(errors.join(" | "), true);
+  }
+  console.log("ComfyUI WebUI init() complete. Errors:", errors);
+}
+
+$("refreshModelsBtn").addEventListener("click", async () => {
+  try {
+    await loadOllamaModels();
+  } catch (error) {
+    setStatus(error.message, true);
+    fillSelect("ollamaModel", "ollamaModelManualWrap", []);
+  }
+});
+
+$("refreshCheckpointsBtn").addEventListener("click", async () => {
+  try {
+    await loadCheckpoints();
+  } catch (error) {
+    setStatus(error.message, true);
+    fillSelect("checkpoint", "checkpointManualWrap", []);
+  }
+});
+
+$("translateBtn").addEventListener("click", async () => {
+  try {
+    await translateOnly();
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+});
+
+$("generateBtn").addEventListener("click", async () => {
+  try {
+    await generateImages();
+  } catch (error) {
+    setStatus(error.message, true);
+  }
+});
+
+$("followupCheck").addEventListener("change", () => {
+  const hint = $("followupHint");
+  if ($("followupCheck").checked) {
+    $("promptDe").placeholder =
+      "Änderungsanweisung eingeben, z. B. \u201EMache die Sonne etwas dunkler\u201C";
+    // Clear translated prompt so it gets regenerated with context
+    $("translatedPrompt").value = "";
+  } else {
+    $("promptDe").placeholder =
+      "z. B. Ein futuristisches Stadtbild bei Sonnenuntergang";
+  }
+});
+
+init();

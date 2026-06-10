@@ -1,0 +1,145 @@
+:root {
+  color-scheme: dark;
+  --bg: #1e1f22;
+  --card: #292b31;
+  --text: #efefef;
+  --muted: #b8bac3;
+  --accent: #4f8cff;
+  --danger: #ff7b7b;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+}
+
+.container {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 1rem;
+}
+
+.card {
+  background: var(--card);
+  border-radius: 10px;
+  padding: 1rem;
+  margin-bottom: 1rem;
+}
+
+label { display: block; margin: 0.4rem 0; }
+input, textarea, button {
+  width: 100%;
+  background: #181a1f;
+  color: var(--text);
+  border: 1px solid #434653;
+  border-radius: 8px;
+  padding: 0.55rem;
+}
+
+button {
+  background: var(--accent);
+  border: none;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+button:hover { filter: brightness(1.1); }
+
+.inline {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.5rem;
+}
+
+.grid-2 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1rem;
+}
+
+.grid-4 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 0.75rem;
+}
+
+.actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(180px, 220px)) 1fr;
+  gap: 0.6rem;
+  align-items: center;
+}
+
+.hint { color: var(--muted); }
+.error { color: var(--danger); }
+.hidden { display: none; }
+
+.manual-wrap {
+  margin-top: 0.4rem;
+}
+.manual-wrap input {
+  border-style: dashed;
+}
+
+select {
+  width: 100%;
+  background: #181a1f;
+  color: var(--text);
+  border: 1px solid #434653;
+  border-radius: 8px;
+  padding: 0.55rem;
+}
+
+.images {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.75rem;
+}
+
+.images img {
+  width: 100%;
+  border-radius: 8px;
+  border: 1px solid #434653;
+}
+
+/* Progress bar */
+.progress-bar-outer {
+  background: #181a1f;
+  border-radius: 8px;
+  height: 10px;
+  margin: 0.4rem 0 0.2rem;
+  overflow: hidden;
+  border: 1px solid #434653;
+}
+.progress-bar-inner {
+  background: var(--accent);
+  height: 100%;
+  width: 0%;
+  transition: width 0.3s ease;
+  border-radius: 8px;
+}
+
+#progressWrap {
+  padding: 0 0.25rem;
+  margin-bottom: 0.5rem;
+}
+
+/* Follow-up checkbox */
+.inline-check {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+}
+.inline-check input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

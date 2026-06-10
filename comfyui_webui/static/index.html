@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ComfyUI + Ollama WebUI</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <main class="container">
+    <h1>ComfyUI + Ollama WebUI</h1>
+    <p class="hint">Deutsch eingeben → lokal mit Ollama übersetzen → mit ComfyUI Bilder generieren.</p>
+
+    <section class="card">
+      <label for="promptDe">Deutscher Prompt</label>
+      <textarea id="promptDe" rows="4" placeholder="z. B. Ein futuristisches Stadtbild bei Sonnenuntergang"></textarea>
+
+      <label for="negativePrompt">Negative Prompt</label>
+      <textarea id="negativePrompt" rows="2" placeholder="z. B. blurry, low quality"></textarea>
+    </section>
+
+    <section class="card grid-2">
+      <div>
+        <label for="ollamaModel">Ollama-Modell (Übersetzung)</label>
+        <div class="inline">
+          <select id="ollamaModel">
+            <option value="">– Modelle laden –</option>
+          </select>
+          <button id="refreshModelsBtn" type="button">↻</button>
+        </div>
+        <div id="ollamaModelManualWrap" class="manual-wrap hidden">
+          <input id="ollamaModelManual" placeholder="Modellname manuell eingeben …" />
+        </div>
+        <small id="ollamaModelNote" class="hint"></small>
+      </div>
+      <div>
+        <label for="checkpoint">ComfyUI Checkpoint</label>
+        <div class="inline">
+          <select id="checkpoint">
+            <option value="">– Checkpoints laden –</option>
+          </select>
+          <button id="refreshCheckpointsBtn" type="button">↻</button>
+        </div>
+        <div id="checkpointManualWrap" class="manual-wrap hidden">
+          <input id="checkpointManual" placeholder="Checkpoint-Namen manuell eingeben …" />
+        </div>
+        <small id="checkpointNote" class="hint"></small>
+      </div>
+    </section>
+
+    <section class="card grid-4">
+      <label>Steps <input id="steps" type="number" value="30" min="1" max="200" /></label>
+      <label>CFG <input id="cfg" type="number" value="7" min="0" max="30" step="0.1" /></label>
+      <label>Seed <input id="seed" type="number" value="-1" /></label>
+      <label>Anzahl Bilder <input id="imageCount" type="number" value="1" min="1" max="8" /></label>
+      <label>Width <input id="width" type="number" value="1024" min="64" step="8" /></label>
+      <label>Height <input id="height" type="number" value="1024" min="64" step="8" /></label>
+      <label>Sampler <select id="sampler"></select></label>
+      <label>Scheduler <select id="scheduler"></select></label>
+    </section>
+
+    <section class="card actions">
+      <button id="translateBtn" type="button">Nur übersetzen</button>
+      <button id="generateBtn" type="button">Bild(er) generieren</button>
+      <span id="status" class="hint"></span>
+    </section>
+
+    <div id="progressWrap" class="hidden">
+      <div class="progress-bar-outer">
+        <div id="progressBar" class="progress-bar-inner"></div>
+      </div>
+      <small id="progressLabel" class="hint"></small>
+    </div>
+
+    <section class="card">
+      <h2>Übersetzte Prompts (Englisch)</h2>
+      <label for="translatedPrompt">Positiver Prompt</label>
+      <textarea id="translatedPrompt" rows="3" placeholder="Hier erscheint der übersetzte Prompt."></textarea>
+      <label for="translatedNegativePrompt">Negativer Prompt</label>
+      <textarea id="translatedNegativePrompt" rows="2" placeholder="Hier erscheint der übersetzte Negative Prompt."></textarea>
+    </section>
+
+    <section id="followupSection" class="card hidden">
+      <label class="inline-check">
+        <input type="checkbox" id="followupCheck" />
+        <span>Folgebefehl – Prompt oben als Änderungsanweisung verwenden</span>
+      </label>
+      <small id="followupHint" class="hint"></small>
+    </section>
+
+    <section class="card">
+      <h2>Ergebnisbilder</h2>
+      <div id="images" class="images"></div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
