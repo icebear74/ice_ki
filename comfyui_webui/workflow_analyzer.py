@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 SAMPLER_TYPES: frozenset[str] = frozenset({
     "KSampler",
     "KSamplerAdvanced",
+    "SamplerCustomAdvanced",  # FLUX / UNet-based workflows
 })
 
 CHECKPOINT_LOADER_TYPES: frozenset[str] = frozenset({
@@ -62,12 +63,17 @@ MODEL_PASSTHROUGH_TYPES: frozenset[str] = frozenset({
     "FreeU_V2",
     "PatchModelAddDownscale",
     "LatentConsistencyModelMerge",
+    "FluxGuidance",
+})
+
+# Guider nodes used by SamplerCustomAdvanced workflows (FLUX / UNet-based).
+# These carry the model + conditioning references that would normally be on the
+# KSampler node directly.
+GUIDER_TYPES: frozenset[str] = frozenset({
+    "BasicGuider",
     "CFGGuider",
     "DualCFGGuider",
-    "BasicGuider",
-    "FluxGuidance",
     "PAGGuider",
-    "SamplerCustomAdvanced",  # not a loader but wraps a sampler/guider
 })
 
 # Conditioning modifiers that pass conditioning through – we look upstream
@@ -412,8 +418,26 @@ def analyze_workflow(workflow: dict[str, Any]) -> WorkflowRoles:
     sampler_node = workflow[roles.primary_sampler_id]
     sampler_inputs = sampler_node.get("inputs", {})
 
+    # ── 2b. For SamplerCustomAdvanced: resolve inputs through the guider node ──
+    # SamplerCustomAdvanced does not have direct positive/negative/model inputs.
+    # Instead, they live on the connected guider (CFGGuider, BasicGuider, …).
+    _guider_inputs: dict[str, Any] = {}
+    if sampler_node.get("class_type") == "SamplerCustomAdvanced":
+        guider_ref = sampler_inputs.get("guider")
+        if isinstance(guider_ref, list) and guider_ref:
+            guider_id = str(guider_ref[0])
+            guider_node = workflow.get(guider_id)
+            if isinstance(guider_node, dict) and guider_node.get("class_type") in GUIDER_TYPES:
+                _guider_inputs = guider_node.get("inputs", {})
+
     # ── 3. Positive conditioning chain ───────────────────────────────────────
-    pos_ref = sampler_inputs.get("positive")
+    # For KSampler/KSamplerAdvanced: direct "positive" input on the sampler.
+    # For SamplerCustomAdvanced:    "positive" or "conditioning" on the guider.
+    pos_ref = (
+        _guider_inputs.get("positive") or _guider_inputs.get("conditioning")
+        if _guider_inputs
+        else sampler_inputs.get("positive")
+    )
     if isinstance(pos_ref, list) and pos_ref:
         pos_id = str(pos_ref[0])
         clip_ids, is_zero = _find_all_clips_in_conditioning_chain(workflow, pos_id)
@@ -437,7 +461,13 @@ def analyze_workflow(workflow: dict[str, Any]) -> WorkflowRoles:
         roles.warnings.append("Sampler hat keinen 'positive'-Eingang – positiver Prompt kann nicht gesetzt werden.")
 
     # ── 4. Negative conditioning chain ───────────────────────────────────────
-    neg_ref = sampler_inputs.get("negative")
+    # For KSampler/KSamplerAdvanced: direct "negative" input.
+    # For SamplerCustomAdvanced:    "negative" on the guider (only CFGGuider has one).
+    neg_ref = (
+        _guider_inputs.get("negative")
+        if _guider_inputs
+        else sampler_inputs.get("negative")
+    )
     if isinstance(neg_ref, list) and neg_ref:
         neg_id = str(neg_ref[0])
         neg_node = workflow.get(neg_id)
@@ -487,7 +517,13 @@ def analyze_workflow(workflow: dict[str, Any]) -> WorkflowRoles:
         roles.is_potentially_img2img = True
 
     # ── 7. Model loader ───────────────────────────────────────────────────────
-    model_ref = sampler_inputs.get("model")
+    # For KSampler/KSamplerAdvanced: direct "model" input.
+    # For SamplerCustomAdvanced:    "model" on the guider node.
+    model_ref = (
+        _guider_inputs.get("model")
+        if _guider_inputs
+        else sampler_inputs.get("model")
+    )
     if isinstance(model_ref, list) and model_ref:
         model_id = str(model_ref[0])
         loader_id = _trace_to_model_loader(workflow, model_id)

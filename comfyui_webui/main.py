@@ -1258,6 +1258,85 @@ async def _translate_german_to_english(prompt_de: str, model: str, context_promp
     return await _call_ollama_raw(instruction, model)
 
 
+def _inject_custom_advanced_params(
+    workflow: dict[str, dict[str, Any]],
+    sampler_node: dict[str, Any],
+    seed: int,
+    payload: "GenerateRequest",
+    req_id: str,
+) -> None:
+    """Inject generation parameters for a ``SamplerCustomAdvanced`` node.
+
+    ``SamplerCustomAdvanced`` (used in FLUX / Zimage-style workflows) does not
+    hold seed, steps, cfg, or sampler_name directly.  Instead these values live
+    on dedicated upstream nodes that are wired to the sampler:
+
+    * **seed**        → ``RandomNoise.noise_seed``
+    * **steps**       → scheduler node (``BasicScheduler``, ``SDTurboScheduler``, …)
+    * **sampler_name** → ``KSamplerSelect.sampler_name``
+    * **cfg**         → ``CFGGuider.cfg``
+    * **scheduler**   → ``BasicScheduler.scheduler`` (when present)
+    """
+    inputs = sampler_node.get("inputs", {})
+
+    # ── Seed → RandomNoise.noise_seed ────────────────────────────────────────
+    noise_ref = inputs.get("noise")
+    if isinstance(noise_ref, list) and noise_ref:
+        noise_id = str(noise_ref[0])
+        noise_node = workflow.get(noise_id)
+        if noise_node and noise_node.get("class_type") == "RandomNoise":
+            noise_node["inputs"]["noise_seed"] = seed
+            _gen_logger.debug(
+                "SET_SEED_NOISE id=%s noise_node=%r seed=%d", req_id, noise_id, seed
+            )
+
+    # ── Steps (+ scheduler name) → scheduler node ────────────────────────────
+    sigmas_ref = inputs.get("sigmas")
+    if isinstance(sigmas_ref, list) and sigmas_ref:
+        sigmas_id = str(sigmas_ref[0])
+        sigmas_node = workflow.get(sigmas_id)
+        if sigmas_node:
+            sct = sigmas_node.get("class_type", "")
+            sig_inputs = sigmas_node.get("inputs", {})
+            steps = max(1, min(payload.steps, 200))
+            if "steps" in sig_inputs:
+                sig_inputs["steps"] = steps
+                _gen_logger.debug(
+                    "SET_STEPS id=%s sigmas_node=%r steps=%d", req_id, sigmas_id, steps
+                )
+            # BasicScheduler additionally accepts a scheduler name
+            if sct == "BasicScheduler" and "scheduler" in sig_inputs:
+                sig_inputs["scheduler"] = payload.scheduler
+                _gen_logger.debug(
+                    "SET_SCHEDULER id=%s sigmas_node=%r scheduler=%r",
+                    req_id, sigmas_id, payload.scheduler,
+                )
+
+    # ── Sampler name → KSamplerSelect.sampler_name ───────────────────────────
+    sampler_select_ref = inputs.get("sampler")
+    if isinstance(sampler_select_ref, list) and sampler_select_ref:
+        select_id = str(sampler_select_ref[0])
+        select_node = workflow.get(select_id)
+        if select_node and select_node.get("class_type") == "KSamplerSelect":
+            select_node["inputs"]["sampler_name"] = payload.sampler
+            _gen_logger.debug(
+                "SET_SAMPLER_NAME id=%s select_node=%r sampler=%r",
+                req_id, select_id, payload.sampler,
+            )
+
+    # ── CFG → CFGGuider.cfg ──────────────────────────────────────────────────
+    guider_ref = inputs.get("guider")
+    if isinstance(guider_ref, list) and guider_ref:
+        guider_id = str(guider_ref[0])
+        guider_node = workflow.get(guider_id)
+        if guider_node and guider_node.get("class_type") == "CFGGuider":
+            cfg = max(0.0, min(payload.cfg, 30.0))
+            guider_node["inputs"]["cfg"] = cfg
+            _gen_logger.debug(
+                "SET_CFG id=%s guider_node=%r cfg=%.1f", req_id, guider_id, cfg
+            )
+
+
 def _build_workflow(
     payload: GenerateRequest,
     translated_prompt: str,
@@ -1364,19 +1443,25 @@ def _build_workflow(
 
     # ── KSampler generation parameters ──────────────────────────────────────
     seed = payload.seed if payload.seed >= 0 else int.from_bytes(os.urandom(4), "big")
-    is_advanced = sampler_node.get("class_type") == "KSamplerAdvanced"
-    sampler_updates: dict[str, Any] = {
-        ("noise_seed" if is_advanced else "seed"): seed,
-        "steps": max(1, min(payload.steps, 200)),
-        "cfg": max(0.0, min(payload.cfg, 30.0)),
-        "sampler_name": payload.sampler,
-        "scheduler": payload.scheduler,
-    }
-    sampler_node["inputs"].update(sampler_updates)
-    _gen_logger.debug(
-        "SET_SAMPLER id=%s sampler_node=%r updates=%s",
-        req_id, roles.primary_sampler_id, sampler_updates,
-    )
+    is_custom_advanced = sampler_node.get("class_type") == "SamplerCustomAdvanced"
+    if is_custom_advanced:
+        # SamplerCustomAdvanced (FLUX / Zimage-style): seed, steps, cfg, sampler_name
+        # and scheduler live on dedicated upstream nodes, not on the sampler itself.
+        _inject_custom_advanced_params(workflow, sampler_node, seed, payload, req_id)
+    else:
+        is_advanced = sampler_node.get("class_type") == "KSamplerAdvanced"
+        sampler_updates: dict[str, Any] = {
+            ("noise_seed" if is_advanced else "seed"): seed,
+            "steps": max(1, min(payload.steps, 200)),
+            "cfg": max(0.0, min(payload.cfg, 30.0)),
+            "sampler_name": payload.sampler,
+            "scheduler": payload.scheduler,
+        }
+        sampler_node["inputs"].update(sampler_updates)
+        _gen_logger.debug(
+            "SET_SAMPLER id=%s sampler_node=%r updates=%s",
+            req_id, roles.primary_sampler_id, sampler_updates,
+        )
 
     # ── Latent image dimensions ──────────────────────────────────────────────
     width = max(64, payload.width // 8 * 8)
