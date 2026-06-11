@@ -27,6 +27,7 @@
       <span class="app-title">ComfyUI + Ollama WebUI</span>
       <nav class="app-nav">
         <button id="tabGenerate" class="tab-btn active" type="button">Generieren</button>
+        <button id="tabGallery" class="tab-btn" type="button">&#128444; Galerie</button>
         <button id="tabAdvanced" class="tab-btn hidden" type="button">&#9881; Erweitert</button>
         <button id="tabAdmin" class="tab-btn hidden" type="button">&#9881; Admin</button>
       </nav>
@@ -82,6 +83,16 @@
             <button id="refreshMappingsBtn" type="button" title="Mappings neu laden">&#8635;</button>
           </div>
           <small id="mappingNote" class="hint">W&auml;hle ein Mapping &ndash; alle Vorgaben (Modell, Steps, usw.) werden daraus geladen.</small>
+        </section>
+
+        <!-- Seed (sichtbar für alle Benutzer) -->
+        <section class="card">
+          <label for="genSeed">Seed</label>
+          <div class="seed-row">
+            <input id="genSeed" type="number" value="-1" />
+            <button id="genSeedRandomBtn" class="btn-sm" type="button" title="Neuen Zufallsseed w&uuml;rfeln">&#127922;</button>
+          </div>
+          <small class="hint">&minus;1 = bei jeder Generierung zuf&auml;llig. Gleicher Seed + gleiche Einstellungen = reproduzierbares Ergebnis.</small>
         </section>
 
         <section class="card actions">
@@ -394,6 +405,47 @@
 
       </main>
     </div><!-- /panelAdmin -->
+
+    <!-- ── GALERIE TAB ── -->
+    <div id="panelGallery" class="hidden">
+      <main class="container">
+
+        <!-- Admin: Benutzerauswahl (nur für Admins sichtbar) -->
+        <section class="card hidden" id="galleryAdminBar">
+          <div class="inline">
+            <select id="galleryUserSelect">
+              <option value="">– Eigene Galerie –</option>
+            </select>
+            <button id="galleryLoadUserBtn" type="button">Laden</button>
+          </div>
+        </section>
+
+        <section class="card">
+          <div style="display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap;margin-bottom:0.75rem">
+            <h2 style="margin:0" id="galleryTitle">Meine Galerie</h2>
+            <button id="galleryReloadBtn" class="btn-sm btn-secondary" type="button" title="Galerie neu laden">&#8635;</button>
+          </div>
+          <div id="galleryStatus" class="hint"></div>
+          <div id="galleryGrid" class="gallery-grid"></div>
+        </section>
+
+      </main>
+    </div><!-- /panelGallery -->
+
+    <!-- ── GALERIE METADATEN MODAL ── -->
+    <div id="galleryMetaOverlay" class="overlay hidden">
+      <div class="gallery-meta-box card">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.75rem">
+          <h2 style="margin:0;font-size:1.1rem" id="galleryMetaTitle">Bilddetails</h2>
+          <button id="galleryMetaCloseBtn" class="btn-sm btn-secondary" type="button">&#10005;</button>
+        </div>
+        <div id="galleryMetaContent"></div>
+        <div style="margin-top:0.75rem;display:flex;gap:0.5rem;flex-wrap:wrap">
+          <button id="galleryMetaApplyBtn" type="button">&#9654; Einstellungen &uuml;bernehmen</button>
+          <button id="galleryMetaCloseBtn2" class="btn-secondary" type="button">Schlie&szlig;en</button>
+        </div>
+      </div>
+    </div>
 
   </div><!-- /mainApp -->
 

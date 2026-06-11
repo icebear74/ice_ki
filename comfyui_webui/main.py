@@ -7,6 +7,7 @@ import logging.handlers
 import os
 import secrets
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncGenerator
 from urllib.parse import urlencode
@@ -62,6 +63,15 @@ def _setup_file_logging() -> None:
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
 COMFYUI_BASE_URL = os.getenv("COMFYUI_BASE_URL", "http://127.0.0.1:8188").rstrip("/")
+# Optional: absolute path to ComfyUI's output folder (e.g. /home/user/ComfyUI/output).
+# When set, generated images are deleted from ComfyUI after being saved to the local gallery.
+COMFYUI_OUTPUT_DIR = os.getenv("COMFYUI_OUTPUT_DIR", "").strip()
+
+GALLERY_DIR = DATA_DIR / "gallery"
+
+# In-memory store for generation payload data keyed by prompt_id.
+# Allows the SSE progress handler to access prompts/settings for gallery saving.
+_pending_generations: dict[str, dict[str, Any]] = {}
 
 DEFAULT_WORKFLOW = {
     "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": ""}},
@@ -960,7 +970,7 @@ async def get_comfy_samplers(
 @app.post("/api/generate")
 async def generate_images(
     payload: GenerateRequest,
-    _: dict[str, str] = Depends(require_user),
+    session: dict[str, str] = Depends(require_user),
 ) -> dict[str, Any]:
     req_id = uuid.uuid4().hex[:8]
     _gen_logger.info(
@@ -1002,7 +1012,7 @@ async def generate_images(
     )
 
     try:
-        workflow = _build_workflow(payload, translated_prompt, translated_negative or "", req_id=req_id)
+        workflow, actual_seed = _build_workflow(payload, translated_prompt, translated_negative or "", req_id=req_id)
     except ValueError as exc:
         _gen_logger.error("BUILD_WORKFLOW_ERROR id=%s error=%r", req_id, str(exc))
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1051,11 +1061,21 @@ async def generate_images(
         _gen_logger.error("COMFYUI_UNREACHABLE id=%s error=%r", req_id, str(exc))
         raise HTTPException(status_code=502, detail=f"ComfyUI nicht erreichbar: {exc}") from exc
 
+    # Store payload for gallery saving in the SSE progress handler
+    _pending_generations[prompt_id] = {
+        "username": session["username"],
+        "payload": payload,
+        "actual_seed": actual_seed,
+        "translated_prompt": translated_prompt,
+        "translated_negative_prompt": translated_negative or "",
+    }
+
     return {
         "translated_prompt": translated_prompt,
         "translated_negative_prompt": translated_negative or "",
         "prompt_id": prompt_id,
         "client_id": client_id,
+        "actual_seed": actual_seed,
     }
 
 
@@ -1064,7 +1084,7 @@ async def comfy_progress_sse(
     prompt_id: str,
     client_id: str,
     request: Request,
-    _: dict[str, str] = Depends(require_user),
+    session: dict[str, str] = Depends(require_user),
 ) -> StreamingResponse:
     async def event_stream() -> AsyncGenerator[str, None]:
         # Initial queue-position check via REST
@@ -1085,9 +1105,19 @@ async def comfy_progress_sse(
 
         try:
             async with websockets.connect(ws_url, ping_interval=20) as ws:
-                async for raw in ws:
+                while True:
                     if await request.is_disconnected():
                         return
+                    # Use a 15-second timeout so we can send SSE keepalives while
+                    # the job sits in a long queue (prevents proxy/mobile timeouts).
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=15.0)
+                    except asyncio.TimeoutError:
+                        yield ": keepalive\n\n"
+                        continue
+                    except Exception:
+                        break
+
                     if isinstance(raw, bytes):
                         continue  # skip binary preview frames
                     try:
@@ -1130,7 +1160,7 @@ async def comfy_progress_sse(
             yield f"data: {json.dumps({'type': 'error', 'message': f'WebSocket-Fehler: {exc}'})}\n\n"
             return
 
-        # Fetch images from history
+        # Fetch images from history, save to local gallery, delete from ComfyUI
         try:
             async with httpx.AsyncClient(timeout=10.0) as http:
                 for _ in range(20):
@@ -1139,11 +1169,67 @@ async def comfy_progress_sse(
                     data = resp.json()
                     if data.get(prompt_id):
                         images = _extract_images(data[prompt_id])
-                        image_urls = [
-                            f"/api/comfy/image?{urlencode({'filename': img['filename'], 'subfolder': img.get('subfolder', ''), 'type': img.get('type', 'output')})}"
-                            for img in images
-                        ]
-                        yield f"data: {json.dumps({'type': 'done', 'images': image_urls})}\n\n"
+                        gen_data = _pending_generations.pop(prompt_id, None)
+                        username = gen_data["username"] if gen_data else session["username"]
+
+                        gallery_ids: list[str] = []
+                        image_urls: list[str] = []
+
+                        for img in images:
+                            comfy_params = {
+                                "filename": img["filename"],
+                                "subfolder": img.get("subfolder", ""),
+                                "type": img.get("type", "output"),
+                            }
+                            try:
+                                async with httpx.AsyncClient(timeout=60.0) as img_http:
+                                    img_resp = await img_http.get(
+                                        f"{COMFYUI_BASE_URL}/view",
+                                        params=comfy_params,
+                                    )
+                                img_resp.raise_for_status()
+                                ct = img_resp.headers.get("content-type", "image/png")
+
+                                meta: dict[str, Any] = {}
+                                if gen_data:
+                                    p = gen_data["payload"]
+                                    meta = {
+                                        "prompt_de": p.prompt_de,
+                                        "negative_prompt_de": p.negative_prompt,
+                                        "translated_prompt": gen_data["translated_prompt"],
+                                        "translated_negative_prompt": gen_data["translated_negative_prompt"],
+                                        "workflow_template": p.workflow_template or "default",
+                                        "checkpoint": p.checkpoint or "",
+                                        "ollama_model": p.ollama_model,
+                                        "steps": p.steps,
+                                        "cfg": p.cfg,
+                                        "actual_seed": gen_data["actual_seed"],
+                                        "width": p.width,
+                                        "height": p.height,
+                                        "sampler": p.sampler,
+                                        "scheduler": p.scheduler,
+                                        "image_count": p.image_count,
+                                        "username": username,
+                                    }
+
+                                image_id = _save_to_gallery(username, img_resp.content, ct, meta)
+                                gallery_ids.append(image_id)
+                                image_urls.append(f"/api/gallery/image/{image_id}")
+
+                                # Best-effort: delete the file from ComfyUI's output folder
+                                _delete_comfyui_output(
+                                    img["filename"],
+                                    img.get("subfolder", ""),
+                                    img.get("type", "output"),
+                                )
+                            except Exception as exc:
+                                _gen_logger.warning("GALLERY_SAVE_ERROR: %s", exc)
+                                # Fallback: serve via existing proxy so the user still sees the image
+                                image_urls.append(
+                                    f"/api/comfy/image?{urlencode(comfy_params)}"
+                                )
+
+                        yield f"data: {json.dumps({'type': 'done', 'images': image_urls, 'gallery_ids': gallery_ids})}\n\n"
                         return
                     await asyncio.sleep(0.5)
             yield f"data: {json.dumps({'type': 'error', 'message': 'Bilder nicht in History gefunden.'})}\n\n"
@@ -1342,7 +1428,7 @@ def _build_workflow(
     translated_prompt: str,
     translated_negative: str,
     req_id: str = "",
-) -> dict[str, dict[str, Any]]:
+) -> tuple[dict[str, dict[str, Any]], int]:
     """Build the final ComfyUI prompt dict for a generation request.
 
     Uses :mod:`workflow_analyzer` to locate graph roles by following node
@@ -1536,7 +1622,7 @@ def _build_workflow(
                 req_id, payload.checkpoint,
             )
 
-    return workflow
+    return workflow, seed
 
 
 def _extract_images(history_data: dict[str, Any]) -> list[dict[str, str]]:
@@ -1558,3 +1644,182 @@ def _extract_images(history_data: dict[str, Any]) -> list[dict[str, str]]:
                     }
                 )
     return images
+
+
+# ---------------------------------------------------------------------------
+# Gallery helpers
+# ---------------------------------------------------------------------------
+
+def _gallery_dir(username: str) -> Path:
+    d = GALLERY_DIR / username
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _save_to_gallery(
+    username: str,
+    image_data: bytes,
+    content_type: str,
+    metadata: dict[str, Any],
+) -> str:
+    """Save image bytes + metadata JSON to the user gallery. Returns image_id."""
+    now = datetime.now(timezone.utc)
+    image_id = now.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
+    ext = "jpg" if ("jpeg" in content_type or "jpg" in content_type) else "png"
+    gdir = _gallery_dir(username)
+    img_path = gdir / f"{image_id}.{ext}"
+    meta_path = gdir / f"{image_id}.json"
+    img_path.write_bytes(image_data)
+    metadata["id"] = image_id
+    metadata["filename"] = img_path.name
+    metadata["ext"] = ext
+    metadata.setdefault("created_at", now.isoformat())
+    meta_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
+    return image_id
+
+
+def _list_gallery(username: str) -> list[dict[str, Any]]:
+    """Return all gallery metadata entries for *username*, newest first."""
+    gdir = GALLERY_DIR / username
+    if not gdir.exists():
+        return []
+    items: list[dict[str, Any]] = []
+    for meta_path in sorted(gdir.glob("*.json"), reverse=True):
+        try:
+            items.append(json.loads(meta_path.read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError):
+            continue
+    return items
+
+
+def _delete_comfyui_output(filename: str, subfolder: str = "", type_: str = "output") -> None:
+    """Best-effort deletion of a ComfyUI output image file.
+
+    Only runs when ``COMFYUI_OUTPUT_DIR`` is configured in the environment.
+    """
+    if not COMFYUI_OUTPUT_DIR:
+        return
+    try:
+        base = Path(COMFYUI_OUTPUT_DIR)
+        img_path = (base / subfolder / filename) if subfolder else (base / filename)
+        if img_path.exists():
+            img_path.unlink()
+            logger.info("Deleted ComfyUI output: %s", img_path)
+    except OSError as exc:
+        logger.warning("Could not delete ComfyUI output %s: %s", filename, exc)
+
+
+# ---------------------------------------------------------------------------
+# Gallery API endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/gallery")
+async def gallery_list(
+    session: dict[str, str] = Depends(require_user),
+) -> dict[str, Any]:
+    """Return the current user's gallery items (newest first)."""
+    items = _list_gallery(session["username"])
+    return {"items": items, "username": session["username"]}
+
+
+@app.get("/api/gallery/image/{image_id}")
+async def gallery_image_serve(
+    image_id: str,
+    session: dict[str, str] = Depends(require_user),
+) -> Response:
+    """Serve a gallery image.  Regular users can only access their own images;
+    admins can access any user's image (search across all gallery directories)."""
+    safe_id = "".join(c for c in image_id if c.isalnum() or c in ("_", "-"))
+    username = session["username"]
+    is_admin = session.get("role") == "admin"
+
+    # Own images first
+    user_dir = GALLERY_DIR / username
+    for ext in ("png", "jpg", "jpeg", "webp"):
+        img_path = user_dir / f"{safe_id}.{ext}"
+        if img_path.exists():
+            return FileResponse(str(img_path), media_type=f"image/{ext}")
+
+    # Admin: search all user dirs
+    if is_admin and GALLERY_DIR.exists():
+        for sub in GALLERY_DIR.iterdir():
+            if not sub.is_dir():
+                continue
+            for ext in ("png", "jpg", "jpeg", "webp"):
+                img_path = sub / f"{safe_id}.{ext}"
+                if img_path.exists():
+                    return FileResponse(str(img_path), media_type=f"image/{ext}")
+
+    raise HTTPException(status_code=404, detail="Bild nicht gefunden.")
+
+
+@app.delete("/api/gallery/{image_id}")
+async def gallery_delete(
+    image_id: str,
+    session: dict[str, str] = Depends(require_user),
+) -> dict[str, str]:
+    """Delete a gallery image (own images only)."""
+    safe_id = "".join(c for c in image_id if c.isalnum() or c in ("_", "-"))
+    user_dir = GALLERY_DIR / session["username"]
+    deleted = False
+    for ext in ("png", "jpg", "jpeg", "webp"):
+        p = user_dir / f"{safe_id}.{ext}"
+        if p.exists():
+            p.unlink()
+            deleted = True
+    meta_p = user_dir / f"{safe_id}.json"
+    if meta_p.exists():
+        meta_p.unlink()
+        deleted = True
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Bild nicht gefunden.")
+    return {"status": "deleted"}
+
+
+@app.get("/api/admin/gallery")
+async def admin_gallery_overview(
+    _: dict[str, str] = Depends(require_admin),
+) -> dict[str, Any]:
+    """List all users that have gallery entries with counts."""
+    users: list[dict[str, Any]] = []
+    if GALLERY_DIR.exists():
+        for sub in sorted(GALLERY_DIR.iterdir()):
+            if sub.is_dir():
+                count = sum(1 for _ in sub.glob("*.json"))
+                if count > 0:
+                    users.append({"username": sub.name, "count": count})
+    return {"users": users}
+
+
+@app.get("/api/admin/gallery/{username}")
+async def admin_gallery_user(
+    username: str,
+    _: dict[str, str] = Depends(require_admin),
+) -> dict[str, Any]:
+    """Return gallery items for a specific user (admin only)."""
+    items = _list_gallery(username)
+    return {"items": items, "username": username}
+
+
+@app.delete("/api/admin/gallery/{username}/{image_id}")
+async def admin_gallery_delete(
+    username: str,
+    image_id: str,
+    _: dict[str, str] = Depends(require_admin),
+) -> dict[str, str]:
+    """Admin: delete any user's gallery image."""
+    safe_id = "".join(c for c in image_id if c.isalnum() or c in ("_", "-"))
+    user_dir = GALLERY_DIR / username
+    deleted = False
+    for ext in ("png", "jpg", "jpeg", "webp"):
+        p = user_dir / f"{safe_id}.{ext}"
+        if p.exists():
+            p.unlink()
+            deleted = True
+    meta_p = user_dir / f"{safe_id}.json"
+    if meta_p.exists():
+        meta_p.unlink()
+        deleted = True
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Bild nicht gefunden.")
+    return {"status": "deleted"}

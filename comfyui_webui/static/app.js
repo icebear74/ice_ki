@@ -10,6 +10,9 @@ const state = {
   templates: [],
   mappings: [],        // loaded from /api/mappings
   editingMappingName: null,  // null = create, string = editing existing
+  gallery: [],         // current gallery items
+  galleryUsername: "", // whose gallery is displayed
+  galleryMeta: null,   // currently open metadata item
 };
 
 const $ = (id) => document.getElementById(id);
@@ -57,8 +60,10 @@ function showApp(user) {
   // Admin tab only for admins
   if (user.role === "admin") {
     $("tabAdmin").classList.remove("hidden");
+    $("galleryAdminBar").classList.remove("hidden");
   } else {
     $("tabAdmin").classList.add("hidden");
+    $("galleryAdminBar").classList.add("hidden");
   }
   // Erweitert tab only for users with can_advanced (admins always have it)
   const canAdv = user.can_advanced || user.role === "admin";
@@ -118,7 +123,7 @@ async function doLogout() {
 // Tab switching
 // ---------------------------------------------------------------------------
 function showTab(name) {
-  const tabs = ["Generate", "Advanced", "Admin"];
+  const tabs = ["Generate", "Gallery", "Advanced", "Admin"];
   for (const t of tabs) {
     const panel = $(`panel${t}`);
     if (panel) panel.classList.toggle("hidden", t !== name);
@@ -130,6 +135,9 @@ function showTab(name) {
     loadAdminModelAliases();
     loadAdminUsers();
     populateMappingFormSelects();
+  }
+  if (name === "Gallery") {
+    loadGallery();
   }
 }
 
@@ -292,11 +300,14 @@ function collectPayload() {
   const mapping = getActiveMapping();
   const canAdv = state.currentUser && (state.currentUser.can_advanced || state.currentUser.role === "admin");
 
+  // Seed is always taken from the dedicated genSeed field (visible to all users).
+  // The value -1 means "random" and is resolved server-side.
+  const seed = Number($("genSeed").value);
+
   // Generation parameters: use Erweitert overrides if user has permission,
   // otherwise fall back to mapping values
   const steps    = canAdv ? Number($("steps").value)     : (mapping ? (mapping.steps ?? 30)        : 30);
   const cfg      = canAdv ? Number($("cfg").value)       : (mapping ? (mapping.cfg ?? 7)           : 7);
-  const seed     = canAdv ? Number($("seed").value)      : (mapping ? (mapping.seed ?? -1)         : -1);
   const width    = canAdv ? Number($("width").value)     : (mapping ? (mapping.width ?? 1024)      : 1024);
   const height   = canAdv ? Number($("height").value)    : (mapping ? (mapping.height ?? 1024)     : 1024);
   const imgCount = canAdv ? Number($("imageCount").value): (mapping ? (mapping.image_count ?? 1)   : 1);
@@ -328,8 +339,10 @@ function showImages(urls) {
   wrap.innerHTML = "";
   for (const url of urls) {
     const img = document.createElement("img");
-    img.src = `${url}&_=${Date.now()}`;
-    img.alt = "Generated image";
+    // Cache-bust: use ? or & depending on whether the URL already has query params
+    const sep = url.includes("?") ? "&" : "?";
+    img.src = `${url}${sep}_=${Date.now()}`;
+    img.alt = "Generiertes Bild";
     wrap.appendChild(img);
   }
 }
@@ -458,52 +471,72 @@ async function generateImages() {
       body: JSON.stringify(payload),
     });
 
-    const { prompt_id, client_id, translated_prompt, translated_negative_prompt } = submitData;
+    const { prompt_id, client_id, translated_prompt, translated_negative_prompt, actual_seed } = submitData;
     if (translated_prompt) $("translatedPrompt").value = translated_prompt;
     if (translated_negative_prompt) $("translatedNegativePrompt").value = translated_negative_prompt;
+    // Show the actual seed that was used (important when seed was -1)
+    if (actual_seed != null) $("genSeed").value = actual_seed;
 
     showProgress(true);
     setProgressBar(0, 0, null);
 
     await new Promise((resolve, reject) => {
-      const url = `/api/comfy/progress/${encodeURIComponent(prompt_id)}?client_id=${encodeURIComponent(client_id)}`;
-      const evtSource = new EventSource(url);
+      let resolved = false;
+      let reconnects = 0;
+      const MAX_RECONNECTS = 60; // ~3 min with 3s delays
 
-      evtSource.onmessage = (event) => {
-        let data;
-        try { data = JSON.parse(event.data); } catch { return; }
+      function connect() {
+        const url = `/api/comfy/progress/${encodeURIComponent(prompt_id)}?client_id=${encodeURIComponent(client_id)}`;
+        const evtSource = new EventSource(url);
 
-        if (data.type === "queued") {
-          const pos = data.position ? ` (Position ${data.position})` : "";
-          setStatus(`In Warteschlange${pos} …`);
-        } else if (data.type === "start") {
-          setStatus("Generiere …");
-        } else if (data.type === "progress") {
-          const { step, max, eta } = data;
-          const etaStr = eta != null ? ` · ETA ${eta}s` : "";
-          setStatus(`Generiere … Schritt ${step}/${max}${etaStr}`);
-          setProgressBar(step, max, eta);
-        } else if (data.type === "done") {
+        evtSource.onmessage = (event) => {
+          reconnects = 0;
+          let data;
+          try { data = JSON.parse(event.data); } catch { return; }
+
+          if (data.type === "queued") {
+            const pos = data.position ? ` (Position ${data.position})` : "";
+            setStatus(`In Warteschlange${pos} …`);
+          } else if (data.type === "start") {
+            setStatus("Generiere …");
+          } else if (data.type === "progress") {
+            const { step, max, eta } = data;
+            const etaStr = eta != null ? ` · ETA ${eta}s` : "";
+            setStatus(`Generiere … Schritt ${step}/${max}${etaStr}`);
+            setProgressBar(step, max, eta);
+          } else if (data.type === "done") {
+            evtSource.close();
+            resolved = true;
+            showProgress(false);
+            showImages(data.images || []);
+            setStatus(`Fertig. ${(data.images || []).length} Bild(er) gespeichert.`);
+            setButtons(false);
+            resolve(data);
+          } else if (data.type === "error") {
+            evtSource.close();
+            resolved = true;
+            showProgress(false);
+            setButtons(false);
+            reject(new Error(data.message));
+          }
+        };
+
+        evtSource.onerror = () => {
           evtSource.close();
-          showProgress(false);
-          showImages(data.images || []);
-          setStatus(`Fertig. Bilder: ${(data.images || []).length}`);
-          setButtons(false);
-          resolve();
-        } else if (data.type === "error") {
-          evtSource.close();
-          showProgress(false);
-          setButtons(false);
-          reject(new Error(data.message));
-        }
-      };
+          if (resolved) return;
+          if (reconnects >= MAX_RECONNECTS) {
+            showProgress(false);
+            setButtons(false);
+            reject(new Error("Verbindung getrennt. Bitte Seite neu laden und Galerie prüfen."));
+            return;
+          }
+          reconnects++;
+          setStatus(`Verbindung unterbrochen – Wiederverbindung ${reconnects} …`);
+          setTimeout(connect, 3000);
+        };
+      }
 
-      evtSource.onerror = () => {
-        evtSource.close();
-        showProgress(false);
-        setButtons(false);
-        reject(new Error("Verbindung zum Fortschritt-Stream unterbrochen."));
-      };
+      connect();
     });
   } catch (err) {
     setButtons(false);
@@ -1266,6 +1299,177 @@ async function submitChangePw() {
 }
 
 // ---------------------------------------------------------------------------
+// Gallery
+// ---------------------------------------------------------------------------
+async function loadGallery(username) {
+  const status = $("galleryStatus");
+  const grid = $("galleryGrid");
+  const title = $("galleryTitle");
+  status.textContent = "Lade …";
+  grid.innerHTML = "";
+
+  try {
+    let data;
+    if (username) {
+      data = await api(`/api/admin/gallery/${encodeURIComponent(username)}`);
+    } else {
+      data = await api("/api/gallery");
+    }
+    state.gallery = data.items || [];
+    state.galleryUsername = data.username || (state.currentUser ? state.currentUser.username : "");
+    title.textContent = username
+      ? `Galerie: ${escHtml(data.username)}`
+      : "Meine Galerie";
+    renderGallery(state.gallery, state.galleryUsername);
+    status.textContent = state.gallery.length === 0
+      ? "Noch keine Bilder in der Galerie."
+      : `${state.gallery.length} Bild(er)`;
+  } catch (err) {
+    status.textContent = `Fehler: ${err.message}`;
+    status.classList.add("error");
+  }
+}
+
+function renderGallery(items, username) {
+  const grid = $("galleryGrid");
+  grid.innerHTML = "";
+  const isAdmin = state.currentUser && state.currentUser.role === "admin";
+
+  for (const item of items) {
+    const card = document.createElement("div");
+    card.className = "gallery-item";
+
+    const dateStr = item.created_at
+      ? new Date(item.created_at).toLocaleString("de-DE", { dateStyle: "short", timeStyle: "short" })
+      : "";
+    const seedStr = item.actual_seed != null ? `Seed: ${item.actual_seed}` : "";
+    const modelStr = item.checkpoint ? item.checkpoint.replace(/^.*[\\/]/, "").replace(/\.[^.]+$/, "") : "";
+
+    const imgUrl = `/api/gallery/image/${encodeURIComponent(item.id)}?_=${Date.now()}`;
+
+    card.innerHTML = `
+      <img src="${imgUrl}" alt="Galeriebild" loading="lazy" />
+      <div class="gallery-item-meta">
+        <span class="gallery-date">${escHtml(dateStr)}</span>
+        <span class="gallery-seed hint">${escHtml(seedStr)}</span>
+        ${modelStr ? `<span class="gallery-model hint" title="${escHtml(item.checkpoint || "")}">${escHtml(modelStr)}</span>` : ""}
+      </div>
+      <div class="gallery-item-actions">
+        <button class="btn-sm gallery-info-btn" data-id="${escHtml(item.id)}" type="button" title="Details anzeigen">&#9432;</button>
+        <button class="btn-sm btn-danger gallery-del-btn" data-id="${escHtml(item.id)}" data-user="${escHtml(username)}" type="button" title="Bild l&ouml;schen">&#128465;</button>
+      </div>
+    `;
+    grid.appendChild(card);
+  }
+
+  grid.querySelectorAll(".gallery-info-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const item = state.gallery.find((x) => x.id === btn.dataset.id);
+      if (item) openGalleryMeta(item);
+    });
+  });
+
+  grid.querySelectorAll(".gallery-del-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      if (!confirm("Dieses Bild wirklich aus der Galerie löschen?")) return;
+      try {
+        const isAdmin = state.currentUser && state.currentUser.role === "admin";
+        const targetUser = btn.dataset.user;
+        const ownUser = state.currentUser ? state.currentUser.username : "";
+        if (isAdmin && targetUser && targetUser !== ownUser) {
+          await api(`/api/admin/gallery/${encodeURIComponent(targetUser)}/${encodeURIComponent(btn.dataset.id)}`, { method: "DELETE" });
+        } else {
+          await api(`/api/gallery/${encodeURIComponent(btn.dataset.id)}`, { method: "DELETE" });
+        }
+        await loadGallery(targetUser !== ownUser ? targetUser : null);
+      } catch (err) {
+        alert(`Fehler: ${err.message}`);
+      }
+    });
+  });
+}
+
+function openGalleryMeta(item) {
+  state.galleryMeta = item;
+  $("galleryMetaTitle").textContent = item.created_at
+    ? `Bild vom ${new Date(item.created_at).toLocaleString("de-DE")}`
+    : "Bilddetails";
+
+  const imgUrl = `/api/gallery/image/${encodeURIComponent(item.id)}?_=${Date.now()}`;
+
+  const rows = [
+    ["Prompt (Deutsch)", item.prompt_de],
+    ["Neg. Prompt (Deutsch)", item.negative_prompt_de],
+    ["Übersetzter Prompt (Englisch)", item.translated_prompt],
+    ["Übersetzter Neg. Prompt (Englisch)", item.translated_negative_prompt],
+    ["Template", item.workflow_template],
+    ["Modell / Checkpoint", item.checkpoint],
+    ["Ollama-Modell", item.ollama_model],
+    ["Seed (tatsächlich)", item.actual_seed],
+    ["Steps", item.steps],
+    ["CFG-Scale", item.cfg],
+    ["Sampler", item.sampler],
+    ["Scheduler", item.scheduler],
+    ["Größe", item.width && item.height ? `${item.width} × ${item.height} px` : null],
+    ["Anzahl Bilder", item.image_count],
+    ["Benutzer", item.username],
+  ];
+
+  let html = `<img src="${imgUrl}" alt="Galeriebild" class="gallery-meta-img" />`;
+  html += `<table class="gallery-meta-table">`;
+  for (const [label, val] of rows) {
+    if (val == null || val === "" || val === 0 && label !== "Seed (tatsächlich)") continue;
+    html += `<tr><th>${escHtml(label)}</th><td>${escHtml(String(val))}</td></tr>`;
+  }
+  html += `</table>`;
+
+  $("galleryMetaContent").innerHTML = html;
+  $("galleryMetaOverlay").classList.remove("hidden");
+}
+
+function closeGalleryMeta() {
+  $("galleryMetaOverlay").classList.add("hidden");
+  state.galleryMeta = null;
+}
+
+function applyGallerySettings() {
+  const item = state.galleryMeta;
+  if (!item) return;
+  closeGalleryMeta();
+  showTab("Generate");
+  if (item.prompt_de) $("promptDe").value = item.prompt_de;
+  if (item.negative_prompt_de) $("negativePrompt").value = item.negative_prompt_de;
+  if (item.actual_seed != null) $("genSeed").value = item.actual_seed;
+  if (item.translated_prompt) $("translatedPrompt").value = item.translated_prompt;
+  if (item.translated_negative_prompt) $("translatedNegativePrompt").value = item.translated_negative_prompt;
+  // Advanced fields (applied even if tab is hidden – stored and used on generate)
+  if (item.steps) $("steps").value = item.steps;
+  if (item.cfg) $("cfg").value = item.cfg;
+  if (item.width) $("width").value = item.width;
+  if (item.height) $("height").value = item.height;
+  if (item.sampler && state.samplers.includes(item.sampler)) $("sampler").value = item.sampler;
+  if (item.scheduler && state.schedulers.includes(item.scheduler)) $("scheduler").value = item.scheduler;
+  if (item.image_count) $("imageCount").value = item.image_count;
+  setStatus("Einstellungen aus Galerie übernommen.");
+}
+
+async function loadAdminGalleryUsers() {
+  const sel = $("galleryUserSelect");
+  sel.innerHTML = '<option value="">– Eigene Galerie –</option>';
+  try {
+    const data = await api("/api/admin/gallery");
+    for (const u of data.users || []) {
+      const opt = document.createElement("option");
+      opt.value = u.username;
+      opt.textContent = `${u.username} (${u.count} Bild${u.count !== 1 ? "er" : ""})`;
+      sel.appendChild(opt);
+    }
+  } catch {
+    // ignore – admin panel will show an error if it fails
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Utility
 // ---------------------------------------------------------------------------
 function escHtml(str) {
@@ -1286,6 +1490,9 @@ async function initAppData() {
   await loadOllamaModels().catch((e) => errors.push(`Ollama: ${e.message}`));
   await loadCheckpoints().catch((e) => errors.push(`Checkpoints: ${e.message}`));
   await loadSamplers();
+  if (state.currentUser && state.currentUser.role === "admin") {
+    await loadAdminGalleryUsers().catch(() => {});
+  }
   if (errors.length > 0) {
     setStatus(errors.join(" | "), true);
   }
@@ -1308,6 +1515,7 @@ $("cpSubmitBtn").addEventListener("click", submitChangePw);
 $("cpCancelBtn").addEventListener("click", closeChangePw);
 $("cpNewPw2").addEventListener("keydown", (e) => { if (e.key === "Enter") submitChangePw(); });
 $("tabGenerate").addEventListener("click", () => showTab("Generate"));
+$("tabGallery").addEventListener("click", () => showTab("Gallery"));
 $("tabAdvanced").addEventListener("click", () => showTab("Advanced"));
 $("tabAdmin").addEventListener("click", () => showTab("Admin"));
 
@@ -1386,6 +1594,37 @@ $("addUserCancelBtn").addEventListener("click", () => {
   $("addUserForm").classList.add("hidden");
 });
 $("aliasSaveBtn").addEventListener("click", saveModelAlias);
+
+// ---------------------------------------------------------------------------
+// Event listeners – seed field
+// ---------------------------------------------------------------------------
+$("genSeedRandomBtn").addEventListener("click", () => {
+  // Generate a random uint32 seed (0 to 2^32-1) and put it in the seed field
+  const arr = new Uint32Array(1);
+  crypto.getRandomValues(arr);
+  $("genSeed").value = arr[0];
+});
+
+// ---------------------------------------------------------------------------
+// Event listeners – gallery
+// ---------------------------------------------------------------------------
+$("galleryReloadBtn").addEventListener("click", () => {
+  const sel = $("galleryUserSelect");
+  const user = sel && sel.value ? sel.value : null;
+  loadGallery(user);
+});
+
+$("galleryLoadUserBtn").addEventListener("click", () => {
+  const sel = $("galleryUserSelect");
+  loadGallery(sel.value || null);
+});
+
+$("galleryMetaCloseBtn").addEventListener("click", closeGalleryMeta);
+$("galleryMetaCloseBtn2").addEventListener("click", closeGalleryMeta);
+$("galleryMetaApplyBtn").addEventListener("click", applyGallerySettings);
+$("galleryMetaOverlay").addEventListener("click", (e) => {
+  if (e.target === $("galleryMetaOverlay")) closeGalleryMeta();
+});
 
 // ---------------------------------------------------------------------------
 // Bootstrap: check session, show login or app
