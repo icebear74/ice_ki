@@ -33,7 +33,13 @@ async function api(path, options = {}) {
     let detail = `${response.status} ${response.statusText}`;
     try {
       const payload = await response.json();
-      detail = payload.detail || JSON.stringify(payload);
+      if (typeof payload.detail === "string") {
+        detail = payload.detail;
+      } else if (payload.detail != null) {
+        detail = JSON.stringify(payload.detail);
+      } else {
+        detail = JSON.stringify(payload);
+      }
     } catch {
       // ignore
     }
@@ -508,8 +514,17 @@ async function generateImages() {
             evtSource.close();
             resolved = true;
             showProgress(false);
-            showImages(data.images || []);
-            setStatus(`Fertig. ${(data.images || []).length} Bild(er) gespeichert.`);
+            const doneImages = data.images || [];
+            showImages(doneImages);
+            if (doneImages.length > 0 && state.currentUser) {
+              try {
+                sessionStorage.setItem(
+                  `lastImages_${state.currentUser.username}`,
+                  JSON.stringify(doneImages),
+                );
+              } catch { /* quota exceeded – ignore */ }
+            }
+            setStatus(`Fertig. ${doneImages.length} Bild(er) gespeichert.`);
             setButtons(false);
             resolve(data);
           } else if (data.type === "error") {
@@ -1492,6 +1507,19 @@ async function initAppData() {
   await loadSamplers();
   if (state.currentUser && state.currentUser.role === "admin") {
     await loadAdminGalleryUsers().catch(() => {});
+  }
+  // Restore last generated images so a page reload doesn't lose them
+  if (state.currentUser) {
+    try {
+      const stored = sessionStorage.getItem(`lastImages_${state.currentUser.username}`);
+      if (stored) {
+        const urls = JSON.parse(stored);
+        if (Array.isArray(urls) && urls.length > 0) {
+          showImages(urls);
+          setStatus("Letzte Bilder der Sitzung wiederhergestellt. Galerie für ältere Bilder.");
+        }
+      }
+    } catch { /* corrupt storage – ignore */ }
   }
   if (errors.length > 0) {
     setStatus(errors.join(" | "), true);
