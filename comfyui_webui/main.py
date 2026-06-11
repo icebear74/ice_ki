@@ -1088,7 +1088,14 @@ async def comfy_progress_sse(
     session: dict[str, str] = Depends(require_user),
 ) -> StreamingResponse:
     async def event_stream() -> AsyncGenerator[str, None]:
-        # Initial queue-position check via REST
+        # ── Fast path: images already saved to gallery (duplicate reconnect) ─────
+        existing = _find_gallery_by_prompt_id(session["username"], prompt_id)
+        if existing:
+            urls = [f"/api/gallery/image/{id}" for id in existing]
+            yield f"data: {json.dumps({'type': 'done', 'images': urls, 'gallery_ids': existing})}\n\n"
+            return
+
+        # ── Initial queue-position check via REST ─────────────────────────────────
         try:
             async with httpx.AsyncClient(timeout=5.0) as http:
                 q = await http.get(f"{COMFYUI_BASE_URL}/queue")
@@ -1098,70 +1105,82 @@ async def comfy_progress_sse(
         except Exception:
             yield f"data: {json.dumps({'type': 'queued'})}\n\n"
 
-        ws_url = (
-            COMFYUI_BASE_URL.replace("http://", "ws://").replace("https://", "wss://")
-            + f"/ws?clientId={client_id}"
-        )
-        start_time: float | None = None
-
+        # ── Check if job already completed (finished while client was reconnecting) ─
+        already_done = False
         try:
-            async with websockets.connect(ws_url, ping_interval=20) as ws:
-                while True:
-                    if await request.is_disconnected():
-                        return
-                    # Use a 15-second timeout so we can send SSE keepalives while
-                    # the job sits in a long queue (prevents proxy/mobile timeouts).
-                    try:
-                        raw = await asyncio.wait_for(ws.recv(), timeout=15.0)
-                    except asyncio.TimeoutError:
-                        yield ": keepalive\n\n"
-                        continue
-                    except Exception:
-                        break
+            async with httpx.AsyncClient(timeout=5.0) as http:
+                hist_check = await http.get(f"{COMFYUI_BASE_URL}/history/{prompt_id}")
+                if hist_check.status_code == 200 and hist_check.json().get(prompt_id):
+                    already_done = True
+        except Exception:
+            pass
 
-                    if isinstance(raw, bytes):
-                        continue  # skip binary preview frames
-                    try:
-                        msg = json.loads(raw)
-                    except json.JSONDecodeError:
-                        continue
+        # ── WebSocket progress tracking (skipped when job already finished) ───────
+        if not already_done:
+            ws_url = (
+                COMFYUI_BASE_URL.replace("http://", "ws://").replace("https://", "wss://")
+                + f"/ws?clientId={client_id}"
+            )
+            start_time: float | None = None
 
-                    mtype = msg.get("type", "")
-                    mdata = msg.get("data") or {}
-                    mpid = mdata.get("prompt_id") if isinstance(mdata, dict) else None
+            try:
+                async with websockets.connect(ws_url, ping_interval=20) as ws:
+                    while True:
+                        if await request.is_disconnected():
+                            return
+                        # Use a 15-second timeout so we can send SSE keepalives while
+                        # the job sits in a long queue (prevents proxy/mobile timeouts).
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=15.0)
+                        except asyncio.TimeoutError:
+                            yield ": keepalive\n\n"
+                            continue
+                        except Exception:
+                            break
 
-                    # Filter messages for other prompts
-                    if mpid and mpid != prompt_id:
-                        continue
+                        if isinstance(raw, bytes):
+                            continue  # skip binary preview frames
+                        try:
+                            msg = json.loads(raw)
+                        except json.JSONDecodeError:
+                            continue
 
-                    if mtype == "execution_start":
-                        start_time = asyncio.get_event_loop().time()
-                        yield f"data: {json.dumps({'type': 'start'})}\n\n"
+                        mtype = msg.get("type", "")
+                        mdata = msg.get("data") or {}
+                        mpid = mdata.get("prompt_id") if isinstance(mdata, dict) else None
 
-                    elif mtype == "progress":
-                        step = int(mdata.get("value", 0))
-                        total = int(mdata.get("max", 1))
-                        eta: int | None = None
-                        if start_time and step > 0 and step < total:
-                            elapsed = asyncio.get_event_loop().time() - start_time
-                            eta = round(elapsed / step * (total - step))
-                        yield f"data: {json.dumps({'type': 'progress', 'step': step, 'max': total, 'eta': eta})}\n\n"
+                        # Filter messages for other prompts
+                        if mpid and mpid != prompt_id:
+                            continue
 
-                    elif mtype == "execution_success" or (
-                        mtype == "executing" and isinstance(mdata, dict) and mdata.get("node") is None
-                    ):
-                        break
+                        if mtype == "execution_start":
+                            start_time = asyncio.get_event_loop().time()
+                            yield f"data: {json.dumps({'type': 'start'})}\n\n"
 
-                    elif mtype == "execution_error":
-                        err = mdata.get("exception_message", "Unbekannter Fehler") if isinstance(mdata, dict) else "Fehler"
-                        yield f"data: {json.dumps({'type': 'error', 'message': str(err)})}\n\n"
-                        return
+                        elif mtype == "progress":
+                            step = int(mdata.get("value", 0))
+                            total = int(mdata.get("max", 1))
+                            eta: int | None = None
+                            if start_time and step > 0 and step < total:
+                                elapsed = asyncio.get_event_loop().time() - start_time
+                                eta = round(elapsed / step * (total - step))
+                            yield f"data: {json.dumps({'type': 'progress', 'step': step, 'max': total, 'eta': eta})}\n\n"
 
-        except Exception as exc:
-            yield f"data: {json.dumps({'type': 'error', 'message': f'WebSocket-Fehler: {exc}'})}\n\n"
-            return
+                        elif mtype == "execution_success" or (
+                            mtype == "executing" and isinstance(mdata, dict) and mdata.get("node") is None
+                        ):
+                            break
 
-        # Fetch images from history, save to local gallery, delete from ComfyUI
+                        elif mtype == "execution_error":
+                            err = mdata.get("exception_message", "Unbekannter Fehler") if isinstance(mdata, dict) else "Fehler"
+                            yield f"data: {json.dumps({'type': 'error', 'message': str(err)})}\n\n"
+                            return
+
+            except Exception as exc:
+                yield f"data: {json.dumps({'type': 'error', 'message': f'WebSocket-Fehler: {exc}'})}\n\n"
+                return
+
+        # ── Fetch images from history, save to local gallery, delete from ComfyUI ─
         try:
             async with httpx.AsyncClient(timeout=10.0) as http:
                 for _ in range(20):
@@ -1191,10 +1210,10 @@ async def comfy_progress_sse(
                                 img_resp.raise_for_status()
                                 ct = img_resp.headers.get("content-type", "image/png")
 
-                                meta: dict[str, Any] = {}
+                                meta: dict[str, Any] = {"prompt_id": prompt_id}
                                 if gen_data:
                                     p = gen_data["payload"]
-                                    meta = {
+                                    meta.update({
                                         "prompt_de": p.prompt_de,
                                         "negative_prompt_de": p.negative_prompt,
                                         "translated_prompt": gen_data["translated_prompt"],
@@ -1211,7 +1230,7 @@ async def comfy_progress_sse(
                                         "scheduler": p.scheduler,
                                         "image_count": p.image_count,
                                         "username": username,
-                                    }
+                                    })
 
                                 image_id = _save_to_gallery(username, img_resp.content, ct, meta)
                                 gallery_ids.append(image_id)
@@ -1725,6 +1744,15 @@ def _list_gallery(username: str) -> list[dict[str, Any]]:
         except (OSError, json.JSONDecodeError):
             continue
     return items
+
+
+def _find_gallery_by_prompt_id(username: str, prompt_id: str) -> list[str]:
+    """Return gallery image IDs that were created for *prompt_id* (newest first).
+
+    Relies on ``prompt_id`` being stored in each gallery metadata file by the
+    SSE progress handler.  Returns an empty list when no match is found.
+    """
+    return [item["id"] for item in _list_gallery(username) if item.get("prompt_id") == prompt_id]
 
 
 def _delete_comfyui_output(filename: str, subfolder: str = "", type_: str = "output") -> None:

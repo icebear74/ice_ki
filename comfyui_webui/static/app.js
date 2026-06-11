@@ -121,6 +121,10 @@ async function doLogout() {
   } catch {
     // ignore
   }
+  if (state.currentUser) {
+    try { sessionStorage.removeItem(`pendingJob_${state.currentUser.username}`); } catch {}
+    try { sessionStorage.removeItem(`lastImages_${state.currentUser.username}`); } catch {}
+  }
   state.currentUser = null;
   showLogin();
 }
@@ -353,6 +357,104 @@ function showImages(urls) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Pending-job helpers (sessionStorage, survives page reload)
+// ---------------------------------------------------------------------------
+function savePendingJob(promptId, clientId) {
+  if (!state.currentUser) return;
+  try {
+    sessionStorage.setItem(
+      `pendingJob_${state.currentUser.username}`,
+      JSON.stringify({ promptId, clientId }),
+    );
+  } catch { /* quota – ignore */ }
+}
+
+function clearPendingJob() {
+  if (!state.currentUser) return;
+  try { sessionStorage.removeItem(`pendingJob_${state.currentUser.username}`); } catch {}
+}
+
+// ---------------------------------------------------------------------------
+// SSE progress connection (reusable for new jobs and reconnect after reload)
+// ---------------------------------------------------------------------------
+function connectToProgress(promptId, clientId) {
+  return new Promise((resolve, reject) => {
+    let resolved = false;
+    let reconnects = 0;
+    const MAX_RECONNECTS = 60; // ~3 min with 3s delays
+
+    showProgress(true);
+    setProgressBar(0, 0, null);
+    setButtons(true);
+
+    function connect() {
+      const url = `/api/comfy/progress/${encodeURIComponent(promptId)}?client_id=${encodeURIComponent(clientId)}`;
+      const evtSource = new EventSource(url);
+
+      evtSource.onmessage = (event) => {
+        reconnects = 0;
+        let data;
+        try { data = JSON.parse(event.data); } catch { return; }
+
+        if (data.type === "queued") {
+          const pos = data.position ? ` (Position ${data.position})` : "";
+          setStatus(`In Warteschlange${pos} …`);
+        } else if (data.type === "start") {
+          setStatus("Generiere …");
+        } else if (data.type === "progress") {
+          const { step, max, eta } = data;
+          const etaStr = eta != null ? ` · ETA ${eta}s` : "";
+          setStatus(`Generiere … Schritt ${step}/${max}${etaStr}`);
+          setProgressBar(step, max, eta);
+        } else if (data.type === "done") {
+          evtSource.close();
+          resolved = true;
+          showProgress(false);
+          const doneImages = data.images || [];
+          showImages(doneImages);
+          clearPendingJob();
+          if (doneImages.length > 0 && state.currentUser) {
+            try {
+              sessionStorage.setItem(
+                `lastImages_${state.currentUser.username}`,
+                JSON.stringify(doneImages),
+              );
+            } catch { /* quota exceeded – ignore */ }
+          }
+          setStatus(`Fertig. ${doneImages.length} Bild(er) gespeichert.`);
+          setButtons(false);
+          resolve(doneImages);
+        } else if (data.type === "error") {
+          evtSource.close();
+          resolved = true;
+          showProgress(false);
+          setButtons(false);
+          clearPendingJob();
+          reject(new Error(data.message));
+        }
+      };
+
+      evtSource.onerror = () => {
+        evtSource.close();
+        if (resolved) return;
+        if (reconnects >= MAX_RECONNECTS) {
+          showProgress(false);
+          setButtons(false);
+          clearPendingJob();
+          reject(new Error("Verbindung getrennt. Bitte Galerie auf fertige Bilder prüfen."));
+          return;
+        }
+        reconnects++;
+        setStatus(`Verbindung unterbrochen – Wiederverbindung ${reconnects} …`);
+        setTimeout(connect, 3000);
+      };
+    }
+
+    connect();
+  });
+}
+
 // Auto-refine prompt if changes are present; resolves to (possibly updated) prompt_de
 async function autoRefineIfNeeded(promptDe, changesDe, ollamaModel) {
   if (!changesDe || !changesDe.trim()) return promptDe;
@@ -483,76 +585,10 @@ async function generateImages() {
     // Show the actual seed that was used (important when seed was -1)
     if (actual_seed != null) $("genSeed").value = actual_seed;
 
-    showProgress(true);
-    setProgressBar(0, 0, null);
+    // Persist job IDs so the page can reconnect to this job after a reload
+    savePendingJob(prompt_id, client_id);
 
-    await new Promise((resolve, reject) => {
-      let resolved = false;
-      let reconnects = 0;
-      const MAX_RECONNECTS = 60; // ~3 min with 3s delays
-
-      function connect() {
-        const url = `/api/comfy/progress/${encodeURIComponent(prompt_id)}?client_id=${encodeURIComponent(client_id)}`;
-        const evtSource = new EventSource(url);
-
-        evtSource.onmessage = (event) => {
-          reconnects = 0;
-          let data;
-          try { data = JSON.parse(event.data); } catch { return; }
-
-          if (data.type === "queued") {
-            const pos = data.position ? ` (Position ${data.position})` : "";
-            setStatus(`In Warteschlange${pos} …`);
-          } else if (data.type === "start") {
-            setStatus("Generiere …");
-          } else if (data.type === "progress") {
-            const { step, max, eta } = data;
-            const etaStr = eta != null ? ` · ETA ${eta}s` : "";
-            setStatus(`Generiere … Schritt ${step}/${max}${etaStr}`);
-            setProgressBar(step, max, eta);
-          } else if (data.type === "done") {
-            evtSource.close();
-            resolved = true;
-            showProgress(false);
-            const doneImages = data.images || [];
-            showImages(doneImages);
-            if (doneImages.length > 0 && state.currentUser) {
-              try {
-                sessionStorage.setItem(
-                  `lastImages_${state.currentUser.username}`,
-                  JSON.stringify(doneImages),
-                );
-              } catch { /* quota exceeded – ignore */ }
-            }
-            setStatus(`Fertig. ${doneImages.length} Bild(er) gespeichert.`);
-            setButtons(false);
-            resolve(data);
-          } else if (data.type === "error") {
-            evtSource.close();
-            resolved = true;
-            showProgress(false);
-            setButtons(false);
-            reject(new Error(data.message));
-          }
-        };
-
-        evtSource.onerror = () => {
-          evtSource.close();
-          if (resolved) return;
-          if (reconnects >= MAX_RECONNECTS) {
-            showProgress(false);
-            setButtons(false);
-            reject(new Error("Verbindung getrennt. Bitte Seite neu laden und Galerie prüfen."));
-            return;
-          }
-          reconnects++;
-          setStatus(`Verbindung unterbrochen – Wiederverbindung ${reconnects} …`);
-          setTimeout(connect, 3000);
-        };
-      }
-
-      connect();
-    });
+    await connectToProgress(prompt_id, client_id);
   } catch (err) {
     setButtons(false);
     showProgress(false);
@@ -1508,18 +1544,37 @@ async function initAppData() {
   if (state.currentUser && state.currentUser.role === "admin") {
     await loadAdminGalleryUsers().catch(() => {});
   }
-  // Restore last generated images so a page reload doesn't lose them
+  // Restore session state after reload
   if (state.currentUser) {
+    // Priority 1: reconnect to an in-progress/queued job
+    let reconnected = false;
     try {
-      const stored = sessionStorage.getItem(`lastImages_${state.currentUser.username}`);
+      const stored = sessionStorage.getItem(`pendingJob_${state.currentUser.username}`);
       if (stored) {
-        const urls = JSON.parse(stored);
-        if (Array.isArray(urls) && urls.length > 0) {
-          showImages(urls);
-          setStatus("Letzte Bilder der Sitzung wiederhergestellt. Galerie für ältere Bilder.");
+        const { promptId, clientId } = JSON.parse(stored);
+        if (promptId && clientId) {
+          setStatus("Wiederverbindung zu laufendem Auftrag …");
+          reconnected = true;
+          connectToProgress(promptId, clientId).catch((err) => {
+            setStatus(`Auftrag beendet: ${err.message}`, true);
+          });
         }
       }
     } catch { /* corrupt storage – ignore */ }
+
+    // Priority 2: show last finished images (only when no active job)
+    if (!reconnected) {
+      try {
+        const stored = sessionStorage.getItem(`lastImages_${state.currentUser.username}`);
+        if (stored) {
+          const urls = JSON.parse(stored);
+          if (Array.isArray(urls) && urls.length > 0) {
+            showImages(urls);
+            setStatus("Letzte Bilder der Sitzung wiederhergestellt. Galerie für ältere Bilder.");
+          }
+        }
+      } catch { /* corrupt storage – ignore */ }
+    }
   }
   if (errors.length > 0) {
     setStatus(errors.join(" | "), true);
