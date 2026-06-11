@@ -354,10 +354,25 @@ class UpdateTemplateRequest(BaseModel):
 
 @app.get("/api/templates")
 async def list_templates_for_user(
-    _: dict[str, str] = Depends(require_user),
+    session: dict[str, str] = Depends(require_user),
 ) -> dict[str, Any]:
-    """Return approved + enabled templates (visible to all authenticated users)."""
+    """Return templates for the current user.
+
+    Admin users receive *all* templates (including inactive/unapproved) so they
+    can use them when creating mappings.  Each template record gets an extra
+    ``_inactive`` flag set to ``True`` when the template is not both approved
+    and enabled – the UI uses this to show the ``(x)`` marker.
+
+    Regular users only see approved + enabled templates (unchanged behaviour).
+    """
+    if session.get("role") == "admin":
+        all_tpls = _registry.get_all_templates()
+        for t in all_tpls:
+            t["_inactive"] = not (t.get("approved") and t.get("enabled", True))
+        return {"templates": all_tpls}
     templates = _registry.get_approved_templates()
+    for t in templates:
+        t["_inactive"] = False
     return {"templates": templates}
 
 
@@ -1918,3 +1933,350 @@ async def admin_gallery_delete(
     if not deleted:
         raise HTTPException(status_code=404, detail="Bild nicht gefunden.")
     return {"status": "deleted"}
+
+
+# ---------------------------------------------------------------------------
+# Admin – Test-Run (parametric sweep over steps and/or cfg)
+# ---------------------------------------------------------------------------
+
+class TestRunRequest(BaseModel):
+    """Request body for starting an admin test run.
+
+    All generation settings are inherited from the current generate form.
+    The test run sweeps every (steps, cfg) combination formed by iterating
+    from ``steps_from`` to ``steps_to`` (inclusive, step 1) and from
+    ``cfg_from`` to ``cfg_to`` (inclusive, step ``cfg_step``).
+    """
+    prompt_de: str = Field(min_length=1)
+    negative_prompt: str = ""
+    ollama_model: str = Field(min_length=1)
+    translated_prompt: str | None = None
+    translated_negative_prompt: str | None = None
+    checkpoint: str | None = None
+    workflow_template: str | None = None
+    seed: int = -1
+    width: int = 1024
+    height: int = 1024
+    sampler: str = "euler"
+    scheduler: str = "normal"
+    image_count: int = 1
+    # Range parameters
+    steps_from: int = Field(default=20, ge=1, le=200)
+    steps_to: int = Field(default=20, ge=1, le=200)
+    cfg_from: float = Field(default=7.0, ge=0.0, le=30.0)
+    cfg_to: float = Field(default=7.0, ge=0.0, le=30.0)
+    cfg_step: float = Field(default=0.5, gt=0.0, le=10.0)
+
+
+# In-memory store for active/recently-finished test runs.
+_test_runs: dict[str, dict[str, Any]] = {}
+
+
+def _build_cfg_list(cfg_from: float, cfg_to: float, cfg_step: float) -> list[float]:
+    """Return a list of cfg values from cfg_from to cfg_to inclusive."""
+    values: list[float] = []
+    v = cfg_from
+    while v <= cfg_to + 1e-9:
+        values.append(round(v, 4))
+        v = round(v + cfg_step, 4)
+        if cfg_step <= 0:
+            break
+    return values
+
+
+async def _test_run_worker(run_id: str, run: dict[str, Any]) -> None:
+    """Background async task – survives browser disconnects."""
+    try:
+        req: TestRunRequest = run["request"]
+        username: str = run["username"]
+
+        # ── Translate prompts once ───────────────────────────────────────────
+        translated_prompt = run.get("translated_prompt") or ""
+        if not translated_prompt:
+            try:
+                translated_prompt = await _translate_german_to_english(
+                    req.prompt_de, req.ollama_model
+                )
+            except Exception as exc:
+                run["status"] = "error"
+                run["error"] = f"Übersetzung fehlgeschlagen: {exc}"
+                return
+        run["translated_prompt"] = translated_prompt
+
+        translated_negative = run.get("translated_negative") or ""
+        if req.negative_prompt and not translated_negative:
+            try:
+                translated_negative = await _translate_german_to_english(
+                    req.negative_prompt, req.ollama_model
+                )
+            except Exception:
+                translated_negative = ""
+        run["translated_negative"] = translated_negative
+
+        # ── Build combinations ───────────────────────────────────────────────
+        steps_list = list(range(req.steps_from, req.steps_to + 1))
+        cfg_list = _build_cfg_list(req.cfg_from, req.cfg_to, req.cfg_step)
+        combinations = [(s, c) for s in steps_list for c in cfg_list]
+        run["total"] = len(combinations)
+        run["current"] = 0
+        run["status"] = "running"
+
+        # Fix seed once so all images are comparable
+        seed = req.seed if req.seed >= 0 else int.from_bytes(os.urandom(4), "big")
+        run["seed_used"] = seed
+
+        _gen_logger.info(
+            "TEST_RUN_START run_id=%s user=%s combinations=%d seed=%d",
+            run_id, username, len(combinations), seed,
+        )
+
+        for steps, cfg in combinations:
+            if run.get("cancelled"):
+                run["status"] = "cancelled"
+                _gen_logger.info("TEST_RUN_CANCELLED run_id=%s", run_id)
+                return
+
+            req_id = f"tr_{run_id}_{steps}s_{cfg}c"
+
+            combo_req = GenerateRequest(
+                prompt_de=req.prompt_de,
+                negative_prompt=req.negative_prompt,
+                ollama_model=req.ollama_model,
+                checkpoint=req.checkpoint,
+                workflow_template=req.workflow_template,
+                steps=steps,
+                cfg=cfg,
+                seed=seed,
+                width=req.width,
+                height=req.height,
+                sampler=req.sampler,
+                scheduler=req.scheduler,
+                image_count=req.image_count,
+            )
+
+            try:
+                workflow, actual_seed = _build_workflow(
+                    combo_req, translated_prompt, translated_negative, req_id=req_id
+                )
+            except ValueError as exc:
+                run["errors"].append(f"steps={steps}, cfg={cfg}: Workflow-Fehler: {exc}")
+                run["current"] += 1
+                continue
+
+            client_id = f"testrun-{uuid.uuid4()}"
+            prompt_id: str | None = None
+            try:
+                async with httpx.AsyncClient(timeout=20.0) as client:
+                    resp = await client.post(
+                        f"{COMFYUI_BASE_URL}/prompt",
+                        json={"prompt": workflow, "client_id": client_id},
+                    )
+                if not resp.is_success:
+                    try:
+                        body = resp.json()
+                        comfy_error = (
+                            body.get("error", {}).get("message")
+                            or body.get("error")
+                            or str(body)
+                        )
+                    except Exception:
+                        comfy_error = resp.text[:200] or f"HTTP {resp.status_code}"
+                    run["errors"].append(f"steps={steps}, cfg={cfg}: ComfyUI: {comfy_error}")
+                    run["current"] += 1
+                    continue
+                prompt_id = resp.json().get("prompt_id")
+                if not prompt_id:
+                    run["errors"].append(f"steps={steps}, cfg={cfg}: Keine prompt_id erhalten")
+                    run["current"] += 1
+                    continue
+            except Exception as exc:
+                run["errors"].append(f"steps={steps}, cfg={cfg}: Anfragefehler: {exc}")
+                run["current"] += 1
+                continue
+
+            _gen_logger.info(
+                "TEST_RUN_QUEUED run_id=%s steps=%d cfg=%.2f prompt_id=%s",
+                run_id, steps, cfg, prompt_id,
+            )
+
+            # Poll for completion (up to 5 minutes)
+            images: list[dict[str, str]] = []
+            timed_out = False
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as http:
+                    for _ in range(300):
+                        if run.get("cancelled"):
+                            break
+                        await asyncio.sleep(1.0)
+                        try:
+                            hist = await http.get(
+                                f"{COMFYUI_BASE_URL}/history/{prompt_id}"
+                            )
+                            if hist.status_code == 200:
+                                hdata = hist.json()
+                                if hdata.get(prompt_id):
+                                    images = _extract_images(hdata[prompt_id])
+                                    break
+                        except Exception:
+                            pass
+                    else:
+                        timed_out = True
+            except Exception as exc:
+                run["errors"].append(f"steps={steps}, cfg={cfg}: Poll-Fehler: {exc}")
+                run["current"] += 1
+                continue
+
+            if run.get("cancelled"):
+                run["status"] = "cancelled"
+                return
+
+            if timed_out:
+                run["errors"].append(
+                    f"steps={steps}, cfg={cfg}: Timeout – kein Ergebnis nach 5 Minuten"
+                )
+                run["current"] += 1
+                continue
+
+            for img in images:
+                comfy_params = {
+                    "filename": img["filename"],
+                    "subfolder": img.get("subfolder", ""),
+                    "type": img.get("type", "output"),
+                }
+                try:
+                    async with httpx.AsyncClient(timeout=60.0) as img_http:
+                        img_resp = await img_http.get(
+                            f"{COMFYUI_BASE_URL}/view", params=comfy_params
+                        )
+                    img_resp.raise_for_status()
+                    ct = img_resp.headers.get("content-type", "image/png")
+                    meta: dict[str, Any] = {
+                        "prompt_id": prompt_id,
+                        "test_run_id": run_id,
+                        "prompt_de": req.prompt_de,
+                        "negative_prompt_de": req.negative_prompt,
+                        "translated_prompt": translated_prompt,
+                        "translated_negative_prompt": translated_negative,
+                        "workflow_template": req.workflow_template or "default",
+                        "checkpoint": req.checkpoint or "",
+                        "ollama_model": req.ollama_model,
+                        "steps": steps,
+                        "cfg": cfg,
+                        "actual_seed": actual_seed,
+                        "width": req.width,
+                        "height": req.height,
+                        "sampler": req.sampler,
+                        "scheduler": req.scheduler,
+                        "image_count": req.image_count,
+                        "username": username,
+                    }
+                    image_id = _save_to_gallery(username, img_resp.content, ct, meta)
+                    run["gallery_ids"].append(image_id)
+                    _delete_comfyui_output(
+                        img["filename"], img.get("subfolder", ""), img.get("type", "output")
+                    )
+                except Exception as exc:
+                    run["errors"].append(
+                        f"steps={steps}, cfg={cfg}: Galerie-Fehler: {exc}"
+                    )
+
+            run["current"] += 1
+
+        if not run.get("cancelled"):
+            run["status"] = "done"
+            _gen_logger.info(
+                "TEST_RUN_DONE run_id=%s images=%d errors=%d",
+                run_id, len(run["gallery_ids"]), len(run["errors"]),
+            )
+
+    except asyncio.CancelledError:
+        run["status"] = "cancelled"
+        raise
+    except Exception as exc:
+        run["status"] = "error"
+        run["error"] = str(exc)
+        _gen_logger.error("TEST_RUN_ERROR run_id=%s error=%r", run_id, str(exc))
+
+
+@app.post("/api/admin/testrun", status_code=201)
+async def admin_start_testrun(
+    payload: TestRunRequest,
+    session: dict[str, str] = Depends(require_admin),
+) -> dict[str, Any]:
+    """Start a parametric test run (admin only).
+
+    Executes as an asyncio background task – continues even after browser close.
+    Use ``GET /api/admin/testrun/{run_id}`` to poll for progress.
+    """
+    if payload.steps_from > payload.steps_to:
+        raise HTTPException(
+            status_code=400, detail="steps_from darf nicht größer als steps_to sein."
+        )
+    if payload.cfg_from > payload.cfg_to:
+        raise HTTPException(
+            status_code=400, detail="cfg_from darf nicht größer als cfg_to sein."
+        )
+
+    run_id = uuid.uuid4().hex[:12]
+    run: dict[str, Any] = {
+        "run_id": run_id,
+        "status": "starting",
+        "current": 0,
+        "total": 0,
+        "gallery_ids": [],
+        "errors": [],
+        "error": None,
+        "cancelled": False,
+        "seed_used": None,
+        "translated_prompt": payload.translated_prompt or "",
+        "translated_negative": payload.translated_negative_prompt or "",
+        "request": payload,
+        "username": session["username"],
+    }
+    _test_runs[run_id] = run
+    asyncio.create_task(_test_run_worker(run_id, run))
+    _gen_logger.info(
+        "TEST_RUN_CREATED run_id=%s user=%s steps=%d-%d cfg=%.1f-%.1f step=%.2f",
+        run_id, session["username"],
+        payload.steps_from, payload.steps_to,
+        payload.cfg_from, payload.cfg_to, payload.cfg_step,
+    )
+    return {"run_id": run_id, "status": "starting"}
+
+
+@app.get("/api/admin/testrun/{run_id}")
+async def admin_get_testrun(
+    run_id: str,
+    _: dict[str, str] = Depends(require_admin),
+) -> dict[str, Any]:
+    """Return the current status and progress of a test run."""
+    run = _test_runs.get(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Test-Run nicht gefunden.")
+    return {
+        "run_id": run_id,
+        "status": run["status"],
+        "current": run["current"],
+        "total": run["total"],
+        "gallery_ids": list(run["gallery_ids"]),
+        "errors": list(run["errors"]),
+        "error": run.get("error"),
+        "seed_used": run.get("seed_used"),
+    }
+
+
+@app.delete("/api/admin/testrun/{run_id}")
+async def admin_cancel_testrun(
+    run_id: str,
+    _: dict[str, str] = Depends(require_admin),
+) -> dict[str, str]:
+    """Request cancellation of a running test run.
+
+    The worker checks the ``cancelled`` flag between iterations – cancellation
+    takes effect after the currently-generating image finishes.
+    """
+    run = _test_runs.get(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Test-Run nicht gefunden.")
+    run["cancelled"] = True
+    return {"status": "cancel_requested"}

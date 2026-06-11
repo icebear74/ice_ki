@@ -98,8 +98,60 @@
         <section class="card actions">
           <button id="translateBtn" type="button">Nur &uuml;bersetzen</button>
           <button id="generateBtn" type="button">Bild(er) generieren</button>
+          <button id="testModeBtn" class="btn-secondary hidden" type="button">&#128300; Testmodus</button>
         </section>
         <p id="status" class="hint" style="margin:0.25rem 0 0.5rem"></p>
+
+        <!-- ── TESTMODUS PANEL (admin only) ── -->
+        <div id="testModePanel" class="card hidden" style="border:1px dashed var(--accent);padding:1rem;margin-bottom:0.5rem">
+          <h3 style="margin:0 0 0.5rem;font-size:1rem;color:var(--accent)">&#128300; Testmodus &ndash; Parametrischer Sweep</h3>
+          <p class="hint" style="margin:0 0 0.75rem">
+            Alle Einstellungen aus dem Generieren-Tab werden &uuml;bernommen. Steps und CFG werden als Bereich durchlaufen.
+            Gleicher Seed f&uuml;r alle Kombinationen. L&auml;uft serverseitig &ndash; auch wenn der Browser geschlossen wird.
+          </p>
+
+          <div class="grid-4" style="margin-bottom:0.75rem">
+            <div class="setting-block">
+              <label>Steps von</label>
+              <input id="tmStepsFrom" type="number" value="20" min="1" max="200" />
+            </div>
+            <div class="setting-block">
+              <label>Steps bis</label>
+              <input id="tmStepsTo" type="number" value="30" min="1" max="200" />
+            </div>
+            <div class="setting-block">
+              <label>CFG von</label>
+              <input id="tmCfgFrom" type="number" value="7" min="0" max="30" step="0.1" />
+            </div>
+            <div class="setting-block">
+              <label>CFG bis</label>
+              <input id="tmCfgTo" type="number" value="7" min="0" max="30" step="0.1" />
+            </div>
+            <div class="setting-block">
+              <label>CFG-Schritt</label>
+              <input id="tmCfgStep" type="number" value="0.5" min="0.1" max="10" step="0.1" />
+            </div>
+            <div class="setting-block" style="justify-content:flex-end">
+              <small id="tmCombinationInfo" class="hint" style="font-size:0.9rem;font-weight:600;margin-top:auto">&nbsp;</small>
+            </div>
+          </div>
+
+          <div style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center;margin-bottom:0.5rem">
+            <button id="tmStartBtn" type="button" style="width:auto">&#9654; Testlauf starten</button>
+            <button id="tmCancelBtn" class="btn-secondary hidden" type="button" style="width:auto">&#9646;&#9646; Abbrechen</button>
+            <button id="tmGalleryBtn" class="btn-secondary hidden" type="button" style="width:auto">&#128444; Galerie &ouml;ffnen</button>
+          </div>
+
+          <div id="tmProgressWrap" class="hidden" style="margin-bottom:0.4rem">
+            <div class="progress-bar-outer">
+              <div id="tmProgressBar" class="progress-bar-inner"></div>
+            </div>
+            <small id="tmProgressLabel" class="hint"></small>
+          </div>
+
+          <p id="tmStatus" class="hint" style="margin:0"></p>
+          <pre id="tmErrors" style="font-size:0.75rem;color:var(--danger);white-space:pre-wrap;margin:0.25rem 0 0"></pre>
+        </div>
 
         <div id="progressWrap" class="hidden">
           <div class="progress-bar-outer">

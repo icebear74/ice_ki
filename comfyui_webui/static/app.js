@@ -13,6 +13,8 @@ const state = {
   gallery: [],         // current gallery items
   galleryUsername: "", // whose gallery is displayed
   galleryMeta: null,   // currently open metadata item
+  testRunId: null,     // active test run ID
+  testRunPollTimer: null, // setInterval handle for test run polling
 };
 
 const $ = (id) => document.getElementById(id);
@@ -67,9 +69,11 @@ function showApp(user) {
   if (user.role === "admin") {
     $("tabAdmin").classList.remove("hidden");
     $("galleryAdminBar").classList.remove("hidden");
+    $("testModeBtn").classList.remove("hidden");
   } else {
     $("tabAdmin").classList.add("hidden");
     $("galleryAdminBar").classList.add("hidden");
+    $("testModeBtn").classList.add("hidden");
   }
   // Erweitert tab only for users with can_advanced (admins always have it)
   const canAdv = user.can_advanced || user.role === "admin";
@@ -242,6 +246,8 @@ async function loadSamplers() {
 
 async function loadTemplates() {
   try {
+    // Admins fetch all templates (including inactive) via the same endpoint;
+    // the server tags each record with _inactive=true when not approved+enabled.
     const data = await api("/api/templates");
     state.templates = data.templates || [];
   } catch {
@@ -746,7 +752,10 @@ function populateMappingFormSelects() {
     if (tpl.name === "default") continue;
     const opt = document.createElement("option");
     opt.value = tpl.name;
-    opt.textContent = tpl.display_name || tpl.name;
+    // Admins see all templates; inactive ones get an (x) prefix
+    const label = tpl.display_name || tpl.name;
+    opt.textContent = tpl._inactive ? `(x) ${label}` : label;
+    if (tpl._inactive) opt.style.color = "var(--muted)";
     tplSel.appendChild(opt);
   }
   if (prevTpl) tplSel.value = prevTpl;
@@ -1521,6 +1530,222 @@ async function loadAdminGalleryUsers() {
 }
 
 // ---------------------------------------------------------------------------
+// Admin – Test mode (parametric sweep over steps / cfg)
+// ---------------------------------------------------------------------------
+
+function openTestMode() {
+  const panel = $("testModePanel");
+  if (!panel) return;
+  const isHidden = panel.classList.contains("hidden");
+  panel.classList.toggle("hidden", !isHidden);
+  if (isHidden) {
+    // Pre-fill from Erweitert tab values
+    const stepsVal = $("steps") ? $("steps").value : "20";
+    const cfgVal   = $("cfg")   ? $("cfg").value   : "7";
+    $("tmStepsFrom").value = stepsVal;
+    $("tmStepsTo").value   = stepsVal;
+    $("tmCfgFrom").value   = cfgVal;
+    $("tmCfgTo").value     = cfgVal;
+    $("tmCfgStep").value   = "0.5";
+    updateTestRunCombinationCount();
+    // If there's an active run, reconnect to it
+    if (state.testRunId) {
+      _startTestRunPolling(state.testRunId);
+    }
+  }
+}
+
+function updateTestRunCombinationCount() {
+  const stepsFrom = parseInt($("tmStepsFrom").value) || 0;
+  const stepsTo   = parseInt($("tmStepsTo").value)   || 0;
+  const cfgFrom   = parseFloat($("tmCfgFrom").value) || 0;
+  const cfgTo     = parseFloat($("tmCfgTo").value)   || 0;
+  const cfgStep   = parseFloat($("tmCfgStep").value) || 0.5;
+
+  const nSteps = Math.max(0, stepsTo - stepsFrom + 1);
+  let nCfg = 0;
+  if (cfgStep > 0) {
+    let v = cfgFrom;
+    while (v <= cfgTo + 1e-9) { nCfg++; v = Math.round((v + cfgStep) * 10000) / 10000; }
+  } else {
+    nCfg = 1;
+  }
+  const total = nSteps * nCfg;
+  const info = $("tmCombinationInfo");
+  if (info) info.textContent = `= ${total} Kombinationen`;
+}
+
+async function startTestRun() {
+  const mapping = getActiveMapping();
+  if (!mapping) {
+    alert("Bitte zuerst ein Mapping auswählen.");
+    return;
+  }
+  const promptDe = $("promptDe").value.trim();
+  if (!promptDe) {
+    alert("Bitte einen deutschen Prompt eingeben.");
+    return;
+  }
+
+  const stepsFrom = parseInt($("tmStepsFrom").value);
+  const stepsTo   = parseInt($("tmStepsTo").value);
+  const cfgFrom   = parseFloat($("tmCfgFrom").value);
+  const cfgTo     = parseFloat($("tmCfgTo").value);
+  const cfgStep   = parseFloat($("tmCfgStep").value);
+
+  if (isNaN(stepsFrom) || isNaN(stepsTo) || stepsFrom < 1 || stepsTo < stepsFrom) {
+    alert("Steps: Bitte gültige Werte eingeben (von ≤ bis, min. 1).");
+    return;
+  }
+  if (isNaN(cfgFrom) || isNaN(cfgTo) || cfgFrom < 0 || cfgTo < cfgFrom) {
+    alert("CFG: Bitte gültige Werte eingeben (von ≤ bis, min. 0).");
+    return;
+  }
+  if (isNaN(cfgStep) || cfgStep <= 0) {
+    alert("CFG-Schritt muss größer als 0 sein.");
+    return;
+  }
+
+  const canAdv = state.currentUser && (state.currentUser.can_advanced || state.currentUser.role === "admin");
+  const seed = Number($("genSeed").value);
+  const steps    = canAdv ? Number($("steps").value)      : (mapping.steps ?? 30);
+  const cfg      = canAdv ? Number($("cfg").value)        : (mapping.cfg ?? 7);
+  const width    = canAdv ? Number($("width").value)      : (mapping.width ?? 1024);
+  const height   = canAdv ? Number($("height").value)     : (mapping.height ?? 1024);
+  const sampler  = canAdv ? $("sampler").value.trim()     : (mapping.sampler || "euler");
+  const sched    = canAdv ? $("scheduler").value.trim()   : (mapping.scheduler || "normal");
+  const imgCount = canAdv ? Number($("imageCount").value) : (mapping.image_count ?? 1);
+
+  const translatedPrompt = $("translatedPrompt").value.trim() || null;
+  const translatedNeg    = $("translatedNegativePrompt").value.trim() || null;
+
+  const body = {
+    prompt_de: promptDe,
+    negative_prompt: $("negativePrompt").value.trim(),
+    ollama_model: mapping.ollama_model || "",
+    translated_prompt: translatedPrompt,
+    translated_negative_prompt: translatedNeg,
+    checkpoint: mapping.checkpoint || null,
+    workflow_template: mapping.template_name || "default",
+    seed,
+    width,
+    height,
+    sampler,
+    scheduler: sched,
+    image_count: imgCount,
+    steps_from: stepsFrom,
+    steps_to: stepsTo,
+    cfg_from: cfgFrom,
+    cfg_to: cfgTo,
+    cfg_step: cfgStep,
+  };
+
+  $("tmStartBtn").disabled = true;
+  _setTestRunStatus("Starte Testlauf …", false);
+
+  try {
+    const data = await api("/api/admin/testrun", { method: "POST", body: JSON.stringify(body) });
+    state.testRunId = data.run_id;
+    // Persist so reconnect after reload works
+    try { sessionStorage.setItem("pendingTestRun", data.run_id); } catch {}
+    _startTestRunPolling(data.run_id);
+  } catch (err) {
+    $("tmStartBtn").disabled = false;
+    _setTestRunStatus(`Fehler: ${err.message}`, true);
+  }
+}
+
+function _setTestRunStatus(msg, isError) {
+  const el = $("tmStatus");
+  if (!el) return;
+  el.textContent = msg;
+  el.classList.toggle("error", !!isError);
+}
+
+function _setTestRunProgress(current, total) {
+  const bar = $("tmProgressBar");
+  const label = $("tmProgressLabel");
+  const wrap = $("tmProgressWrap");
+  if (!bar || !label || !wrap) return;
+  wrap.classList.remove("hidden");
+  const pct = total > 0 ? Math.round((current / total) * 100) : 0;
+  bar.style.width = `${pct}%`;
+  label.textContent = `${current} / ${total} (${pct}%)`;
+}
+
+function _startTestRunPolling(runId) {
+  _stopTestRunPolling();
+  _pollTestRun(runId); // immediate first poll
+  state.testRunPollTimer = setInterval(() => _pollTestRun(runId), 2000);
+}
+
+function _stopTestRunPolling() {
+  if (state.testRunPollTimer) {
+    clearInterval(state.testRunPollTimer);
+    state.testRunPollTimer = null;
+  }
+}
+
+async function _pollTestRun(runId) {
+  try {
+    const data = await api(`/api/admin/testrun/${encodeURIComponent(runId)}`);
+    _setTestRunProgress(data.current, data.total);
+
+    const seedInfo = data.seed_used != null ? ` · Seed: ${data.seed_used}` : "";
+    if (data.status === "running" || data.status === "starting") {
+      _setTestRunStatus(
+        `Läuft … ${data.current}/${data.total} Kombinationen${seedInfo}`,
+        false,
+      );
+      $("tmStartBtn").disabled = true;
+      $("tmCancelBtn").classList.remove("hidden");
+    } else if (data.status === "done") {
+      _stopTestRunPolling();
+      state.testRunId = null;
+      try { sessionStorage.removeItem("pendingTestRun"); } catch {}
+      const errInfo = data.errors.length > 0 ? ` · ${data.errors.length} Fehler` : "";
+      _setTestRunStatus(
+        `✓ Fertig – ${data.gallery_ids.length} Bild(er) gespeichert${seedInfo}${errInfo}`,
+        data.errors.length > 0,
+      );
+      $("tmStartBtn").disabled = false;
+      $("tmCancelBtn").classList.add("hidden");
+      $("tmGalleryBtn").classList.remove("hidden");
+      if (data.errors.length > 0) {
+        const errEl = $("tmErrors");
+        if (errEl) errEl.textContent = data.errors.join("\n");
+      }
+    } else if (data.status === "cancelled") {
+      _stopTestRunPolling();
+      state.testRunId = null;
+      try { sessionStorage.removeItem("pendingTestRun"); } catch {}
+      _setTestRunStatus(`Abgebrochen (${data.current}/${data.total} erledigt${seedInfo})`, false);
+      $("tmStartBtn").disabled = false;
+      $("tmCancelBtn").classList.add("hidden");
+    } else if (data.status === "error") {
+      _stopTestRunPolling();
+      state.testRunId = null;
+      try { sessionStorage.removeItem("pendingTestRun"); } catch {}
+      _setTestRunStatus(`Fehler: ${data.error || "Unbekannter Fehler"}`, true);
+      $("tmStartBtn").disabled = false;
+      $("tmCancelBtn").classList.add("hidden");
+    }
+  } catch {
+    // Transient error – keep polling
+  }
+}
+
+async function cancelTestRun() {
+  if (!state.testRunId) return;
+  try {
+    await api(`/api/admin/testrun/${encodeURIComponent(state.testRunId)}`, { method: "DELETE" });
+    _setTestRunStatus("Abbruch angefordert …", false);
+  } catch (err) {
+    _setTestRunStatus(`Fehler beim Abbruch: ${err.message}`, true);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Utility
 // ---------------------------------------------------------------------------
 function escHtml(str) {
@@ -1578,6 +1803,16 @@ async function initAppData() {
   }
   if (errors.length > 0) {
     setStatus(errors.join(" | "), true);
+  }
+  // Reconnect to a pending test run (admin only)
+  if (state.currentUser && state.currentUser.role === "admin") {
+    try {
+      const storedRunId = sessionStorage.getItem("pendingTestRun");
+      if (storedRunId) {
+        state.testRunId = storedRunId;
+        _startTestRunPolling(storedRunId);
+      }
+    } catch { /* ignore */ }
   }
 }
 
@@ -1707,6 +1942,21 @@ $("galleryMetaCloseBtn2").addEventListener("click", closeGalleryMeta);
 $("galleryMetaApplyBtn").addEventListener("click", applyGallerySettings);
 $("galleryMetaOverlay").addEventListener("click", (e) => {
   if (e.target === $("galleryMetaOverlay")) closeGalleryMeta();
+});
+
+// ---------------------------------------------------------------------------
+// Event listeners – test mode (admin only)
+// ---------------------------------------------------------------------------
+$("testModeBtn").addEventListener("click", openTestMode);
+$("tmStartBtn").addEventListener("click", startTestRun);
+$("tmCancelBtn").addEventListener("click", cancelTestRun);
+$("tmGalleryBtn").addEventListener("click", () => {
+  $("testModePanel").classList.add("hidden");
+  showTab("Gallery");
+});
+["tmStepsFrom", "tmStepsTo", "tmCfgFrom", "tmCfgTo", "tmCfgStep"].forEach((id) => {
+  const el = $(id);
+  if (el) el.addEventListener("input", updateTestRunCombinationCount);
 });
 
 // ---------------------------------------------------------------------------
