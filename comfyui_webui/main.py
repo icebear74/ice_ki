@@ -5,6 +5,7 @@ import json
 import logging
 import logging.handlers
 import os
+import re
 import secrets
 import uuid
 from datetime import datetime, timezone
@@ -1650,9 +1651,40 @@ def _extract_images(history_data: dict[str, Any]) -> list[dict[str, str]]:
 # Gallery helpers
 # ---------------------------------------------------------------------------
 
+_SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9_\-]")
+
+
+def _safe_username(username: str) -> str:
+    """Return a filesystem-safe version of *username* (strip all path chars)."""
+    safe = _SAFE_NAME_RE.sub("", username)
+    if not safe:
+        raise ValueError(f"Invalid username for gallery path: {username!r}")
+    return safe
+
+
+def _safe_image_id(image_id: str) -> str:
+    """Return a filesystem-safe image ID (alphanumeric, underscore, hyphen only)."""
+    safe = _SAFE_NAME_RE.sub("", image_id)
+    if not safe:
+        raise ValueError(f"Invalid image_id for gallery path: {image_id!r}")
+    return safe
+
+
+def _check_gallery_path(path: Path) -> Path:
+    """Resolve *path* and raise if it escapes GALLERY_DIR (path-traversal guard)."""
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(GALLERY_DIR.resolve())
+    except ValueError:
+        raise ValueError(f"Path escapes gallery directory: {path}") from None
+    return resolved
+
+
 def _gallery_dir(username: str) -> Path:
-    d = GALLERY_DIR / username
+    safe = _safe_username(username)
+    d = GALLERY_DIR / safe
     d.mkdir(parents=True, exist_ok=True)
+    _check_gallery_path(d)
     return d
 
 
@@ -1667,8 +1699,8 @@ def _save_to_gallery(
     image_id = now.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
     ext = "jpg" if ("jpeg" in content_type or "jpg" in content_type) else "png"
     gdir = _gallery_dir(username)
-    img_path = gdir / f"{image_id}.{ext}"
-    meta_path = gdir / f"{image_id}.json"
+    img_path = _check_gallery_path(gdir / f"{image_id}.{ext}")
+    meta_path = _check_gallery_path(gdir / f"{image_id}.json")
     img_path.write_bytes(image_data)
     metadata["id"] = image_id
     metadata["filename"] = img_path.name
@@ -1680,8 +1712,9 @@ def _save_to_gallery(
 
 def _list_gallery(username: str) -> list[dict[str, Any]]:
     """Return all gallery metadata entries for *username*, newest first."""
-    gdir = GALLERY_DIR / username
-    if not gdir.exists():
+    safe = _safe_username(username)
+    gdir = _check_gallery_path(GALLERY_DIR / safe) if (GALLERY_DIR / safe).exists() else None
+    if gdir is None or not gdir.exists():
         return []
     items: list[dict[str, Any]] = []
     for meta_path in sorted(gdir.glob("*.json"), reverse=True):
@@ -1729,14 +1762,21 @@ async def gallery_image_serve(
 ) -> Response:
     """Serve a gallery image.  Regular users can only access their own images;
     admins can access any user's image (search across all gallery directories)."""
-    safe_id = "".join(c for c in image_id if c.isalnum() or c in ("_", "-"))
-    username = session["username"]
+    try:
+        safe_id = _safe_image_id(image_id)
+        username = session["username"]
+        safe_user = _safe_username(username)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Ungültige Parameter.")
     is_admin = session.get("role") == "admin"
 
     # Own images first
-    user_dir = GALLERY_DIR / username
+    user_dir = GALLERY_DIR / safe_user
     for ext in ("png", "jpg", "jpeg", "webp"):
-        img_path = user_dir / f"{safe_id}.{ext}"
+        try:
+            img_path = _check_gallery_path(user_dir / f"{safe_id}.{ext}")
+        except ValueError:
+            continue
         if img_path.exists():
             return FileResponse(str(img_path), media_type=f"image/{ext}")
 
@@ -1746,7 +1786,10 @@ async def gallery_image_serve(
             if not sub.is_dir():
                 continue
             for ext in ("png", "jpg", "jpeg", "webp"):
-                img_path = sub / f"{safe_id}.{ext}"
+                try:
+                    img_path = _check_gallery_path(sub / f"{safe_id}.{ext}")
+                except ValueError:
+                    continue
                 if img_path.exists():
                     return FileResponse(str(img_path), media_type=f"image/{ext}")
 
@@ -1759,16 +1802,25 @@ async def gallery_delete(
     session: dict[str, str] = Depends(require_user),
 ) -> dict[str, str]:
     """Delete a gallery image (own images only)."""
-    safe_id = "".join(c for c in image_id if c.isalnum() or c in ("_", "-"))
-    user_dir = GALLERY_DIR / session["username"]
+    try:
+        safe_id = _safe_image_id(image_id)
+        user_dir = GALLERY_DIR / _safe_username(session["username"])
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Ungültige Parameter.")
     deleted = False
     for ext in ("png", "jpg", "jpeg", "webp"):
-        p = user_dir / f"{safe_id}.{ext}"
+        try:
+            p = _check_gallery_path(user_dir / f"{safe_id}.{ext}")
+        except ValueError:
+            continue
         if p.exists():
             p.unlink()
             deleted = True
-    meta_p = user_dir / f"{safe_id}.json"
-    if meta_p.exists():
+    try:
+        meta_p = _check_gallery_path(user_dir / f"{safe_id}.json")
+    except ValueError:
+        meta_p = None
+    if meta_p and meta_p.exists():
         meta_p.unlink()
         deleted = True
     if not deleted:
@@ -1797,8 +1849,12 @@ async def admin_gallery_user(
     _: dict[str, str] = Depends(require_admin),
 ) -> dict[str, Any]:
     """Return gallery items for a specific user (admin only)."""
-    items = _list_gallery(username)
-    return {"items": items, "username": username}
+    try:
+        safe = _safe_username(username)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Ungültiger Benutzername.")
+    items = _list_gallery(safe)
+    return {"items": items, "username": safe}
 
 
 @app.delete("/api/admin/gallery/{username}/{image_id}")
@@ -1808,16 +1864,25 @@ async def admin_gallery_delete(
     _: dict[str, str] = Depends(require_admin),
 ) -> dict[str, str]:
     """Admin: delete any user's gallery image."""
-    safe_id = "".join(c for c in image_id if c.isalnum() or c in ("_", "-"))
-    user_dir = GALLERY_DIR / username
+    try:
+        safe_id = _safe_image_id(image_id)
+        user_dir = GALLERY_DIR / _safe_username(username)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Ungültige Parameter.")
     deleted = False
     for ext in ("png", "jpg", "jpeg", "webp"):
-        p = user_dir / f"{safe_id}.{ext}"
+        try:
+            p = _check_gallery_path(user_dir / f"{safe_id}.{ext}")
+        except ValueError:
+            continue
         if p.exists():
             p.unlink()
             deleted = True
-    meta_p = user_dir / f"{safe_id}.json"
-    if meta_p.exists():
+    try:
+        meta_p = _check_gallery_path(user_dir / f"{safe_id}.json")
+    except ValueError:
+        meta_p = None
+    if meta_p and meta_p.exists():
         meta_p.unlink()
         deleted = True
     if not deleted:
