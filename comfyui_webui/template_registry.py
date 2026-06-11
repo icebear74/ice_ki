@@ -11,6 +11,7 @@ Templates are persisted in ``data/templates.json``.  Each record contains:
 - ``filename``     – optional path to the JSON workflow file (relative to data/templates/)
 - ``last_seen``    – ISO timestamp of last discovery/import
 - ``created_at``   – ISO timestamp of first registration
+- ``analysis``     – dict; result of deep workflow analysis (see :mod:`workflow_analyzer`)
 """
 from __future__ import annotations
 
@@ -19,6 +20,8 @@ import json
 import logging
 from pathlib import Path
 from typing import Any
+
+import workflow_analyzer as _analyzer
 
 logger = logging.getLogger(__name__)
 
@@ -85,17 +88,76 @@ def detect_model_type(workflow_json: dict) -> str:
     """Inspect a ComfyUI workflow JSON and return the required model type.
 
     Returns ``'unet'`` if a UNETLoader/DiffusionModelLoader node is found,
-    ``'checkpoint'`` if a CheckpointLoaderSimple node is found, or ``'any'`` otherwise.
+    ``'checkpoint'`` if a CheckpointLoaderSimple node is found, or ``'any'``
+    otherwise.
+
+    .. note::
+        For full graph analysis use :func:`analyze_template_file` instead.
     """
-    for node in workflow_json.values():
-        if not isinstance(node, dict):
-            continue
-        ct = node.get("class_type", "")
-        if ct in ("UNETLoader", "DiffusionModelLoader"):
-            return "unet"
-        if ct == "CheckpointLoaderSimple":
-            return "checkpoint"
-    return "any"
+    roles = _analyzer.analyze_workflow(workflow_json)
+    return roles.model_type
+
+
+def analyze_template_file(path: Path) -> dict[str, Any]:
+    """Parse and deeply analyze a workflow JSON file.
+
+    Returns a dict with keys:
+
+    ``valid``
+        ``True`` if the file parsed correctly as a JSON object.
+    ``parse_error``
+        Human-readable parse error string, or ``None``.
+    ``analysis``
+        :meth:`~workflow_analyzer.WorkflowRoles.to_dict` result, or ``None``
+        when the file could not be parsed.
+    ``model_type``
+        ``"checkpoint"`` / ``"unet"`` / ``"any"`` derived from analysis, or
+        ``"any"`` on parse failure.
+    ``analyzed_at``
+        ISO timestamp of analysis.
+    """
+    now = datetime.datetime.utcnow().isoformat()
+    result: dict[str, Any] = {
+        "valid": False,
+        "parse_error": None,
+        "analysis": None,
+        "model_type": "any",
+        "analyzed_at": now,
+    }
+    try:
+        raw = path.read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        result["parse_error"] = str(exc)
+        logger.warning("analyze_template_file: cannot parse %s: %s", path.name, exc)
+        return result
+
+    if not isinstance(data, dict):
+        result["parse_error"] = "JSON ist kein Objekt (erwartet wird ein ComfyUI-Workflow-JSON)."
+        return result
+
+    result["valid"] = True
+    roles = _analyzer.analyze_workflow(data)
+    result["analysis"] = roles.to_dict()
+    result["model_type"] = roles.model_type
+
+    if not roles.is_usable:
+        logger.warning(
+            "analyze_template_file: %s – not usable: %s",
+            path.name,
+            "; ".join(roles.errors),
+        )
+    elif roles.warnings:
+        logger.info(
+            "analyze_template_file: %s – usable with %d warning(s): %s",
+            path.name,
+            len(roles.warnings),
+            "; ".join(roles.warnings),
+        )
+    else:
+        logger.debug("analyze_template_file: %s – OK", path.name)
+
+    return result
 
 
 def register_template(
@@ -107,6 +169,7 @@ def register_template(
     approved: bool = False,
     enabled: bool = True,
     model_type: str = "any",
+    analysis: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Register a new template or update last_seen if it already exists."""
     templates = load_templates()
@@ -120,6 +183,8 @@ def register_template(
             # Update model_type if a specific type was detected, or if not yet set
             if model_type != "any" or "model_type" not in t:
                 t["model_type"] = model_type
+            if analysis is not None:
+                t["analysis"] = analysis
             save_templates(templates)
             return t
 
@@ -132,6 +197,7 @@ def register_template(
         "approved": approved,
         "enabled": enabled,
         "model_type": model_type,
+        "analysis": analysis,
         "last_seen": now,
         "created_at": now,
     }
@@ -142,7 +208,7 @@ def register_template(
 
 def update_template(name: str, **fields: Any) -> dict[str, Any] | None:
     """Update allowed fields for a template record."""
-    allowed = {"approved", "enabled", "display_name", "description", "model_type"}
+    allowed = {"approved", "enabled", "display_name", "description", "model_type", "analysis"}
     templates = load_templates()
     for t in templates:
         if t["name"] == name:
@@ -175,6 +241,9 @@ def discover_local_templates() -> list[dict[str, Any]]:
     slug already exists its ``filename`` reference is updated but its
     ``approved``/``enabled`` flags are **not** changed (so a deliberately
     disabled template stays disabled).
+
+    Each file is deeply validated via :func:`analyze_template_file` and the
+    result is stored in the template record's ``analysis`` field.
     """
     _ensure_data_dir()
     registered: list[dict[str, Any]] = []
@@ -182,14 +251,54 @@ def discover_local_templates() -> list[dict[str, Any]]:
         stem = json_file.stem
         slug = stem.lower().replace(" ", "_").replace("-", "_")
         display_name = stem.replace("_", " ").replace("-", " ").title()
-        try:
-            data = json.loads(json_file.read_text(encoding="utf-8"))
-            if not isinstance(data, dict):
-                logger.warning("discover_local_templates: %s is not a JSON object – skipped", json_file.name)
-                continue
-            model_type = detect_model_type(data)
-        except (OSError, json.JSONDecodeError) as exc:
-            logger.warning("discover_local_templates: cannot parse %s: %s", json_file.name, exc)
+
+        validation = analyze_template_file(json_file)
+        model_type = validation.get("model_type", "any")
+        analysis_meta = {
+            "is_usable": validation["analysis"]["is_usable"] if validation.get("analysis") else False,
+            "model_type": model_type,
+            "sampler_count": validation["analysis"].get("sampler_count", 0) if validation.get("analysis") else 0,
+            "model_loader_count": validation["analysis"].get("model_loader_count", 0) if validation.get("analysis") else 0,
+            "positive_clip_count": validation["analysis"].get("positive_clip_count", 0) if validation.get("analysis") else 0,
+            "negative_is_zero_out": validation["analysis"].get("negative_is_zero_out", False) if validation.get("analysis") else False,
+            "is_potentially_img2img": validation["analysis"].get("is_potentially_img2img", False) if validation.get("analysis") else False,
+            "warnings": validation["analysis"].get("warnings", []) if validation.get("analysis") else [],
+            "errors": validation["analysis"].get("errors", [validation.get("parse_error", "Datei konnte nicht gelesen werden")]) if not validation.get("valid") else (validation["analysis"].get("errors", []) if validation.get("analysis") else []),
+            "analyzed_at": validation.get("analyzed_at"),
+            "parse_error": validation.get("parse_error"),
+        }
+
+        if not validation.get("valid"):
+            logger.warning(
+                "discover_local_templates: %s konnte nicht geparst werden: %s",
+                json_file.name,
+                validation.get("parse_error"),
+            )
+            # Still register it so admins can see it and the parse error
+            existing = get_template(slug)
+            if existing is None:
+                record = register_template(
+                    name=slug,
+                    display_name=display_name,
+                    source="local",
+                    description=f"Lokales Workflow-Template: {json_file.name}",
+                    filename=json_file.name,
+                    approved=False,  # don't auto-approve broken templates
+                    enabled=False,
+                    model_type="any",
+                    analysis=analysis_meta,
+                )
+                logger.info("discover_local_templates: registriert (fehlerhaft) %r aus %s", slug, json_file.name)
+            else:
+                record = register_template(
+                    name=slug,
+                    display_name=existing.get("display_name", display_name),
+                    source=existing.get("source", "local"),
+                    filename=json_file.name,
+                    model_type="any",
+                    analysis=analysis_meta,
+                )
+            registered.append(record)
             continue
 
         existing = get_template(slug)
@@ -203,18 +312,19 @@ def discover_local_templates() -> list[dict[str, Any]]:
                 approved=True,
                 enabled=True,
                 model_type=model_type,
+                analysis=analysis_meta,
             )
-            logger.info("discover_local_templates: registered new template %r from %s", slug, json_file.name)
+            logger.info("discover_local_templates: registriert %r aus %s (model_type=%s)", slug, json_file.name, model_type)
         else:
-            # Update the filename reference (register_template updates filename for existing entries)
             record = register_template(
                 name=slug,
                 display_name=existing.get("display_name", display_name),
                 source=existing.get("source", "local"),
                 filename=json_file.name,
                 model_type=model_type,
+                analysis=analysis_meta,
             )
-            logger.debug("discover_local_templates: updated filename for existing template %r", slug)
+            logger.debug("discover_local_templates: aktualisiert %r", slug)
         registered.append(record)
     return registered
 

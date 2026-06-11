@@ -774,9 +774,34 @@ async function saveMapping() {
 // ---------------------------------------------------------------------------
 // Admin – templates
 // ---------------------------------------------------------------------------
+
+function _analysisStatusBadge(tpl) {
+  const ana = tpl.analysis;
+  if (!ana) return '<span title="Noch nicht analysiert" style="opacity:0.5">–</span>';
+  const warns = (ana.warnings || []).length;
+  const errs = (ana.errors || []).length;
+  const parseErr = ana.parse_error ? `Parse-Fehler: ${ana.parse_error}\n` : "";
+  const warnText = warns ? `Warnungen:\n• ${(ana.warnings || []).join("\n• ")}\n` : "";
+  const errText = errs ? `Fehler:\n• ${(ana.errors || []).join("\n• ")}\n` : "";
+  const extras = [
+    `Sampler: ${ana.sampler_count ?? "?"}`,
+    `Loader: ${ana.model_loader_count ?? "?"}`,
+    ana.negative_is_zero_out ? "Negativ: ZeroOut (fest)" : "",
+    ana.is_potentially_img2img ? "⚠ Möglicher img2img-Pfad" : "",
+  ].filter(Boolean).join(" | ");
+  const title = `${parseErr}${errText}${warnText}${extras}`.trim();
+  if (!ana.is_usable) {
+    return `<span class="badge badge-error" title="${escHtml(title)}">✗ Nicht verwendbar</span>`;
+  }
+  if (warns > 0) {
+    return `<span class="badge badge-warn" title="${escHtml(title)}">⚠ ${warns} Warnung${warns > 1 ? "en" : ""}</span>`;
+  }
+  return `<span class="badge badge-ok" title="${escHtml(title)}">✓ OK</span>`;
+}
+
 async function loadAdminTemplates() {
   const tbody = $("adminTemplateBody");
-  tbody.innerHTML = "<tr><td colspan='7' class='hint'>Lade …</td></tr>";
+  tbody.innerHTML = "<tr><td colspan='8' class='hint'>Lade …</td></tr>";
   try {
     const data = await api("/api/admin/templates");
     tbody.innerHTML = "";
@@ -801,6 +826,10 @@ async function loadAdminTemplates() {
             <option value="unet" ${mt === "unet" ? "selected" : ""}>UNet</option>
             <option value="any" ${mt === "any" ? "selected" : ""}>Beliebig</option>
           </select>
+        </td>
+        <td class="tpl-analysis-cell">
+          ${_analysisStatusBadge(tpl)}
+          ${tpl.filename ? `<button class="btn-sm tpl-reanalyze" data-name="${escHtml(tpl.name)}" type="button" title="Analyse neu ausführen" style="margin-left:0.25rem">&#8635;</button>` : ""}
         </td>
         <td><input type="checkbox" class="tpl-approved" data-name="${escHtml(tpl.name)}" ${tpl.approved ? "checked" : ""} /></td>
         <td><input type="checkbox" class="tpl-enabled" data-name="${escHtml(tpl.name)}" ${tpl.enabled ? "checked" : ""} /></td>
@@ -865,6 +894,20 @@ async function loadAdminTemplates() {
         }
       });
     });
+    tbody.querySelectorAll(".tpl-reanalyze").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const name = btn.dataset.name;
+        const cell = btn.closest(".tpl-analysis-cell");
+        cell.innerHTML = '<small class="hint">Analysiere…</small>';
+        try {
+          const result = await api(`/api/admin/templates/${encodeURIComponent(name)}/analysis`, { method: "GET" });
+          // Reload table to show updated analysis
+          await loadAdminTemplates();
+        } catch (err) {
+          cell.innerHTML = `<span class="badge badge-error" title="${escHtml(err.message)}">✗ Fehler</span>`;
+        }
+      });
+    });
     tbody.querySelectorAll(".tpl-approved, .tpl-enabled").forEach((cb) => {
       cb.addEventListener("change", async () => {
         const name = cb.dataset.name;
@@ -895,7 +938,7 @@ async function loadAdminTemplates() {
       });
     });
   } catch (err) {
-    tbody.innerHTML = `<tr><td colspan='7' class='error'>${escHtml(err.message)}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan='8' class='error'>${escHtml(err.message)}</td></tr>`;
   }
 }
 

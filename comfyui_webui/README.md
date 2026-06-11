@@ -121,16 +121,102 @@ Workflow-Templates können als JSON-Dateien in `data/templates/` abgelegt werden
 Der `filename`-Eintrag im Template-Datensatz zeigt auf diese Datei (relativ zu
 `data/templates/`).
 
-**Anforderung an Template-Dateien:**  
-Die App erwartet dieselbe Node-ID-Konvention wie beim Standard-Template:
+> **Wichtig:** Die App benötigt **keine** feste Node-ID-Konvention mehr.  
+> Du kannst jeden von ComfyUI exportierten Workflow direkt als JSON-Datei
+> ablegen und hochladen – die Analyse erkennt die Rollen automatisch.
 
-| Node | Zweck |
-|------|-------|
-| `"1"` | Model-Loader (`CheckpointLoaderSimple`, `UNETLoader`, …) |
-| `"2"` | Positiver Prompt (`CLIPTextEncode`) |
-| `"3"` | Negativer Prompt (`CLIPTextEncode`) |
-| `"4"` | Latent-Bild / Größe (`EmptyLatentImage`) |
-| `"5"` | Sampler (`KSampler`) |
+---
+
+## Workflow-Analyse und Validierung
+
+### Was wird analysiert?
+
+Beim Hochladen oder Entdecken einer Template-Datei analysiert die App den
+Workflow-Graphen automatisch (Modul `workflow_analyzer.py`) und erkennt:
+
+| Rolle | Erkannte Knotentypen |
+|-------|----------------------|
+| **Sampler** | `KSampler`, `KSamplerAdvanced` |
+| **Checkpoint-Loader** | `CheckpointLoaderSimple`, `CheckpointLoader` |
+| **UNet-Loader** | `UNETLoader`, `DiffusionModelLoader` |
+| **Positiver Prompt** | `CLIPTextEncode`-Knoten im positiven Conditioning-Pfad |
+| **Negativer Prompt** | `CLIPTextEncode` oder `ConditioningZeroOut` im negativen Pfad |
+| **Latent-Quelle** | `EmptyLatentImage`, `EmptySD3LatentImage`, u. a. |
+| **Decoder** | `VAEDecode`, `VAEDecodeTiled` |
+| **Output** | `SaveImage`, `PreviewImage` |
+| **img2img-Pfade** | `VAEEncode`, `LoadImage` (für zukünftige Unterstützung) |
+
+### Analyse-Ergebnis in der Admin-UI
+
+In der Template-Tabelle zeigt die Spalte **Analyse**:
+
+- **✓ OK** – Workflow ist vollständig verwendbar, keine Warnungen
+- **⚠ N Warnung(en)** – verwendbar, aber z. B. mehrdeutiger Sampler, mehrere CLIP-Knoten
+- **✗ Nicht verwendbar** – kein Sampler gefunden, Parse-Fehler, o. ä.
+
+Der Tooltip beim Hover zeigt Details zu Warnungen, Fehlern, Sampler- und Loader-Anzahl.
+
+Mit dem **⟳**-Button wird die Analyse für ein bestehendes Template neu ausgeführt
+(`GET /api/admin/templates/{name}/analysis`).
+
+### Unterstützte Workflow-Typen
+
+| Workflow-Typ | Unterstützt | Hinweise |
+|---|---|---|
+| Standard SD 1.x/2.x/XL | ✓ | CheckpointLoaderSimple + KSampler |
+| FLUX / UNet-basiert | ✓ | UNETLoader/DiffusionModelLoader erkannt |
+| Dual-CLIP (FLUX) | ✓ | Beide CLIPTextEncode-Knoten werden befüllt |
+| `ConditioningZeroOut` negativ | ✓ | Negativ-Prompt wird nicht überschrieben |
+| Mehrstufige Sampler-Pipelines | ⚠ | Ausgabe-Sampler (→ VAEDecode) wird bevorzugt |
+| img2img / Inpainting | ⚠ | Strukturen erkannt, aber Parameter noch nicht vollständig injizierbar |
+| Komplexe Conditioning-Graphen | ⚠ | Warnung wenn kein CLIPTextEncode erreichbar |
+
+### Bekannte Einschränkungen
+
+- **img2img**: Der Analyse-Code erkennt `VAEEncode`- und `LoadImage`-Pfade und meldet
+  sie als „möglicher img2img-Workflow". Die tatsächliche Bildübergabe ist noch
+  **nicht implementiert** – die Architektur ist jedoch darauf vorbereitet.
+- Sehr ungewöhnliche Node-Typen für Sampler oder Loader (custom nodes) werden
+  unter Umständen nicht erkannt.
+- Bei Workflows mit mehr als einem Sampler wählt die WebUI den Sampler,
+  dessen Ausgabe direkt in einen `VAEDecode`-Knoten fließt. Ist das nicht
+  eindeutig, wird der erste gefundene Sampler verwendet (mit Warnung).
+
+### Logging
+
+Jede Generierungsanfrage wird in `data/generation.log` protokolliert (rotierend,
+max. 10 MB, 5 Backups):
+
+```
+2024-01-15 12:00:00.123 | INFO | REQUEST id=a1b2c3d4 template='default' checkpoint='v1-5.safetensors' ...
+2024-01-15 12:00:00.456 | INFO | ANALYSIS id=a1b2c3d4 usable=True sampler='5' model_type=checkpoint ...
+2024-01-15 12:00:01.789 | DEBUG | SET_POSITIVE id=a1b2c3d4 clip_node='2' text='a futuristic cityscape...'
+2024-01-15 12:00:01.791 | INFO | QUEUED id=a1b2c3d4 prompt_id=abc-123-...
+```
+
+Protokollierte Ereignisse:
+- `REQUEST` – eingehende Generierungsparameter
+- `TRANSLATED` – übersetzte Prompts
+- `TEMPLATE` – gewähltes Template
+- `ANALYSIS` – Graph-Analyse-Ergebnis (Rollen, Warnungen)
+- `SET_POSITIVE` / `SET_NEGATIVE` / `SET_SAMPLER` / `SET_LATENT` / `SET_MODEL` – Mutationen
+- `QUEUED` – erfolgreiche Übergabe an ComfyUI
+- `COMFYUI_REJECT` / `COMFYUI_UNREACHABLE` – ComfyUI-Fehler
+
+---
+
+## Vorbereitung für Image2Image
+
+Die Architektur ist für spätere img2img-Unterstützung vorbereitet:
+
+- `workflow_analyzer.py` erkennt bereits `VAEEncode`, `LoadImage` und
+  `VAEEncodeTiled`-Knoten und setzt `is_potentially_img2img = True`
+- Das Analyse-Ergebnis wird in den Template-Metadaten gespeichert
+- Der API-Endpunkt `GET /api/admin/templates/{name}/analysis` liefert vollständige
+  Graph-Metadaten, die für eine spätere img2img-Implementierung genutzt werden können
+- Zukünftig: `GenerateRequest` um `init_image`-Feld erweitern, `_build_workflow()`
+  erkennt `primary_latent_id` bereits als `VAEEncode`-Quelle und kann dort das
+  Eingabebild übergeben
 
 ---
 

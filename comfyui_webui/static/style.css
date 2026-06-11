@@ -300,3 +300,20 @@ button:disabled {
   margin-bottom: 0.25rem;
 }
 
+
+/* ── Analysis status badges ─────────────────────────────────── */
+.badge {
+  display: inline-block;
+  padding: 0.15rem 0.45rem;
+  border-radius: 5px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: default;
+}
+.badge-ok    { background: rgba(92,184,92,0.2);  color: #5cb85c; border: 1px solid rgba(92,184,92,0.4); }
+.badge-warn  { background: rgba(240,173,78,0.2); color: #f0ad4e; border: 1px solid rgba(240,173,78,0.4); }
+.badge-error { background: rgba(255,123,123,0.2); color: #ff7b7b; border: 1px solid rgba(255,123,123,0.4); }
+
+.tpl-analysis-cell { white-space: nowrap; }
+
