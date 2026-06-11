@@ -128,7 +128,14 @@ def analyze_template_file(path: Path) -> dict[str, Any]:
         raw = path.read_text(encoding="utf-8")
         data = json.loads(raw)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        result["parse_error"] = str(exc)
+        # Sanitize exception message: strip file paths / internal details from OSError
+        if isinstance(exc, OSError):
+            safe_msg = f"Dateifehler: {exc.strerror or 'Unbekannter Fehler'}"
+        elif isinstance(exc, json.JSONDecodeError):
+            safe_msg = f"JSON-Fehler: {exc.msg} (Zeile {exc.lineno})"
+        else:
+            safe_msg = type(exc).__name__
+        result["parse_error"] = safe_msg
         logger.warning("analyze_template_file: cannot parse %s: %s", path.name, exc)
         return result
 
