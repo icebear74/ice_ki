@@ -1682,9 +1682,8 @@ def _check_gallery_path(path: Path) -> Path:
 
 def _gallery_dir(username: str) -> Path:
     safe = _safe_username(username)
-    d = GALLERY_DIR / safe
+    d = _check_gallery_path(GALLERY_DIR / safe)
     d.mkdir(parents=True, exist_ok=True)
-    _check_gallery_path(d)
     return d
 
 
@@ -1713,8 +1712,11 @@ def _save_to_gallery(
 def _list_gallery(username: str) -> list[dict[str, Any]]:
     """Return all gallery metadata entries for *username*, newest first."""
     safe = _safe_username(username)
-    gdir = _check_gallery_path(GALLERY_DIR / safe) if (GALLERY_DIR / safe).exists() else None
-    if gdir is None or not gdir.exists():
+    try:
+        gdir = _check_gallery_path(GALLERY_DIR / safe)
+    except ValueError:
+        return []
+    if not gdir.exists():
         return []
     items: list[dict[str, Any]] = []
     for meta_path in sorted(gdir.glob("*.json"), reverse=True):
