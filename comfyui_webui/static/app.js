@@ -256,8 +256,10 @@ async function loadTemplates() {
 }
 
 async function loadMappings() {
+  const isAdmin = state.currentUser && state.currentUser.role === "admin";
   try {
-    const data = await api("/api/mappings");
+    const endpoint = isAdmin ? "/api/admin/mappings" : "/api/mappings";
+    const data = await api(endpoint);
     state.mappings = data.mappings || [];
   } catch {
     state.mappings = [];
@@ -271,12 +273,18 @@ async function loadMappings() {
   for (const m of state.mappings) {
     const opt = document.createElement("option");
     opt.value = m.name;
-    opt.textContent = m.display_name || m.name;
+    const inactive = isAdmin && m.enabled === false;
+    opt.textContent = (m.display_name || m.name) + (inactive ? " (x)" : "");
+    if (inactive) opt.style.color = "var(--muted, #888)";
     select.appendChild(opt);
   }
   const note = $("mappingNote");
   if (state.mappings.length === 0) {
     note.textContent = "Keine Mappings verfügbar. Ein Admin muss zuerst Mappings anlegen.";
+  } else if (isAdmin) {
+    const active = state.mappings.filter((m) => m.enabled !== false).length;
+    const inactive = state.mappings.length - active;
+    note.textContent = `${state.mappings.length} Mapping(s) gesamt – ${active} aktiv, ${inactive} inaktiv (x).`;
   } else {
     note.textContent = `${state.mappings.length} Mapping(s) verfügbar. Wähle eines, um die Vorgaben zu laden.`;
   }
