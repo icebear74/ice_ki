@@ -300,3 +300,170 @@ button:disabled {
   margin-bottom: 0.25rem;
 }
 
+
+/* ── Analysis status badges ─────────────────────────────────── */
+.badge {
+  display: inline-block;
+  padding: 0.15rem 0.45rem;
+  border-radius: 5px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: default;
+}
+.badge-ok    { background: rgba(92,184,92,0.2);  color: #5cb85c; border: 1px solid rgba(92,184,92,0.4); }
+.badge-warn  { background: rgba(240,173,78,0.2); color: #f0ad4e; border: 1px solid rgba(240,173,78,0.4); }
+.badge-error { background: rgba(255,123,123,0.2); color: #ff7b7b; border: 1px solid rgba(255,123,123,0.4); }
+
+/* ── Gallery ────────────────────────────────────────────────── */
+.gallery-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 0.75rem;
+  margin-top: 0.5rem;
+}
+
+.gallery-item {
+  background: #1a1c20;
+  border: 1px solid #3a3c45;
+  border-radius: 8px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+.gallery-item.selected {
+  border-color: var(--accent, #7c6aff);
+  box-shadow: 0 0 0 2px var(--accent, #7c6aff);
+}
+
+.gallery-item-checkbox {
+  position: absolute;
+  top: 0.4rem;
+  left: 0.4rem;
+  width: 1.1rem;
+  height: 1.1rem;
+  cursor: pointer;
+  accent-color: var(--accent, #7c6aff);
+  z-index: 2;
+}
+
+.gallery-item img {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  object-fit: cover;
+  display: block;
+  border-bottom: 1px solid #3a3c45;
+}
+
+.gallery-item-meta {
+  padding: 0.4rem 0.5rem 0.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  flex: 1;
+}
+
+.gallery-date {
+  font-size: 0.78rem;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gallery-seed,
+.gallery-model,
+.gallery-cfg-steps {
+  font-size: 0.72rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gallery-item-actions {
+  display: flex;
+  gap: 0.3rem;
+  padding: 0.4rem 0.5rem;
+  border-top: 1px solid #3a3c45;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.gallery-item-actions button {
+  flex: 1;
+  text-align: center;
+  min-width: 0;
+  font-size: 0.72rem;
+  padding: 0.2rem 0.35rem;
+}
+
+/* ── Result images in Generate tab ──────────────────────────── */
+.result-image-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.result-image-wrap img {
+  width: 100%;
+  border-radius: 8px;
+  border: 1px solid #434653;
+}
+
+.result-image-actions {
+  display: flex;
+  gap: 0.4rem;
+  justify-content: center;
+}
+
+/* ── Gallery metadata modal ─────────────────────────────────── */
+.gallery-meta-box {
+  width: 100%;
+  max-width: 660px;
+  max-height: 90vh;
+  overflow-y: auto;
+  padding: 1.25rem;
+}
+
+.gallery-meta-img {
+  width: 100%;
+  max-height: 260px;
+  object-fit: contain;
+  border-radius: 6px;
+  border: 1px solid #3a3c45;
+  margin-bottom: 0.75rem;
+}
+
+.gallery-meta-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+  margin-bottom: 0.5rem;
+}
+
+.gallery-meta-table th,
+.gallery-meta-table td {
+  text-align: left;
+  padding: 0.3rem 0.5rem;
+  border-bottom: 1px solid #3a3c45;
+  vertical-align: top;
+  word-break: break-word;
+}
+
+.gallery-meta-table th {
+  color: var(--muted);
+  font-weight: 600;
+  white-space: nowrap;
+  width: 40%;
+}
+
+/* ── Seed control in Generate tab ───────────────────────────── */
+.seed-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.5rem;
+  align-items: center;
+}
+

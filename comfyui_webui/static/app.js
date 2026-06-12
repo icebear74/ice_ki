@@ -10,6 +10,11 @@ const state = {
   templates: [],
   mappings: [],        // loaded from /api/mappings
   editingMappingName: null,  // null = create, string = editing existing
+  gallery: [],         // current gallery items
+  galleryUsername: "", // whose gallery is displayed
+  galleryMeta: null,   // currently open metadata item
+  testRunId: null,     // active test run ID
+  testRunPollTimer: null, // setInterval handle for test run polling
 };
 
 const $ = (id) => document.getElementById(id);
@@ -30,7 +35,13 @@ async function api(path, options = {}) {
     let detail = `${response.status} ${response.statusText}`;
     try {
       const payload = await response.json();
-      detail = payload.detail || JSON.stringify(payload);
+      if (typeof payload.detail === "string") {
+        detail = payload.detail;
+      } else if (payload.detail != null) {
+        detail = JSON.stringify(payload.detail);
+      } else {
+        detail = JSON.stringify(payload);
+      }
     } catch {
       // ignore
     }
@@ -57,8 +68,12 @@ function showApp(user) {
   // Admin tab only for admins
   if (user.role === "admin") {
     $("tabAdmin").classList.remove("hidden");
+    $("galleryAdminBar").classList.remove("hidden");
+    $("testModeBtn").classList.remove("hidden");
   } else {
     $("tabAdmin").classList.add("hidden");
+    $("galleryAdminBar").classList.add("hidden");
+    $("testModeBtn").classList.add("hidden");
   }
   // Erweitert tab only for users with can_advanced (admins always have it)
   const canAdv = user.can_advanced || user.role === "admin";
@@ -110,6 +125,10 @@ async function doLogout() {
   } catch {
     // ignore
   }
+  if (state.currentUser) {
+    try { sessionStorage.removeItem(`pendingJob_${state.currentUser.username}`); } catch {}
+    try { sessionStorage.removeItem(`lastImages_${state.currentUser.username}`); } catch {}
+  }
   state.currentUser = null;
   showLogin();
 }
@@ -118,7 +137,7 @@ async function doLogout() {
 // Tab switching
 // ---------------------------------------------------------------------------
 function showTab(name) {
-  const tabs = ["Generate", "Advanced", "Admin"];
+  const tabs = ["Generate", "Gallery", "Advanced", "Admin"];
   for (const t of tabs) {
     const panel = $(`panel${t}`);
     if (panel) panel.classList.toggle("hidden", t !== name);
@@ -130,6 +149,9 @@ function showTab(name) {
     loadAdminModelAliases();
     loadAdminUsers();
     populateMappingFormSelects();
+  }
+  if (name === "Gallery") {
+    loadGallery();
   }
 }
 
@@ -224,6 +246,8 @@ async function loadSamplers() {
 
 async function loadTemplates() {
   try {
+    // Admins fetch all templates (including inactive) via the same endpoint;
+    // the server tags each record with _inactive=true when not approved+enabled.
     const data = await api("/api/templates");
     state.templates = data.templates || [];
   } catch {
@@ -232,8 +256,10 @@ async function loadTemplates() {
 }
 
 async function loadMappings() {
+  const isAdmin = state.currentUser && state.currentUser.role === "admin";
   try {
-    const data = await api("/api/mappings");
+    const endpoint = isAdmin ? "/api/admin/mappings" : "/api/mappings";
+    const data = await api(endpoint);
     state.mappings = data.mappings || [];
   } catch {
     state.mappings = [];
@@ -247,12 +273,18 @@ async function loadMappings() {
   for (const m of state.mappings) {
     const opt = document.createElement("option");
     opt.value = m.name;
-    opt.textContent = m.display_name || m.name;
+    const inactive = isAdmin && m.enabled === false;
+    opt.textContent = (m.display_name || m.name) + (inactive ? " (x)" : "");
+    if (inactive) opt.style.color = "var(--muted, #888)";
     select.appendChild(opt);
   }
   const note = $("mappingNote");
   if (state.mappings.length === 0) {
     note.textContent = "Keine Mappings verfügbar. Ein Admin muss zuerst Mappings anlegen.";
+  } else if (isAdmin) {
+    const active = state.mappings.filter((m) => m.enabled !== false).length;
+    const inactive = state.mappings.length - active;
+    note.textContent = `${state.mappings.length} Mapping(s) gesamt – ${active} aktiv, ${inactive} inaktiv (x).`;
   } else {
     note.textContent = `${state.mappings.length} Mapping(s) verfügbar. Wähle eines, um die Vorgaben zu laden.`;
   }
@@ -292,11 +324,14 @@ function collectPayload() {
   const mapping = getActiveMapping();
   const canAdv = state.currentUser && (state.currentUser.can_advanced || state.currentUser.role === "admin");
 
+  // Seed is always taken from the dedicated genSeed field (visible to all users).
+  // The value -1 means "random" and is resolved server-side.
+  const seed = Number($("genSeed").value);
+
   // Generation parameters: use Erweitert overrides if user has permission,
   // otherwise fall back to mapping values
   const steps    = canAdv ? Number($("steps").value)     : (mapping ? (mapping.steps ?? 30)        : 30);
   const cfg      = canAdv ? Number($("cfg").value)       : (mapping ? (mapping.cfg ?? 7)           : 7);
-  const seed     = canAdv ? Number($("seed").value)      : (mapping ? (mapping.seed ?? -1)         : -1);
   const width    = canAdv ? Number($("width").value)     : (mapping ? (mapping.width ?? 1024)      : 1024);
   const height   = canAdv ? Number($("height").value)    : (mapping ? (mapping.height ?? 1024)     : 1024);
   const imgCount = canAdv ? Number($("imageCount").value): (mapping ? (mapping.image_count ?? 1)   : 1);
@@ -327,11 +362,136 @@ function showImages(urls) {
   const wrap = $("images");
   wrap.innerHTML = "";
   for (const url of urls) {
+    const container = document.createElement("div");
+    container.className = "result-image-wrap";
+
     const img = document.createElement("img");
-    img.src = `${url}&_=${Date.now()}`;
-    img.alt = "Generated image";
-    wrap.appendChild(img);
+    const sep = url.includes("?") ? "&" : "?";
+    const cacheBust = `${url}${sep}_=${Date.now()}`;
+    img.src = cacheBust;
+    img.alt = "Generiertes Bild";
+
+    const actions = document.createElement("div");
+    actions.className = "result-image-actions";
+
+    const dlJpg = document.createElement("button");
+    dlJpg.className = "btn-sm btn-secondary";
+    dlJpg.type = "button";
+    dlJpg.textContent = "⬇ JPG";
+    dlJpg.title = "Als JPEG herunterladen";
+    dlJpg.addEventListener("click", () => downloadImageFromUrl(cacheBust, "jpg"));
+
+    const dlPng = document.createElement("button");
+    dlPng.className = "btn-sm btn-secondary";
+    dlPng.type = "button";
+    dlPng.textContent = "⬇ PNG";
+    dlPng.title = "Als PNG herunterladen";
+    dlPng.addEventListener("click", () => downloadImageFromUrl(cacheBust, "png"));
+
+    actions.appendChild(dlJpg);
+    actions.appendChild(dlPng);
+    container.appendChild(img);
+    container.appendChild(actions);
+    wrap.appendChild(container);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Pending-job helpers (sessionStorage, survives page reload)
+// ---------------------------------------------------------------------------
+function savePendingJob(promptId, clientId) {
+  if (!state.currentUser) return;
+  try {
+    sessionStorage.setItem(
+      `pendingJob_${state.currentUser.username}`,
+      JSON.stringify({ promptId, clientId }),
+    );
+  } catch { /* quota – ignore */ }
+}
+
+function clearPendingJob() {
+  if (!state.currentUser) return;
+  try { sessionStorage.removeItem(`pendingJob_${state.currentUser.username}`); } catch {}
+}
+
+// ---------------------------------------------------------------------------
+// SSE progress connection (reusable for new jobs and reconnect after reload)
+// ---------------------------------------------------------------------------
+function connectToProgress(promptId, clientId) {
+  return new Promise((resolve, reject) => {
+    let resolved = false;
+    let reconnects = 0;
+    const MAX_RECONNECTS = 60; // ~3 min with 3s delays
+
+    showProgress(true);
+    setProgressBar(0, 0, null);
+    setButtons(true);
+
+    function connect() {
+      const url = `/api/comfy/progress/${encodeURIComponent(promptId)}?client_id=${encodeURIComponent(clientId)}`;
+      const evtSource = new EventSource(url);
+
+      evtSource.onmessage = (event) => {
+        reconnects = 0;
+        let data;
+        try { data = JSON.parse(event.data); } catch { return; }
+
+        if (data.type === "queued") {
+          const pos = data.position ? ` (Position ${data.position})` : "";
+          setStatus(`In Warteschlange${pos} …`);
+        } else if (data.type === "start") {
+          setStatus("Generiere …");
+        } else if (data.type === "progress") {
+          const { step, max, eta } = data;
+          const etaStr = eta != null ? ` · ETA ${eta}s` : "";
+          setStatus(`Generiere … Schritt ${step}/${max}${etaStr}`);
+          setProgressBar(step, max, eta);
+        } else if (data.type === "done") {
+          evtSource.close();
+          resolved = true;
+          showProgress(false);
+          const doneImages = data.images || [];
+          showImages(doneImages);
+          clearPendingJob();
+          if (doneImages.length > 0 && state.currentUser) {
+            try {
+              sessionStorage.setItem(
+                `lastImages_${state.currentUser.username}`,
+                JSON.stringify(doneImages),
+              );
+            } catch { /* quota exceeded – ignore */ }
+          }
+          setStatus(`Fertig. ${doneImages.length} Bild(er) gespeichert.`);
+          setButtons(false);
+          resolve(doneImages);
+        } else if (data.type === "error") {
+          evtSource.close();
+          resolved = true;
+          showProgress(false);
+          setButtons(false);
+          clearPendingJob();
+          reject(new Error(data.message));
+        }
+      };
+
+      evtSource.onerror = () => {
+        evtSource.close();
+        if (resolved) return;
+        if (reconnects >= MAX_RECONNECTS) {
+          showProgress(false);
+          setButtons(false);
+          clearPendingJob();
+          reject(new Error("Verbindung getrennt. Bitte Galerie auf fertige Bilder prüfen."));
+          return;
+        }
+        reconnects++;
+        setStatus(`Verbindung unterbrochen – Wiederverbindung ${reconnects} …`);
+        setTimeout(connect, 3000);
+      };
+    }
+
+    connect();
+  });
 }
 
 // Auto-refine prompt if changes are present; resolves to (possibly updated) prompt_de
@@ -458,53 +618,16 @@ async function generateImages() {
       body: JSON.stringify(payload),
     });
 
-    const { prompt_id, client_id, translated_prompt, translated_negative_prompt } = submitData;
+    const { prompt_id, client_id, translated_prompt, translated_negative_prompt, actual_seed } = submitData;
     if (translated_prompt) $("translatedPrompt").value = translated_prompt;
     if (translated_negative_prompt) $("translatedNegativePrompt").value = translated_negative_prompt;
+    // Show the actual seed that was used (important when seed was -1)
+    if (actual_seed != null) $("genSeed").value = actual_seed;
 
-    showProgress(true);
-    setProgressBar(0, 0, null);
+    // Persist job IDs so the page can reconnect to this job after a reload
+    savePendingJob(prompt_id, client_id);
 
-    await new Promise((resolve, reject) => {
-      const url = `/api/comfy/progress/${encodeURIComponent(prompt_id)}?client_id=${encodeURIComponent(client_id)}`;
-      const evtSource = new EventSource(url);
-
-      evtSource.onmessage = (event) => {
-        let data;
-        try { data = JSON.parse(event.data); } catch { return; }
-
-        if (data.type === "queued") {
-          const pos = data.position ? ` (Position ${data.position})` : "";
-          setStatus(`In Warteschlange${pos} …`);
-        } else if (data.type === "start") {
-          setStatus("Generiere …");
-        } else if (data.type === "progress") {
-          const { step, max, eta } = data;
-          const etaStr = eta != null ? ` · ETA ${eta}s` : "";
-          setStatus(`Generiere … Schritt ${step}/${max}${etaStr}`);
-          setProgressBar(step, max, eta);
-        } else if (data.type === "done") {
-          evtSource.close();
-          showProgress(false);
-          showImages(data.images || []);
-          setStatus(`Fertig. Bilder: ${(data.images || []).length}`);
-          setButtons(false);
-          resolve();
-        } else if (data.type === "error") {
-          evtSource.close();
-          showProgress(false);
-          setButtons(false);
-          reject(new Error(data.message));
-        }
-      };
-
-      evtSource.onerror = () => {
-        evtSource.close();
-        showProgress(false);
-        setButtons(false);
-        reject(new Error("Verbindung zum Fortschritt-Stream unterbrochen."));
-      };
-    });
+    await connectToProgress(prompt_id, client_id);
   } catch (err) {
     setButtons(false);
     showProgress(false);
@@ -662,7 +785,10 @@ function populateMappingFormSelects() {
     if (tpl.name === "default") continue;
     const opt = document.createElement("option");
     opt.value = tpl.name;
-    opt.textContent = tpl.display_name || tpl.name;
+    // Admins see all templates; inactive ones get an (x) prefix
+    const label = tpl.display_name || tpl.name;
+    opt.textContent = tpl._inactive ? `(x) ${label}` : label;
+    if (tpl._inactive) opt.style.color = "var(--muted)";
     tplSel.appendChild(opt);
   }
   if (prevTpl) tplSel.value = prevTpl;
@@ -774,9 +900,34 @@ async function saveMapping() {
 // ---------------------------------------------------------------------------
 // Admin – templates
 // ---------------------------------------------------------------------------
+
+function _analysisStatusBadge(tpl) {
+  const ana = tpl.analysis;
+  if (!ana) return '<span title="Noch nicht analysiert" style="opacity:0.5">–</span>';
+  const warns = (ana.warnings || []).length;
+  const errs = (ana.errors || []).length;
+  const parseErr = ana.parse_error ? `Parse-Fehler: ${ana.parse_error}\n` : "";
+  const warnText = warns ? `Warnungen:\n• ${(ana.warnings || []).join("\n• ")}\n` : "";
+  const errText = errs ? `Fehler:\n• ${(ana.errors || []).join("\n• ")}\n` : "";
+  const extras = [
+    `Sampler: ${ana.sampler_count ?? "?"}`,
+    `Loader: ${ana.model_loader_count ?? "?"}`,
+    ana.negative_is_zero_out ? "Negativ: ZeroOut (fest)" : "",
+    ana.is_potentially_img2img ? "⚠ Möglicher img2img-Pfad" : "",
+  ].filter(Boolean).join(" | ");
+  const title = `${parseErr}${errText}${warnText}${extras}`.trim();
+  if (!ana.is_usable) {
+    return `<span class="badge badge-error" title="${escHtml(title)}">✗ Nicht verwendbar</span>`;
+  }
+  if (warns > 0) {
+    return `<span class="badge badge-warn" title="${escHtml(title)}">⚠ ${warns} Warnung${warns > 1 ? "en" : ""}</span>`;
+  }
+  return `<span class="badge badge-ok" title="${escHtml(title)}">✓ OK</span>`;
+}
+
 async function loadAdminTemplates() {
   const tbody = $("adminTemplateBody");
-  tbody.innerHTML = "<tr><td colspan='7' class='hint'>Lade …</td></tr>";
+  tbody.innerHTML = "<tr><td colspan='8' class='hint'>Lade …</td></tr>";
   try {
     const data = await api("/api/admin/templates");
     tbody.innerHTML = "";
@@ -801,6 +952,10 @@ async function loadAdminTemplates() {
             <option value="unet" ${mt === "unet" ? "selected" : ""}>UNet</option>
             <option value="any" ${mt === "any" ? "selected" : ""}>Beliebig</option>
           </select>
+        </td>
+        <td class="tpl-analysis-cell">
+          ${_analysisStatusBadge(tpl)}
+          ${tpl.filename ? `<button class="btn-sm tpl-reanalyze" data-name="${escHtml(tpl.name)}" type="button" title="Analyse neu ausführen" style="margin-left:0.25rem">&#8635;</button>` : ""}
         </td>
         <td><input type="checkbox" class="tpl-approved" data-name="${escHtml(tpl.name)}" ${tpl.approved ? "checked" : ""} /></td>
         <td><input type="checkbox" class="tpl-enabled" data-name="${escHtml(tpl.name)}" ${tpl.enabled ? "checked" : ""} /></td>
@@ -865,6 +1020,20 @@ async function loadAdminTemplates() {
         }
       });
     });
+    tbody.querySelectorAll(".tpl-reanalyze").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const name = btn.dataset.name;
+        const cell = btn.closest(".tpl-analysis-cell");
+        cell.innerHTML = '<small class="hint">Analysiere…</small>';
+        try {
+          const result = await api(`/api/admin/templates/${encodeURIComponent(name)}/analysis`, { method: "GET" });
+          // Reload table to show updated analysis
+          await loadAdminTemplates();
+        } catch (err) {
+          cell.innerHTML = `<span class="badge badge-error" title="${escHtml(err.message)}">✗ Fehler</span>`;
+        }
+      });
+    });
     tbody.querySelectorAll(".tpl-approved, .tpl-enabled").forEach((cb) => {
       cb.addEventListener("change", async () => {
         const name = cb.dataset.name;
@@ -895,7 +1064,7 @@ async function loadAdminTemplates() {
       });
     });
   } catch (err) {
-    tbody.innerHTML = `<tr><td colspan='7' class='error'>${escHtml(err.message)}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan='8' class='error'>${escHtml(err.message)}</td></tr>`;
   }
 }
 
@@ -1072,7 +1241,7 @@ async function saveModelAlias() {
 // ---------------------------------------------------------------------------
 async function loadAdminUsers() {
   const tbody = $("adminUserBody");
-  tbody.innerHTML = "<tr><td colspan='6' class='hint'>Lade …</td></tr>";
+  tbody.innerHTML = "<tr><td colspan='7' class='hint'>Lade …</td></tr>";
   try {
     const data = await api("/api/admin/users");
     tbody.innerHTML = "";
@@ -1094,6 +1263,12 @@ async function loadAdminUsers() {
           ${!isSelf
             ? `<button class="btn-sm ${user.disabled ? "" : "btn-danger"} user-toggle" data-name="${escHtml(user.username)}" data-disabled="${user.disabled}" type="button">${user.disabled ? "Aktivieren" : "Deaktivieren"}</button>`
             : "(eigenes Konto)"
+          }
+        </td>
+        <td>
+          ${!isSelf
+            ? `<button class="btn-sm btn-danger user-delete" data-name="${escHtml(user.username)}" type="button">L&ouml;schen</button>`
+            : ""
           }
         </td>
       `;
@@ -1127,8 +1302,19 @@ async function loadAdminUsers() {
         }
       });
     });
+    tbody.querySelectorAll(".user-delete").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        if (!confirm(`Benutzer "${btn.dataset.name}" und seine gesamte Galerie unwiderruflich löschen?`)) return;
+        try {
+          await api(`/api/admin/users/${encodeURIComponent(btn.dataset.name)}`, { method: "DELETE" });
+          await loadAdminUsers();
+        } catch (err) {
+          alert(`Fehler: ${err.message}`);
+        }
+      });
+    });
   } catch (err) {
-    tbody.innerHTML = `<tr><td colspan='6' class='error'>${escHtml(err.message)}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan='7' class='error'>${escHtml(err.message)}</td></tr>`;
   }
 }
 
@@ -1223,6 +1409,436 @@ async function submitChangePw() {
 }
 
 // ---------------------------------------------------------------------------
+// Gallery
+// ---------------------------------------------------------------------------
+function updateGalleryDeleteSelectedBtn() {
+  const btn = $("galleryDeleteSelectedBtn");
+  if (!btn) return;
+  const selected = document.querySelectorAll("#galleryGrid .gallery-item-checkbox:checked");
+  if (selected.length > 0) {
+    btn.classList.remove("hidden");
+    btn.textContent = `🗑 Ausgewählte löschen (${selected.length})`;
+  } else {
+    btn.classList.add("hidden");
+  }
+}
+
+async function loadGallery(username) {
+  const status = $("galleryStatus");
+  const grid = $("galleryGrid");
+  const title = $("galleryTitle");
+  status.textContent = "Lade …";
+  grid.innerHTML = "";
+
+  try {
+    let data;
+    if (username) {
+      data = await api(`/api/admin/gallery/${encodeURIComponent(username)}`);
+    } else {
+      data = await api("/api/gallery");
+    }
+    state.gallery = data.items || [];
+    state.galleryUsername = data.username || (state.currentUser ? state.currentUser.username : "");
+    title.textContent = username
+      ? `Galerie: ${escHtml(data.username)}`
+      : "Meine Galerie";
+    renderGallery(state.gallery, state.galleryUsername);
+    status.textContent = state.gallery.length === 0
+      ? "Noch keine Bilder in der Galerie."
+      : `${state.gallery.length} Bild(er)`;
+  } catch (err) {
+    status.textContent = `Fehler: ${err.message}`;
+    status.classList.add("error");
+  }
+}
+
+function renderGallery(items, username) {
+  const grid = $("galleryGrid");
+  grid.innerHTML = "";
+  const isAdmin = state.currentUser && state.currentUser.role === "admin";
+
+  for (const item of items) {
+    const card = document.createElement("div");
+    card.className = "gallery-item";
+    card.dataset.id = item.id;
+
+    const dateStr = item.created_at
+      ? new Date(item.created_at).toLocaleString("de-DE", { dateStyle: "short", timeStyle: "short" })
+      : "";
+    const seedStr = item.actual_seed != null ? `Seed: ${item.actual_seed}` : "";
+    const modelStr = item.checkpoint ? item.checkpoint.replace(/^.*[\\/]/, "").replace(/\.[^.]+$/, "") : "";
+    const cfgStepsStr = (item.steps || item.cfg)
+      ? [item.steps ? `Steps: ${item.steps}` : null, item.cfg ? `CFG: ${item.cfg}` : null]
+          .filter(Boolean).join(" · ")
+      : "";
+
+    const imgUrl = `/api/gallery/image/${encodeURIComponent(item.id)}?_=${Date.now()}`;
+
+    card.innerHTML = `
+      <input type="checkbox" class="gallery-item-checkbox" title="Bild ausw&auml;hlen" />
+      <img src="${imgUrl}" alt="Galeriebild" loading="lazy" />
+      <div class="gallery-item-meta">
+        <span class="gallery-date">${escHtml(dateStr)}</span>
+        <span class="gallery-seed hint">${escHtml(seedStr)}</span>
+        ${modelStr ? `<span class="gallery-model hint" title="${escHtml(item.checkpoint || "")}">${escHtml(modelStr)}</span>` : ""}
+        ${cfgStepsStr ? `<span class="gallery-cfg-steps hint">${escHtml(cfgStepsStr)}</span>` : ""}
+      </div>
+      <div class="gallery-item-actions">
+        <button class="btn-sm gallery-info-btn" data-id="${escHtml(item.id)}" type="button" title="Details anzeigen">&#9432;</button>
+        <button class="btn-sm btn-secondary gallery-dl-jpg" data-id="${escHtml(item.id)}" type="button" title="Als JPEG herunterladen">&#11015;JPG</button>
+        <button class="btn-sm btn-secondary gallery-dl-png" data-id="${escHtml(item.id)}" type="button" title="Als PNG herunterladen">&#11015;PNG</button>
+        <button class="btn-sm btn-danger gallery-del-btn" data-id="${escHtml(item.id)}" data-user="${escHtml(username)}" type="button" title="Bild l&ouml;schen">&#128465;</button>
+      </div>
+    `;
+    grid.appendChild(card);
+  }
+
+  // Checkbox: toggle selected class and update toolbar button
+  grid.querySelectorAll(".gallery-item-checkbox").forEach((cb) => {
+    cb.addEventListener("change", () => {
+      cb.closest(".gallery-item").classList.toggle("selected", cb.checked);
+      updateGalleryDeleteSelectedBtn();
+    });
+  });
+
+  grid.querySelectorAll(".gallery-info-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const item = state.gallery.find((x) => x.id === btn.dataset.id);
+      if (item) openGalleryMeta(item);
+    });
+  });
+
+  grid.querySelectorAll(".gallery-dl-jpg, .gallery-dl-png").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const format = btn.classList.contains("gallery-dl-jpg") ? "jpg" : "png";
+      const imgUrl = `/api/gallery/image/${encodeURIComponent(btn.dataset.id)}`;
+      downloadImageFromUrl(imgUrl, format);
+    });
+  });
+
+  grid.querySelectorAll(".gallery-del-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      if (!confirm("Dieses Bild wirklich aus der Galerie löschen?")) return;
+      try {
+        const isAdmin = state.currentUser && state.currentUser.role === "admin";
+        const targetUser = btn.dataset.user;
+        const ownUser = state.currentUser ? state.currentUser.username : "";
+        if (isAdmin && targetUser && targetUser !== ownUser) {
+          await api(`/api/admin/gallery/${encodeURIComponent(targetUser)}/${encodeURIComponent(btn.dataset.id)}`, { method: "DELETE" });
+        } else {
+          await api(`/api/gallery/${encodeURIComponent(btn.dataset.id)}`, { method: "DELETE" });
+        }
+        await loadGallery(targetUser !== ownUser ? targetUser : null);
+      } catch (err) {
+        alert(`Fehler: ${err.message}`);
+      }
+    });
+  });
+
+  updateGalleryDeleteSelectedBtn();
+}
+
+function openGalleryMeta(item) {
+  state.galleryMeta = item;
+  $("galleryMetaTitle").textContent = item.created_at
+    ? `Bild vom ${new Date(item.created_at).toLocaleString("de-DE")}`
+    : "Bilddetails";
+
+  const imgUrl = `/api/gallery/image/${encodeURIComponent(item.id)}?_=${Date.now()}`;
+
+  const rows = [
+    ["Prompt (Deutsch)", item.prompt_de],
+    ["Neg. Prompt (Deutsch)", item.negative_prompt_de],
+    ["Übersetzter Prompt (Englisch)", item.translated_prompt],
+    ["Übersetzter Neg. Prompt (Englisch)", item.translated_negative_prompt],
+    ["Template", item.workflow_template],
+    ["Modell / Checkpoint", item.checkpoint],
+    ["Ollama-Modell", item.ollama_model],
+    ["Seed (tatsächlich)", item.actual_seed],
+    ["Steps", item.steps],
+    ["CFG-Scale", item.cfg],
+    ["Sampler", item.sampler],
+    ["Scheduler", item.scheduler],
+    ["Größe", item.width && item.height ? `${item.width} × ${item.height} px` : null],
+    ["Anzahl Bilder", item.image_count],
+    ["Benutzer", item.username],
+  ];
+
+  let html = `<img src="${imgUrl}" alt="Galeriebild" class="gallery-meta-img" />`;
+  html += `<table class="gallery-meta-table">`;
+  for (const [label, val] of rows) {
+    if (val == null || val === "" || val === 0 && label !== "Seed (tatsächlich)") continue;
+    html += `<tr><th>${escHtml(label)}</th><td>${escHtml(String(val))}</td></tr>`;
+  }
+  html += `</table>`;
+
+  $("galleryMetaContent").innerHTML = html;
+  $("galleryMetaOverlay").classList.remove("hidden");
+
+  // Wire up download buttons in modal
+  $("galleryMetaDlJpgBtn").onclick = () => downloadImageFromUrl(imgUrl, "jpg");
+  $("galleryMetaDlPngBtn").onclick = () => downloadImageFromUrl(imgUrl, "png");
+}
+
+function closeGalleryMeta() {
+  $("galleryMetaOverlay").classList.add("hidden");
+  state.galleryMeta = null;
+}
+
+function applyGallerySettings() {
+  const item = state.galleryMeta;
+  if (!item) return;
+  closeGalleryMeta();
+  showTab("Generate");
+  if (item.prompt_de) $("promptDe").value = item.prompt_de;
+  if (item.negative_prompt_de) $("negativePrompt").value = item.negative_prompt_de;
+  if (item.actual_seed != null) $("genSeed").value = item.actual_seed;
+  if (item.translated_prompt) $("translatedPrompt").value = item.translated_prompt;
+  if (item.translated_negative_prompt) $("translatedNegativePrompt").value = item.translated_negative_prompt;
+  // Advanced fields (applied even if tab is hidden – stored and used on generate)
+  if (item.steps) $("steps").value = item.steps;
+  if (item.cfg) $("cfg").value = item.cfg;
+  if (item.width) $("width").value = item.width;
+  if (item.height) $("height").value = item.height;
+  if (item.sampler && state.samplers.includes(item.sampler)) $("sampler").value = item.sampler;
+  if (item.scheduler && state.schedulers.includes(item.scheduler)) $("scheduler").value = item.scheduler;
+  if (item.image_count) $("imageCount").value = item.image_count;
+  setStatus("Einstellungen aus Galerie übernommen.");
+}
+
+async function loadAdminGalleryUsers() {
+  const sel = $("galleryUserSelect");
+  sel.innerHTML = '<option value="">– Eigene Galerie –</option>';
+  try {
+    const data = await api("/api/admin/gallery");
+    for (const u of data.users || []) {
+      const opt = document.createElement("option");
+      opt.value = u.username;
+      opt.textContent = `${u.username} (${u.count} Bild${u.count !== 1 ? "er" : ""})`;
+      sel.appendChild(opt);
+    }
+  } catch {
+    // ignore – admin panel will show an error if it fails
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Admin – Test mode (parametric sweep over steps / cfg)
+// ---------------------------------------------------------------------------
+
+function openTestMode() {
+  const panel = $("testModePanel");
+  if (!panel) return;
+  const isHidden = panel.classList.contains("hidden");
+  panel.classList.toggle("hidden", !isHidden);
+  if (isHidden) {
+    // Pre-fill from Erweitert tab values
+    const stepsVal = $("steps") ? $("steps").value : "20";
+    const cfgVal   = $("cfg")   ? $("cfg").value   : "7";
+    $("tmStepsFrom").value = stepsVal;
+    $("tmStepsTo").value   = stepsVal;
+    $("tmCfgFrom").value   = cfgVal;
+    $("tmCfgTo").value     = cfgVal;
+    $("tmCfgStep").value   = "0.5";
+    updateTestRunCombinationCount();
+    // If there's an active run, reconnect to it
+    if (state.testRunId) {
+      _startTestRunPolling(state.testRunId);
+    }
+  }
+}
+
+function updateTestRunCombinationCount() {
+  const stepsFrom = parseInt($("tmStepsFrom").value) || 0;
+  const stepsTo   = parseInt($("tmStepsTo").value)   || 0;
+  const cfgFrom   = parseFloat($("tmCfgFrom").value) || 0;
+  const cfgTo     = parseFloat($("tmCfgTo").value)   || 0;
+  const cfgStep   = parseFloat($("tmCfgStep").value) || 0.5;
+
+  const nSteps = Math.max(0, stepsTo - stepsFrom + 1);
+  let nCfg = 0;
+  if (cfgStep > 0) {
+    let v = cfgFrom;
+    while (v <= cfgTo + 1e-9) { nCfg++; v = Math.round((v + cfgStep) * 10000) / 10000; }
+  } else {
+    nCfg = 1;
+  }
+  const total = nSteps * nCfg;
+  const info = $("tmCombinationInfo");
+  if (info) info.textContent = `= ${total} Kombinationen`;
+}
+
+async function startTestRun() {
+  const mapping = getActiveMapping();
+  if (!mapping) {
+    alert("Bitte zuerst ein Mapping auswählen.");
+    return;
+  }
+  const promptDe = $("promptDe").value.trim();
+  if (!promptDe) {
+    alert("Bitte einen deutschen Prompt eingeben.");
+    return;
+  }
+
+  const stepsFrom = parseInt($("tmStepsFrom").value);
+  const stepsTo   = parseInt($("tmStepsTo").value);
+  const cfgFrom   = parseFloat($("tmCfgFrom").value);
+  const cfgTo     = parseFloat($("tmCfgTo").value);
+  const cfgStep   = parseFloat($("tmCfgStep").value);
+
+  if (isNaN(stepsFrom) || isNaN(stepsTo) || stepsFrom < 1 || stepsTo < stepsFrom) {
+    alert("Steps: Bitte gültige Werte eingeben (von ≤ bis, min. 1).");
+    return;
+  }
+  if (isNaN(cfgFrom) || isNaN(cfgTo) || cfgFrom < 0 || cfgTo < cfgFrom) {
+    alert("CFG: Bitte gültige Werte eingeben (von ≤ bis, min. 0).");
+    return;
+  }
+  if (isNaN(cfgStep) || cfgStep <= 0) {
+    alert("CFG-Schritt muss größer als 0 sein.");
+    return;
+  }
+
+  const canAdv = state.currentUser && (state.currentUser.can_advanced || state.currentUser.role === "admin");
+  const seed = Number($("genSeed").value);
+  const steps    = canAdv ? Number($("steps").value)      : (mapping.steps ?? 30);
+  const cfg      = canAdv ? Number($("cfg").value)        : (mapping.cfg ?? 7);
+  const width    = canAdv ? Number($("width").value)      : (mapping.width ?? 1024);
+  const height   = canAdv ? Number($("height").value)     : (mapping.height ?? 1024);
+  const sampler  = canAdv ? $("sampler").value.trim()     : (mapping.sampler || "euler");
+  const sched    = canAdv ? $("scheduler").value.trim()   : (mapping.scheduler || "normal");
+  const imgCount = canAdv ? Number($("imageCount").value) : (mapping.image_count ?? 1);
+
+  const translatedPrompt = $("translatedPrompt").value.trim() || null;
+  const translatedNeg    = $("translatedNegativePrompt").value.trim() || null;
+
+  const body = {
+    prompt_de: promptDe,
+    negative_prompt: $("negativePrompt").value.trim(),
+    ollama_model: mapping.ollama_model || "",
+    translated_prompt: translatedPrompt,
+    translated_negative_prompt: translatedNeg,
+    checkpoint: mapping.checkpoint || null,
+    workflow_template: mapping.template_name || "default",
+    seed,
+    width,
+    height,
+    sampler,
+    scheduler: sched,
+    image_count: imgCount,
+    steps_from: stepsFrom,
+    steps_to: stepsTo,
+    cfg_from: cfgFrom,
+    cfg_to: cfgTo,
+    cfg_step: cfgStep,
+  };
+
+  $("tmStartBtn").disabled = true;
+  _setTestRunStatus("Starte Testlauf …", false);
+
+  try {
+    const data = await api("/api/admin/testrun", { method: "POST", body: JSON.stringify(body) });
+    state.testRunId = data.run_id;
+    // Persist so reconnect after reload works
+    try { sessionStorage.setItem("pendingTestRun", data.run_id); } catch {}
+    _startTestRunPolling(data.run_id);
+  } catch (err) {
+    $("tmStartBtn").disabled = false;
+    _setTestRunStatus(`Fehler: ${err.message}`, true);
+  }
+}
+
+function _setTestRunStatus(msg, isError) {
+  const el = $("tmStatus");
+  if (!el) return;
+  el.textContent = msg;
+  el.classList.toggle("error", !!isError);
+}
+
+function _setTestRunProgress(current, total) {
+  const bar = $("tmProgressBar");
+  const label = $("tmProgressLabel");
+  const wrap = $("tmProgressWrap");
+  if (!bar || !label || !wrap) return;
+  wrap.classList.remove("hidden");
+  const pct = total > 0 ? Math.round((current / total) * 100) : 0;
+  bar.style.width = `${pct}%`;
+  label.textContent = `${current} / ${total} (${pct}%)`;
+}
+
+function _startTestRunPolling(runId) {
+  _stopTestRunPolling();
+  _pollTestRun(runId); // immediate first poll
+  state.testRunPollTimer = setInterval(() => _pollTestRun(runId), 2000);
+}
+
+function _stopTestRunPolling() {
+  if (state.testRunPollTimer) {
+    clearInterval(state.testRunPollTimer);
+    state.testRunPollTimer = null;
+  }
+}
+
+async function _pollTestRun(runId) {
+  try {
+    const data = await api(`/api/admin/testrun/${encodeURIComponent(runId)}`);
+    _setTestRunProgress(data.current, data.total);
+
+    const seedInfo = data.seed_used != null ? ` · Seed: ${data.seed_used}` : "";
+    if (data.status === "running" || data.status === "starting") {
+      _setTestRunStatus(
+        `Läuft … ${data.current}/${data.total} Kombinationen${seedInfo}`,
+        false,
+      );
+      $("tmStartBtn").disabled = true;
+      $("tmCancelBtn").classList.remove("hidden");
+    } else if (data.status === "done") {
+      _stopTestRunPolling();
+      state.testRunId = null;
+      try { sessionStorage.removeItem("pendingTestRun"); } catch {}
+      const errInfo = data.errors.length > 0 ? ` · ${data.errors.length} Fehler` : "";
+      _setTestRunStatus(
+        `✓ Fertig – ${data.gallery_ids.length} Bild(er) gespeichert${seedInfo}${errInfo}`,
+        data.errors.length > 0,
+      );
+      $("tmStartBtn").disabled = false;
+      $("tmCancelBtn").classList.add("hidden");
+      $("tmGalleryBtn").classList.remove("hidden");
+      if (data.errors.length > 0) {
+        const errEl = $("tmErrors");
+        if (errEl) errEl.textContent = data.errors.join("\n");
+      }
+    } else if (data.status === "cancelled") {
+      _stopTestRunPolling();
+      state.testRunId = null;
+      try { sessionStorage.removeItem("pendingTestRun"); } catch {}
+      _setTestRunStatus(`Abgebrochen (${data.current}/${data.total} erledigt${seedInfo})`, false);
+      $("tmStartBtn").disabled = false;
+      $("tmCancelBtn").classList.add("hidden");
+    } else if (data.status === "error") {
+      _stopTestRunPolling();
+      state.testRunId = null;
+      try { sessionStorage.removeItem("pendingTestRun"); } catch {}
+      _setTestRunStatus(`Fehler: ${data.error || "Unbekannter Fehler"}`, true);
+      $("tmStartBtn").disabled = false;
+      $("tmCancelBtn").classList.add("hidden");
+    }
+  } catch {
+    // Transient error – keep polling
+  }
+}
+
+async function cancelTestRun() {
+  if (!state.testRunId) return;
+  try {
+    await api(`/api/admin/testrun/${encodeURIComponent(state.testRunId)}`, { method: "DELETE" });
+    _setTestRunStatus("Abbruch angefordert …", false);
+  } catch (err) {
+    _setTestRunStatus(`Fehler beim Abbruch: ${err.message}`, true);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Utility
 // ---------------------------------------------------------------------------
 function escHtml(str) {
@@ -1231,6 +1847,50 @@ function escHtml(str) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+// ---------------------------------------------------------------------------
+// Image download helper
+// ---------------------------------------------------------------------------
+async function downloadImageFromUrl(url, format) {
+  try {
+    const resp = await fetch(url, { credentials: "same-origin" });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const sourceBlob = await resp.blob();
+
+    const img = await createImageBitmap(sourceBlob);
+    const canvas = document.createElement("canvas");
+    canvas.width = img.width;
+    canvas.height = img.height;
+    const ctx = canvas.getContext("2d");
+    if (format === "jpg") {
+      // Fill white background so transparent PNGs convert cleanly to JPEG
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
+    ctx.drawImage(img, 0, 0);
+    img.close && img.close();
+
+    const mimeType = format === "jpg" ? "image/jpeg" : "image/png";
+    const quality  = format === "jpg" ? 0.92 : undefined;
+    const outBlob  = await new Promise((resolve) => canvas.toBlob(resolve, mimeType, quality));
+
+    // Generate a random filename
+    const randPart = Array.from(crypto.getRandomValues(new Uint8Array(8)))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+    const filename = `img_${randPart}.${format}`;
+
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(outBlob);
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(a.href);
+  } catch (err) {
+    alert(`Download fehlgeschlagen: ${err.message}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1243,8 +1903,53 @@ async function initAppData() {
   await loadOllamaModels().catch((e) => errors.push(`Ollama: ${e.message}`));
   await loadCheckpoints().catch((e) => errors.push(`Checkpoints: ${e.message}`));
   await loadSamplers();
+  if (state.currentUser && state.currentUser.role === "admin") {
+    await loadAdminGalleryUsers().catch(() => {});
+  }
+  // Restore session state after reload
+  if (state.currentUser) {
+    // Priority 1: reconnect to an in-progress/queued job
+    let reconnected = false;
+    try {
+      const stored = sessionStorage.getItem(`pendingJob_${state.currentUser.username}`);
+      if (stored) {
+        const { promptId, clientId } = JSON.parse(stored);
+        if (promptId && clientId) {
+          setStatus("Wiederverbindung zu laufendem Auftrag …");
+          reconnected = true;
+          connectToProgress(promptId, clientId).catch((err) => {
+            setStatus(`Auftrag beendet: ${err.message}`, true);
+          });
+        }
+      }
+    } catch { /* corrupt storage – ignore */ }
+
+    // Priority 2: show last finished images (only when no active job)
+    if (!reconnected) {
+      try {
+        const stored = sessionStorage.getItem(`lastImages_${state.currentUser.username}`);
+        if (stored) {
+          const urls = JSON.parse(stored);
+          if (Array.isArray(urls) && urls.length > 0) {
+            showImages(urls);
+            setStatus("Letzte Bilder der Sitzung wiederhergestellt. Galerie für ältere Bilder.");
+          }
+        }
+      } catch { /* corrupt storage – ignore */ }
+    }
+  }
   if (errors.length > 0) {
     setStatus(errors.join(" | "), true);
+  }
+  // Reconnect to a pending test run (admin only)
+  if (state.currentUser && state.currentUser.role === "admin") {
+    try {
+      const storedRunId = sessionStorage.getItem("pendingTestRun");
+      if (storedRunId) {
+        state.testRunId = storedRunId;
+        _startTestRunPolling(storedRunId);
+      }
+    } catch { /* ignore */ }
   }
 }
 
@@ -1265,6 +1970,7 @@ $("cpSubmitBtn").addEventListener("click", submitChangePw);
 $("cpCancelBtn").addEventListener("click", closeChangePw);
 $("cpNewPw2").addEventListener("keydown", (e) => { if (e.key === "Enter") submitChangePw(); });
 $("tabGenerate").addEventListener("click", () => showTab("Generate"));
+$("tabGallery").addEventListener("click", () => showTab("Gallery"));
 $("tabAdvanced").addEventListener("click", () => showTab("Advanced"));
 $("tabAdmin").addEventListener("click", () => showTab("Admin"));
 
@@ -1343,6 +2049,97 @@ $("addUserCancelBtn").addEventListener("click", () => {
   $("addUserForm").classList.add("hidden");
 });
 $("aliasSaveBtn").addEventListener("click", saveModelAlias);
+
+// ---------------------------------------------------------------------------
+// Event listeners – seed field
+// ---------------------------------------------------------------------------
+$("genSeedRandomBtn").addEventListener("click", () => {
+  // Generate a random uint32 seed (0 to 2^32-1) and put it in the seed field
+  const arr = new Uint32Array(1);
+  crypto.getRandomValues(arr);
+  $("genSeed").value = arr[0];
+});
+
+// ---------------------------------------------------------------------------
+// Event listeners – gallery
+// ---------------------------------------------------------------------------
+$("galleryReloadBtn").addEventListener("click", () => {
+  const sel = $("galleryUserSelect");
+  const user = sel && sel.value ? sel.value : null;
+  loadGallery(user);
+});
+
+$("galleryDeleteSelectedBtn").addEventListener("click", async () => {
+  const checked = [...document.querySelectorAll("#galleryGrid .gallery-item-checkbox:checked")];
+  if (checked.length === 0) return;
+  if (!confirm(`Wirklich ${checked.length} ausgewählte Bild(er) löschen?`)) return;
+  const sel = $("galleryUserSelect");
+  const targetUser = sel && sel.value ? sel.value : null;
+  const ownUser = state.currentUser ? state.currentUser.username : "";
+  const isAdmin = state.currentUser && state.currentUser.role === "admin";
+  try {
+    for (const cb of checked) {
+      const card = cb.closest(".gallery-item");
+      const id = card.dataset.id;
+      if (isAdmin && targetUser && targetUser !== ownUser) {
+        await api(`/api/admin/gallery/${encodeURIComponent(targetUser)}/${encodeURIComponent(id)}`, { method: "DELETE" });
+      } else {
+        await api(`/api/gallery/${encodeURIComponent(id)}`, { method: "DELETE" });
+      }
+    }
+    await loadGallery(targetUser);
+    if (isAdmin) await loadAdminGalleryUsers().catch(() => {});
+  } catch (err) {
+    alert(`Fehler: ${err.message}`);
+  }
+});
+
+$("galleryDeleteAllBtn").addEventListener("click", async () => {
+  const sel = $("galleryUserSelect");
+  const targetUser = sel && sel.value ? sel.value : null;
+  const displayName = targetUser || (state.currentUser ? state.currentUser.username : "dich");
+  if (!confirm(`Wirklich ALLE Bilder der Galerie von „${displayName}" löschen?`)) return;
+  try {
+    if (targetUser && state.currentUser && targetUser !== state.currentUser.username) {
+      await api(`/api/admin/gallery/${encodeURIComponent(targetUser)}`, { method: "DELETE" });
+    } else {
+      await api("/api/gallery", { method: "DELETE" });
+    }
+    await loadGallery(targetUser);
+    if (state.currentUser && state.currentUser.role === "admin") {
+      await loadAdminGalleryUsers().catch(() => {});
+    }
+  } catch (err) {
+    alert(`Fehler: ${err.message}`);
+  }
+});
+
+$("galleryLoadUserBtn").addEventListener("click", () => {
+  const sel = $("galleryUserSelect");
+  loadGallery(sel.value || null);
+});
+
+$("galleryMetaCloseBtn").addEventListener("click", closeGalleryMeta);
+$("galleryMetaCloseBtn2").addEventListener("click", closeGalleryMeta);
+$("galleryMetaApplyBtn").addEventListener("click", applyGallerySettings);
+$("galleryMetaOverlay").addEventListener("click", (e) => {
+  if (e.target === $("galleryMetaOverlay")) closeGalleryMeta();
+});
+
+// ---------------------------------------------------------------------------
+// Event listeners – test mode (admin only)
+// ---------------------------------------------------------------------------
+$("testModeBtn").addEventListener("click", openTestMode);
+$("tmStartBtn").addEventListener("click", startTestRun);
+$("tmCancelBtn").addEventListener("click", cancelTestRun);
+$("tmGalleryBtn").addEventListener("click", () => {
+  $("testModePanel").classList.add("hidden");
+  showTab("Gallery");
+});
+["tmStepsFrom", "tmStepsTo", "tmCfgFrom", "tmCfgTo", "tmCfgStep"].forEach((id) => {
+  const el = $(id);
+  if (el) el.addEventListener("input", updateTestRunCombinationCount);
+});
 
 // ---------------------------------------------------------------------------
 // Bootstrap: check session, show login or app

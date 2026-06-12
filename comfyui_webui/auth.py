@@ -221,6 +221,25 @@ def change_password(username: str, new_password: str) -> bool:
     return False
 
 
+def delete_user(username: str) -> bool:
+    """Remove *username* from the user store.
+
+    Returns ``True`` when the user was found and deleted, ``False`` otherwise.
+    Raises ``ValueError`` when trying to delete the last remaining admin.
+    """
+    users = load_users()
+    target = next((u for u in users if u["username"] == username), None)
+    if target is None:
+        return False
+    remaining = [u for u in users if u["username"] != username]
+    # Guard: never remove the last admin account
+    if target.get("role") == "admin":
+        if not any(u.get("role") == "admin" for u in remaining):
+            raise ValueError("Der letzte Admin-Account kann nicht gelöscht werden.")
+    save_users(remaining)
+    return True
+
+
 def public_user(user: dict[str, Any]) -> dict[str, Any]:
     """Return a safe public representation (no password fields)."""
     return {

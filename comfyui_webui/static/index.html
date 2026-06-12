@@ -27,6 +27,7 @@
       <span class="app-title">ComfyUI + Ollama WebUI</span>
       <nav class="app-nav">
         <button id="tabGenerate" class="tab-btn active" type="button">Generieren</button>
+        <button id="tabGallery" class="tab-btn" type="button">&#128444; Galerie</button>
         <button id="tabAdvanced" class="tab-btn hidden" type="button">&#9881; Erweitert</button>
         <button id="tabAdmin" class="tab-btn hidden" type="button">&#9881; Admin</button>
       </nav>
@@ -84,11 +85,73 @@
           <small id="mappingNote" class="hint">W&auml;hle ein Mapping &ndash; alle Vorgaben (Modell, Steps, usw.) werden daraus geladen.</small>
         </section>
 
+        <!-- Seed (sichtbar für alle Benutzer) -->
+        <section class="card">
+          <label for="genSeed">Seed</label>
+          <div class="seed-row">
+            <input id="genSeed" type="number" value="-1" />
+            <button id="genSeedRandomBtn" class="btn-sm" type="button" title="Neuen Zufallsseed w&uuml;rfeln">&#127922;</button>
+          </div>
+          <small class="hint">&minus;1 = bei jeder Generierung zuf&auml;llig. Gleicher Seed + gleiche Einstellungen = reproduzierbares Ergebnis.</small>
+        </section>
+
         <section class="card actions">
           <button id="translateBtn" type="button">Nur &uuml;bersetzen</button>
           <button id="generateBtn" type="button">Bild(er) generieren</button>
+          <button id="testModeBtn" class="btn-secondary hidden" type="button">&#128300; Testmodus</button>
         </section>
         <p id="status" class="hint" style="margin:0.25rem 0 0.5rem"></p>
+
+        <!-- ── TESTMODUS PANEL (admin only) ── -->
+        <div id="testModePanel" class="card hidden" style="border:1px dashed var(--accent);padding:1rem;margin-bottom:0.5rem">
+          <h3 style="margin:0 0 0.5rem;font-size:1rem;color:var(--accent)">&#128300; Testmodus &ndash; Parametrischer Sweep</h3>
+          <p class="hint" style="margin:0 0 0.75rem">
+            Alle Einstellungen aus dem Generieren-Tab werden &uuml;bernommen. Steps und CFG werden als Bereich durchlaufen.
+            Gleicher Seed f&uuml;r alle Kombinationen. L&auml;uft serverseitig &ndash; auch wenn der Browser geschlossen wird.
+          </p>
+
+          <div class="grid-4" style="margin-bottom:0.75rem">
+            <div class="setting-block">
+              <label>Steps von</label>
+              <input id="tmStepsFrom" type="number" value="20" min="1" max="200" />
+            </div>
+            <div class="setting-block">
+              <label>Steps bis</label>
+              <input id="tmStepsTo" type="number" value="30" min="1" max="200" />
+            </div>
+            <div class="setting-block">
+              <label>CFG von</label>
+              <input id="tmCfgFrom" type="number" value="7" min="0" max="30" step="0.1" />
+            </div>
+            <div class="setting-block">
+              <label>CFG bis</label>
+              <input id="tmCfgTo" type="number" value="7" min="0" max="30" step="0.1" />
+            </div>
+            <div class="setting-block">
+              <label>CFG-Schritt</label>
+              <input id="tmCfgStep" type="number" value="0.5" min="0.1" max="10" step="0.1" />
+            </div>
+            <div class="setting-block" style="justify-content:flex-end">
+              <small id="tmCombinationInfo" class="hint" style="font-size:0.9rem;font-weight:600;margin-top:auto">&nbsp;</small>
+            </div>
+          </div>
+
+          <div style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center;margin-bottom:0.5rem">
+            <button id="tmStartBtn" type="button" style="width:auto">&#9654; Testlauf starten</button>
+            <button id="tmCancelBtn" class="btn-secondary hidden" type="button" style="width:auto">&#9646;&#9646; Abbrechen</button>
+            <button id="tmGalleryBtn" class="btn-secondary hidden" type="button" style="width:auto">&#128444; Galerie &ouml;ffnen</button>
+          </div>
+
+          <div id="tmProgressWrap" class="hidden" style="margin-bottom:0.4rem">
+            <div class="progress-bar-outer">
+              <div id="tmProgressBar" class="progress-bar-inner"></div>
+            </div>
+            <small id="tmProgressLabel" class="hint"></small>
+          </div>
+
+          <p id="tmStatus" class="hint" style="margin:0"></p>
+          <pre id="tmErrors" style="font-size:0.75rem;color:var(--danger);white-space:pre-wrap;margin:0.25rem 0 0"></pre>
+        </div>
 
         <div id="progressWrap" class="hidden">
           <div class="progress-bar-outer">
@@ -311,6 +374,7 @@
                 <th>Anzeigename</th>
                 <th>Quelle</th>
                 <th>Modelltyp</th>
+                <th>Analyse</th>
                 <th>Freigegeben</th>
                 <th>Aktiv</th>
                 <th>Aktionen</th>
@@ -385,6 +449,7 @@
                 <th>Deaktiviert</th>
                 <th>Erstellt</th>
                 <th>Aktionen</th>
+                <th>L&ouml;schen</th>
               </tr>
             </thead>
             <tbody id="adminUserBody"></tbody>
@@ -393,6 +458,51 @@
 
       </main>
     </div><!-- /panelAdmin -->
+
+    <!-- ── GALERIE TAB ── -->
+    <div id="panelGallery" class="hidden">
+      <main class="container">
+
+        <!-- Admin: Benutzerauswahl (nur für Admins sichtbar) -->
+        <section class="card hidden" id="galleryAdminBar">
+          <div class="inline">
+            <select id="galleryUserSelect">
+              <option value="">– Eigene Galerie –</option>
+            </select>
+            <button id="galleryLoadUserBtn" type="button">Laden</button>
+          </div>
+        </section>
+
+        <section class="card">
+          <div style="display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap;margin-bottom:0.75rem">
+            <h2 style="margin:0" id="galleryTitle">Meine Galerie</h2>
+            <button id="galleryReloadBtn" class="btn-sm btn-secondary" type="button" title="Galerie neu laden">&#8635;</button>
+            <button id="galleryDeleteSelectedBtn" class="btn-sm btn-danger hidden" type="button" title="Ausgew&auml;hlte Bilder l&ouml;schen">&#128465; Ausgew&auml;hlte l&ouml;schen</button>
+            <button id="galleryDeleteAllBtn" class="btn-sm btn-danger" type="button" title="Alle Bilder l&ouml;schen">&#128465; Alle l&ouml;schen</button>
+          </div>
+          <div id="galleryStatus" class="hint"></div>
+          <div id="galleryGrid" class="gallery-grid"></div>
+        </section>
+
+      </main>
+    </div><!-- /panelGallery -->
+
+    <!-- ── GALERIE METADATEN MODAL ── -->
+    <div id="galleryMetaOverlay" class="overlay hidden">
+      <div class="gallery-meta-box card">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.75rem">
+          <h2 style="margin:0;font-size:1.1rem" id="galleryMetaTitle">Bilddetails</h2>
+          <button id="galleryMetaCloseBtn" class="btn-sm btn-secondary" type="button">&#10005;</button>
+        </div>
+        <div id="galleryMetaContent"></div>
+        <div style="margin-top:0.75rem;display:flex;gap:0.5rem;flex-wrap:wrap">
+          <button id="galleryMetaApplyBtn" type="button">&#9654; Einstellungen &uuml;bernehmen</button>
+          <button id="galleryMetaDlJpgBtn" class="btn-secondary" type="button">&#11015; Download JPG</button>
+          <button id="galleryMetaDlPngBtn" class="btn-secondary" type="button">&#11015; Download PNG</button>
+          <button id="galleryMetaCloseBtn2" class="btn-secondary" type="button">Schlie&szlig;en</button>
+        </div>
+      </div>
+    </div>
 
   </div><!-- /mainApp -->
 

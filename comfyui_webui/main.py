@@ -3,9 +3,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import logging.handlers
 import os
+import re
 import secrets
+import shutil
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, AsyncGenerator
 from urllib.parse import urlencode
@@ -20,14 +24,56 @@ from pydantic import BaseModel, Field
 import auth as _auth
 import mapping_registry as _mappings
 import template_registry as _registry
+import workflow_analyzer as _analyzer
 
 APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
+DATA_DIR = APP_DIR / "data"
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# File-based generation logger – logs requests, workflow mutations, responses
+# ---------------------------------------------------------------------------
+
+_gen_logger = logging.getLogger("comfyui_webui.generation")
+
+
+def _setup_file_logging() -> None:
+    """Configure a rotating file handler for generation logs in data/."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = DATA_DIR / "generation.log"
+    try:
+        handler = logging.handlers.RotatingFileHandler(
+            log_path,
+            maxBytes=10 * 1024 * 1024,  # 10 MB
+            backupCount=5,
+            encoding="utf-8",
+        )
+        handler.setLevel(logging.DEBUG)
+        fmt = logging.Formatter(
+            "%(asctime)s.%(msecs)03d | %(levelname)s | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+        handler.setFormatter(fmt)
+        _gen_logger.addHandler(handler)
+        _gen_logger.setLevel(logging.DEBUG)
+        _gen_logger.propagate = False  # don't duplicate to root logger
+    except OSError as exc:
+        logger.warning("_setup_file_logging: konnte Log-Datei nicht öffnen: %s", exc)
+
+
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
 COMFYUI_BASE_URL = os.getenv("COMFYUI_BASE_URL", "http://127.0.0.1:8188").rstrip("/")
+# Optional: absolute path to ComfyUI's output folder (e.g. /home/user/ComfyUI/output).
+# When set, generated images are deleted from ComfyUI after being saved to the local gallery.
+COMFYUI_OUTPUT_DIR = os.getenv("COMFYUI_OUTPUT_DIR", "").strip()
+
+GALLERY_DIR = DATA_DIR / "gallery"
+
+# In-memory store for generation payload data keyed by prompt_id.
+# Allows the SSE progress handler to access prompts/settings for gallery saving.
+_pending_generations: dict[str, dict[str, Any]] = {}
 
 DEFAULT_WORKFLOW = {
     "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": ""}},
@@ -98,6 +144,8 @@ _sessions: dict[str, dict[str, str]] = {}
 @app.on_event("startup")
 async def _startup() -> None:
     """Bootstrap admin account and seed example templates on first run."""
+    _setup_file_logging()
+    _gen_logger.info("=== ComfyUI WebUI gestartet ===")
     bootstrap_credential = _auth.bootstrap_admin()
     if bootstrap_credential:
         # Print the one-time bootstrap credential to stdout only.
@@ -307,10 +355,25 @@ class UpdateTemplateRequest(BaseModel):
 
 @app.get("/api/templates")
 async def list_templates_for_user(
-    _: dict[str, str] = Depends(require_user),
+    session: dict[str, str] = Depends(require_user),
 ) -> dict[str, Any]:
-    """Return approved + enabled templates (visible to all authenticated users)."""
+    """Return templates for the current user.
+
+    Admin users receive *all* templates (including inactive/unapproved) so they
+    can use them when creating mappings.  Each template record gets an extra
+    ``_inactive`` flag set to ``True`` when the template is not both approved
+    and enabled – the UI uses this to show the ``(x)`` marker.
+
+    Regular users only see approved + enabled templates (unchanged behaviour).
+    """
+    if session.get("role") == "admin":
+        all_tpls = _registry.get_all_templates()
+        for t in all_tpls:
+            t["_inactive"] = not (t.get("approved") and t.get("enabled", True))
+        return {"templates": all_tpls}
     templates = _registry.get_approved_templates()
+    for t in templates:
+        t["_inactive"] = False
     return {"templates": templates}
 
 
@@ -427,8 +490,6 @@ async def admin_upload_template(
     if not isinstance(data, dict):
         raise HTTPException(status_code=400, detail="JSON muss ein Objekt sein (ComfyUI workflow).")
 
-    model_type = _registry.detect_model_type(data)
-
     # Sanitise filename: keep only safe chars
     safe_name = Path(file.filename).name
     safe_name = "".join(c for c in safe_name if c.isalnum() or c in ("_", "-", "."))
@@ -440,6 +501,11 @@ async def admin_upload_template(
     dest = _registry.TEMPLATES_DIR / safe_name
     _registry.TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(raw)
+
+    # Deep-analyze the uploaded file
+    validation = _registry.analyze_template_file(dest)
+    model_type = validation.get("model_type", "any")
+    analysis_meta = _build_analysis_meta(validation)
 
     # Register (same logic as discover_local_templates for a single file)
     stem = Path(safe_name).stem
@@ -456,6 +522,7 @@ async def admin_upload_template(
             approved=True,
             enabled=True,
             model_type=model_type,
+            analysis=analysis_meta,
         )
     else:
         record = _registry.register_template(
@@ -464,8 +531,58 @@ async def admin_upload_template(
             source=existing.get("source", "local"),
             filename=safe_name,
             model_type=model_type,
+            analysis=analysis_meta,
         )
     return record
+
+
+def _build_analysis_meta(validation: dict[str, Any]) -> dict[str, Any]:
+    """Convert analyze_template_file() result to compact template metadata."""
+    ana = validation.get("analysis") or {}
+    return {
+        "is_usable": ana.get("is_usable", False),
+        "model_type": validation.get("model_type", "any"),
+        "sampler_count": ana.get("sampler_count", 0),
+        "model_loader_count": ana.get("model_loader_count", 0),
+        "positive_clip_count": ana.get("positive_clip_count", 0),
+        "negative_is_zero_out": ana.get("negative_is_zero_out", False),
+        "is_potentially_img2img": ana.get("is_potentially_img2img", False),
+        "warnings": ana.get("warnings", []),
+        "errors": (
+            ana.get("errors", [])
+            if validation.get("valid")
+            else [validation.get("parse_error") or "Datei konnte nicht geparst werden"]
+        ),
+        "analyzed_at": validation.get("analyzed_at"),
+        "parse_error": validation.get("parse_error"),
+    }
+
+
+@app.get("/api/admin/templates/{name}/analysis")
+async def admin_template_analysis(
+    name: str,
+    _: dict[str, str] = Depends(require_admin),
+) -> dict[str, Any]:
+    """Re-run deep analysis for a specific template and return the result.
+
+    Also updates the stored ``analysis`` field in the template record.
+    """
+    record = _registry.get_template(name)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Template nicht gefunden.")
+    if not record.get("filename"):
+        raise HTTPException(
+            status_code=400,
+            detail="Kein Workflow-JSON für dieses Template gespeichert (nur Metadaten-Eintrag).",
+        )
+    tpath = _registry.TEMPLATES_DIR / record["filename"]
+    if not tpath.exists():
+        raise HTTPException(status_code=404, detail=f"Workflow-Datei nicht gefunden: {record['filename']}")
+
+    validation = _registry.analyze_template_file(tpath)
+    analysis_meta = _build_analysis_meta(validation)
+    _registry.update_template(name, analysis=analysis_meta, model_type=validation.get("model_type", "any"))
+    return {"name": name, "validation": validation, "analysis": analysis_meta}
 
 
 def _load_default_workflow() -> dict[str, dict[str, Any]]:
@@ -870,8 +987,28 @@ async def get_comfy_samplers(
 @app.post("/api/generate")
 async def generate_images(
     payload: GenerateRequest,
-    _: dict[str, str] = Depends(require_user),
+    session: dict[str, str] = Depends(require_user),
 ) -> dict[str, Any]:
+    req_id = uuid.uuid4().hex[:8]
+    _gen_logger.info(
+        "REQUEST id=%s template=%r checkpoint=%r ollama=%r steps=%d cfg=%.1f "
+        "seed=%d width=%d height=%d sampler=%r scheduler=%r image_count=%d "
+        "prompt_de=%r",
+        req_id,
+        payload.workflow_template,
+        payload.checkpoint,
+        payload.ollama_model,
+        payload.steps,
+        payload.cfg,
+        payload.seed,
+        payload.width,
+        payload.height,
+        payload.sampler,
+        payload.scheduler,
+        payload.image_count,
+        payload.prompt_de[:120] if payload.prompt_de else "",
+    )
+
     translated_prompt = payload.translated_prompt
     if not translated_prompt:
         translated_prompt = await _translate_german_to_english(
@@ -884,11 +1021,26 @@ async def generate_images(
             payload.negative_prompt, payload.ollama_model
         )
 
+    _gen_logger.info(
+        "TRANSLATED id=%s positive=%r negative=%r",
+        req_id,
+        translated_prompt[:120] if translated_prompt else "",
+        (translated_negative or "")[:80],
+    )
+
     try:
-        workflow = _build_workflow(payload, translated_prompt, translated_negative or "")
+        workflow, actual_seed = _build_workflow(payload, translated_prompt, translated_negative or "", req_id=req_id)
     except ValueError as exc:
+        _gen_logger.error("BUILD_WORKFLOW_ERROR id=%s error=%r", req_id, str(exc))
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     client_id = f"comfyui-webui-{uuid.uuid4()}"
+    _gen_logger.debug(
+        "PROMPT_JSON id=%s client_id=%s payload=%s",
+        req_id,
+        client_id,
+        json.dumps(workflow, ensure_ascii=False)[:2000],
+    )
 
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
@@ -908,6 +1060,10 @@ async def generate_images(
                 )
             except Exception:
                 comfy_error = response.text[:500] or f"HTTP {response.status_code}"
+            _gen_logger.error(
+                "COMFYUI_REJECT id=%s status=%d error=%r",
+                req_id, response.status_code, comfy_error,
+            )
             raise HTTPException(
                 status_code=502,
                 detail=f"ComfyUI-Fehler ({response.status_code}): {comfy_error}",
@@ -915,16 +1071,28 @@ async def generate_images(
         prompt_id = response.json().get("prompt_id")
         if not prompt_id:
             raise HTTPException(status_code=502, detail="ComfyUI hat keine prompt_id zurückgegeben.")
+        _gen_logger.info("QUEUED id=%s prompt_id=%s", req_id, prompt_id)
     except HTTPException:
         raise
     except httpx.HTTPError as exc:
+        _gen_logger.error("COMFYUI_UNREACHABLE id=%s error=%r", req_id, str(exc))
         raise HTTPException(status_code=502, detail=f"ComfyUI nicht erreichbar: {exc}") from exc
+
+    # Store payload for gallery saving in the SSE progress handler
+    _pending_generations[prompt_id] = {
+        "username": session["username"],
+        "payload": payload,
+        "actual_seed": actual_seed,
+        "translated_prompt": translated_prompt,
+        "translated_negative_prompt": translated_negative or "",
+    }
 
     return {
         "translated_prompt": translated_prompt,
         "translated_negative_prompt": translated_negative or "",
         "prompt_id": prompt_id,
         "client_id": client_id,
+        "actual_seed": actual_seed,
     }
 
 
@@ -933,10 +1101,17 @@ async def comfy_progress_sse(
     prompt_id: str,
     client_id: str,
     request: Request,
-    _: dict[str, str] = Depends(require_user),
+    session: dict[str, str] = Depends(require_user),
 ) -> StreamingResponse:
     async def event_stream() -> AsyncGenerator[str, None]:
-        # Initial queue-position check via REST
+        # ── Fast path: images already saved to gallery (duplicate reconnect) ─────
+        existing = _find_gallery_by_prompt_id(session["username"], prompt_id)
+        if existing:
+            urls = [f"/api/gallery/image/{id}" for id in existing]
+            yield f"data: {json.dumps({'type': 'done', 'images': urls, 'gallery_ids': existing})}\n\n"
+            return
+
+        # ── Initial queue-position check via REST ─────────────────────────────────
         try:
             async with httpx.AsyncClient(timeout=5.0) as http:
                 q = await http.get(f"{COMFYUI_BASE_URL}/queue")
@@ -946,60 +1121,82 @@ async def comfy_progress_sse(
         except Exception:
             yield f"data: {json.dumps({'type': 'queued'})}\n\n"
 
-        ws_url = (
-            COMFYUI_BASE_URL.replace("http://", "ws://").replace("https://", "wss://")
-            + f"/ws?clientId={client_id}"
-        )
-        start_time: float | None = None
-
+        # ── Check if job already completed (finished while client was reconnecting) ─
+        already_done = False
         try:
-            async with websockets.connect(ws_url, ping_interval=20) as ws:
-                async for raw in ws:
-                    if await request.is_disconnected():
-                        return
-                    if isinstance(raw, bytes):
-                        continue  # skip binary preview frames
-                    try:
-                        msg = json.loads(raw)
-                    except json.JSONDecodeError:
-                        continue
+            async with httpx.AsyncClient(timeout=5.0) as http:
+                hist_check = await http.get(f"{COMFYUI_BASE_URL}/history/{prompt_id}")
+                if hist_check.status_code == 200 and hist_check.json().get(prompt_id):
+                    already_done = True
+        except Exception:
+            pass
 
-                    mtype = msg.get("type", "")
-                    mdata = msg.get("data") or {}
-                    mpid = mdata.get("prompt_id") if isinstance(mdata, dict) else None
+        # ── WebSocket progress tracking (skipped when job already finished) ───────
+        if not already_done:
+            ws_url = (
+                COMFYUI_BASE_URL.replace("http://", "ws://").replace("https://", "wss://")
+                + f"/ws?clientId={client_id}"
+            )
+            start_time: float | None = None
 
-                    # Filter messages for other prompts
-                    if mpid and mpid != prompt_id:
-                        continue
+            try:
+                async with websockets.connect(ws_url, ping_interval=20) as ws:
+                    while True:
+                        if await request.is_disconnected():
+                            return
+                        # Use a 15-second timeout so we can send SSE keepalives while
+                        # the job sits in a long queue (prevents proxy/mobile timeouts).
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=15.0)
+                        except asyncio.TimeoutError:
+                            yield ": keepalive\n\n"
+                            continue
+                        except Exception:
+                            break
 
-                    if mtype == "execution_start":
-                        start_time = asyncio.get_event_loop().time()
-                        yield f"data: {json.dumps({'type': 'start'})}\n\n"
+                        if isinstance(raw, bytes):
+                            continue  # skip binary preview frames
+                        try:
+                            msg = json.loads(raw)
+                        except json.JSONDecodeError:
+                            continue
 
-                    elif mtype == "progress":
-                        step = int(mdata.get("value", 0))
-                        total = int(mdata.get("max", 1))
-                        eta: int | None = None
-                        if start_time and step > 0 and step < total:
-                            elapsed = asyncio.get_event_loop().time() - start_time
-                            eta = round(elapsed / step * (total - step))
-                        yield f"data: {json.dumps({'type': 'progress', 'step': step, 'max': total, 'eta': eta})}\n\n"
+                        mtype = msg.get("type", "")
+                        mdata = msg.get("data") or {}
+                        mpid = mdata.get("prompt_id") if isinstance(mdata, dict) else None
 
-                    elif mtype == "execution_success" or (
-                        mtype == "executing" and isinstance(mdata, dict) and mdata.get("node") is None
-                    ):
-                        break
+                        # Filter messages for other prompts
+                        if mpid and mpid != prompt_id:
+                            continue
 
-                    elif mtype == "execution_error":
-                        err = mdata.get("exception_message", "Unbekannter Fehler") if isinstance(mdata, dict) else "Fehler"
-                        yield f"data: {json.dumps({'type': 'error', 'message': str(err)})}\n\n"
-                        return
+                        if mtype == "execution_start":
+                            start_time = asyncio.get_event_loop().time()
+                            yield f"data: {json.dumps({'type': 'start'})}\n\n"
 
-        except Exception as exc:
-            yield f"data: {json.dumps({'type': 'error', 'message': f'WebSocket-Fehler: {exc}'})}\n\n"
-            return
+                        elif mtype == "progress":
+                            step = int(mdata.get("value", 0))
+                            total = int(mdata.get("max", 1))
+                            eta: int | None = None
+                            if start_time and step > 0 and step < total:
+                                elapsed = asyncio.get_event_loop().time() - start_time
+                                eta = round(elapsed / step * (total - step))
+                            yield f"data: {json.dumps({'type': 'progress', 'step': step, 'max': total, 'eta': eta})}\n\n"
 
-        # Fetch images from history
+                        elif mtype == "execution_success" or (
+                            mtype == "executing" and isinstance(mdata, dict) and mdata.get("node") is None
+                        ):
+                            break
+
+                        elif mtype == "execution_error":
+                            err = mdata.get("exception_message", "Unbekannter Fehler") if isinstance(mdata, dict) else "Fehler"
+                            yield f"data: {json.dumps({'type': 'error', 'message': str(err)})}\n\n"
+                            return
+
+            except Exception as exc:
+                yield f"data: {json.dumps({'type': 'error', 'message': f'WebSocket-Fehler: {exc}'})}\n\n"
+                return
+
+        # ── Fetch images from history, save to local gallery, delete from ComfyUI ─
         try:
             async with httpx.AsyncClient(timeout=10.0) as http:
                 for _ in range(20):
@@ -1008,11 +1205,67 @@ async def comfy_progress_sse(
                     data = resp.json()
                     if data.get(prompt_id):
                         images = _extract_images(data[prompt_id])
-                        image_urls = [
-                            f"/api/comfy/image?{urlencode({'filename': img['filename'], 'subfolder': img.get('subfolder', ''), 'type': img.get('type', 'output')})}"
-                            for img in images
-                        ]
-                        yield f"data: {json.dumps({'type': 'done', 'images': image_urls})}\n\n"
+                        gen_data = _pending_generations.pop(prompt_id, None)
+                        username = gen_data["username"] if gen_data else session["username"]
+
+                        gallery_ids: list[str] = []
+                        image_urls: list[str] = []
+
+                        for img in images:
+                            comfy_params = {
+                                "filename": img["filename"],
+                                "subfolder": img.get("subfolder", ""),
+                                "type": img.get("type", "output"),
+                            }
+                            try:
+                                async with httpx.AsyncClient(timeout=60.0) as img_http:
+                                    img_resp = await img_http.get(
+                                        f"{COMFYUI_BASE_URL}/view",
+                                        params=comfy_params,
+                                    )
+                                img_resp.raise_for_status()
+                                ct = img_resp.headers.get("content-type", "image/png")
+
+                                meta: dict[str, Any] = {"prompt_id": prompt_id}
+                                if gen_data:
+                                    p = gen_data["payload"]
+                                    meta.update({
+                                        "prompt_de": p.prompt_de,
+                                        "negative_prompt_de": p.negative_prompt,
+                                        "translated_prompt": gen_data["translated_prompt"],
+                                        "translated_negative_prompt": gen_data["translated_negative_prompt"],
+                                        "workflow_template": p.workflow_template or "default",
+                                        "checkpoint": p.checkpoint or "",
+                                        "ollama_model": p.ollama_model,
+                                        "steps": p.steps,
+                                        "cfg": p.cfg,
+                                        "actual_seed": gen_data["actual_seed"],
+                                        "width": p.width,
+                                        "height": p.height,
+                                        "sampler": p.sampler,
+                                        "scheduler": p.scheduler,
+                                        "image_count": p.image_count,
+                                        "username": username,
+                                    })
+
+                                image_id = _save_to_gallery(username, img_resp.content, ct, meta)
+                                gallery_ids.append(image_id)
+                                image_urls.append(f"/api/gallery/image/{image_id}")
+
+                                # Best-effort: delete the file from ComfyUI's output folder
+                                _delete_comfyui_output(
+                                    img["filename"],
+                                    img.get("subfolder", ""),
+                                    img.get("type", "output"),
+                                )
+                            except Exception as exc:
+                                _gen_logger.warning("GALLERY_SAVE_ERROR: %s", exc)
+                                # Fallback: serve via existing proxy so the user still sees the image
+                                image_urls.append(
+                                    f"/api/comfy/image?{urlencode(comfy_params)}"
+                                )
+
+                        yield f"data: {json.dumps({'type': 'done', 'images': image_urls, 'gallery_ids': gallery_ids})}\n\n"
                         return
                     await asyncio.sleep(0.5)
             yield f"data: {json.dumps({'type': 'error', 'message': 'Bilder nicht in History gefunden.'})}\n\n"
@@ -1127,30 +1380,99 @@ async def _translate_german_to_english(prompt_de: str, model: str, context_promp
     return await _call_ollama_raw(instruction, model)
 
 
-def _find_node_by_class(
-    workflow: dict[str, Any], *class_types: str
-) -> tuple[str, dict[str, Any]] | tuple[None, None]:
-    """Return the first ``(key, node)`` whose ``class_type`` matches any of *class_types*."""
-    for key, node in workflow.items():
-        if node.get("class_type") in class_types:
-            return key, node
-    return None, None
+def _inject_custom_advanced_params(
+    workflow: dict[str, dict[str, Any]],
+    sampler_node: dict[str, Any],
+    seed: int,
+    payload: "GenerateRequest",
+    req_id: str,
+) -> None:
+    """Inject generation parameters for a ``SamplerCustomAdvanced`` node.
+
+    ``SamplerCustomAdvanced`` (used in FLUX / Zimage-style workflows) does not
+    hold seed, steps, cfg, or sampler_name directly.  Instead these values live
+    on dedicated upstream nodes that are wired to the sampler:
+
+    * **seed**        → ``RandomNoise.noise_seed``
+    * **steps**       → scheduler node (``BasicScheduler``, ``SDTurboScheduler``, …)
+    * **sampler_name** → ``KSamplerSelect.sampler_name``
+    * **cfg**         → ``CFGGuider.cfg``
+    * **scheduler**   → ``BasicScheduler.scheduler`` (when present)
+    """
+    inputs = sampler_node.get("inputs", {})
+
+    # ── Seed → RandomNoise.noise_seed ────────────────────────────────────────
+    noise_ref = inputs.get("noise")
+    if isinstance(noise_ref, list) and noise_ref:
+        noise_id = str(noise_ref[0])
+        noise_node = workflow.get(noise_id)
+        if noise_node and noise_node.get("class_type") == "RandomNoise":
+            noise_node["inputs"]["noise_seed"] = seed
+            _gen_logger.debug(
+                "SET_SEED_NOISE id=%s noise_node=%r seed=%d", req_id, noise_id, seed
+            )
+
+    # ── Steps (+ scheduler name) → scheduler node ────────────────────────────
+    sigmas_ref = inputs.get("sigmas")
+    if isinstance(sigmas_ref, list) and sigmas_ref:
+        sigmas_id = str(sigmas_ref[0])
+        sigmas_node = workflow.get(sigmas_id)
+        if sigmas_node:
+            sct = sigmas_node.get("class_type", "")
+            sig_inputs = sigmas_node.get("inputs", {})
+            steps = max(1, min(payload.steps, 200))
+            if "steps" in sig_inputs:
+                sig_inputs["steps"] = steps
+                _gen_logger.debug(
+                    "SET_STEPS id=%s sigmas_node=%r steps=%d", req_id, sigmas_id, steps
+                )
+            # BasicScheduler additionally accepts a scheduler name
+            if sct == "BasicScheduler" and "scheduler" in sig_inputs:
+                sig_inputs["scheduler"] = payload.scheduler
+                _gen_logger.debug(
+                    "SET_SCHEDULER id=%s sigmas_node=%r scheduler=%r",
+                    req_id, sigmas_id, payload.scheduler,
+                )
+
+    # ── Sampler name → KSamplerSelect.sampler_name ───────────────────────────
+    sampler_select_ref = inputs.get("sampler")
+    if isinstance(sampler_select_ref, list) and sampler_select_ref:
+        select_id = str(sampler_select_ref[0])
+        select_node = workflow.get(select_id)
+        if select_node and select_node.get("class_type") == "KSamplerSelect":
+            select_node["inputs"]["sampler_name"] = payload.sampler
+            _gen_logger.debug(
+                "SET_SAMPLER_NAME id=%s select_node=%r sampler=%r",
+                req_id, select_id, payload.sampler,
+            )
+
+    # ── CFG → CFGGuider.cfg ──────────────────────────────────────────────────
+    guider_ref = inputs.get("guider")
+    if isinstance(guider_ref, list) and guider_ref:
+        guider_id = str(guider_ref[0])
+        guider_node = workflow.get(guider_id)
+        if guider_node and guider_node.get("class_type") == "CFGGuider":
+            cfg = max(0.0, min(payload.cfg, 30.0))
+            guider_node["inputs"]["cfg"] = cfg
+            _gen_logger.debug(
+                "SET_CFG id=%s guider_node=%r cfg=%.1f", req_id, guider_id, cfg
+            )
 
 
-def _resolve_ref(
-    workflow: dict[str, Any], ref: Any
-) -> tuple[str, dict[str, Any]] | tuple[None, None]:
-    """Follow a ComfyUI node-reference ``[node_id, slot]`` and return ``(key, node)``."""
-    if isinstance(ref, list) and len(ref) >= 1:
-        key = str(ref[0])
-        if key in workflow:
-            return key, workflow[key]
-    return None, None
+def _build_workflow(
+    payload: GenerateRequest,
+    translated_prompt: str,
+    translated_negative: str,
+    req_id: str = "",
+) -> tuple[dict[str, dict[str, Any]], int]:
+    """Build the final ComfyUI prompt dict for a generation request.
 
-
-def _build_workflow(payload: GenerateRequest, translated_prompt: str, translated_negative: str) -> dict[str, dict[str, Any]]:
-    # Resolve workflow template: prefer registry-selected template file, then
-    # fall back to the global workflow_template.json / built-in default.
+    Uses :mod:`workflow_analyzer` to locate graph roles by following node
+    connections rather than relying on fixed IDs.  Logs every mutation step
+    to the generation log.
+    """
+    # ── Load template ────────────────────────────────────────────────────────
+    template_source = "default"
     workflow_json: dict[str, Any] | None = None
     if payload.workflow_template and payload.workflow_template != "default":
         record = _registry.get_template(payload.workflow_template)
@@ -1160,91 +1482,183 @@ def _build_workflow(payload: GenerateRequest, translated_prompt: str, translated
                 data = json.loads(tpath.read_text(encoding="utf-8"))
                 if isinstance(data, dict):
                     workflow_json = data
+                    template_source = payload.workflow_template
             except (OSError, json.JSONDecodeError) as exc:
-                logger.warning("_build_workflow: could not load template file %s: %s", tpath, exc)
+                logger.warning("_build_workflow: Konnte Template-Datei nicht laden %s: %s", tpath, exc)
+                _gen_logger.warning(
+                    "TEMPLATE_LOAD_ERROR id=%s template=%r file=%s error=%r",
+                    req_id, payload.workflow_template, tpath.name, str(exc),
+                )
 
     if workflow_json is None:
         workflow_json = _load_default_workflow()
 
-    # Deep-copy: only keep class_type and inputs (drop _meta and other UI-only keys)
+    _gen_logger.info("TEMPLATE id=%s source=%r", req_id, template_source)
+
+    # ── Strip UI-only keys (keep only class_type + inputs) ──────────────────
     workflow: dict[str, dict[str, Any]] = {
         key: {"class_type": node["class_type"], "inputs": dict(node["inputs"])}
         for key, node in workflow_json.items()
-        if "class_type" in node and "inputs" in node
+        if isinstance(node, dict) and "class_type" in node and "inputs" in node
     }
 
-    # ── Locate KSampler (or KSamplerAdvanced) ──────────────────────────────
-    ksampler_key, ksampler_node = _find_node_by_class(workflow, "KSampler", "KSamplerAdvanced")
-    if ksampler_node is None:
+    # ── Graph analysis ───────────────────────────────────────────────────────
+    roles = _analyzer.analyze_workflow(workflow)
+    _gen_logger.info(
+        "ANALYSIS id=%s usable=%s sampler=%r model_type=%s pos_clips=%s "
+        "neg_clips=%s neg_zero_out=%s latent=%r model_loader=%r warnings=%s",
+        req_id,
+        roles.is_usable,
+        roles.primary_sampler_id,
+        roles.model_type,
+        roles.positive_clip_ids,
+        roles.negative_clip_ids,
+        roles.negative_is_zero_out,
+        roles.primary_latent_id,
+        roles.primary_model_loader_id,
+        roles.warnings or "[]",
+    )
+
+    if not roles.is_usable:
         raise ValueError(
-            "Kein KSampler-Knoten im Workflow gefunden. "
-            "Das Template muss einen KSampler- oder KSamplerAdvanced-Knoten enthalten."
+            "Workflow-Template nicht verwendbar: "
+            + ("; ".join(roles.errors) or "unbekannter Fehler")
         )
 
-    # ── Inject positive prompt ──────────────────────────────────────────────
-    pos_key, pos_node = _resolve_ref(workflow, ksampler_node["inputs"].get("positive"))
-    if pos_node and pos_node.get("class_type") == "CLIPTextEncode":
-        pos_node["inputs"]["text"] = translated_prompt
+    sampler_node = workflow[roles.primary_sampler_id]
+
+    # ── Inject positive prompt ───────────────────────────────────────────────
+    if roles.positive_clip_ids:
+        for clip_id in roles.positive_clip_ids:
+            clip_node = workflow.get(clip_id)
+            if clip_node and clip_node.get("class_type") == "CLIPTextEncode":
+                clip_node["inputs"]["text"] = translated_prompt
+                _gen_logger.debug(
+                    "SET_POSITIVE id=%s clip_node=%r text=%r",
+                    req_id, clip_id, translated_prompt[:80],
+                )
     else:
-        # Fallback: first CLIPTextEncode in the workflow
-        for node in workflow.values():
+        # Last-resort fallback: first CLIPTextEncode in workflow
+        for nid, node in workflow.items():
             if node.get("class_type") == "CLIPTextEncode":
                 node["inputs"]["text"] = translated_prompt
+                _gen_logger.debug(
+                    "SET_POSITIVE_FALLBACK id=%s clip_node=%r text=%r",
+                    req_id, nid, translated_prompt[:80],
+                )
                 break
 
-    # ── Inject negative prompt (only when target IS a CLIPTextEncode) ───────
-    # Workflows that use ConditioningZeroOut or similar as "negative" are left
-    # untouched – their negative conditioning is intentionally fixed.
-    neg_key, neg_node = _resolve_ref(workflow, ksampler_node["inputs"].get("negative"))
-    if neg_node and neg_node.get("class_type") == "CLIPTextEncode":
-        neg_node["inputs"]["text"] = translated_negative
+    # ── Inject negative prompt ───────────────────────────────────────────────
+    if roles.negative_is_zero_out:
+        _gen_logger.debug(
+            "SKIP_NEGATIVE id=%s reason=ConditioningZeroOut", req_id,
+        )
+    elif roles.negative_clip_ids:
+        for clip_id in roles.negative_clip_ids:
+            clip_node = workflow.get(clip_id)
+            if clip_node and clip_node.get("class_type") == "CLIPTextEncode":
+                clip_node["inputs"]["text"] = translated_negative
+                _gen_logger.debug(
+                    "SET_NEGATIVE id=%s clip_node=%r text=%r",
+                    req_id, clip_id, translated_negative[:80],
+                )
 
-    # ── KSampler generation params ──────────────────────────────────────────
+    # ── KSampler generation parameters ──────────────────────────────────────
     seed = payload.seed if payload.seed >= 0 else int.from_bytes(os.urandom(4), "big")
-    is_advanced = ksampler_node.get("class_type") == "KSamplerAdvanced"
-    ksampler_node["inputs"].update(
-        {
+    is_custom_advanced = sampler_node.get("class_type") == "SamplerCustomAdvanced"
+    if is_custom_advanced:
+        # SamplerCustomAdvanced (FLUX / Zimage-style): seed, steps, cfg, sampler_name
+        # and scheduler live on dedicated upstream nodes, not on the sampler itself.
+        _inject_custom_advanced_params(workflow, sampler_node, seed, payload, req_id)
+    else:
+        is_advanced = sampler_node.get("class_type") == "KSamplerAdvanced"
+        sampler_updates: dict[str, Any] = {
             ("noise_seed" if is_advanced else "seed"): seed,
             "steps": max(1, min(payload.steps, 200)),
             "cfg": max(0.0, min(payload.cfg, 30.0)),
             "sampler_name": payload.sampler,
             "scheduler": payload.scheduler,
         }
-    )
+        sampler_node["inputs"].update(sampler_updates)
+        _gen_logger.debug(
+            "SET_SAMPLER id=%s sampler_node=%r updates=%s",
+            req_id, roles.primary_sampler_id, sampler_updates,
+        )
 
-    # ── Latent image dimensions ─────────────────────────────────────────────
-    _LATENT_TYPES = ("EmptyLatentImage", "EmptySD3LatentImage", "EmptyHunyuanLatentVideo")
-    latent_key, latent_node = _resolve_ref(workflow, ksampler_node["inputs"].get("latent_image"))
-    if latent_node and latent_node.get("class_type") in _LATENT_TYPES:
-        target = latent_node
+    # ── Latent image dimensions ──────────────────────────────────────────────
+    width = max(64, payload.width // 8 * 8)
+    height = max(64, payload.height // 8 * 8)
+    batch = max(1, min(payload.image_count, 8))
+
+    latent_target: dict[str, Any] | None = None
+    if roles.primary_latent_id and roles.primary_latent_id in workflow:
+        latent_target = workflow[roles.primary_latent_id]
+
+    if latent_target is not None:
+        latent_target["inputs"]["width"] = width
+        latent_target["inputs"]["height"] = height
+        latent_target["inputs"]["batch_size"] = batch
+        _gen_logger.debug(
+            "SET_LATENT id=%s latent_node=%r w=%d h=%d batch=%d",
+            req_id, roles.primary_latent_id, width, height, batch,
+        )
     else:
-        # Fallback: first EmptyLatentImage-like node in the workflow
-        _, target = _find_node_by_class(workflow, *_LATENT_TYPES)
-    if target is not None:
-        target["inputs"]["width"] = max(64, payload.width // 8 * 8)
-        target["inputs"]["height"] = max(64, payload.height // 8 * 8)
-        target["inputs"]["batch_size"] = max(1, min(payload.image_count, 8))
+        _gen_logger.warning("SET_LATENT_SKIP id=%s – kein Latent-Knoten gefunden", req_id)
 
-    # ── Model loader ────────────────────────────────────────────────────────
+    # ── Model loader ─────────────────────────────────────────────────────────
     if payload.checkpoint:
-        is_unet = payload.checkpoint.startswith("[unet] ")
+        is_unet_model = payload.checkpoint.startswith("[unet] ")
         model_name = payload.checkpoint.removeprefix("[unet] ")
 
-        unet_key, unet_node = _find_node_by_class(workflow, "UNETLoader", "DiffusionModelLoader")
-        ckpt_key, ckpt_node = _find_node_by_class(workflow, "CheckpointLoaderSimple")
+        # Use graph-analysis result first; fall back to first loader of correct type
+        loader_id = roles.primary_model_loader_id
+        loader_node = workflow.get(loader_id) if loader_id else None
 
-        if unet_node is not None:
-            unet_node["inputs"]["unet_name"] = model_name
-        elif ckpt_node is not None:
-            if is_unet:
-                raise ValueError(
-                    f"Das Modell '{model_name}' ist ein UNet-/Diffusion-Modell (z. B. FLUX, Zimage) "
-                    "und lässt sich nicht mit CheckpointLoaderSimple laden. "
-                    "Bitte ein Template mit einem UNETLoader- oder DiffusionModelLoader-Knoten verwenden."
+        if loader_node is None:
+            # Fallback: find first node of matching loader type
+            for nid, node in workflow.items():
+                ct = node.get("class_type", "")
+                if is_unet_model and ct in ("UNETLoader", "DiffusionModelLoader"):
+                    loader_node = node
+                    loader_id = nid
+                    break
+                if not is_unet_model and ct == "CheckpointLoaderSimple":
+                    loader_node = node
+                    loader_id = nid
+                    break
+
+        if loader_node is not None:
+            loader_ct = loader_node.get("class_type", "")
+            if loader_ct in ("UNETLoader", "DiffusionModelLoader"):
+                loader_node["inputs"]["unet_name"] = model_name
+                _gen_logger.debug(
+                    "SET_MODEL id=%s loader_node=%r type=%s model=%r",
+                    req_id, loader_id, loader_ct, model_name,
                 )
-            ckpt_node["inputs"]["ckpt_name"] = model_name
+            elif loader_ct == "CheckpointLoaderSimple":
+                if is_unet_model:
+                    raise ValueError(
+                        f"Das Modell '{model_name}' ist ein UNet-/Diffusion-Modell (z. B. FLUX, Zimage) "
+                        "und lässt sich nicht mit CheckpointLoaderSimple laden. "
+                        "Bitte ein Template mit einem UNETLoader- oder DiffusionModelLoader-Knoten verwenden."
+                    )
+                loader_node["inputs"]["ckpt_name"] = model_name
+                _gen_logger.debug(
+                    "SET_MODEL id=%s loader_node=%r type=CheckpointLoaderSimple model=%r",
+                    req_id, loader_id, model_name,
+                )
+            else:
+                _gen_logger.warning(
+                    "SET_MODEL_SKIP id=%s loader_node=%r has unexpected class_type=%r",
+                    req_id, loader_id, loader_ct,
+                )
+        else:
+            _gen_logger.warning(
+                "SET_MODEL_SKIP id=%s – kein passender Modell-Loader gefunden für checkpoint=%r",
+                req_id, payload.checkpoint,
+            )
 
-    return workflow
+    return workflow, seed
 
 
 def _extract_images(history_data: dict[str, Any]) -> list[dict[str, str]]:
@@ -1266,3 +1680,663 @@ def _extract_images(history_data: dict[str, Any]) -> list[dict[str, str]]:
                     }
                 )
     return images
+
+
+# ---------------------------------------------------------------------------
+# Gallery helpers
+# ---------------------------------------------------------------------------
+
+_SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9_\-]")
+
+
+def _safe_username(username: str) -> str:
+    """Return a filesystem-safe version of *username* (strip all path chars)."""
+    safe = _SAFE_NAME_RE.sub("", username)
+    if not safe:
+        raise ValueError(f"Invalid username for gallery path: {username!r}")
+    return safe
+
+
+def _safe_image_id(image_id: str) -> str:
+    """Return a filesystem-safe image ID (alphanumeric, underscore, hyphen only)."""
+    safe = _SAFE_NAME_RE.sub("", image_id)
+    if not safe:
+        raise ValueError(f"Invalid image_id for gallery path: {image_id!r}")
+    return safe
+
+
+def _check_gallery_path(path: Path) -> Path:
+    """Resolve *path* and raise if it escapes GALLERY_DIR (path-traversal guard)."""
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(GALLERY_DIR.resolve())
+    except ValueError:
+        raise ValueError(f"Path escapes gallery directory: {path}") from None
+    return resolved
+
+
+def _gallery_dir(username: str) -> Path:
+    safe = _safe_username(username)
+    d = _check_gallery_path(GALLERY_DIR / safe)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _save_to_gallery(
+    username: str,
+    image_data: bytes,
+    content_type: str,
+    metadata: dict[str, Any],
+) -> str:
+    """Save image bytes + metadata JSON to the user gallery. Returns image_id."""
+    now = datetime.now(timezone.utc)
+    image_id = now.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
+    ext = "jpg" if ("jpeg" in content_type or "jpg" in content_type) else "png"
+    gdir = _gallery_dir(username)
+    img_path = _check_gallery_path(gdir / f"{image_id}.{ext}")
+    meta_path = _check_gallery_path(gdir / f"{image_id}.json")
+    img_path.write_bytes(image_data)
+    metadata["id"] = image_id
+    metadata["filename"] = img_path.name
+    metadata["ext"] = ext
+    metadata.setdefault("created_at", now.isoformat())
+    meta_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
+    return image_id
+
+
+def _list_gallery(username: str) -> list[dict[str, Any]]:
+    """Return all gallery metadata entries for *username*, newest first."""
+    safe = _safe_username(username)
+    try:
+        gdir = _check_gallery_path(GALLERY_DIR / safe)
+    except ValueError:
+        return []
+    if not gdir.exists():
+        return []
+    items: list[dict[str, Any]] = []
+    for meta_path in sorted(gdir.glob("*.json"), reverse=True):
+        try:
+            items.append(json.loads(meta_path.read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError):
+            continue
+    return items
+
+
+def _find_gallery_by_prompt_id(username: str, prompt_id: str) -> list[str]:
+    """Return gallery image IDs that were created for *prompt_id* (newest first).
+
+    Relies on ``prompt_id`` being stored in each gallery metadata file by the
+    SSE progress handler.  Returns an empty list when no match is found.
+    """
+    return [item["id"] for item in _list_gallery(username) if item.get("prompt_id") == prompt_id]
+
+
+def _delete_gallery_dir(username: str) -> None:
+    """Delete the entire gallery directory for *username* (best-effort)."""
+    try:
+        safe = _safe_username(username)
+        gdir = _check_gallery_path(GALLERY_DIR / safe)
+        if gdir.exists():
+            shutil.rmtree(str(gdir))
+            logger.info("Deleted gallery directory for user %r", username)
+    except ValueError as exc:
+        logger.warning("Path check failed for gallery dir of %r: %s", username, exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not delete gallery dir for %r: %s", username, exc)
+
+
+def _delete_comfyui_output(filename: str, subfolder: str = "", type_: str = "output") -> None:
+    """Best-effort deletion of a ComfyUI output image file.
+
+    Only runs when ``COMFYUI_OUTPUT_DIR`` is configured in the environment.
+    """
+    if not COMFYUI_OUTPUT_DIR:
+        return
+    try:
+        base = Path(COMFYUI_OUTPUT_DIR)
+        img_path = (base / subfolder / filename) if subfolder else (base / filename)
+        if img_path.exists():
+            img_path.unlink()
+            logger.info("Deleted ComfyUI output: %s", img_path)
+    except OSError as exc:
+        logger.warning("Could not delete ComfyUI output %s: %s", filename, exc)
+
+
+# ---------------------------------------------------------------------------
+# Gallery API endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/gallery")
+async def gallery_list(
+    session: dict[str, str] = Depends(require_user),
+) -> dict[str, Any]:
+    """Return the current user's gallery items (newest first)."""
+    items = _list_gallery(session["username"])
+    return {"items": items, "username": session["username"]}
+
+
+@app.get("/api/gallery/image/{image_id}")
+async def gallery_image_serve(
+    image_id: str,
+    session: dict[str, str] = Depends(require_user),
+) -> Response:
+    """Serve a gallery image.  Regular users can only access their own images;
+    admins can access any user's image (search across all gallery directories)."""
+    try:
+        safe_id = _safe_image_id(image_id)
+        username = session["username"]
+        safe_user = _safe_username(username)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Ungültige Parameter.")
+    is_admin = session.get("role") == "admin"
+
+    # Own images first
+    user_dir = GALLERY_DIR / safe_user
+    for ext in ("png", "jpg", "jpeg", "webp"):
+        try:
+            img_path = _check_gallery_path(user_dir / f"{safe_id}.{ext}")
+        except ValueError:
+            continue
+        if img_path.exists():
+            return FileResponse(str(img_path), media_type=f"image/{ext}")
+
+    # Admin: search all user dirs
+    if is_admin and GALLERY_DIR.exists():
+        for sub in GALLERY_DIR.iterdir():
+            if not sub.is_dir():
+                continue
+            for ext in ("png", "jpg", "jpeg", "webp"):
+                try:
+                    img_path = _check_gallery_path(sub / f"{safe_id}.{ext}")
+                except ValueError:
+                    continue
+                if img_path.exists():
+                    return FileResponse(str(img_path), media_type=f"image/{ext}")
+
+    raise HTTPException(status_code=404, detail="Bild nicht gefunden.")
+
+
+@app.delete("/api/gallery/{image_id}")
+async def gallery_delete(
+    image_id: str,
+    session: dict[str, str] = Depends(require_user),
+) -> dict[str, str]:
+    """Delete a gallery image (own images only)."""
+    try:
+        safe_id = _safe_image_id(image_id)
+        user_dir = GALLERY_DIR / _safe_username(session["username"])
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Ungültige Parameter.")
+    deleted = False
+    for ext in ("png", "jpg", "jpeg", "webp"):
+        try:
+            p = _check_gallery_path(user_dir / f"{safe_id}.{ext}")
+        except ValueError:
+            continue
+        if p.exists():
+            p.unlink()
+            deleted = True
+    try:
+        meta_p = _check_gallery_path(user_dir / f"{safe_id}.json")
+    except ValueError:
+        meta_p = None
+    if meta_p and meta_p.exists():
+        meta_p.unlink()
+        deleted = True
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Bild nicht gefunden.")
+    return {"status": "deleted"}
+
+
+@app.delete("/api/gallery")
+async def gallery_delete_all(
+    session: dict[str, str] = Depends(require_user),
+) -> dict[str, Any]:
+    """Delete **all** gallery images for the current user."""
+    _delete_gallery_dir(session["username"])
+    return {"status": "deleted", "username": session["username"]}
+
+
+@app.get("/api/admin/gallery")
+async def admin_gallery_overview(
+    _: dict[str, str] = Depends(require_admin),
+) -> dict[str, Any]:
+    """List all users that have gallery entries with counts."""
+    users: list[dict[str, Any]] = []
+    if GALLERY_DIR.exists():
+        for sub in sorted(GALLERY_DIR.iterdir()):
+            if sub.is_dir():
+                count = sum(1 for _ in sub.glob("*.json"))
+                if count > 0:
+                    users.append({"username": sub.name, "count": count})
+    return {"users": users}
+
+
+@app.get("/api/admin/gallery/{username}")
+async def admin_gallery_user(
+    username: str,
+    _: dict[str, str] = Depends(require_admin),
+) -> dict[str, Any]:
+    """Return gallery items for a specific user (admin only)."""
+    try:
+        safe = _safe_username(username)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Ungültiger Benutzername.")
+    items = _list_gallery(safe)
+    return {"items": items, "username": safe}
+
+
+@app.delete("/api/admin/gallery/{username}/{image_id}")
+async def admin_gallery_delete(
+    username: str,
+    image_id: str,
+    _: dict[str, str] = Depends(require_admin),
+) -> dict[str, str]:
+    """Admin: delete any user's gallery image."""
+    try:
+        safe_id = _safe_image_id(image_id)
+        user_dir = GALLERY_DIR / _safe_username(username)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Ungültige Parameter.")
+    deleted = False
+    for ext in ("png", "jpg", "jpeg", "webp"):
+        try:
+            p = _check_gallery_path(user_dir / f"{safe_id}.{ext}")
+        except ValueError:
+            continue
+        if p.exists():
+            p.unlink()
+            deleted = True
+    try:
+        meta_p = _check_gallery_path(user_dir / f"{safe_id}.json")
+    except ValueError:
+        meta_p = None
+    if meta_p and meta_p.exists():
+        meta_p.unlink()
+        deleted = True
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Bild nicht gefunden.")
+    return {"status": "deleted"}
+
+
+@app.delete("/api/admin/gallery/{username}")
+async def admin_gallery_delete_all(
+    username: str,
+    _: dict[str, str] = Depends(require_admin),
+) -> dict[str, Any]:
+    """Admin: delete **all** gallery images for a specific user."""
+    try:
+        safe = _safe_username(username)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Ungültiger Benutzername.")
+    _delete_gallery_dir(safe)
+    return {"status": "deleted", "username": safe}
+
+
+# ---------------------------------------------------------------------------
+# Admin – User deletion
+# ---------------------------------------------------------------------------
+
+@app.delete("/api/admin/users/{username}")
+async def admin_delete_user(
+    username: str,
+    current: dict[str, str] = Depends(require_admin),
+) -> dict[str, str]:
+    """Admin: permanently delete a user account and their gallery."""
+    if username == current["username"]:
+        raise HTTPException(status_code=400, detail="Du kannst dein eigenes Konto nicht löschen.")
+    try:
+        found = _auth.delete_user(username)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not found:
+        raise HTTPException(status_code=404, detail="Benutzer nicht gefunden.")
+    _delete_gallery_dir(username)
+    return {"status": "deleted"}
+
+
+# ---------------------------------------------------------------------------
+# Admin – Test-Run (parametric sweep over steps and/or cfg)
+# ---------------------------------------------------------------------------
+
+class TestRunRequest(BaseModel):
+    """Request body for starting an admin test run.
+
+    All generation settings are inherited from the current generate form.
+    The test run sweeps every (steps, cfg) combination formed by iterating
+    from ``steps_from`` to ``steps_to`` (inclusive, step 1) and from
+    ``cfg_from`` to ``cfg_to`` (inclusive, step ``cfg_step``).
+    """
+    prompt_de: str = Field(min_length=1)
+    negative_prompt: str = ""
+    ollama_model: str = Field(min_length=1)
+    translated_prompt: str | None = None
+    translated_negative_prompt: str | None = None
+    checkpoint: str | None = None
+    workflow_template: str | None = None
+    seed: int = -1
+    width: int = 1024
+    height: int = 1024
+    sampler: str = "euler"
+    scheduler: str = "normal"
+    image_count: int = 1
+    # Range parameters
+    steps_from: int = Field(default=20, ge=1, le=200)
+    steps_to: int = Field(default=20, ge=1, le=200)
+    cfg_from: float = Field(default=7.0, ge=0.0, le=30.0)
+    cfg_to: float = Field(default=7.0, ge=0.0, le=30.0)
+    cfg_step: float = Field(default=0.5, gt=0.0, le=10.0)
+
+
+# In-memory store for active/recently-finished test runs.
+_test_runs: dict[str, dict[str, Any]] = {}
+
+
+def _build_cfg_list(cfg_from: float, cfg_to: float, cfg_step: float) -> list[float]:
+    """Return a list of cfg values from cfg_from to cfg_to inclusive."""
+    values: list[float] = []
+    v = cfg_from
+    while v <= cfg_to + 1e-9:
+        values.append(round(v, 4))
+        v = round(v + cfg_step, 4)
+        if cfg_step <= 0:
+            break
+    return values
+
+
+async def _test_run_worker(run_id: str, run: dict[str, Any]) -> None:
+    """Background async task – survives browser disconnects."""
+    try:
+        req: TestRunRequest = run["request"]
+        username: str = run["username"]
+
+        # ── Translate prompts once ───────────────────────────────────────────
+        translated_prompt = run.get("translated_prompt") or ""
+        if not translated_prompt:
+            try:
+                translated_prompt = await _translate_german_to_english(
+                    req.prompt_de, req.ollama_model
+                )
+            except Exception as exc:
+                run["status"] = "error"
+                run["error"] = f"Übersetzung fehlgeschlagen: {exc}"
+                return
+        run["translated_prompt"] = translated_prompt
+
+        translated_negative = run.get("translated_negative") or ""
+        if req.negative_prompt and not translated_negative:
+            try:
+                translated_negative = await _translate_german_to_english(
+                    req.negative_prompt, req.ollama_model
+                )
+            except Exception:
+                translated_negative = ""
+        run["translated_negative"] = translated_negative
+
+        # ── Build combinations ───────────────────────────────────────────────
+        steps_list = list(range(req.steps_from, req.steps_to + 1))
+        cfg_list = _build_cfg_list(req.cfg_from, req.cfg_to, req.cfg_step)
+        combinations = [(s, c) for s in steps_list for c in cfg_list]
+        run["total"] = len(combinations)
+        run["current"] = 0
+        run["status"] = "running"
+
+        # Fix seed once so all images are comparable
+        seed = req.seed if req.seed >= 0 else int.from_bytes(os.urandom(4), "big")
+        run["seed_used"] = seed
+
+        _gen_logger.info(
+            "TEST_RUN_START run_id=%s user=%s combinations=%d seed=%d",
+            run_id, username, len(combinations), seed,
+        )
+
+        for steps, cfg in combinations:
+            if run.get("cancelled"):
+                run["status"] = "cancelled"
+                _gen_logger.info("TEST_RUN_CANCELLED run_id=%s", run_id)
+                return
+
+            req_id = f"tr_{run_id}_{steps}s_{cfg}c"
+
+            combo_req = GenerateRequest(
+                prompt_de=req.prompt_de,
+                negative_prompt=req.negative_prompt,
+                ollama_model=req.ollama_model,
+                checkpoint=req.checkpoint,
+                workflow_template=req.workflow_template,
+                steps=steps,
+                cfg=cfg,
+                seed=seed,
+                width=req.width,
+                height=req.height,
+                sampler=req.sampler,
+                scheduler=req.scheduler,
+                image_count=req.image_count,
+            )
+
+            try:
+                workflow, actual_seed = _build_workflow(
+                    combo_req, translated_prompt, translated_negative, req_id=req_id
+                )
+            except ValueError as exc:
+                run["errors"].append(f"steps={steps}, cfg={cfg}: Workflow-Fehler: {exc}")
+                run["current"] += 1
+                continue
+
+            client_id = f"testrun-{uuid.uuid4()}"
+            prompt_id: str | None = None
+            try:
+                async with httpx.AsyncClient(timeout=20.0) as client:
+                    resp = await client.post(
+                        f"{COMFYUI_BASE_URL}/prompt",
+                        json={"prompt": workflow, "client_id": client_id},
+                    )
+                if not resp.is_success:
+                    try:
+                        body = resp.json()
+                        comfy_error = (
+                            body.get("error", {}).get("message")
+                            or body.get("error")
+                            or str(body)
+                        )
+                    except Exception:
+                        comfy_error = resp.text[:200] or f"HTTP {resp.status_code}"
+                    run["errors"].append(f"steps={steps}, cfg={cfg}: ComfyUI: {comfy_error}")
+                    run["current"] += 1
+                    continue
+                prompt_id = resp.json().get("prompt_id")
+                if not prompt_id:
+                    run["errors"].append(f"steps={steps}, cfg={cfg}: Keine prompt_id erhalten")
+                    run["current"] += 1
+                    continue
+            except Exception as exc:
+                run["errors"].append(f"steps={steps}, cfg={cfg}: Anfragefehler: {exc}")
+                run["current"] += 1
+                continue
+
+            _gen_logger.info(
+                "TEST_RUN_QUEUED run_id=%s steps=%d cfg=%.2f prompt_id=%s",
+                run_id, steps, cfg, prompt_id,
+            )
+
+            # Poll for completion (up to 5 minutes)
+            images: list[dict[str, str]] = []
+            timed_out = False
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as http:
+                    for _ in range(300):
+                        if run.get("cancelled"):
+                            break
+                        await asyncio.sleep(1.0)
+                        try:
+                            hist = await http.get(
+                                f"{COMFYUI_BASE_URL}/history/{prompt_id}"
+                            )
+                            if hist.status_code == 200:
+                                hdata = hist.json()
+                                if hdata.get(prompt_id):
+                                    images = _extract_images(hdata[prompt_id])
+                                    break
+                        except Exception:
+                            pass
+                    else:
+                        timed_out = True
+            except Exception as exc:
+                run["errors"].append(f"steps={steps}, cfg={cfg}: Poll-Fehler: {exc}")
+                run["current"] += 1
+                continue
+
+            if run.get("cancelled"):
+                run["status"] = "cancelled"
+                return
+
+            if timed_out:
+                run["errors"].append(
+                    f"steps={steps}, cfg={cfg}: Timeout – kein Ergebnis nach 5 Minuten"
+                )
+                run["current"] += 1
+                continue
+
+            for img in images:
+                comfy_params = {
+                    "filename": img["filename"],
+                    "subfolder": img.get("subfolder", ""),
+                    "type": img.get("type", "output"),
+                }
+                try:
+                    async with httpx.AsyncClient(timeout=60.0) as img_http:
+                        img_resp = await img_http.get(
+                            f"{COMFYUI_BASE_URL}/view", params=comfy_params
+                        )
+                    img_resp.raise_for_status()
+                    ct = img_resp.headers.get("content-type", "image/png")
+                    meta: dict[str, Any] = {
+                        "prompt_id": prompt_id,
+                        "test_run_id": run_id,
+                        "prompt_de": req.prompt_de,
+                        "negative_prompt_de": req.negative_prompt,
+                        "translated_prompt": translated_prompt,
+                        "translated_negative_prompt": translated_negative,
+                        "workflow_template": req.workflow_template or "default",
+                        "checkpoint": req.checkpoint or "",
+                        "ollama_model": req.ollama_model,
+                        "steps": steps,
+                        "cfg": cfg,
+                        "actual_seed": actual_seed,
+                        "width": req.width,
+                        "height": req.height,
+                        "sampler": req.sampler,
+                        "scheduler": req.scheduler,
+                        "image_count": req.image_count,
+                        "username": username,
+                    }
+                    image_id = _save_to_gallery(username, img_resp.content, ct, meta)
+                    run["gallery_ids"].append(image_id)
+                    _delete_comfyui_output(
+                        img["filename"], img.get("subfolder", ""), img.get("type", "output")
+                    )
+                except Exception as exc:
+                    run["errors"].append(
+                        f"steps={steps}, cfg={cfg}: Galerie-Fehler: {exc}"
+                    )
+
+            run["current"] += 1
+
+        if not run.get("cancelled"):
+            run["status"] = "done"
+            _gen_logger.info(
+                "TEST_RUN_DONE run_id=%s images=%d errors=%d",
+                run_id, len(run["gallery_ids"]), len(run["errors"]),
+            )
+
+    except asyncio.CancelledError:
+        run["status"] = "cancelled"
+        raise
+    except Exception as exc:
+        run["status"] = "error"
+        run["error"] = str(exc)
+        _gen_logger.error("TEST_RUN_ERROR run_id=%s error=%r", run_id, str(exc))
+
+
+@app.post("/api/admin/testrun", status_code=201)
+async def admin_start_testrun(
+    payload: TestRunRequest,
+    session: dict[str, str] = Depends(require_admin),
+) -> dict[str, Any]:
+    """Start a parametric test run (admin only).
+
+    Executes as an asyncio background task – continues even after browser close.
+    Use ``GET /api/admin/testrun/{run_id}`` to poll for progress.
+    """
+    if payload.steps_from > payload.steps_to:
+        raise HTTPException(
+            status_code=400, detail="steps_from darf nicht größer als steps_to sein."
+        )
+    if payload.cfg_from > payload.cfg_to:
+        raise HTTPException(
+            status_code=400, detail="cfg_from darf nicht größer als cfg_to sein."
+        )
+
+    run_id = uuid.uuid4().hex[:12]
+    run: dict[str, Any] = {
+        "run_id": run_id,
+        "status": "starting",
+        "current": 0,
+        "total": 0,
+        "gallery_ids": [],
+        "errors": [],
+        "error": None,
+        "cancelled": False,
+        "seed_used": None,
+        "translated_prompt": payload.translated_prompt or "",
+        "translated_negative": payload.translated_negative_prompt or "",
+        "request": payload,
+        "username": session["username"],
+    }
+    _test_runs[run_id] = run
+    asyncio.create_task(_test_run_worker(run_id, run))
+    _gen_logger.info(
+        "TEST_RUN_CREATED run_id=%s user=%s steps=%d-%d cfg=%.1f-%.1f step=%.2f",
+        run_id, session["username"],
+        payload.steps_from, payload.steps_to,
+        payload.cfg_from, payload.cfg_to, payload.cfg_step,
+    )
+    return {"run_id": run_id, "status": "starting"}
+
+
+@app.get("/api/admin/testrun/{run_id}")
+async def admin_get_testrun(
+    run_id: str,
+    _: dict[str, str] = Depends(require_admin),
+) -> dict[str, Any]:
+    """Return the current status and progress of a test run."""
+    run = _test_runs.get(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Test-Run nicht gefunden.")
+    return {
+        "run_id": run_id,
+        "status": run["status"],
+        "current": run["current"],
+        "total": run["total"],
+        "gallery_ids": list(run["gallery_ids"]),
+        "errors": list(run["errors"]),
+        "error": run.get("error"),
+        "seed_used": run.get("seed_used"),
+    }
+
+
+@app.delete("/api/admin/testrun/{run_id}")
+async def admin_cancel_testrun(
+    run_id: str,
+    _: dict[str, str] = Depends(require_admin),
+) -> dict[str, str]:
+    """Request cancellation of a running test run.
+
+    The worker checks the ``cancelled`` flag between iterations – cancellation
+    takes effect after the currently-generating image finishes.
+    """
+    run = _test_runs.get(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Test-Run nicht gefunden.")
+    run["cancelled"] = True
+    return {"status": "cancel_requested"}
