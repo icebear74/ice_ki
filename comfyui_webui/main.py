@@ -32,6 +32,9 @@ DATA_DIR = APP_DIR / "data"
 
 logger = logging.getLogger(__name__)
 
+_QUOTED_LITERAL_PATTERN = re.compile(r'"[^"\n]*"|(?<!\w)\'[^\'\n]+\'(?!\w)')
+_QUOTED_LITERAL_PLACEHOLDER_PREFIX = "__ICEKI_LITERAL_"
+
 # ---------------------------------------------------------------------------
 # File-based generation logger – logs requests, workflow mutations, responses
 # ---------------------------------------------------------------------------
@@ -1360,24 +1363,55 @@ async def _call_ollama_raw(instruction: str, model: str) -> str:
     return text
 
 
+def _mask_quoted_literals(text: str, replacements: dict[str, str]) -> str:
+    """Replace quoted literal text with stable placeholders before translation."""
+    if not text:
+        return text
+
+    def _replace(match: re.Match[str]) -> str:
+        placeholder = f"{_QUOTED_LITERAL_PLACEHOLDER_PREFIX}{len(replacements)}__"
+        replacements[placeholder] = match.group(0)
+        return placeholder
+
+    return _QUOTED_LITERAL_PATTERN.sub(_replace, text)
+
+
+def _restore_quoted_literals(text: str, replacements: dict[str, str]) -> str:
+    """Restore previously masked quoted literal text after translation."""
+    restored = text
+    for placeholder, literal in replacements.items():
+        restored = restored.replace(placeholder, literal)
+    return restored
+
+
 async def _translate_german_to_english(prompt_de: str, model: str, context_prompt: str | None = None) -> str:
     """Translate German prompt to English via Ollama, optionally refining an existing prompt."""
+    quoted_literals: dict[str, str] = {}
+    masked_prompt_de = _mask_quoted_literals(prompt_de, quoted_literals)
+    masked_context_prompt = (
+        _mask_quoted_literals(context_prompt, quoted_literals) if context_prompt else None
+    )
+
     if context_prompt:
         instruction = (
             "You previously created an image with this English prompt:\n"
-            f'"{context_prompt}"\n\n'
+            f"{masked_context_prompt}\n\n"
             "The user wants to modify it with this German instruction:\n"
-            f'"{prompt_de}"\n\n'
-            "Return only the updated English image prompt. No explanations, no quotes, no additional text."
+            f"{masked_prompt_de}\n\n"
+            "Any text inside quotes, and any placeholder like __ICEKI_LITERAL_0__, represents visible text, "
+            "signage, or lettering in the image and must remain exactly unchanged. "
+            "Return only the updated English image prompt. No explanations, no additional text."
         )
     else:
         instruction = (
             "Translate the following German image prompt into natural, precise English "
-            "for text-to-image models. Return only the English prompt, no explanations, "
-            "no quotes, no additional text.\n\n"
-            f"German: {prompt_de}"
+            "for text-to-image models. Any text inside quotes, and any placeholder like __ICEKI_LITERAL_0__, "
+            "represents visible text, signage, or lettering in the image and must remain exactly unchanged. "
+            "Return only the English prompt, no explanations, no additional text.\n\n"
+            f"German: {masked_prompt_de}"
         )
-    return await _call_ollama_raw(instruction, model)
+    translated = await _call_ollama_raw(instruction, model)
+    return _restore_quoted_literals(translated, quoted_literals)
 
 
 def _inject_custom_advanced_params(
