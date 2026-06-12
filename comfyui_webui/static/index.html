@@ -449,6 +449,7 @@
                 <th>Deaktiviert</th>
                 <th>Erstellt</th>
                 <th>Aktionen</th>
+                <th>L&ouml;schen</th>
               </tr>
             </thead>
             <tbody id="adminUserBody"></tbody>
@@ -476,6 +477,7 @@
           <div style="display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap;margin-bottom:0.75rem">
             <h2 style="margin:0" id="galleryTitle">Meine Galerie</h2>
             <button id="galleryReloadBtn" class="btn-sm btn-secondary" type="button" title="Galerie neu laden">&#8635;</button>
+            <button id="galleryDeleteAllBtn" class="btn-sm btn-danger" type="button" title="Alle Bilder l&ouml;schen">&#128465; Alle l&ouml;schen</button>
           </div>
           <div id="galleryStatus" class="hint"></div>
           <div id="galleryGrid" class="gallery-grid"></div>
@@ -494,6 +496,8 @@
         <div id="galleryMetaContent"></div>
         <div style="margin-top:0.75rem;display:flex;gap:0.5rem;flex-wrap:wrap">
           <button id="galleryMetaApplyBtn" type="button">&#9654; Einstellungen &uuml;bernehmen</button>
+          <button id="galleryMetaDlJpgBtn" class="btn-secondary" type="button">&#11015; Download JPG</button>
+          <button id="galleryMetaDlPngBtn" class="btn-secondary" type="button">&#11015; Download PNG</button>
           <button id="galleryMetaCloseBtn2" class="btn-secondary" type="button">Schlie&szlig;en</button>
         </div>
       </div>

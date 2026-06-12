@@ -7,6 +7,7 @@ import logging.handlers
 import os
 import re
 import secrets
+import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1770,6 +1771,20 @@ def _find_gallery_by_prompt_id(username: str, prompt_id: str) -> list[str]:
     return [item["id"] for item in _list_gallery(username) if item.get("prompt_id") == prompt_id]
 
 
+def _delete_gallery_dir(username: str) -> None:
+    """Delete the entire gallery directory for *username* (best-effort)."""
+    try:
+        safe = _safe_username(username)
+        gdir = _check_gallery_path(GALLERY_DIR / safe)
+        if gdir.exists():
+            shutil.rmtree(str(gdir))
+            logger.info("Deleted gallery directory for user %r", username)
+    except ValueError as exc:
+        logger.warning("Path check failed for gallery dir of %r: %s", username, exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not delete gallery dir for %r: %s", username, exc)
+
+
 def _delete_comfyui_output(filename: str, subfolder: str = "", type_: str = "output") -> None:
     """Best-effort deletion of a ComfyUI output image file.
 
@@ -1873,6 +1888,15 @@ async def gallery_delete(
     return {"status": "deleted"}
 
 
+@app.delete("/api/gallery")
+async def gallery_delete_all(
+    session: dict[str, str] = Depends(require_user),
+) -> dict[str, Any]:
+    """Delete **all** gallery images for the current user."""
+    _delete_gallery_dir(session["username"])
+    return {"status": "deleted", "username": session["username"]}
+
+
 @app.get("/api/admin/gallery")
 async def admin_gallery_overview(
     _: dict[str, str] = Depends(require_admin),
@@ -1932,6 +1956,42 @@ async def admin_gallery_delete(
         deleted = True
     if not deleted:
         raise HTTPException(status_code=404, detail="Bild nicht gefunden.")
+    return {"status": "deleted"}
+
+
+@app.delete("/api/admin/gallery/{username}")
+async def admin_gallery_delete_all(
+    username: str,
+    _: dict[str, str] = Depends(require_admin),
+) -> dict[str, Any]:
+    """Admin: delete **all** gallery images for a specific user."""
+    try:
+        safe = _safe_username(username)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Ungültiger Benutzername.")
+    _delete_gallery_dir(safe)
+    return {"status": "deleted", "username": safe}
+
+
+# ---------------------------------------------------------------------------
+# Admin – User deletion
+# ---------------------------------------------------------------------------
+
+@app.delete("/api/admin/users/{username}")
+async def admin_delete_user(
+    username: str,
+    current: dict[str, str] = Depends(require_admin),
+) -> dict[str, str]:
+    """Admin: permanently delete a user account and their gallery."""
+    if username == current["username"]:
+        raise HTTPException(status_code=400, detail="Du kannst dein eigenes Konto nicht löschen.")
+    try:
+        found = _auth.delete_user(username)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not found:
+        raise HTTPException(status_code=404, detail="Benutzer nicht gefunden.")
+    _delete_gallery_dir(username)
     return {"status": "deleted"}
 
 

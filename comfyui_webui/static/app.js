@@ -354,12 +354,37 @@ function showImages(urls) {
   const wrap = $("images");
   wrap.innerHTML = "";
   for (const url of urls) {
+    const container = document.createElement("div");
+    container.className = "result-image-wrap";
+
     const img = document.createElement("img");
-    // Cache-bust: use ? or & depending on whether the URL already has query params
     const sep = url.includes("?") ? "&" : "?";
-    img.src = `${url}${sep}_=${Date.now()}`;
+    const cacheBust = `${url}${sep}_=${Date.now()}`;
+    img.src = cacheBust;
     img.alt = "Generiertes Bild";
-    wrap.appendChild(img);
+
+    const actions = document.createElement("div");
+    actions.className = "result-image-actions";
+
+    const dlJpg = document.createElement("button");
+    dlJpg.className = "btn-sm btn-secondary";
+    dlJpg.type = "button";
+    dlJpg.textContent = "⬇ JPG";
+    dlJpg.title = "Als JPEG herunterladen";
+    dlJpg.addEventListener("click", () => downloadImageFromUrl(cacheBust, "jpg"));
+
+    const dlPng = document.createElement("button");
+    dlPng.className = "btn-sm btn-secondary";
+    dlPng.type = "button";
+    dlPng.textContent = "⬇ PNG";
+    dlPng.title = "Als PNG herunterladen";
+    dlPng.addEventListener("click", () => downloadImageFromUrl(cacheBust, "png"));
+
+    actions.appendChild(dlJpg);
+    actions.appendChild(dlPng);
+    container.appendChild(img);
+    container.appendChild(actions);
+    wrap.appendChild(container);
   }
 }
 
@@ -1208,7 +1233,7 @@ async function saveModelAlias() {
 // ---------------------------------------------------------------------------
 async function loadAdminUsers() {
   const tbody = $("adminUserBody");
-  tbody.innerHTML = "<tr><td colspan='6' class='hint'>Lade …</td></tr>";
+  tbody.innerHTML = "<tr><td colspan='7' class='hint'>Lade …</td></tr>";
   try {
     const data = await api("/api/admin/users");
     tbody.innerHTML = "";
@@ -1230,6 +1255,12 @@ async function loadAdminUsers() {
           ${!isSelf
             ? `<button class="btn-sm ${user.disabled ? "" : "btn-danger"} user-toggle" data-name="${escHtml(user.username)}" data-disabled="${user.disabled}" type="button">${user.disabled ? "Aktivieren" : "Deaktivieren"}</button>`
             : "(eigenes Konto)"
+          }
+        </td>
+        <td>
+          ${!isSelf
+            ? `<button class="btn-sm btn-danger user-delete" data-name="${escHtml(user.username)}" type="button">L&ouml;schen</button>`
+            : ""
           }
         </td>
       `;
@@ -1263,8 +1294,19 @@ async function loadAdminUsers() {
         }
       });
     });
+    tbody.querySelectorAll(".user-delete").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        if (!confirm(`Benutzer "${btn.dataset.name}" und seine gesamte Galerie unwiderruflich löschen?`)) return;
+        try {
+          await api(`/api/admin/users/${encodeURIComponent(btn.dataset.name)}`, { method: "DELETE" });
+          await loadAdminUsers();
+        } catch (err) {
+          alert(`Fehler: ${err.message}`);
+        }
+      });
+    });
   } catch (err) {
-    tbody.innerHTML = `<tr><td colspan='6' class='error'>${escHtml(err.message)}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan='7' class='error'>${escHtml(err.message)}</td></tr>`;
   }
 }
 
@@ -1404,6 +1446,10 @@ function renderGallery(items, username) {
       : "";
     const seedStr = item.actual_seed != null ? `Seed: ${item.actual_seed}` : "";
     const modelStr = item.checkpoint ? item.checkpoint.replace(/^.*[\\/]/, "").replace(/\.[^.]+$/, "") : "";
+    const cfgStepsStr = (item.steps || item.cfg)
+      ? [item.steps ? `Steps: ${item.steps}` : null, item.cfg ? `CFG: ${item.cfg}` : null]
+          .filter(Boolean).join(" · ")
+      : "";
 
     const imgUrl = `/api/gallery/image/${encodeURIComponent(item.id)}?_=${Date.now()}`;
 
@@ -1413,9 +1459,12 @@ function renderGallery(items, username) {
         <span class="gallery-date">${escHtml(dateStr)}</span>
         <span class="gallery-seed hint">${escHtml(seedStr)}</span>
         ${modelStr ? `<span class="gallery-model hint" title="${escHtml(item.checkpoint || "")}">${escHtml(modelStr)}</span>` : ""}
+        ${cfgStepsStr ? `<span class="gallery-cfg-steps hint">${escHtml(cfgStepsStr)}</span>` : ""}
       </div>
       <div class="gallery-item-actions">
         <button class="btn-sm gallery-info-btn" data-id="${escHtml(item.id)}" type="button" title="Details anzeigen">&#9432;</button>
+        <button class="btn-sm btn-secondary gallery-dl-jpg" data-id="${escHtml(item.id)}" type="button" title="Als JPEG herunterladen">&#11015;JPG</button>
+        <button class="btn-sm btn-secondary gallery-dl-png" data-id="${escHtml(item.id)}" type="button" title="Als PNG herunterladen">&#11015;PNG</button>
         <button class="btn-sm btn-danger gallery-del-btn" data-id="${escHtml(item.id)}" data-user="${escHtml(username)}" type="button" title="Bild l&ouml;schen">&#128465;</button>
       </div>
     `;
@@ -1426,6 +1475,14 @@ function renderGallery(items, username) {
     btn.addEventListener("click", () => {
       const item = state.gallery.find((x) => x.id === btn.dataset.id);
       if (item) openGalleryMeta(item);
+    });
+  });
+
+  grid.querySelectorAll(".gallery-dl-jpg, .gallery-dl-png").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const format = btn.classList.contains("gallery-dl-jpg") ? "jpg" : "png";
+      const imgUrl = `/api/gallery/image/${encodeURIComponent(btn.dataset.id)}`;
+      downloadImageFromUrl(imgUrl, format);
     });
   });
 
@@ -1485,6 +1542,10 @@ function openGalleryMeta(item) {
 
   $("galleryMetaContent").innerHTML = html;
   $("galleryMetaOverlay").classList.remove("hidden");
+
+  // Wire up download buttons in modal
+  $("galleryMetaDlJpgBtn").onclick = () => downloadImageFromUrl(imgUrl, "jpg");
+  $("galleryMetaDlPngBtn").onclick = () => downloadImageFromUrl(imgUrl, "png");
 }
 
 function closeGalleryMeta() {
@@ -1757,6 +1818,50 @@ function escHtml(str) {
 }
 
 // ---------------------------------------------------------------------------
+// Image download helper
+// ---------------------------------------------------------------------------
+async function downloadImageFromUrl(url, format) {
+  try {
+    const resp = await fetch(url, { credentials: "same-origin" });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const sourceBlob = await resp.blob();
+
+    const img = await createImageBitmap(sourceBlob);
+    const canvas = document.createElement("canvas");
+    canvas.width = img.width;
+    canvas.height = img.height;
+    const ctx = canvas.getContext("2d");
+    if (format === "jpg") {
+      // Fill white background so transparent PNGs convert cleanly to JPEG
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
+    ctx.drawImage(img, 0, 0);
+    img.close && img.close();
+
+    const mimeType = format === "jpg" ? "image/jpeg" : "image/png";
+    const quality  = format === "jpg" ? 0.92 : undefined;
+    const outBlob  = await new Promise((resolve) => canvas.toBlob(resolve, mimeType, quality));
+
+    // Generate a random filename
+    const randPart = Array.from(crypto.getRandomValues(new Uint8Array(8)))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+    const filename = `img_${randPart}.${format}`;
+
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(outBlob);
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(a.href);
+  } catch (err) {
+    alert(`Download fehlgeschlagen: ${err.message}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Init – after login, load all dynamic data
 // ---------------------------------------------------------------------------
 async function initAppData() {
@@ -1930,6 +2035,26 @@ $("galleryReloadBtn").addEventListener("click", () => {
   const sel = $("galleryUserSelect");
   const user = sel && sel.value ? sel.value : null;
   loadGallery(user);
+});
+
+$("galleryDeleteAllBtn").addEventListener("click", async () => {
+  const sel = $("galleryUserSelect");
+  const targetUser = sel && sel.value ? sel.value : null;
+  const displayName = targetUser || (state.currentUser ? state.currentUser.username : "dich");
+  if (!confirm(`Wirklich ALLE Bilder der Galerie von „${displayName}" löschen?`)) return;
+  try {
+    if (targetUser && state.currentUser && targetUser !== state.currentUser.username) {
+      await api(`/api/admin/gallery/${encodeURIComponent(targetUser)}`, { method: "DELETE" });
+    } else {
+      await api("/api/gallery", { method: "DELETE" });
+    }
+    await loadGallery(targetUser);
+    if (state.currentUser && state.currentUser.role === "admin") {
+      await loadAdminGalleryUsers().catch(() => {});
+    }
+  } catch (err) {
+    alert(`Fehler: ${err.message}`);
+  }
 });
 
 $("galleryLoadUserBtn").addEventListener("click", () => {
