@@ -171,6 +171,18 @@ Mit dem **⟳**-Button wird die Analyse für ein bestehendes Template neu ausgef
 | img2img / Inpainting | ⚠ | Strukturen erkannt, aber Parameter noch nicht vollständig injizierbar |
 | Komplexe Conditioning-Graphen | ⚠ | Warnung wenn kein CLIPTextEncode erreichbar |
 
+### Ausführungsverhalten bei importierten Templates
+
+- Importierte Workflow-JSONs werden jetzt **strukturtreu** ausgeführt:
+  - Die Pipeline-Struktur (Loader, Wrapper wie `ModelSamplingAuraFlow`, CLIP-/VAE-Ketten) bleibt unverändert.
+  - Prompt-Injektion erfolgt nur auf den vom Graph-Analyzer erkannten positiven/negativen Pfaden.
+- Für importierte Templates werden Sampler-/Latent-Defaults aus dem Template standardmäßig beibehalten.
+  WebUI-Werte werden nur dann in diese Felder geschrieben, wenn sie explizit vom WebUI-Standard abweichen
+  (z. B. geänderte Steps statt Default 30).
+- Der Seed wird weiterhin pro Lauf gesetzt (fester Seed oder zufällig bei `-1`).
+- Bei nicht eindeutigem positiven Prompt-Ziel wird die Generierung mit einem klaren Fehler abgebrochen
+  statt stillschweigend den falschen Knoten zu überschreiben.
+
 ### Bekannte Einschränkungen
 
 - **img2img**: Der Analyse-Code erkennt `VAEEncode`- und `LoadImage`-Pfade und meldet
@@ -199,6 +211,7 @@ Protokollierte Ereignisse:
 - `TRANSLATED` – übersetzte Prompts
 - `TEMPLATE` – gewähltes Template
 - `ANALYSIS` – Graph-Analyse-Ergebnis (Rollen, Warnungen)
+- `OVERRIDE_POLICY` – Modus für Mutationen (`full` bei Default-Template, sonst `preserve_imported`)
 - `SET_POSITIVE` / `SET_NEGATIVE` / `SET_SAMPLER` / `SET_LATENT` / `SET_MODEL` – Mutationen
 - `QUEUED` – erfolgreiche Übergabe an ComfyUI
 - `COMFYUI_REJECT` / `COMFYUI_UNREACHABLE` – ComfyUI-Fehler

@@ -1386,6 +1386,11 @@ def _inject_custom_advanced_params(
     seed: int,
     payload: "GenerateRequest",
     req_id: str,
+    *,
+    set_steps: bool,
+    set_cfg: bool,
+    set_sampler: bool,
+    set_scheduler: bool,
 ) -> None:
     """Inject generation parameters for a ``SamplerCustomAdvanced`` node.
 
@@ -1398,6 +1403,9 @@ def _inject_custom_advanced_params(
     * **sampler_name** → ``KSamplerSelect.sampler_name``
     * **cfg**         → ``CFGGuider.cfg``
     * **scheduler**   → ``BasicScheduler.scheduler`` (when present)
+
+    Individual overrides can be toggled to preserve imported templates and only
+    apply explicit user-selected changes.
     """
     inputs = sampler_node.get("inputs", {})
 
@@ -1421,13 +1429,13 @@ def _inject_custom_advanced_params(
             sct = sigmas_node.get("class_type", "")
             sig_inputs = sigmas_node.get("inputs", {})
             steps = max(1, min(payload.steps, 200))
-            if "steps" in sig_inputs:
+            if set_steps and "steps" in sig_inputs:
                 sig_inputs["steps"] = steps
                 _gen_logger.debug(
                     "SET_STEPS id=%s sigmas_node=%r steps=%d", req_id, sigmas_id, steps
                 )
             # BasicScheduler additionally accepts a scheduler name
-            if sct == "BasicScheduler" and "scheduler" in sig_inputs:
+            if set_scheduler and sct == "BasicScheduler" and "scheduler" in sig_inputs:
                 sig_inputs["scheduler"] = payload.scheduler
                 _gen_logger.debug(
                     "SET_SCHEDULER id=%s sigmas_node=%r scheduler=%r",
@@ -1439,7 +1447,7 @@ def _inject_custom_advanced_params(
     if isinstance(sampler_select_ref, list) and sampler_select_ref:
         select_id = str(sampler_select_ref[0])
         select_node = workflow.get(select_id)
-        if select_node and select_node.get("class_type") == "KSamplerSelect":
+        if set_sampler and select_node and select_node.get("class_type") == "KSamplerSelect":
             select_node["inputs"]["sampler_name"] = payload.sampler
             _gen_logger.debug(
                 "SET_SAMPLER_NAME id=%s select_node=%r sampler=%r",
@@ -1451,7 +1459,7 @@ def _inject_custom_advanced_params(
     if isinstance(guider_ref, list) and guider_ref:
         guider_id = str(guider_ref[0])
         guider_node = workflow.get(guider_id)
-        if guider_node and guider_node.get("class_type") == "CFGGuider":
+        if set_cfg and guider_node and guider_node.get("class_type") == "CFGGuider":
             cfg = max(0.0, min(payload.cfg, 30.0))
             guider_node["inputs"]["cfg"] = cfg
             _gen_logger.debug(
@@ -1525,6 +1533,34 @@ def _build_workflow(
             + ("; ".join(roles.errors) or "unbekannter Fehler")
         )
 
+    is_default_template = template_source == "default"
+    preserve_imported = not is_default_template
+    _gen_logger.info(
+        "OVERRIDE_POLICY id=%s template=%r mode=%s",
+        req_id,
+        template_source,
+        "full" if is_default_template else "preserve_imported",
+    )
+
+    default_steps = 30
+    default_cfg = 7.0
+    default_sampler = "euler"
+    default_scheduler = "normal"
+    default_width = 1024
+    default_height = 1024
+    default_image_count = 1
+
+    override_steps = is_default_template or payload.steps != default_steps
+    override_cfg = is_default_template or payload.cfg != default_cfg
+    override_sampler = is_default_template or payload.sampler != default_sampler
+    override_scheduler = is_default_template or payload.scheduler != default_scheduler
+    override_latent = (
+        is_default_template
+        or payload.width != default_width
+        or payload.height != default_height
+        or payload.image_count != default_image_count
+    )
+
     sampler_node = workflow[roles.primary_sampler_id]
 
     # ── Inject positive prompt ───────────────────────────────────────────────
@@ -1537,16 +1573,20 @@ def _build_workflow(
                     "SET_POSITIVE id=%s clip_node=%r text=%r",
                     req_id, clip_id, translated_prompt[:80],
                 )
+    elif len(roles.clip_text_encode_ids) == 1:
+        nid = roles.clip_text_encode_ids[0]
+        node = workflow.get(nid)
+        if node and node.get("class_type") == "CLIPTextEncode":
+            node["inputs"]["text"] = translated_prompt
+            _gen_logger.warning(
+                "SET_POSITIVE_SINGLE_FALLBACK id=%s clip_node=%r text=%r",
+                req_id, nid, translated_prompt[:80],
+            )
     else:
-        # Last-resort fallback: first CLIPTextEncode in workflow
-        for nid, node in workflow.items():
-            if node.get("class_type") == "CLIPTextEncode":
-                node["inputs"]["text"] = translated_prompt
-                _gen_logger.debug(
-                    "SET_POSITIVE_FALLBACK id=%s clip_node=%r text=%r",
-                    req_id, nid, translated_prompt[:80],
-                )
-                break
+        raise ValueError(
+            "Positiver Prompt kann nicht sicher injiziert werden "
+            "(kein eindeutiger positiver Conditioning-Pfad erkannt)."
+        )
 
     # ── Inject negative prompt ───────────────────────────────────────────────
     if roles.negative_is_zero_out:
@@ -1562,6 +1602,11 @@ def _build_workflow(
                     "SET_NEGATIVE id=%s clip_node=%r text=%r",
                     req_id, clip_id, translated_negative[:80],
                 )
+    elif translated_negative:
+        _gen_logger.warning(
+            "SET_NEGATIVE_SKIP id=%s reason=no_negative_target",
+            req_id,
+        )
 
     # ── KSampler generation parameters ──────────────────────────────────────
     seed = payload.seed if payload.seed >= 0 else int.from_bytes(os.urandom(4), "big")
@@ -1569,16 +1614,36 @@ def _build_workflow(
     if is_custom_advanced:
         # SamplerCustomAdvanced (FLUX / Zimage-style): seed, steps, cfg, sampler_name
         # and scheduler live on dedicated upstream nodes, not on the sampler itself.
-        _inject_custom_advanced_params(workflow, sampler_node, seed, payload, req_id)
+        _inject_custom_advanced_params(
+            workflow,
+            sampler_node,
+            seed,
+            payload,
+            req_id,
+            set_steps=override_steps,
+            set_cfg=override_cfg,
+            set_sampler=override_sampler,
+            set_scheduler=override_scheduler,
+        )
     else:
         is_advanced = sampler_node.get("class_type") == "KSamplerAdvanced"
-        sampler_updates: dict[str, Any] = {
-            ("noise_seed" if is_advanced else "seed"): seed,
-            "steps": max(1, min(payload.steps, 200)),
-            "cfg": max(0.0, min(payload.cfg, 30.0)),
-            "sampler_name": payload.sampler,
-            "scheduler": payload.scheduler,
-        }
+        sampler_updates: dict[str, Any] = {("noise_seed" if is_advanced else "seed"): seed}
+        if override_steps:
+            sampler_updates["steps"] = max(1, min(payload.steps, 200))
+        elif preserve_imported:
+            _gen_logger.warning("SET_STEPS_SKIP id=%s reason=preserve_imported", req_id)
+        if override_cfg:
+            sampler_updates["cfg"] = max(0.0, min(payload.cfg, 30.0))
+        elif preserve_imported:
+            _gen_logger.warning("SET_CFG_SKIP id=%s reason=preserve_imported", req_id)
+        if override_sampler:
+            sampler_updates["sampler_name"] = payload.sampler
+        elif preserve_imported:
+            _gen_logger.warning("SET_SAMPLER_NAME_SKIP id=%s reason=preserve_imported", req_id)
+        if override_scheduler:
+            sampler_updates["scheduler"] = payload.scheduler
+        elif preserve_imported:
+            _gen_logger.warning("SET_SCHEDULER_SKIP id=%s reason=preserve_imported", req_id)
         sampler_node["inputs"].update(sampler_updates)
         _gen_logger.debug(
             "SET_SAMPLER id=%s sampler_node=%r updates=%s",
@@ -1594,7 +1659,7 @@ def _build_workflow(
     if roles.primary_latent_id and roles.primary_latent_id in workflow:
         latent_target = workflow[roles.primary_latent_id]
 
-    if latent_target is not None:
+    if latent_target is not None and override_latent:
         latent_target["inputs"]["width"] = width
         latent_target["inputs"]["height"] = height
         latent_target["inputs"]["batch_size"] = batch
@@ -1602,6 +1667,8 @@ def _build_workflow(
             "SET_LATENT id=%s latent_node=%r w=%d h=%d batch=%d",
             req_id, roles.primary_latent_id, width, height, batch,
         )
+    elif latent_target is not None:
+        _gen_logger.warning("SET_LATENT_SKIP id=%s reason=preserve_imported", req_id)
     else:
         _gen_logger.warning("SET_LATENT_SKIP id=%s – kein Latent-Knoten gefunden", req_id)
 
