@@ -1403,6 +1403,18 @@ async function submitChangePw() {
 // ---------------------------------------------------------------------------
 // Gallery
 // ---------------------------------------------------------------------------
+function updateGalleryDeleteSelectedBtn() {
+  const btn = $("galleryDeleteSelectedBtn");
+  if (!btn) return;
+  const selected = document.querySelectorAll("#galleryGrid .gallery-item-checkbox:checked");
+  if (selected.length > 0) {
+    btn.classList.remove("hidden");
+    btn.textContent = `🗑 Ausgewählte löschen (${selected.length})`;
+  } else {
+    btn.classList.add("hidden");
+  }
+}
+
 async function loadGallery(username) {
   const status = $("galleryStatus");
   const grid = $("galleryGrid");
@@ -1440,6 +1452,7 @@ function renderGallery(items, username) {
   for (const item of items) {
     const card = document.createElement("div");
     card.className = "gallery-item";
+    card.dataset.id = item.id;
 
     const dateStr = item.created_at
       ? new Date(item.created_at).toLocaleString("de-DE", { dateStyle: "short", timeStyle: "short" })
@@ -1454,6 +1467,7 @@ function renderGallery(items, username) {
     const imgUrl = `/api/gallery/image/${encodeURIComponent(item.id)}?_=${Date.now()}`;
 
     card.innerHTML = `
+      <input type="checkbox" class="gallery-item-checkbox" title="Bild ausw&auml;hlen" />
       <img src="${imgUrl}" alt="Galeriebild" loading="lazy" />
       <div class="gallery-item-meta">
         <span class="gallery-date">${escHtml(dateStr)}</span>
@@ -1470,6 +1484,14 @@ function renderGallery(items, username) {
     `;
     grid.appendChild(card);
   }
+
+  // Checkbox: toggle selected class and update toolbar button
+  grid.querySelectorAll(".gallery-item-checkbox").forEach((cb) => {
+    cb.addEventListener("change", () => {
+      cb.closest(".gallery-item").classList.toggle("selected", cb.checked);
+      updateGalleryDeleteSelectedBtn();
+    });
+  });
 
   grid.querySelectorAll(".gallery-info-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -1504,6 +1526,8 @@ function renderGallery(items, username) {
       }
     });
   });
+
+  updateGalleryDeleteSelectedBtn();
 }
 
 function openGalleryMeta(item) {
@@ -2035,6 +2059,31 @@ $("galleryReloadBtn").addEventListener("click", () => {
   const sel = $("galleryUserSelect");
   const user = sel && sel.value ? sel.value : null;
   loadGallery(user);
+});
+
+$("galleryDeleteSelectedBtn").addEventListener("click", async () => {
+  const checked = [...document.querySelectorAll("#galleryGrid .gallery-item-checkbox:checked")];
+  if (checked.length === 0) return;
+  if (!confirm(`Wirklich ${checked.length} ausgewählte Bild(er) löschen?`)) return;
+  const sel = $("galleryUserSelect");
+  const targetUser = sel && sel.value ? sel.value : null;
+  const ownUser = state.currentUser ? state.currentUser.username : "";
+  const isAdmin = state.currentUser && state.currentUser.role === "admin";
+  try {
+    for (const cb of checked) {
+      const card = cb.closest(".gallery-item");
+      const id = card.dataset.id;
+      if (isAdmin && targetUser && targetUser !== ownUser) {
+        await api(`/api/admin/gallery/${encodeURIComponent(targetUser)}/${encodeURIComponent(id)}`, { method: "DELETE" });
+      } else {
+        await api(`/api/gallery/${encodeURIComponent(id)}`, { method: "DELETE" });
+      }
+    }
+    await loadGallery(targetUser);
+    if (isAdmin) await loadAdminGalleryUsers().catch(() => {});
+  } catch (err) {
+    alert(`Fehler: ${err.message}`);
+  }
 });
 
 $("galleryDeleteAllBtn").addEventListener("click", async () => {
