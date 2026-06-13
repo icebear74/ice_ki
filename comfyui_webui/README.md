@@ -303,6 +303,7 @@ uvicorn main:app --host 0.0.0.0 --port 8443 \
 - ComfyUI-Checkpoint auswählbar/eingebbar
 - **Workflow-Template auswählbar** (nur freigegebene Templates für normale Benutzer)
 - Anzeige des übersetzten Prompts vor der Generierung
+- Text in Anführungszeichen wie `"Hallo Welt"` bleibt bei der Übersetzung als exakter sichtbarer Schriftzug erhalten
 - Anzeige der generierten Bilder in der UI
 - **Login-/Logout-Funktion**
 - **Admin-Panel:** Template-Freigabe + Benutzerverwaltung
