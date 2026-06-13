@@ -15,6 +15,8 @@ const state = {
   galleryMeta: null,   // currently open metadata item
   testRunId: null,     // active test run ID
   testRunPollTimer: null, // setInterval handle for test run polling
+  activeTemplateDefaults: null, // workflow_defaults from the selected template (or null)
+  activeTemplateName: null,     // display name of the active imported template
 };
 
 const $ = (id) => document.getElementById(id);
@@ -294,7 +296,13 @@ async function loadMappings() {
 function onMappingChange() {
   const name = $("mappingSelect").value;
   const mapping = state.mappings.find((m) => m.name === name);
-  if (!mapping) return;
+  if (!mapping) {
+    // No mapping selected – clear template defaults
+    state.activeTemplateDefaults = null;
+    state.activeTemplateName = null;
+    updateAdvancedDefaultHints();
+    return;
+  }
   // Populate Erweitert fields from mapping defaults
   $("steps").value = mapping.steps ?? 30;
   $("cfg").value = mapping.cfg ?? 7;
@@ -310,6 +318,143 @@ function onMappingChange() {
   }
   const note = $("mappingNote");
   note.textContent = `Mapping geladen: ${mapping.display_name}`;
+
+  // Load workflow defaults for the template, if available
+  _loadTemplateDefaults(mapping.template_name);
+}
+
+// ---------------------------------------------------------------------------
+// Workflow template-defaults helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Look up workflow_defaults for the given template name and store in state.
+ * Clears defaults for the built-in "default" template (no specific defaults).
+ */
+function _loadTemplateDefaults(templateName) {
+  if (!templateName || templateName === "default") {
+    state.activeTemplateDefaults = null;
+    state.activeTemplateName = null;
+    updateAdvancedDefaultHints();
+    return;
+  }
+  const tpl = state.templates.find((t) => t.name === templateName);
+  const defaults = tpl && tpl.analysis && tpl.analysis.workflow_defaults
+    ? tpl.analysis.workflow_defaults
+    : null;
+
+  // Only surface defaults when at least some useful values are available
+  const hasAny = defaults && (
+    defaults.steps != null ||
+    defaults.cfg != null ||
+    defaults.sampler_name != null ||
+    defaults.scheduler != null ||
+    defaults.width != null ||
+    defaults.height != null
+  );
+
+  state.activeTemplateDefaults = hasAny ? defaults : null;
+  state.activeTemplateName = tpl ? (tpl.display_name || tpl.name) : templateName;
+  updateAdvancedDefaultHints();
+}
+
+/**
+ * Update the template-defaults info panel and per-field hint labels in the
+ * Erweitert tab.  Call this whenever the active template or any Erweitert
+ * field value changes.
+ */
+function updateAdvancedDefaultHints() {
+  const panel = $("templateDefaultsPanel");
+  const panelText = $("templateDefaultsText");
+  const warningEl = $("templateDeviationWarning");
+  const deviationDetails = $("templateDeviationDetails");
+
+  if (!panel) return; // Advanced tab not rendered yet
+
+  const defs = state.activeTemplateDefaults;
+
+  if (!defs) {
+    // No imported-template defaults → hide everything
+    panel.classList.add("hidden");
+    if (warningEl) warningEl.classList.add("hidden");
+    _clearAllFieldHints();
+    return;
+  }
+
+  // Build summary text for the info panel
+  const summaryParts = [];
+  if (defs.sampler_name != null) summaryParts.push(`Sampler: <strong>${escHtml(String(defs.sampler_name))}</strong>`);
+  if (defs.scheduler != null)    summaryParts.push(`Scheduler: <strong>${escHtml(String(defs.scheduler))}</strong>`);
+  if (defs.steps != null)        summaryParts.push(`Steps: <strong>${defs.steps}</strong>`);
+  if (defs.cfg != null)          summaryParts.push(`CFG: <strong>${defs.cfg}</strong>`);
+  if (defs.width != null && defs.height != null) summaryParts.push(`Auflösung: <strong>${defs.width}&times;${defs.height}</strong>`);
+  if (defs.batch_size != null)   summaryParts.push(`Bilder: <strong>${defs.batch_size}</strong>`);
+
+  const tplLabel = state.activeTemplateName ? escHtml(state.activeTemplateName) : "Template";
+  panelText.innerHTML = `Template-Standard (${tplLabel}): ${summaryParts.join(", ")}`;
+  panel.classList.remove("hidden");
+
+  // Per-field hint update
+  const fieldMap = [
+    { hintId: "tdh_steps",      fieldId: "steps",      defVal: defs.steps,        toNum: true },
+    { hintId: "tdh_cfg",        fieldId: "cfg",         defVal: defs.cfg,          toNum: true },
+    { hintId: "tdh_imageCount", fieldId: "imageCount",  defVal: defs.batch_size,   toNum: true },
+    { hintId: "tdh_width",      fieldId: "width",       defVal: defs.width,        toNum: true },
+    { hintId: "tdh_height",     fieldId: "height",      defVal: defs.height,       toNum: true },
+    { hintId: "tdh_sampler",    fieldId: "sampler",     defVal: defs.sampler_name, toNum: false },
+    { hintId: "tdh_scheduler",  fieldId: "scheduler",   defVal: defs.scheduler,    toNum: false },
+  ];
+
+  const deviations = [];
+
+  for (const { hintId, fieldId, defVal, toNum } of fieldMap) {
+    const hintEl = $(hintId);
+    const fieldEl = $(fieldId);
+    if (!hintEl || defVal == null) {
+      if (hintEl) { hintEl.classList.add("hidden"); hintEl.className = "template-default-hint hidden"; }
+      continue;
+    }
+    const currentVal = toNum ? Number(fieldEl.value) : fieldEl.value;
+    const defValCmp  = toNum ? Number(defVal) : String(defVal);
+    const matches = toNum
+      ? Math.abs(currentVal - defValCmp) < 0.001
+      : currentVal === defValCmp;
+
+    hintEl.classList.remove("hidden");
+    if (matches) {
+      hintEl.className = "template-default-hint tdh-match";
+      hintEl.textContent = `✓ Template-Standard: ${defVal}`;
+    } else {
+      hintEl.className = "template-default-hint tdh-warn";
+      hintEl.textContent = `⚠ Template-Standard: ${defVal} (aktuell: ${currentVal})`;
+      deviations.push(`${fieldId}=${currentVal} (Standard: ${defVal})`);
+    }
+  }
+
+  // Show/hide deviation warning banner
+  if (deviations.length > 0) {
+    deviationDetails.textContent = " " + deviations.join("; ");
+    warningEl.classList.remove("hidden");
+  } else {
+    warningEl.classList.add("hidden");
+  }
+}
+
+/** Remove all per-field template-default hints. */
+function _clearAllFieldHints() {
+  for (const id of ["tdh_steps", "tdh_cfg", "tdh_imageCount", "tdh_width", "tdh_height", "tdh_sampler", "tdh_scheduler"]) {
+    const el = $(id);
+    if (el) { el.className = "template-default-hint hidden"; el.textContent = ""; }
+  }
+}
+
+/** Attach change listeners on Erweitert inputs/selects to update hints live. */
+function initAdvancedDefaultListeners() {
+  for (const id of ["steps", "cfg", "imageCount", "width", "height", "sampler", "scheduler"]) {
+    const el = $(id);
+    if (el) el.addEventListener("input", updateAdvancedDefaultHints);
+    if (el) el.addEventListener("change", updateAdvancedDefaultHints);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -794,7 +939,10 @@ function populateMappingFormSelects() {
   if (prevTpl) tplSel.value = prevTpl;
 
   // Re-filter checkpoint dropdown when template changes
-  tplSel.onchange = () => populateCheckpointSelect();
+  tplSel.onchange = () => {
+    populateCheckpointSelect();
+    _updateMappingFormTemplateHint(tplSel.value);
+  };
 
   // Populate checkpoint and ollama model dropdowns
   populateCheckpointSelect();
@@ -803,9 +951,46 @@ function populateMappingFormSelects() {
   // Populate sampler/scheduler dropdowns in form
   fillSelectSimple("newMapSampler", state.samplers.length ? state.samplers : ["euler", "dpmpp_2m", "ddim"], "euler");
   fillSelectSimple("newMapScheduler", state.schedulers.length ? state.schedulers : ["normal", "karras", "simple"], "normal");
+
+  // Show template defaults for current selection
+  _updateMappingFormTemplateHint(tplSel.value);
 }
 
-function openMappingForm(editName) {
+/**
+ * Update the template-defaults hint in the admin mapping form.
+ * Creates or updates a small info element below the template selector.
+ */
+function _updateMappingFormTemplateHint(templateName) {
+  const container = $("newMapTemplateHint");
+  if (!container) return;
+
+  if (!templateName || templateName === "default") {
+    container.className = "hidden";
+    container.textContent = "";
+    return;
+  }
+  const tpl = state.templates.find((t) => t.name === templateName);
+  const defs = tpl && tpl.analysis && tpl.analysis.workflow_defaults
+    ? tpl.analysis.workflow_defaults
+    : null;
+  if (!defs) {
+    container.className = "hint";
+    container.textContent = "Keine analysierten Workflow-Standards verfügbar.";
+    return;
+  }
+  const parts = [];
+  if (defs.sampler_name != null) parts.push(`Sampler: ${defs.sampler_name}`);
+  if (defs.scheduler != null)    parts.push(`Scheduler: ${defs.scheduler}`);
+  if (defs.steps != null)        parts.push(`Steps: ${defs.steps}`);
+  if (defs.cfg != null)          parts.push(`CFG: ${defs.cfg}`);
+  if (defs.width != null && defs.height != null) parts.push(`${defs.width}×${defs.height}`);
+  if (defs.batch_size != null)   parts.push(`Bilder: ${defs.batch_size}`);
+  if (defs.model_name)           parts.push(`Modell: ${defs.model_name}`);
+  container.className = "hint template-form-defaults";
+  container.textContent = parts.length
+    ? `⚙ Workflow-Standards: ${parts.join(", ")}`
+    : "Workflow-Standards konnten nicht extrahiert werden.";
+}
   const form = $("addMappingForm");
   form.classList.remove("hidden");
   populateMappingFormSelects();
@@ -1971,8 +2156,14 @@ $("cpCancelBtn").addEventListener("click", closeChangePw);
 $("cpNewPw2").addEventListener("keydown", (e) => { if (e.key === "Enter") submitChangePw(); });
 $("tabGenerate").addEventListener("click", () => showTab("Generate"));
 $("tabGallery").addEventListener("click", () => showTab("Gallery"));
-$("tabAdvanced").addEventListener("click", () => showTab("Advanced"));
+$("tabAdvanced").addEventListener("click", () => {
+  showTab("Advanced");
+  updateAdvancedDefaultHints();
+});
 $("tabAdmin").addEventListener("click", () => showTab("Admin"));
+
+// Attach change listeners on Erweitert fields for live template-default feedback
+initAdvancedDefaultListeners();
 
 // ---------------------------------------------------------------------------
 // Event listeners – generate tab

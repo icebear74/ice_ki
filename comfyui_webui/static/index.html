@@ -182,18 +182,32 @@
           <h2>Erweiterte Einstellungen</h2>
           <p class="hint">Diese Einstellungen &uuml;berschreiben die Vorgaben des gew&auml;hlten Mappings f&uuml;r die aktuelle Sitzung.</p>
 
+          <!-- Template-defaults info panel (shown only for imported templates) -->
+          <div id="templateDefaultsPanel" class="template-defaults-panel hidden">
+            <span class="template-defaults-icon">&#128736;</span>
+            <span id="templateDefaultsText"></span>
+          </div>
+
+          <!-- Deviation warning (shown when any value differs from template default) -->
+          <div id="templateDeviationWarning" class="template-deviation-warning hidden">
+            &#9888; <strong>Abweichung von Template-Standard:</strong>
+            <span id="templateDeviationDetails"></span>
+          </div>
+
           <div class="grid-4" style="margin-top:0.75rem">
 
             <div class="setting-block">
               <label for="steps">Steps</label>
               <input id="steps" type="number" value="30" min="1" max="200" />
               <small class="setting-hint">Anzahl der Berechnungsschritte. Mehr Schritte = mehr Detail, aber l&auml;ngere Generierung. Empfehlung: 20&ndash;50.</small>
+              <small id="tdh_steps" class="template-default-hint hidden"></small>
             </div>
 
             <div class="setting-block">
               <label for="cfg">CFG-Scale</label>
               <input id="cfg" type="number" value="7" min="0" max="30" step="0.1" />
               <small class="setting-hint">Gibt an, wie stark der Prompt das Bild beeinflusst. Niedrig = freier/kreativer, Hoch = strikter. Empfehlung: 5&ndash;10.</small>
+              <small id="tdh_cfg" class="template-default-hint hidden"></small>
             </div>
 
             <div class="setting-block">
@@ -206,30 +220,35 @@
               <label for="imageCount">Anzahl Bilder</label>
               <input id="imageCount" type="number" value="1" min="1" max="8" />
               <small class="setting-hint">Wie viele Bilder gleichzeitig generiert werden. H&ouml;here Anzahl ben&ouml;tigt mehr VRAM und dauert l&auml;nger.</small>
+              <small id="tdh_imageCount" class="template-default-hint hidden"></small>
             </div>
 
             <div class="setting-block">
               <label for="width">Breite (px)</label>
               <input id="width" type="number" value="1024" min="64" step="8" />
               <small class="setting-hint">Bildbreite in Pixeln. Sollte durch 8 teilbar sein. Mehr Pixel = mehr Detail, aber h&ouml;herer Speicherbedarf.</small>
+              <small id="tdh_width" class="template-default-hint hidden"></small>
             </div>
 
             <div class="setting-block">
               <label for="height">H&ouml;he (px)</label>
               <input id="height" type="number" value="1024" min="64" step="8" />
               <small class="setting-hint">Bildh&ouml;he in Pixeln. Sollte durch 8 teilbar sein. Mehr Pixel = mehr Detail, aber h&ouml;herer Speicherbedarf.</small>
+              <small id="tdh_height" class="template-default-hint hidden"></small>
             </div>
 
             <div class="setting-block">
               <label for="sampler">Sampler</label>
               <select id="sampler"></select>
               <small class="setting-hint">Algorithmus zur Bildberechnung. <em>euler</em> ist schnell und gut. <em>dpmpp_2m</em> liefert oft hochwertigere Ergebnisse.</small>
+              <small id="tdh_sampler" class="template-default-hint hidden"></small>
             </div>
 
             <div class="setting-block">
               <label for="scheduler">Scheduler</label>
               <select id="scheduler"></select>
               <small class="setting-hint">Steuert den Rauschabbau-Zeitplan. <em>normal</em> und <em>karras</em> sind am h&auml;ufigsten genutzt und liefern stabile Resultate.</small>
+              <small id="tdh_scheduler" class="template-default-hint hidden"></small>
             </div>
 
           </div>
@@ -271,6 +290,7 @@
                 <select id="newMapCheckpoint"><option value="">– Kein Modell –</option></select>
               </label>
             </div>
+            <div id="newMapTemplateHint" class="hidden" style="margin-top:0.25rem;grid-column:1/-1"></div>
 
             <div class="grid-2" style="margin-top:0.5rem">
               <label>Ollama-Modell <small class="setting-hint">Modell f&uuml;r die Prompt-&Uuml;bersetzung (Deutsch &rarr; Englisch)</small>

@@ -147,6 +147,7 @@ def analyze_template_file(path: Path) -> dict[str, Any]:
     roles = _analyzer.analyze_workflow(data)
     result["analysis"] = roles.to_dict()
     result["model_type"] = roles.model_type
+    result["defaults"] = _analyzer.extract_workflow_defaults(data, roles)
 
     if not roles.is_usable:
         logger.warning(

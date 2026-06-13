@@ -577,3 +577,107 @@ def analyze_workflow(workflow: dict[str, Any]) -> WorkflowRoles:
         len(roles.warnings),
     )
     return roles
+
+
+def extract_workflow_defaults(
+    workflow: dict[str, Any],
+    roles: WorkflowRoles,
+) -> dict[str, Any]:
+    """Extract the original default parameter values from an analyzed workflow.
+
+    Reads the actual field values that the workflow author set on sampler,
+    latent-image, and model-loader nodes.  These values represent the
+    "designed-for" configuration of the template and can be surfaced in the UI
+    so users know when they are deviating from the intended settings.
+
+    Parameters
+    ----------
+    workflow:
+        The same flat ``{node_id: {class_type, inputs}}`` dict that was passed
+        to :func:`analyze_workflow`.
+    roles:
+        The :class:`WorkflowRoles` result from :func:`analyze_workflow`.
+
+    Returns
+    -------
+    dict
+        Keys: ``steps``, ``cfg``, ``sampler_name``, ``scheduler``,
+        ``width``, ``height``, ``batch_size``, ``model_name``.
+        Any value that cannot be determined is ``None``.
+    """
+    defaults: dict[str, Any] = {
+        "steps": None,
+        "cfg": None,
+        "sampler_name": None,
+        "scheduler": None,
+        "width": None,
+        "height": None,
+        "batch_size": None,
+        "model_name": None,
+    }
+
+    if not roles.is_usable or roles.primary_sampler_id is None:
+        return defaults
+
+    sampler_node = workflow.get(roles.primary_sampler_id)
+    if not isinstance(sampler_node, dict):
+        return defaults
+
+    sampler_ct = sampler_node.get("class_type", "")
+    sampler_inputs = sampler_node.get("inputs", {})
+
+    # ── Steps, CFG, sampler_name, scheduler ─────────────────────────────────
+    if sampler_ct in ("KSampler", "KSamplerAdvanced"):
+        defaults["steps"] = sampler_inputs.get("steps")
+        defaults["cfg"] = sampler_inputs.get("cfg")
+        defaults["sampler_name"] = sampler_inputs.get("sampler_name")
+        defaults["scheduler"] = sampler_inputs.get("scheduler")
+
+    elif sampler_ct == "SamplerCustomAdvanced":
+        # Steps + scheduler live on the sigmas/scheduler node upstream
+        sigmas_ref = sampler_inputs.get("sigmas")
+        if isinstance(sigmas_ref, list) and sigmas_ref:
+            sigmas_id = str(sigmas_ref[0])
+            sigmas_node = workflow.get(sigmas_id)
+            if isinstance(sigmas_node, dict):
+                sig_inputs = sigmas_node.get("inputs", {})
+                defaults["steps"] = sig_inputs.get("steps")
+                if sigmas_node.get("class_type") == "BasicScheduler":
+                    defaults["scheduler"] = sig_inputs.get("scheduler")
+
+        # Sampler name lives on the KSamplerSelect node upstream
+        sampler_sel_ref = sampler_inputs.get("sampler")
+        if isinstance(sampler_sel_ref, list) and sampler_sel_ref:
+            sel_id = str(sampler_sel_ref[0])
+            sel_node = workflow.get(sel_id)
+            if isinstance(sel_node, dict) and sel_node.get("class_type") == "KSamplerSelect":
+                defaults["sampler_name"] = sel_node.get("inputs", {}).get("sampler_name")
+
+        # CFG lives on the guider node (only CFGGuider, not BasicGuider)
+        guider_ref = sampler_inputs.get("guider")
+        if isinstance(guider_ref, list) and guider_ref:
+            guider_id = str(guider_ref[0])
+            guider_node = workflow.get(guider_id)
+            if isinstance(guider_node, dict) and guider_node.get("class_type") == "CFGGuider":
+                defaults["cfg"] = guider_node.get("inputs", {}).get("cfg")
+
+    # ── Width, height, batch_size from latent image node ────────────────────
+    if roles.primary_latent_id:
+        latent_node = workflow.get(roles.primary_latent_id)
+        if isinstance(latent_node, dict):
+            lat_inputs = latent_node.get("inputs", {})
+            defaults["width"] = lat_inputs.get("width")
+            defaults["height"] = lat_inputs.get("height")
+            defaults["batch_size"] = lat_inputs.get("batch_size")
+
+    # ── Model name from primary model loader ─────────────────────────────────
+    if roles.primary_model_loader_id:
+        loader_node = workflow.get(roles.primary_model_loader_id)
+        if isinstance(loader_node, dict):
+            loader_inputs = loader_node.get("inputs", {})
+            defaults["model_name"] = (
+                loader_inputs.get("ckpt_name")
+                or loader_inputs.get("unet_name")
+            )
+
+    return defaults
