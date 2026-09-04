@@ -1,5 +1,5 @@
-# Local runtime data must never be committed - it belongs on the host under
-# /var/lib/k3s-ai-stack/ (see README.md).
+# Local runtime data must never be committed - it belongs in the Longhorn
+# backed PersistentVolumes of the stack (see README.md).
 data/
 *.local.yaml
 *.local.yml

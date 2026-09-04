@@ -1,46 +1,52 @@
 # ---------------------------------------------------------------------------
 # Persistent storage for the textgenerator stack.
 #
-# Design decision: explicit hostPath PersistentVolumes instead of the K3s
-# "local-path" StorageClass, so that every data set has a well known, easily
-# backed up location under /var/lib/k3s-ai-stack/ on the single Ubuntu host.
+# Design decision: every data set is a dynamically provisioned PersistentVolume
+# Claim backed by Longhorn (the default StorageClass of the target cluster).
+# No hostPath PersistentVolumes and no manual host directory preparation are
+# required any more - Longhorn creates, formats and mounts the volumes.
 #
-# Run textgenerator/scripts/prepare-host-dirs.sh BEFORE applying these
-# manifests so that the directories exist with the expected ownership.
+# The stack uses its own StorageClass "textgen-longhorn" instead of the stock
+# "longhorn" class for two reasons:
 #
-# Local volumes survive pod restarts and image upgrades. They do NOT survive
-# a disk failure - see the backup section in textgenerator/README.md.
+#   1. numberOfReplicas: "1" - this is a single node cluster. The default
+#      Longhorn class asks for 3 replicas, which can never become healthy on
+#      one node and leaves every volume permanently "Degraded".
+#   2. reclaimPolicy: Retain - deleting a PVC (or `kubectl delete -k .`) must
+#      not destroy downloaded models, chat history or character cards. The
+#      Longhorn volume is kept and can be re-attached; clean it up explicitly
+#      in the Longhorn UI when it is really no longer needed.
+#
+# To use the stock class instead, set `storageClassName: longhorn` on every
+# claim below (and accept Delete semantics + Degraded volumes on one node).
+#
+# Prerequisites on the host (see textgenerator/scripts/verify-storage.sh):
+#   * open-iscsi  - required by every Longhorn volume
+#   * nfs-common  - required by ReadWriteMany volumes (share-manager/NFS)
+#
+# Longhorn replicates within the cluster; it is NOT a backup. See the backup
+# section in textgenerator/README.md and textgenerator/scripts/backup.sh.
 # ---------------------------------------------------------------------------
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
-  name: textgen-hostpath
+  name: textgen-longhorn
   labels:
     app.kubernetes.io/part-of: textgenerator
-provisioner: kubernetes.io/no-provisioner
+provisioner: driver.longhorn.io
 reclaimPolicy: Retain
+allowVolumeExpansion: true
 volumeBindingMode: Immediate
+parameters:
+  numberOfReplicas: "1"
+  staleReplicaTimeout: "30"
+  fsType: "ext4"
+  # Keep the replica on the node that runs the workload. On a single node
+  # cluster this is a no-op, but it keeps the intent explicit if a second node
+  # is added later.
+  dataLocality: "best-effort"
 ---
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: textgen-sillytavern-data-pv
-  labels:
-    app.kubernetes.io/part-of: textgenerator
-spec:
-  capacity:
-    storage: 5Gi
-  accessModes:
-    - ReadWriteOnce
-  persistentVolumeReclaimPolicy: Retain
-  storageClassName: textgen-hostpath
-  claimRef:
-    namespace: ai-stack
-    name: sillytavern-data-pvc
-  hostPath:
-    path: /var/lib/k3s-ai-stack/sillytavern
-    type: DirectoryOrCreate
----
+# SillyTavern config, chats, settings and user data.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -51,33 +57,13 @@ metadata:
 spec:
   accessModes:
     - ReadWriteOnce
-  storageClassName: textgen-hostpath
-  volumeName: textgen-sillytavern-data-pv
+  storageClassName: textgen-longhorn
   resources:
     requests:
       storage: 5Gi
 ---
-# Downloaded GGUF / HF model files. Sized generously - adjust to the host disk.
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: textgen-oobabooga-models-pv
-  labels:
-    app.kubernetes.io/part-of: textgenerator
-spec:
-  capacity:
-    storage: 200Gi
-  accessModes:
-    - ReadWriteOnce
-  persistentVolumeReclaimPolicy: Retain
-  storageClassName: textgen-hostpath
-  claimRef:
-    namespace: ai-stack
-    name: oobabooga-models-pvc
-  hostPath:
-    path: /var/lib/k3s-ai-stack/oobabooga/models
-    type: DirectoryOrCreate
----
+# Downloaded GGUF / HF model files. Sized generously - adjust to the space
+# Longhorn actually has available on the node before applying.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -88,33 +74,12 @@ metadata:
 spec:
   accessModes:
     - ReadWriteOnce
-  storageClassName: textgen-hostpath
-  volumeName: textgen-oobabooga-models-pv
+  storageClassName: textgen-longhorn
   resources:
     requests:
       storage: 200Gi
 ---
 # Oobabooga character cards and LoRA adapters (mounted with subPath).
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: textgen-oobabooga-character-pv
-  labels:
-    app.kubernetes.io/part-of: textgenerator
-spec:
-  capacity:
-    storage: 20Gi
-  accessModes:
-    - ReadWriteOnce
-  persistentVolumeReclaimPolicy: Retain
-  storageClassName: textgen-hostpath
-  claimRef:
-    namespace: ai-stack
-    name: oobabooga-character-pvc
-  hostPath:
-    path: /var/lib/k3s-ai-stack/oobabooga/character
-    type: DirectoryOrCreate
----
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -125,8 +90,7 @@ metadata:
 spec:
   accessModes:
     - ReadWriteOnce
-  storageClassName: textgen-hostpath
-  volumeName: textgen-oobabooga-character-pv
+  storageClassName: textgen-longhorn
   resources:
     requests:
       storage: 20Gi
@@ -134,26 +98,11 @@ spec:
 # Shared character card area. Mounted by SillyTavern (read/write) and by the
 # character extractor (read/write) so that neither pod has to reach into the
 # private filesystem of the other one.
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: textgen-shared-characters-pv
-  labels:
-    app.kubernetes.io/part-of: textgenerator
-spec:
-  capacity:
-    storage: 10Gi
-  accessModes:
-    - ReadWriteMany
-  persistentVolumeReclaimPolicy: Retain
-  storageClassName: textgen-hostpath
-  claimRef:
-    namespace: ai-stack
-    name: shared-characters-pvc
-  hostPath:
-    path: /var/lib/k3s-ai-stack/shared/characters
-    type: DirectoryOrCreate
----
+#
+# ReadWriteMany is served by a Longhorn share-manager pod that exports the
+# volume over NFS, so the node needs the nfs-common package. Both consumers
+# chown their mount with a privileged initContainer, because fsGroup is not
+# applied to RWX volumes.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -164,34 +113,13 @@ metadata:
 spec:
   accessModes:
     - ReadWriteMany
-  storageClassName: textgen-hostpath
-  volumeName: textgen-shared-characters-pv
+  storageClassName: textgen-longhorn
   resources:
     requests:
       storage: 10Gi
 ---
 # Extractor working data: structured person profiles, raw model output and
 # generated visual prompts.
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: textgen-extractor-data-pv
-  labels:
-    app.kubernetes.io/part-of: textgenerator
-spec:
-  capacity:
-    storage: 10Gi
-  accessModes:
-    - ReadWriteOnce
-  persistentVolumeReclaimPolicy: Retain
-  storageClassName: textgen-hostpath
-  claimRef:
-    namespace: ai-stack
-    name: extractor-data-pvc
-  hostPath:
-    path: /var/lib/k3s-ai-stack/extractor
-    type: DirectoryOrCreate
----
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -202,8 +130,7 @@ metadata:
 spec:
   accessModes:
     - ReadWriteOnce
-  storageClassName: textgen-hostpath
-  volumeName: textgen-extractor-data-pv
+  storageClassName: textgen-longhorn
   resources:
     requests:
       storage: 10Gi
@@ -211,26 +138,6 @@ spec:
 # Optional ComfyUI data (models, workflows, input, output). The PVC is created
 # even when the ComfyUI deployment is scaled to zero, so that image models can
 # be staged in advance.
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: textgen-comfyui-data-pv
-  labels:
-    app.kubernetes.io/part-of: textgenerator
-spec:
-  capacity:
-    storage: 100Gi
-  accessModes:
-    - ReadWriteOnce
-  persistentVolumeReclaimPolicy: Retain
-  storageClassName: textgen-hostpath
-  claimRef:
-    namespace: ai-stack
-    name: comfyui-data-pvc
-  hostPath:
-    path: /var/lib/k3s-ai-stack/comfyui
-    type: DirectoryOrCreate
----
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -241,8 +148,7 @@ metadata:
 spec:
   accessModes:
     - ReadWriteOnce
-  storageClassName: textgen-hostpath
-  volumeName: textgen-comfyui-data-pv
+  storageClassName: textgen-longhorn
   resources:
     requests:
       storage: 100Gi

@@ -58,7 +58,7 @@ Key decisions:
 textgenerator/
 ├── k8s/
 │   ├── 00-namespace.yaml            namespace ai-stack
-│   ├── 01-storage.yaml              StorageClass + hostPath PVs + PVCs
+│   ├── 01-storage.yaml              Longhorn StorageClass + PVCs
 │   ├── 02-oobabooga.yaml            ConfigMap, Deployment, ClusterIP + NodePort
 │   ├── 03-sillytavern.yaml          Deployment, ClusterIP + NodePort
 │   ├── 04-character-extractor.yaml  Deployment + ClusterIP
@@ -66,7 +66,7 @@ textgenerator/
 │   └── kustomization.yaml
 ├── extractor/                       Dockerfile, requirements, app code, schema, prompt
 ├── image-pipeline/                  ComfyUI workflow/prompt integration placeholders
-└── scripts/                         prepare-host-dirs.sh, verify-gpu.sh, backup.sh
+└── scripts/                         verify-gpu.sh, verify-storage.sh, backup.sh
 ```
 
 There is no `06-nodeports.yaml`: every Service lives next to its Deployment.
@@ -83,45 +83,74 @@ There is no `06-nodeports.yaml`: every Service lives next to its Deployment.
 
   It checks `nvidia-smi`, the `nvidia` RuntimeClass, the advertised
   `nvidia.com/gpu` capacity and runs an in-cluster CUDA smoke test.
+* **Longhorn** installed in the cluster (it provides all PersistentVolumes,
+  see §4), with `open-iscsi` and `nfs-common` installed on the node:
 
-## 4. Storage preparation
+  ```bash
+  sudo apt-get install -y open-iscsi nfs-common
+  textgenerator/scripts/verify-storage.sh
+  ```
 
-All persistent data lives under `/var/lib/k3s-ai-stack/` via **explicit
-hostPath PersistentVolumes** (`storageClassName: textgen-hostpath`,
-`persistentVolumeReclaimPolicy: Retain`), so every data set has a known,
-backup-friendly location instead of an opaque `local-path` directory.
+## 4. Storage
+
+Every data set is a **dynamically provisioned PersistentVolumeClaim backed by
+Longhorn**. No host directories have to be created and nothing has to be
+chowned on the node – Longhorn creates, formats and mounts the volumes.
+
+`01-storage.yaml` ships its own StorageClass `textgen-longhorn` instead of
+using the stock `longhorn` class, for two reasons:
+
+| Setting | `longhorn` (stock) | `textgen-longhorn` | Why |
+| --- | --- | --- | --- |
+| `numberOfReplicas` | `"3"` | `"1"` | Single node: 2 of 3 replicas can never be scheduled, so every volume stays permanently *Degraded*. |
+| `reclaimPolicy` | `Delete` | `Retain` | Deleting a PVC (or `kubectl delete -k .`) must not destroy models, chats and character cards. |
+| `dataLocality` | `disabled` | `best-effort` | Keeps the replica on the node running the workload if a second node is ever added. |
+
+`allowVolumeExpansion: true` is set, so a volume can be grown later by editing
+the PVC request. To use the stock class instead, set
+`storageClassName: longhorn` on every claim (and accept Delete semantics).
+
+| PVC | Size / mode | Mounted at |
+| --- | --- | --- |
+| `sillytavern-data-pvc` | 5Gi RWO | `/home/node/app/{config,data,backups,plugins,public/scripts/extensions/third-party}` (`subPath` `config`, `data`, `backups`, `plugins`, `extensions`) |
+| `oobabooga-models-pvc` | 200Gi RWO | `/app/models` |
+| `oobabooga-character-pvc` | 20Gi RWO | `/app/characters`, `/app/loras` (`subPath`) |
+| `shared-characters-pvc` | 10Gi **RWX** | ST: `/home/node/app/data/default-user/characters`, extractor: `/data/characters` |
+| `extractor-data-pvc` | 10Gi RWO | `/data/extractor` (`profiles/`, `raw/`) |
+| `comfyui-data-pvc` | 100Gi RWO | `/opt/ComfyUI/{models,input,output,user,workflows}` (`subPath`) |
+
+Check the prerequisites and the resulting claims with:
 
 ```bash
-sudo textgenerator/scripts/prepare-host-dirs.sh          # /var/lib/k3s-ai-stack
+textgenerator/scripts/verify-storage.sh
 ```
 
-| PVC | Host path | Mounted at |
-| --- | --- | --- |
-| `sillytavern-data-pvc` | `sillytavern/{config,data,backups,plugins,extensions}` | `/home/node/app/{config,data,backups,plugins,public/scripts/extensions/third-party}` (`subPath`) |
-| `oobabooga-models-pvc` | `oobabooga/models` | `/app/models` |
-| `oobabooga-character-pvc` | `oobabooga/character/{characters,loras}` | `/app/characters`, `/app/loras` (`subPath`) |
-| `shared-characters-pvc` | `shared/characters` | ST: `/home/node/app/data/default-user/characters`, extractor: `/data/characters` |
-| `extractor-data-pvc` | `extractor/{profiles,raw}` | `/data/extractor` |
-| `comfyui-data-pvc` | `comfyui/{models,input,output,user,workflows}` | `/opt/ComfyUI/...` (`subPath`) |
+It verifies that `open-iscsi` (needed by every Longhorn volume) and
+`nfs-common` (needed by the ReadWriteMany shared volume, which Longhorn serves
+through a share-manager NFS export) are installed, that Longhorn is present,
+and that all PVCs are `Bound`.
 
-Local volumes survive pod restarts and image upgrades. They do **not** survive
-a disk failure – see §8.
+> **Sizing.** The requests above are generous. Longhorn allows over-provisioning
+> by default, but the sum still has to fit on the node's Longhorn disk – reduce
+> `oobabooga-models-pvc` / `comfyui-data-pvc` before applying if the disk is
+> smaller.
+
+> **Permissions.** Longhorn's CSI driver uses the Kubernetes default
+> `fsGroupPolicy: ReadWriteOnceWithFSType`, so `fsGroup` is applied to the
+> ReadWriteOnce volumes but **skipped for the ReadWriteMany** shared volume.
+> SillyTavern and the extractor therefore run a small root `initContainer` that
+> `chown`s the shared mount to `1000:1000` before the application starts.
 
 > `backups/`, `plugins/` and the third-party extensions directory are **not**
 > under `dataRoot`: SillyTavern creates them relative to its working directory
 > `/home/node/app`. They are mounted so they are writable and persistent – see
 > §11 if you see `EACCES: permission denied, mkdir 'backups/'`.
 
-> Do not skip `prepare-host-dirs.sh`. It also pre-creates
-> `sillytavern/data/default-user/characters`, the mount point of the shared
-> character PVC. If that path does not exist, the kubelet creates the parent
-> directories as `root` and SillyTavern (uid 1000) cannot write its user data.
-> `fsGroup` does **not** fix this – Kubernetes does not apply it to `hostPath`
-> volumes, so host ownership has to be correct.
-
 > Verify the container-internal paths against the image tags you actually
 > deploy (SillyTavern moved its data directory in the past); adjust the
 > `mountPath` values if a future tag differs.
+
+> Longhorn replicates inside the cluster – that is **not** a backup. See §8.
 
 ## 5. Deployment
 
@@ -217,14 +246,26 @@ instead of using a flag the image does not accept.
 
 ## 8. Backups
 
+The data lives in Longhorn volumes, so there is no host directory to tar up.
+`backup.sh` streams archives out of the running pods that already have the
+volumes mounted:
+
 ```bash
-sudo textgenerator/scripts/backup.sh /var/backups/k3s-ai-stack
+textgenerator/scripts/backup.sh /var/backups/k3s-ai-stack
 ```
 
-Backs up SillyTavern config/chats, character cards, extracted profiles,
-Oobabooga characters/LoRAs and ComfyUI workflows. Model files, checkpoints and
-generated images are excluded (large and reproducible). Copy the archive to
-another machine – a local PV does not protect against disk failure.
+Backs up SillyTavern config/chats, the shared character cards and the extracted
+profiles. Model files, checkpoints and generated images are excluded (large and
+reproducible). Restore with the `tar xzf - ` command the script prints.
+
+For scheduled, volume level protection configure a **Longhorn backup target**
+(S3 or NFS) plus recurring snapshot/backup jobs in the Longhorn UI. Longhorn
+replicas alone protect against a failing disk, **not** against accidental
+deletion or losing the host – copy the archives off the machine either way.
+
+Because `textgen-longhorn` uses `reclaimPolicy: Retain`, deleting a PVC leaves
+the Longhorn volume in place; remove it deliberately in the Longhorn UI when it
+is really no longer needed.
 
 ## 9. Migration path: Ingress + authentication
 
@@ -326,7 +367,8 @@ If you pin an older tag, be aware that `SILLYTAVERN_*` environment variables
 only exist from **1.13.0** on. On 1.12.x they are silently ignored, the
 default `whitelistMode: true` stays active and LAN clients get
 "Forbidden: connection attempt from IP that is not whitelisted" – you then have
-to edit `/var/lib/k3s-ai-stack/sillytavern/config/config.yaml` by hand.
+to edit `config.yaml` inside the volume by hand
+(`kubectl -n ai-stack exec -it deploy/sillytavern -- vi config/config.yaml`).
 
 ### `sillytavern` exits immediately after "listening"
 
@@ -373,13 +415,32 @@ kubectl -n ai-stack logs -f deploy/text-generation-webui
 If it later crashes with `no kernel image is available for execution on the
 device`, the image lacks Pascal (`sm_60`) support – see §7.
 
-### Checking permissions after the fact
+### PVC stays `Pending`
 
 ```bash
-sudo ls -ln /var/lib/k3s-ai-stack/sillytavern
+textgenerator/scripts/verify-storage.sh
+kubectl -n ai-stack describe pvc <name>
 ```
 
-Everything the containers write to must be owned by uid/gid `1000`. Re-run
-`sudo textgenerator/scripts/prepare-host-dirs.sh` if directories are missing,
-and `sudo chown -R 1000:1000 /var/lib/k3s-ai-stack/sillytavern` if the kubelet
-created some as root.
+Usual causes: Longhorn is not installed, `open-iscsi` is missing on the node,
+or the requested size does not fit on the Longhorn disk (§4 sizing note).
+
+### Longhorn volume reported `Degraded`
+
+Expected on a single node **only if** you switched the claims to the stock
+`longhorn` class, which asks for three replicas. `textgen-longhorn` requests
+one replica on purpose. The volume is usable either way.
+
+### `Permission denied` on the shared character directory
+
+The ReadWriteMany volume is exported over NFS by a Longhorn share-manager pod,
+so the node needs `nfs-common`, and `fsGroup` does not apply to it (§4). Both
+consumers run a root `initContainer` that `chown`s the mount to `1000:1000`.
+Check it ran:
+
+```bash
+kubectl -n ai-stack logs deploy/character-extractor -c fix-volume-permissions
+kubectl -n ai-stack exec deploy/character-extractor -- ls -ln /data
+```
+
+Everything the containers write to must be owned by uid/gid `1000`.

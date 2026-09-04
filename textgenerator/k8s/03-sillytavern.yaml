@@ -17,7 +17,7 @@ metadata:
 spec:
   replicas: 1
   strategy:
-    # ReadWriteOnce hostPath volume - never run two writers at once.
+    # ReadWriteOnce Longhorn volume - never run two writers at once.
     type: Recreate
   selector:
     matchLabels:
@@ -39,9 +39,37 @@ spec:
         # "EACCES: permission denied, mkdir 'backups/'", because
         # /home/node/app is root-owned inside the image.
         #
-        # fsGroup has no effect on hostPath volumes - the host directory
-        # ownership is set by scripts/prepare-host-dirs.sh instead.
+        # fsGroup covers the ReadWriteOnce Longhorn volume. It is NOT applied
+        # to the ReadWriteMany (NFS) volume, which is why the initContainer
+        # below fixes that one explicitly.
         fsGroup: 1000
+      initContainers:
+        # Longhorn provisions a brand new, empty filesystem owned by root:root
+        # and its CSI driver uses fsGroupPolicy: ReadWriteOnceWithFSType, so
+        # fsGroup is skipped for the ReadWriteMany volume. Take ownership for
+        # uid/gid 1000 - the identity both SillyTavern (via PUID/PGID) and the
+        # extractor run as. The mode is left alone: the Longhorn share-manager
+        # resets the RWX volume root to 0777 on every start anyway.
+        - name: fix-shared-permissions
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - chown 1000:1000 /shared
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+          volumeMounts:
+            - name: shared-characters
+              mountPath: /shared
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
       containers:
         - name: sillytavern
           # Pinned on purpose - bump deliberately after testing.
@@ -52,9 +80,8 @@ spec:
             - name: NODE_ENV
               value: production
             # Drop privileges to this uid/gid after the entrypoint has fixed
-            # directory ownership. Must match the owner of the host
-            # directories (see scripts/prepare-host-dirs.sh) and the uid the
-            # character extractor runs as, so both can share character files.
+            # directory ownership. Must match the uid the character extractor
+            # runs as, so both can share character files.
             - name: PUID
               value: "1000"
             - name: PGID

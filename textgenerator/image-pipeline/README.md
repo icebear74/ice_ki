@@ -48,9 +48,9 @@ calls ComfyUI itself, so image generation stays a manual/optional step.
 `workflows/character_portrait.placeholder.json` is a **placeholder**, not a
 runnable workflow: node ids and class types differ per checkpoint and per
 ComfyUI version. Export a working workflow from the ComfyUI UI
-("Save (API format)"), store it in
-`/var/lib/k3s-ai-stack/comfyui/workflows/`, and replace these tokens before
-submitting it:
+("Save (API format)"), store it in the `workflows/` directory of
+`comfyui-data-pvc` (mounted at `/opt/ComfyUI/workflows`), and replace these
+tokens before submitting it:
 
 | Token                  | Source field                          |
 | ---------------------- | ------------------------------------- |
