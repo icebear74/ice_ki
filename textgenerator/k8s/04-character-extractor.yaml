@@ -41,7 +41,12 @@ spec:
       containers:
         - name: character-extractor
           image: ice-ki/character-extractor:0.1.0
-          imagePullPolicy: IfNotPresent
+          # This image is built on the host and imported into the K3s image
+          # store - it does not exist in any registry. "Never" prevents
+          # containerd from trying to pull it from Docker Hub (which fails
+          # with ErrImagePull). Build it first:
+          #   textgenerator/scripts/build-extractor-image.sh
+          imagePullPolicy: Never
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

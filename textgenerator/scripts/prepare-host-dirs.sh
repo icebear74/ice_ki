@@ -13,6 +13,16 @@ OWNER_GID="${OWNER_GID:-1000}"
 DIRS=(
   "sillytavern/config"
   "sillytavern/data"
+  # SillyTavern creates its default user directory on first start. The
+  # characters/ directory below is a mount point for the shared character
+  # PVC - it must exist beforehand, otherwise the kubelet creates the parent
+  # directories as root and SillyTavern (uid 1000) cannot write into them.
+  "sillytavern/data/default-user"
+  "sillytavern/data/default-user/characters"
+  # Writable application directories relative to /home/node/app.
+  "sillytavern/backups"
+  "sillytavern/plugins"
+  "sillytavern/extensions"
   "oobabooga/models"
   "oobabooga/character/characters"
   "oobabooga/character/loras"

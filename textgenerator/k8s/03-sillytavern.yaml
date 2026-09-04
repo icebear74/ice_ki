@@ -29,23 +29,52 @@ spec:
         app.kubernetes.io/part-of: textgenerator
     spec:
       securityContext:
-        # The upstream image runs as the "node" user (uid/gid 1000).
-        runAsUser: 1000
-        runAsGroup: 1000
+        # NO runAsUser here on purpose: the upstream image has no USER
+        # directive and its entrypoint MUST start as root. With PUID/PGID set
+        # (below) it fixes the ownership of the mounted directories and then
+        # drops the actual node server to uid/gid 1000 via su-exec
+        # ("Mode: PUID/PGID" in the pod log).
+        #
+        # Forcing runAsUser: 1000 here breaks startup with
+        # "EACCES: permission denied, mkdir 'backups/'", because
+        # /home/node/app is root-owned inside the image.
+        #
+        # fsGroup has no effect on hostPath volumes - the host directory
+        # ownership is set by scripts/prepare-host-dirs.sh instead.
         fsGroup: 1000
       containers:
         - name: sillytavern
           # Pinned on purpose - bump deliberately after testing.
-          image: ghcr.io/sillytavern/sillytavern:1.12.6
+          # 1.17.0+ is required for the PUID/PGID non-root mode used below.
+          image: ghcr.io/sillytavern/sillytavern:1.18.0
           imagePullPolicy: IfNotPresent
           env:
             - name: NODE_ENV
               value: production
-            # Required so the container accepts connections from outside.
+            # Drop privileges to this uid/gid after the entrypoint has fixed
+            # directory ownership. Must match the owner of the host
+            # directories (see scripts/prepare-host-dirs.sh) and the uid the
+            # character extractor runs as, so both can share character files.
+            - name: PUID
+              value: "1000"
+            - name: PGID
+              value: "1000"
+            # SILLYTAVERN_* variables map to config.yaml keys (key path
+            # upper-cased, dots replaced by underscores). NOTE: this mapping
+            # only exists in 1.13.0+ - on 1.12.x these variables are silently
+            # ignored and config.yaml has to be edited on the host instead.
             - name: SILLYTAVERN_LISTEN
               value: "true"
             - name: SILLYTAVERN_WHITELISTMODE
               value: "false"
+            # Required: SillyTavern refuses to start when it listens on a
+            # non-localhost address while whitelist, basic auth and user
+            # accounts are all disabled. Only acceptable because this service
+            # is reachable from the trusted local network only. Set this back
+            # to "false" as soon as you enable basic auth or an Ingress with
+            # authentication (see README, "Migration path").
+            - name: SILLYTAVERN_SECURITYOVERRIDE
+              value: "true"
             # Authentication placeholders. Enable them (or put an
             # authenticating reverse proxy / Ingress in front) before exposing
             # this service beyond the trusted local network. Never commit real
@@ -72,28 +101,44 @@ spec:
             - name: sillytavern-data
               mountPath: /home/node/app/data
               subPath: data
+            # SillyTavern creates these directories relative to its working
+            # directory /home/node/app at startup (PUBLIC_DIRECTORIES /
+            # CORE_DIRS). They are mounted so they are writable AND survive
+            # a pod restart - "backups/" in particular holds the automatic
+            # chat and settings backups.
+            - name: sillytavern-data
+              mountPath: /home/node/app/backups
+              subPath: backups
+            - name: sillytavern-data
+              mountPath: /home/node/app/plugins
+              subPath: plugins
+            - name: sillytavern-data
+              mountPath: /home/node/app/public/scripts/extensions/third-party
+              subPath: extensions
             # Shared character card directory, also written by the extractor.
             # Nested inside the data mount on purpose so SillyTavern picks the
             # cards up without knowing anything about the extractor pod.
             - name: shared-characters
               mountPath: /home/node/app/data/default-user/characters
+          # The image ships its own health check (used by the upstream
+          # docker-compose healthcheck). It is preferred over an HTTP GET on
+          # "/" because it keeps working once basic auth is enabled, which
+          # would make an unauthenticated HTTP probe fail with 401.
           startupProbe:
-            httpGet:
-              path: /
-              port: http
+            exec:
+              command: ["node", "src/healthcheck.js"]
             periodSeconds: 10
+            timeoutSeconds: 5
             failureThreshold: 30
           readinessProbe:
-            httpGet:
-              path: /
-              port: http
+            exec:
+              command: ["node", "src/healthcheck.js"]
             periodSeconds: 20
             timeoutSeconds: 5
             failureThreshold: 3
           livenessProbe:
-            httpGet:
-              path: /
-              port: http
+            exec:
+              command: ["node", "src/healthcheck.js"]
             periodSeconds: 30
             timeoutSeconds: 10
             failureThreshold: 5
