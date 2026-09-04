@@ -183,6 +183,32 @@ Mit dem **⟳**-Button wird die Analyse für ein bestehendes Template neu ausgef
 - Bei nicht eindeutigem positiven Prompt-Ziel wird die Generierung mit einem klaren Fehler abgebrochen
   statt stillschweigend den falschen Knoten zu überschreiben.
 
+### Workflow-Aware Defaults & Warnungen (Erweitert-Tab)
+
+Die WebUI zeigt im **Erweitert-Tab** automatisch an, welche Werte direkt aus dem
+importierten Workflow-Template stammen, und warnt, wenn die aktuellen Einstellungen
+davon abweichen:
+
+- **Grüner Hinweis** unter einem Feld (z. B. `✓ Template-Standard: euler`): Der aktuell
+  eingestellte Wert stimmt mit dem Workflow-Original überein – gute Voraussetzungen für
+  korrekte Ergebnisse.
+- **Gelber Hinweis** unter einem Feld (z. B. `⚠ Template-Standard: euler (aktuell: dpmpp_2m)`):
+  Der aktuelle Wert weicht vom Template-Standard ab. Dies kann bei spezialisierten Workflows
+  (z. B. AuraFlow, FLUX Turbo) zu schlechten oder falschen Ergebnissen führen.
+- **Abweichungs-Warnung** oben im Erweitert-Tab: Zusammenfassung aller abweichenden Felder.
+- Grüne Infoleiste: Zeigt alle Template-Standard-Werte auf einen Blick.
+
+Diese Anzeige ist für importierte Templates aktiv. Beim eingebauten Standard-Template
+werden keine Template-Warnungen angezeigt.
+
+Im Admin-Bereich (Mapping-Formular) werden die aus dem Workflow extrahierten Standards
+ebenfalls angezeigt, wenn ein Template ausgewählt wird – als Hilfestellung beim Anlegen
+von Mappings.
+
+**Extrahierte Felder**: `steps`, `cfg`, `sampler_name`, `scheduler`, `width`, `height`,
+`batch_size`, `model_name` – für KSampler-, KSamplerAdvanced- und SamplerCustomAdvanced-
+Workflows (inklusive FLUX-Stil-Pipelines mit BasicScheduler/KSamplerSelect/CFGGuider).
+
 ### Bekannte Einschränkungen
 
 - **img2img**: Der Analyse-Code erkennt `VAEEncode`- und `LoadImage`-Pfade und meldet

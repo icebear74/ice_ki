@@ -558,6 +558,7 @@ def _build_analysis_meta(validation: dict[str, Any]) -> dict[str, Any]:
         ),
         "analyzed_at": validation.get("analyzed_at"),
         "parse_error": validation.get("parse_error"),
+        "workflow_defaults": validation.get("defaults"),
     }
 
 
