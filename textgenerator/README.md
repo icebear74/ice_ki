@@ -66,7 +66,7 @@ textgenerator/
 │   └── kustomization.yaml
 ├── extractor/                       Dockerfile, requirements, app code, schema, prompt
 ├── image-pipeline/                  ComfyUI workflow/prompt integration placeholders
-└── scripts/                         verify-gpu.sh, verify-storage.sh, backup.sh
+└── scripts/                         build.sh, verify-gpu.sh, verify-storage.sh, backup.sh
 ```
 
 There is no `06-nodeports.yaml`: every Service lives next to its Deployment.
@@ -97,18 +97,19 @@ Every data set is a **dynamically provisioned PersistentVolumeClaim backed by
 Longhorn**. No host directories have to be created and nothing has to be
 chowned on the node – Longhorn creates, formats and mounts the volumes.
 
-`01-storage.yaml` ships its own StorageClass `textgen-longhorn` instead of
-using the stock `longhorn` class, for two reasons:
+All claims use the cluster's **`longhorn` StorageClass**, which on this node is
+already configured for a single replica. `storageClassName: longhorn` is written
+out explicitly rather than relying on the default-class annotation, so the
+manifests stay unambiguous. The stack ships **no StorageClass of its own**.
 
-| Setting | `longhorn` (stock) | `textgen-longhorn` | Why |
-| --- | --- | --- | --- |
-| `numberOfReplicas` | `"3"` | `"1"` | Single node: 2 of 3 replicas can never be scheduled, so every volume stays permanently *Degraded*. |
-| `reclaimPolicy` | `Delete` | `Retain` | Deleting a PVC (or `kubectl delete -k .`) must not destroy models, chats and character cards. |
-| `dataLocality` | `disabled` | `best-effort` | Keeps the replica on the node running the workload if a second node is ever added. |
+Two properties of that class are worth knowing:
 
-`allowVolumeExpansion: true` is set, so a volume can be grown later by editing
-the PVC request. To use the stock class instead, set
-`storageClassName: longhorn` on every claim (and accept Delete semantics).
+* **Replica count** – it must be `1` on a single node cluster. With the Longhorn
+  default of `3`, two replicas can never be scheduled and every volume stays
+  permanently *Degraded*. `verify-storage.sh` warns if it finds a value `> 1`.
+* **`reclaimPolicy: Delete`** – deleting a PVC also deletes its data. That is
+  why `build.sh --clean` keeps the PVCs and only removes them when you add
+  `--purge-data`.
 
 | PVC | Size / mode | Mounted at |
 | --- | --- | --- |
@@ -127,8 +128,9 @@ textgenerator/scripts/verify-storage.sh
 
 It verifies that `open-iscsi` (needed by every Longhorn volume) and
 `nfs-common` (needed by the ReadWriteMany shared volume, which Longhorn serves
-through a share-manager NFS export) are installed, that Longhorn is present,
-and that all PVCs are `Bound`.
+through a share-manager NFS export) are installed, reports the replica count
+and reclaim policy of the `longhorn` class, and checks that all PVCs are
+`Bound`.
 
 > **Sizing.** The requests above are generous. Longhorn allows over-provisioning
 > by default, but the sum still has to fit on the node's Longhorn disk – reduce
@@ -154,16 +156,46 @@ and that all PVCs are `Bound`.
 
 ## 5. Deployment
 
-Build the extractor image **first** – it exists in no registry, and the
-deployment uses `imagePullPolicy: Never`:
+One command does everything – prerequisite checks, building and importing the
+extractor image, `kubectl apply -k`, waiting for the rollout and printing the
+NodePort endpoints:
+
+```bash
+sudo textgenerator/scripts/build.sh
+```
+
+`sudo` is needed because the extractor image is imported into the K3s
+containerd store.
+
+| Option | Effect |
+| --- | --- |
+| `--clean` | Delete Deployments/Services/ConfigMaps before deploying. **PVCs are kept**, so no data is lost. |
+| `--purge-data` | Only with `--clean`: also delete the PVCs. Because the `longhorn` class uses `reclaimPolicy: Delete` this **destroys models, chats, character cards and profiles**. Asks for confirmation. |
+| `--clean-only` | Clean up and exit without deploying. |
+| `--skip-build` | Do not rebuild the extractor image. |
+| `--skip-verify` | Skip `verify-gpu.sh` / `verify-storage.sh`. |
+| `--with-comfyui` | Scale the optional ComfyUI deployment to 1 (competes for the single GPU – see §7). |
+| `-y`, `--yes` | Do not ask for confirmation on destructive actions. |
+
+`NAMESPACE`, `EXTRACTOR_TAG` and `ROLLOUT_TIMEOUT` can be overridden through
+the environment.
+
+Typical redeploy after changing manifests or extractor code:
+
+```bash
+sudo textgenerator/scripts/build.sh --clean
+```
+
+Full reset including all data:
+
+```bash
+sudo textgenerator/scripts/build.sh --clean --purge-data
+```
+
+The individual steps are still available if you prefer to run them by hand:
 
 ```bash
 sudo textgenerator/scripts/build-extractor-image.sh
-```
-
-Then deploy the stack:
-
-```bash
 kubectl apply -k textgenerator/k8s
 kubectl -n ai-stack get pods,svc,pvc
 ```
@@ -263,9 +295,10 @@ For scheduled, volume level protection configure a **Longhorn backup target**
 replicas alone protect against a failing disk, **not** against accidental
 deletion or losing the host – copy the archives off the machine either way.
 
-Because `textgen-longhorn` uses `reclaimPolicy: Retain`, deleting a PVC leaves
-the Longhorn volume in place; remove it deliberately in the Longhorn UI when it
-is really no longer needed.
+Because the `longhorn` class uses `reclaimPolicy: Delete`, deleting a PVC also
+deletes its data. Take a backup before running
+`build.sh --clean --purge-data`, and switch the class (or the individual
+claims) to `Retain` if you want deletion to be reversible.
 
 ## 9. Migration path: Ingress + authentication
 
@@ -427,9 +460,15 @@ or the requested size does not fit on the Longhorn disk (§4 sizing note).
 
 ### Longhorn volume reported `Degraded`
 
-Expected on a single node **only if** you switched the claims to the stock
-`longhorn` class, which asks for three replicas. `textgen-longhorn` requests
-one replica on purpose. The volume is usable either way.
+The `longhorn` StorageClass asks for more replicas than the cluster has nodes.
+Set its replica count to `1` for this single node host:
+
+```bash
+kubectl get storageclass longhorn -o jsonpath='{.parameters.numberOfReplicas}{"\n"}'
+```
+
+`verify-storage.sh` reports the same value. The volume stays usable either
+way, but Longhorn keeps retrying the missing replicas.
 
 ### `Permission denied` on the shared character directory
 

@@ -2,23 +2,19 @@
 # Persistent storage for the textgenerator stack.
 #
 # Design decision: every data set is a dynamically provisioned PersistentVolume
-# Claim backed by Longhorn (the default StorageClass of the target cluster).
+# Claim backed by Longhorn, the default StorageClass of the target cluster.
 # No hostPath PersistentVolumes and no manual host directory preparation are
-# required any more - Longhorn creates, formats and mounts the volumes.
+# required - Longhorn creates, formats and mounts the volumes.
 #
-# The stack uses its own StorageClass "textgen-longhorn" instead of the stock
-# "longhorn" class for two reasons:
+# The claims reference the stock "longhorn" class explicitly (rather than
+# relying on it being the cluster default), because it is already configured
+# for a single replica on this single node cluster. The stack therefore ships
+# no StorageClass of its own - change storageClassName on the claims below only
+# if you deliberately want different replica/reclaim settings.
 #
-#   1. numberOfReplicas: "1" - this is a single node cluster. The default
-#      Longhorn class asks for 3 replicas, which can never become healthy on
-#      one node and leaves every volume permanently "Degraded".
-#   2. reclaimPolicy: Retain - deleting a PVC (or `kubectl delete -k .`) must
-#      not destroy downloaded models, chat history or character cards. The
-#      Longhorn volume is kept and can be re-attached; clean it up explicitly
-#      in the Longhorn UI when it is really no longer needed.
-#
-# To use the stock class instead, set `storageClassName: longhorn` on every
-# claim below (and accept Delete semantics + Degraded volumes on one node).
+# Note: the stock class uses reclaimPolicy: Delete, so deleting a PVC also
+# deletes its data. scripts/build.sh --clean therefore keeps the PVCs by
+# default and only removes them with --clean --purge-data.
 #
 # Prerequisites on the host (see textgenerator/scripts/verify-storage.sh):
 #   * open-iscsi  - required by every Longhorn volume
@@ -27,25 +23,6 @@
 # Longhorn replicates within the cluster; it is NOT a backup. See the backup
 # section in textgenerator/README.md and textgenerator/scripts/backup.sh.
 # ---------------------------------------------------------------------------
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: textgen-longhorn
-  labels:
-    app.kubernetes.io/part-of: textgenerator
-provisioner: driver.longhorn.io
-reclaimPolicy: Retain
-allowVolumeExpansion: true
-volumeBindingMode: Immediate
-parameters:
-  numberOfReplicas: "1"
-  staleReplicaTimeout: "30"
-  fsType: "ext4"
-  # Keep the replica on the node that runs the workload. On a single node
-  # cluster this is a no-op, but it keeps the intent explicit if a second node
-  # is added later.
-  dataLocality: "best-effort"
----
 # SillyTavern config, chats, settings and user data.
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -57,7 +34,7 @@ metadata:
 spec:
   accessModes:
     - ReadWriteOnce
-  storageClassName: textgen-longhorn
+  storageClassName: longhorn
   resources:
     requests:
       storage: 5Gi
@@ -74,7 +51,7 @@ metadata:
 spec:
   accessModes:
     - ReadWriteOnce
-  storageClassName: textgen-longhorn
+  storageClassName: longhorn
   resources:
     requests:
       storage: 200Gi
@@ -90,7 +67,7 @@ metadata:
 spec:
   accessModes:
     - ReadWriteOnce
-  storageClassName: textgen-longhorn
+  storageClassName: longhorn
   resources:
     requests:
       storage: 20Gi
@@ -101,8 +78,8 @@ spec:
 #
 # ReadWriteMany is served by a Longhorn share-manager pod that exports the
 # volume over NFS, so the node needs the nfs-common package. Both consumers
-# chown their mount with a privileged initContainer, because fsGroup is not
-# applied to RWX volumes.
+# chown their mount with a root initContainer, because fsGroup is not applied
+# to RWX volumes.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -113,7 +90,7 @@ metadata:
 spec:
   accessModes:
     - ReadWriteMany
-  storageClassName: textgen-longhorn
+  storageClassName: longhorn
   resources:
     requests:
       storage: 10Gi
@@ -130,7 +107,7 @@ metadata:
 spec:
   accessModes:
     - ReadWriteOnce
-  storageClassName: textgen-longhorn
+  storageClassName: longhorn
   resources:
     requests:
       storage: 10Gi
@@ -148,7 +125,7 @@ metadata:
 spec:
   accessModes:
     - ReadWriteOnce
-  storageClassName: textgen-longhorn
+  storageClassName: longhorn
   resources:
     requests:
       storage: 100Gi

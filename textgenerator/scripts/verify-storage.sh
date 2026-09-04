@@ -9,7 +9,7 @@
 set -uo pipefail
 
 NAMESPACE="${NAMESPACE:-ai-stack}"
-STORAGE_CLASS="${STORAGE_CLASS:-textgen-longhorn}"
+STORAGE_CLASS="${STORAGE_CLASS:-longhorn}"
 rc=0
 
 note() { printf '  %s\n' "$*"; }
@@ -50,22 +50,25 @@ if ! kubectl version >/dev/null 2>&1; then
   exit "${rc}"
 fi
 
-if kubectl get storageclass longhorn >/dev/null 2>&1; then
-  ok "Longhorn StorageClass installed"
-else
-  fail "StorageClass 'longhorn' not found - is Longhorn installed?"
-fi
-
 if kubectl get storageclass "${STORAGE_CLASS}" >/dev/null 2>&1; then
-  ok "StorageClass ${STORAGE_CLASS} exists"
-else
-  note "StorageClass ${STORAGE_CLASS} not applied yet (kubectl apply -k textgenerator/k8s)"
-fi
+  ok "StorageClass ${STORAGE_CLASS} installed"
+  replicas="$(kubectl get storageclass "${STORAGE_CLASS}" \
+    -o jsonpath='{.parameters.numberOfReplicas}' 2>/dev/null)"
+  reclaim="$(kubectl get storageclass "${STORAGE_CLASS}" \
+    -o jsonpath='{.reclaimPolicy}' 2>/dev/null)"
+  note "numberOfReplicas=${replicas:-<unset>} reclaimPolicy=${reclaim:-<unset>}"
 
-nodes="$(kubectl get nodes --no-headers 2>/dev/null | wc -l)"
-if [[ "${nodes}" -le 1 ]]; then
-  note "single node cluster - ${STORAGE_CLASS} uses numberOfReplicas: \"1\" on purpose."
-  note "Using the stock 'longhorn' class instead would leave volumes Degraded."
+  nodes="$(kubectl get nodes --no-headers 2>/dev/null | wc -l)"
+  if [[ "${nodes}" -le 1 && -n "${replicas}" && "${replicas}" -gt 1 ]]; then
+    warn "single node cluster but numberOfReplicas=${replicas} - volumes will stay Degraded."
+    warn "Set the replica count of the ${STORAGE_CLASS} class to 1."
+  fi
+  if [[ "${reclaim}" == "Delete" ]]; then
+    note "reclaimPolicy is Delete: deleting a PVC also deletes its data."
+    note "build.sh --clean therefore keeps the PVCs unless --purge-data is given."
+  fi
+else
+  fail "StorageClass '${STORAGE_CLASS}' not found - is Longhorn installed?"
 fi
 
 echo
