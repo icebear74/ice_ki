@@ -1,0 +1,176 @@
+# ---------------------------------------------------------------------------
+# Text Generation WebUI (oobabooga) - model serving backend + HF downloader.
+#
+# GPU: requires a working NVIDIA container runtime in K3s
+# (runtimeClassName: nvidia). See textgenerator/scripts/verify-gpu.sh.
+#
+# IMAGE PINNING: the tag below is an explicit, changeable pin - do not switch
+# it to ":latest". A Tesla P100 (Pascal, compute capability 6.0) is not
+# supported by every recent CUDA/PyTorch build; if the pod crashes with
+# "no kernel image is available for execution on the device", pin an older
+# CUDA 11.x based tag or build a P100 compatible image. See README.md
+# ("Tesla P100 / CUDA caveats").
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: textgen-config
+  namespace: ai-stack
+  labels:
+    app.kubernetes.io/part-of: textgenerator
+data:
+  # Maximum context length handed to the backend. There is no "unlimited"
+  # context: the effective limit is min(model context window, free VRAM).
+  # Raise this value for long-context models, lower it if the model fails to
+  # load on the 16 GB P100.
+  TEXTGEN_CONTEXT_SIZE: "8192"
+  # Internal OpenAI-compatible endpoint used by the extractor.
+  OOBABOOGA_API_BASE_URL: "http://text-generation-webui.ai-stack.svc.cluster.local:5000/v1"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: text-generation-webui
+  namespace: ai-stack
+  labels:
+    app.kubernetes.io/name: text-generation-webui
+    app.kubernetes.io/part-of: textgenerator
+spec:
+  replicas: 1
+  strategy:
+    # Only one pod may hold the GPU, so never start a second one first.
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: text-generation-webui
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: text-generation-webui
+        app.kubernetes.io/part-of: textgenerator
+    spec:
+      runtimeClassName: nvidia
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: text-generation-webui
+          # Pinned on purpose - adjust for Tesla P100 / CUDA compatibility.
+          image: atinoda/text-generation-webui:default-nvidia
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: TEXTGEN_CONTEXT_SIZE
+              valueFrom:
+                configMapKeyRef:
+                  name: textgen-config
+                  key: TEXTGEN_CONTEXT_SIZE
+            # CLI_ARGS is honoured by most text-generation-webui images,
+            # EXTRA_LAUNCH_ARGS by the atinoda images. Both are set to the
+            # same value so a different image can be swapped in without
+            # editing the argument list twice.
+            # NOTE: the context flag differs between releases/loaders
+            # (--ctx-size on current releases, --n_ctx on older llama.cpp
+            # loaders). Verify with `--help` of the chosen image and adjust
+            # here instead of inventing a flag the image does not accept.
+            - name: CLI_ARGS
+              value: >-
+                --api --listen --listen-port 7860 --api-port 5000
+                --auto-devices --ctx-size $(TEXTGEN_CONTEXT_SIZE)
+            - name: EXTRA_LAUNCH_ARGS
+              value: >-
+                --api --listen --listen-port 7860 --api-port 5000
+                --auto-devices --ctx-size $(TEXTGEN_CONTEXT_SIZE)
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "all"
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: "compute,utility"
+          ports:
+            - name: webui
+              containerPort: 7860
+            - name: api
+              containerPort: 5000
+          volumeMounts:
+            - name: models
+              mountPath: /app/models
+            - name: character
+              mountPath: /app/characters
+              subPath: characters
+            - name: character
+              mountPath: /app/loras
+              subPath: loras
+          # Loading a large model from disk into VRAM can take several
+          # minutes; the startup probe allows up to 30 minutes before the
+          # container is considered failed.
+          startupProbe:
+            tcpSocket:
+              port: webui
+            periodSeconds: 15
+            failureThreshold: 120
+          readinessProbe:
+            tcpSocket:
+              port: webui
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket:
+              port: webui
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: "2"
+              memory: 8Gi
+              nvidia.com/gpu: 1
+            limits:
+              cpu: "8"
+              memory: 24Gi
+              nvidia.com/gpu: 1
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: oobabooga-models-pvc
+        - name: character
+          persistentVolumeClaim:
+            claimName: oobabooga-character-pvc
+---
+# Internal service. The model API (port 5000) is intentionally ClusterIP only.
+apiVersion: v1
+kind: Service
+metadata:
+  name: text-generation-webui
+  namespace: ai-stack
+  labels:
+    app.kubernetes.io/name: text-generation-webui
+    app.kubernetes.io/part-of: textgenerator
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: text-generation-webui
+  ports:
+    - name: webui
+      port: 7860
+      targetPort: webui
+    - name: api
+      port: 5000
+      targetPort: api
+---
+# Diagnostic/admin web UI (model downloader, loader settings) on NodePort.
+# Restrict this to the local network - it has no authentication.
+apiVersion: v1
+kind: Service
+metadata:
+  name: text-generation-webui-nodeport
+  namespace: ai-stack
+  labels:
+    app.kubernetes.io/name: text-generation-webui
+    app.kubernetes.io/part-of: textgenerator
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: text-generation-webui
+  ports:
+    - name: webui
+      port: 7860
+      targetPort: webui
+      nodePort: 30786

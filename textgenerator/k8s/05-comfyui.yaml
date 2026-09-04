@@ -1,0 +1,142 @@
+# ---------------------------------------------------------------------------
+# OPTIONAL / DISABLED BY DEFAULT: ComfyUI image generation service.
+#
+# `replicas: 0` on purpose. The text stack does NOT depend on ComfyUI.
+#
+# VRAM WARNING: the host has a single Tesla P100 with 16 GB. Oobabooga already
+# requests `nvidia.com/gpu: 1`, so with the default (non time-sliced) NVIDIA
+# device plugin configuration this pod stays Pending until Oobabooga is scaled
+# down - i.e. text generation and image generation run SERIALLY:
+#
+#   kubectl -n ai-stack scale deploy/text-generation-webui --replicas=0
+#   kubectl -n ai-stack scale deploy/comfyui               --replicas=1
+#
+# Enabling GPU time-slicing in the NVIDIA device plugin would let both pods
+# schedule at the same time, but time-slicing gives NO VRAM isolation: an LLM
+# and an SDXL checkpoint together will exhaust 16 GB. No second physical GPU
+# is allocated anywhere in this stack.
+#
+# The image tag below must be verified for Pascal/CUDA compatibility exactly
+# like the Oobabooga image; see textgenerator/image-pipeline/README.md for the
+# relation to the existing comfyui_webui/ front-end in this repository.
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: comfyui
+  namespace: ai-stack
+  labels:
+    app.kubernetes.io/name: comfyui
+    app.kubernetes.io/part-of: textgenerator
+    app.kubernetes.io/component: optional
+spec:
+  replicas: 0
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: comfyui
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: comfyui
+        app.kubernetes.io/part-of: textgenerator
+    spec:
+      runtimeClassName: nvidia
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: comfyui
+          # Pinned on purpose - verify P100/CUDA compatibility before use.
+          image: ghcr.io/ai-dock/comfyui:v2-cuda-11.8.0-base-22.04
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--listen"
+            - "0.0.0.0"
+            - "--port"
+            - "8188"
+          env:
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "all"
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: "compute,utility"
+          ports:
+            - name: http
+              containerPort: 8188
+          volumeMounts:
+            - name: comfyui-data
+              mountPath: /opt/ComfyUI/models
+              subPath: models
+            - name: comfyui-data
+              mountPath: /opt/ComfyUI/input
+              subPath: input
+            - name: comfyui-data
+              mountPath: /opt/ComfyUI/output
+              subPath: output
+            - name: comfyui-data
+              mountPath: /opt/ComfyUI/user
+              subPath: user
+            # Workflow JSON files shared with textgenerator/image-pipeline/.
+            - name: comfyui-data
+              mountPath: /opt/ComfyUI/workflows
+              subPath: workflows
+          startupProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 15
+            failureThreshold: 80
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "2"
+              memory: 8Gi
+              nvidia.com/gpu: 1
+            limits:
+              cpu: "8"
+              memory: 16Gi
+              nvidia.com/gpu: 1
+      volumes:
+        - name: comfyui-data
+          persistentVolumeClaim:
+            claimName: comfyui-data-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: comfyui
+  namespace: ai-stack
+  labels:
+    app.kubernetes.io/name: comfyui
+    app.kubernetes.io/part-of: textgenerator
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: comfyui
+  ports:
+    - name: http
+      port: 8188
+      targetPort: http
+---
+# Diagnostic web interface for ComfyUI (local network only, no auth).
+apiVersion: v1
+kind: Service
+metadata:
+  name: comfyui-nodeport
+  namespace: ai-stack
+  labels:
+    app.kubernetes.io/name: comfyui
+    app.kubernetes.io/part-of: textgenerator
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: comfyui
+  ports:
+    - name: http
+      port: 8188
+      targetPort: http
+      nodePort: 30188

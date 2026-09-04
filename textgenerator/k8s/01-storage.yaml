@@ -1,0 +1,248 @@
+# ---------------------------------------------------------------------------
+# Persistent storage for the textgenerator stack.
+#
+# Design decision: explicit hostPath PersistentVolumes instead of the K3s
+# "local-path" StorageClass, so that every data set has a well known, easily
+# backed up location under /var/lib/k3s-ai-stack/ on the single Ubuntu host.
+#
+# Run textgenerator/scripts/prepare-host-dirs.sh BEFORE applying these
+# manifests so that the directories exist with the expected ownership.
+#
+# Local volumes survive pod restarts and image upgrades. They do NOT survive
+# a disk failure - see the backup section in textgenerator/README.md.
+# ---------------------------------------------------------------------------
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: textgen-hostpath
+  labels:
+    app.kubernetes.io/part-of: textgenerator
+provisioner: kubernetes.io/no-provisioner
+reclaimPolicy: Retain
+volumeBindingMode: Immediate
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: textgen-sillytavern-data-pv
+  labels:
+    app.kubernetes.io/part-of: textgenerator
+spec:
+  capacity:
+    storage: 5Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: textgen-hostpath
+  claimRef:
+    namespace: ai-stack
+    name: sillytavern-data-pvc
+  hostPath:
+    path: /var/lib/k3s-ai-stack/sillytavern
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sillytavern-data-pvc
+  namespace: ai-stack
+  labels:
+    app.kubernetes.io/part-of: textgenerator
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: textgen-hostpath
+  volumeName: textgen-sillytavern-data-pv
+  resources:
+    requests:
+      storage: 5Gi
+---
+# Downloaded GGUF / HF model files. Sized generously - adjust to the host disk.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: textgen-oobabooga-models-pv
+  labels:
+    app.kubernetes.io/part-of: textgenerator
+spec:
+  capacity:
+    storage: 200Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: textgen-hostpath
+  claimRef:
+    namespace: ai-stack
+    name: oobabooga-models-pvc
+  hostPath:
+    path: /var/lib/k3s-ai-stack/oobabooga/models
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: oobabooga-models-pvc
+  namespace: ai-stack
+  labels:
+    app.kubernetes.io/part-of: textgenerator
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: textgen-hostpath
+  volumeName: textgen-oobabooga-models-pv
+  resources:
+    requests:
+      storage: 200Gi
+---
+# Oobabooga character cards and LoRA adapters (mounted with subPath).
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: textgen-oobabooga-character-pv
+  labels:
+    app.kubernetes.io/part-of: textgenerator
+spec:
+  capacity:
+    storage: 20Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: textgen-hostpath
+  claimRef:
+    namespace: ai-stack
+    name: oobabooga-character-pvc
+  hostPath:
+    path: /var/lib/k3s-ai-stack/oobabooga/character
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: oobabooga-character-pvc
+  namespace: ai-stack
+  labels:
+    app.kubernetes.io/part-of: textgenerator
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: textgen-hostpath
+  volumeName: textgen-oobabooga-character-pv
+  resources:
+    requests:
+      storage: 20Gi
+---
+# Shared character card area. Mounted by SillyTavern (read/write) and by the
+# character extractor (read/write) so that neither pod has to reach into the
+# private filesystem of the other one.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: textgen-shared-characters-pv
+  labels:
+    app.kubernetes.io/part-of: textgenerator
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: textgen-hostpath
+  claimRef:
+    namespace: ai-stack
+    name: shared-characters-pvc
+  hostPath:
+    path: /var/lib/k3s-ai-stack/shared/characters
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: shared-characters-pvc
+  namespace: ai-stack
+  labels:
+    app.kubernetes.io/part-of: textgenerator
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: textgen-hostpath
+  volumeName: textgen-shared-characters-pv
+  resources:
+    requests:
+      storage: 10Gi
+---
+# Extractor working data: structured person profiles, raw model output and
+# generated visual prompts.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: textgen-extractor-data-pv
+  labels:
+    app.kubernetes.io/part-of: textgenerator
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: textgen-hostpath
+  claimRef:
+    namespace: ai-stack
+    name: extractor-data-pvc
+  hostPath:
+    path: /var/lib/k3s-ai-stack/extractor
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: extractor-data-pvc
+  namespace: ai-stack
+  labels:
+    app.kubernetes.io/part-of: textgenerator
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: textgen-hostpath
+  volumeName: textgen-extractor-data-pv
+  resources:
+    requests:
+      storage: 10Gi
+---
+# Optional ComfyUI data (models, workflows, input, output). The PVC is created
+# even when the ComfyUI deployment is scaled to zero, so that image models can
+# be staged in advance.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: textgen-comfyui-data-pv
+  labels:
+    app.kubernetes.io/part-of: textgenerator
+spec:
+  capacity:
+    storage: 100Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: textgen-hostpath
+  claimRef:
+    namespace: ai-stack
+    name: comfyui-data-pvc
+  hostPath:
+    path: /var/lib/k3s-ai-stack/comfyui
+    type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: comfyui-data-pvc
+  namespace: ai-stack
+  labels:
+    app.kubernetes.io/part-of: textgenerator
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: textgen-hostpath
+  volumeName: textgen-comfyui-data-pv
+  resources:
+    requests:
+      storage: 100Gi

@@ -1,0 +1,150 @@
+# ---------------------------------------------------------------------------
+# SillyTavern - storytelling / roleplay front-end.
+#
+# CPU only workload. It talks to the model backend through the internal
+# ClusterIP service http://text-generation-webui.ai-stack.svc.cluster.local:5000
+# (configure it in the SillyTavern UI: API -> Text Completion / OpenAI
+# compatible -> the URL above).
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sillytavern
+  namespace: ai-stack
+  labels:
+    app.kubernetes.io/name: sillytavern
+    app.kubernetes.io/part-of: textgenerator
+spec:
+  replicas: 1
+  strategy:
+    # ReadWriteOnce hostPath volume - never run two writers at once.
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sillytavern
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sillytavern
+        app.kubernetes.io/part-of: textgenerator
+    spec:
+      securityContext:
+        # The upstream image runs as the "node" user (uid/gid 1000).
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: sillytavern
+          # Pinned on purpose - bump deliberately after testing.
+          image: ghcr.io/sillytavern/sillytavern:1.12.6
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: NODE_ENV
+              value: production
+            # Required so the container accepts connections from outside.
+            - name: SILLYTAVERN_LISTEN
+              value: "true"
+            - name: SILLYTAVERN_WHITELISTMODE
+              value: "false"
+            # Authentication placeholders. Enable them (or put an
+            # authenticating reverse proxy / Ingress in front) before exposing
+            # this service beyond the trusted local network. Never commit real
+            # credentials - use a Kubernetes Secret instead.
+            # - name: SILLYTAVERN_BASICAUTHMODE
+            #   value: "true"
+            # - name: SILLYTAVERN_BASICAUTHUSER__USERNAME
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: sillytavern-basicauth
+            #       key: username
+            # - name: SILLYTAVERN_BASICAUTHUSER__PASSWORD
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: sillytavern-basicauth
+            #       key: password
+          ports:
+            - name: http
+              containerPort: 8000
+          volumeMounts:
+            - name: sillytavern-data
+              mountPath: /home/node/app/config
+              subPath: config
+            - name: sillytavern-data
+              mountPath: /home/node/app/data
+              subPath: data
+            # Shared character card directory, also written by the extractor.
+            # Nested inside the data mount on purpose so SillyTavern picks the
+            # cards up without knowing anything about the extractor pod.
+            - name: shared-characters
+              mountPath: /home/node/app/data/default-user/characters
+          startupProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 10
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+      volumes:
+        - name: sillytavern-data
+          persistentVolumeClaim:
+            claimName: sillytavern-data-pvc
+        - name: shared-characters
+          persistentVolumeClaim:
+            claimName: shared-characters-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sillytavern
+  namespace: ai-stack
+  labels:
+    app.kubernetes.io/name: sillytavern
+    app.kubernetes.io/part-of: textgenerator
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: sillytavern
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+# Primary user entry point. NodePort for now; an Ingress with authentication
+# can be added later without touching the Deployment (see README.md).
+apiVersion: v1
+kind: Service
+metadata:
+  name: sillytavern-nodeport
+  namespace: ai-stack
+  labels:
+    app.kubernetes.io/name: sillytavern
+    app.kubernetes.io/part-of: textgenerator
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: sillytavern
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+      nodePort: 30800

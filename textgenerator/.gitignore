@@ -1,0 +1,35 @@
+# Local runtime data must never be committed - it belongs on the host under
+# /var/lib/k3s-ai-stack/ (see README.md).
+data/
+*.local.yaml
+*.local.yml
+
+# Model weights, checkpoints, LoRAs
+*.gguf
+*.safetensors
+*.ckpt
+*.bin
+*.pt
+*.pth
+
+# Generated media and extraction output
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.mp4
+*.profile.json
+*.raw.json
+
+# Secrets - use Kubernetes Secrets, never files in Git
+secrets/
+*secret*.yaml
+*secret*.yml
+*.env
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/

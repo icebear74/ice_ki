@@ -1,0 +1,79 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ice_ki person profile",
+  "description": "Structured person information extracted from story text. Fields that are not present in the source stay null or empty - nothing is invented.",
+  "type": "object",
+  "required": ["profile", "visual_prompt", "metadata"],
+  "additionalProperties": false,
+  "properties": {
+    "profile": {
+      "type": "object",
+      "required": ["name", "aliases", "appearance", "personality", "relationships"],
+      "properties": {
+        "name": { "type": ["string", "null"] },
+        "aliases": { "type": "array", "items": { "type": "string" } },
+        "age": { "type": ["string", "null"] },
+        "gender": { "type": ["string", "null"] },
+        "species": { "type": ["string", "null"] },
+        "occupation": { "type": ["string", "null"] },
+        "appearance": {
+          "type": "object",
+          "properties": {
+            "height": { "type": ["string", "null"] },
+            "build": { "type": ["string", "null"] },
+            "skin": { "type": ["string", "null"] },
+            "hair_color": { "type": ["string", "null"] },
+            "hair_style": { "type": ["string", "null"] },
+            "eye_color": { "type": ["string", "null"] },
+            "distinguishing_features": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "clothing": { "type": "array", "items": { "type": "string" } },
+        "personality": {
+          "type": "object",
+          "properties": {
+            "summary": { "type": ["string", "null"] },
+            "traits": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "speech_style": { "type": ["string", "null"] },
+        "background": { "type": ["string", "null"] },
+        "relationships": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": ["string", "null"] },
+              "relation": { "type": ["string", "null"] },
+              "notes": { "type": ["string", "null"] }
+            }
+          }
+        },
+        "scenario": { "type": ["string", "null"] },
+        "first_message": { "type": ["string", "null"] },
+        "example_dialogue": { "type": ["string", "null"] },
+        "tags": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "visual_prompt": {
+      "type": "object",
+      "description": "Image generation prompt derived from extracted facts only.",
+      "properties": {
+        "safety_mode": { "type": "string", "enum": ["off", "sfw"] },
+        "positive": { "type": "string" },
+        "negative": { "type": "string" },
+        "has_appearance_data": { "type": "boolean" }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "source": { "type": ["string", "null"] },
+        "model": { "type": ["string", "null"] },
+        "extracted_at": { "type": "string" },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "note": { "type": "string" }
+      }
+    }
+  }
+}
