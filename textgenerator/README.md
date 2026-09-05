@@ -284,6 +284,7 @@ Repeat this after every change to `textgenerator/extractor/`.
 | `OOBABOOGA_API_BASE_URL` | ConfigMap `textgen-config` | internal Service DNS | Endpoint the extractor talks to |
 | `EXTRA_LAUNCH_ARGS` | `02-oobabooga.yaml` | `--api --listen --listen-port 7860 --api-port 5000 --ctx-size $(TEXTGEN_CONTEXT_SIZE) --settings /config/settings.yaml` | Backend launch arguments. The atinoda entrypoint reads **only** this variable – `CLI_ARGS` is ignored by this image. |
 | `settings.yaml` | ConfigMap `textgen-settings` | see manifest | Default response length and sampler values of the backend, passed with `--settings`. Applies to Oobabooga's own UI; API clients such as SillyTavern override it per request. |
+| `--cache-type` | `EXTRA_LAUNCH_ARGS` in `02-oobabooga.yaml` | `fp16` | KV cache precision (`fp16`, `q8_0`, `q4_0`). Quantising it is what makes contexts beyond ~32k fit into 16 GB – see *Choosing a model*. |
 | `HF_TOKEN` | Secret `huggingface-token` | *unset* | HuggingFace access token for the model downloader. Set it with `scripts/set-hf-token.sh`, **never** in a manifest. |
 | `EXTRACTOR_MODEL` | `04-character-extractor.yaml` | `""` (currently loaded model) | Model name sent to the API |
 | `EXTRACTOR_MAX_TOKENS` | `04-character-extractor.yaml` | `2048` | Answer length limit of one extraction |
@@ -296,6 +297,155 @@ Repeat this after every change to `textgenerator/extractor/`.
 Any `config.yaml` key can be set this way: upper-case the key path and replace
 dots with underscores (`backups.common.numberOfBackups` →
 `SILLYTAVERN_BACKUPS_COMMON_NUMBEROFBACKUPS`).
+
+### Choosing a model: uncensored, German, long context
+
+The stack is model-agnostic – any GGUF that llama.cpp can load works. This
+section exists because the three wishes *"really uncensored"*, *"speaks
+German"* and *"128k context"* pull in different directions on a 16 GB card.
+
+> **How to read this section.** Everything about VRAM and about this repo's
+> configuration is computed or verified here. Model cards, however, change and
+> get renamed, and GGUF mirrors come and go. Repo ids are therefore given as a
+> starting point – **check the card before downloading** and do not trust a
+> third-party "uncensored" badge that the card itself does not make.
+
+#### First: how much context do you actually need?
+
+A DIN A4 page of German prose is roughly 1,500–3,000 characters, which is
+about **500–900 tokens**. So:
+
+| Context | ≈ A4 pages of German text |
+| --- | --- |
+| 8,192 (current default) | ~10–16 |
+| 16,384 | ~20–32 |
+| 32,768 | ~40–65 |
+| 131,072 | ~150–260 |
+
+"Several A4 pages" is already covered several times over by the default of
+8192. Do not raise the context because a bigger number looks better – every
+token of context costs VRAM that the model then cannot use, and long contexts
+slow generation down noticeably on a P100.
+
+Measure it yourself instead of guessing – the backend exposes a token counter
+(replace the text with your own):
+
+```bash
+kubectl -n ai-stack exec deploy/text-generation-webui -- \
+  curl -s http://127.0.0.1:5000/v1/internal/token-count \
+  -H 'Content-Type: application/json' \
+  -d '{"text": "Ein Beispieltext auf Deutsch."}'
+```
+
+#### Second: what fits into 16 GB
+
+The KV cache grows linearly with context and is **independent of the quant
+level of the weights**:
+
+```
+KV bytes = 2 (K and V) × layers × kv_heads × head_dim × context × bytes_per_element
+```
+
+For a Mistral-Nemo-shaped 12B model (40 layers, 8 KV heads, head_dim 128) that
+is **0.156 GiB per 1k tokens** at fp16. Total VRAM = weights + KV + ~1 GiB
+compute buffers, against ~15 GiB usable on a 16 GB P100:
+
+| Context | Q4_K_M + fp16 KV | Q4_K_M + q8_0 KV | Q4_K_M + q4_0 KV |
+| --- | --- | --- | --- |
+| 8,192 | 9.2 GiB ✅ | 8.6 GiB ✅ | 8.3 GiB ✅ |
+| 16,384 | 10.5 GiB ✅ | 9.2 GiB ✅ | 8.6 GiB ✅ |
+| 32,768 | 13.0 GiB ✅ | 10.5 GiB ✅ | 9.2 GiB ✅ |
+| 65,536 | 18.0 GiB ❌ | 13.0 GiB ✅ | 10.5 GiB ✅ |
+| 131,072 | 28.0 GiB ❌ | 18.0 GiB ❌ | 13.0 GiB ✅ |
+
+**So 128k on this card is only reachable by quantising the KV cache to 4 bit**,
+which costs accuracy exactly where it hurts a long story – in the recall of
+what happened earlier. A realistic sweet spot is **32k with fp16 KV** or
+**64k with q8_0 KV**.
+
+The KV cache type is a launch flag of the backend. It is *not* set by default
+(`fp16`); to change it, extend `EXTRA_LAUNCH_ARGS` in `02-oobabooga.yaml`:
+
+```yaml
+- name: EXTRA_LAUNCH_ARGS
+  value: >-
+    --api --listen --listen-port 7860 --api-port 5000
+    --ctx-size $(TEXTGEN_CONTEXT_SIZE)
+    --settings /config/settings.yaml
+    --cache-type q8_0
+```
+
+Valid values for llama.cpp in this image are `fp16` (default), `q8_0` and
+`q4_0`; the backend automatically enables Hadamard KV rotation (`-khad -vhad`)
+for the quantised types, which limits the quality loss. Remember to raise
+`TEXTGEN_CONTEXT_SIZE` in the same file **and** `truncation_length` in the
+`textgen-settings` ConfigMap – all three have to agree.
+
+#### Third: the models
+
+There is a systematic problem with the word "uncensored": most roleplay
+finetunes that the community labels uncensored never make that claim on their
+own card (`L3-8B-Stheno-v3.2` is exactly such a case, see §11). Two families
+do state it explicitly.
+
+**Dolphin (cognitivecomputations / `dphn`)** – the only well-known series whose
+card states the property outright:
+
+> "Dolphin is uncensored. We have filtered the dataset to remove alignment and
+> bias. This makes the model more compliant. […] It will be highly compliant
+> with any requests, even unethical ones."
+
+| Model | Base | Context | Notes |
+| --- | --- | --- | --- |
+| `dphn/dolphin-2.9.3-mistral-nemo-12b` | Mistral-Nemo-Base-2407 | 128k (from the base) | Best fit for this card. Template **ChatML**. German comes from the Nemo base. |
+| `dphn/Dolphin-Mistral-24B-Venice-Edition` | Mistral-Small-24B-Instruct-2501 | 32k | Explicitly aimed at being "the most uncensored version of Mistral 24B". **24B does not fit here** – Q4_K_M alone is ~14 GB, leaving no room for context. |
+
+Dolphin is *steerable*, not automatically explicit: it follows the system
+prompt you give it, so the system prompt in SillyTavern still matters.
+
+**Heretic-decensored models** – the more reliable route, because the property
+is measured rather than asserted. [Heretic](https://github.com/p-e-w/heretic)
+removes refusal behaviour from an existing model by directional ablation
+("abliteration") and automatically optimises for *fewest refusals at the lowest
+KL divergence from the original*, i.e. minimum collateral damage to the model's
+intelligence. The project's own reference numbers:
+
+| Model | Refusals for "harmful" prompts | KL divergence |
+| --- | ---: | ---: |
+| `google/gemma-3-12b-it` (original) | 97/100 | 0 (by definition) |
+| `p-e-w/gemma-3-12b-it-heretic` | 3/100 | 0.16 |
+
+The community has published **well over 5000** Heretic models. Browse them at
+<https://huggingface.co/models?other=heretic> and pick a *Mistral-Nemo-12B*
+based one to keep German plus 128k-capable positional encoding. Because these
+repos appear and disappear, no specific id is pinned here.
+
+You can also decensor a model yourself – it needs no training, and the
+`bnb_4bit` quantisation option keeps it within reach of consumer VRAM:
+
+```bash
+pip install -U heretic-llm
+heretic mistralai/Mistral-Nemo-Instruct-2407
+```
+
+Afterwards convert the result to GGUF with `llama.cpp/convert_hf_to_gguf.py`
+and quantise it, then drop it into `/mnt/aistack/oobabooga-models/`.
+
+**Why Mistral-Nemo-12B is the recommended base here.** Its card states
+*"Trained with a 128k context window"* and reports a multilingual benchmark
+that includes German (62.7%). Twelve billion parameters fit comfortably in
+16 GB at Q4_K_M/Q5_K_M with room for a large context. The dedicated German
+finetunes are the wrong trade: SauerkrautLM, DiscoResearch Llama3-German and
+Occiglot are all short-context (8k or less) and are aligned *more*, not less –
+the SauerkrautLM card treats uncensored output as a defect it tried to remove.
+
+Suggested starting configuration for a Nemo-based model:
+
+* Quant **Q4_K_M** (~7.5 GB) or **Q5_K_M** (~8.7 GB) – see the P100 note about
+  **K-quants over IQ-quants** in §7.
+* `TEXTGEN_CONTEXT_SIZE: "32768"` with the default fp16 KV cache.
+* Instruct template **Mistral** in SillyTavern (**ChatML** for Dolphin).
+* A system prompt that establishes the role – see §11.
 
 ### About “no context limit”
 
@@ -345,6 +495,23 @@ force a `runAsUser` on this pod.
   execution on the device`. Fix: pin an older, CUDA 11.x based image tag in
   `02-oobabooga.yaml` (the tag there is an explicit pin, deliberately not
   `:latest`, so an upstream rebuild cannot break a working deployment).
+* **Prefer K-quants (`Q4_K_M`, `Q5_K_M`, `Q6_K`) over IQ-quants** on this card.
+  The P100 is compute capability **6.0**, and llama.cpp requires **6.1** for the
+  `__dp4a` byte-wise dot-product intrinsic:
+
+  ```c
+  #define GGML_CUDA_CC_PASCAL          600
+  #define GGML_CUDA_CC_DP4A            610 // minimum compute capability for __dp4a
+  ```
+
+  Below 6.1 llama.cpp falls back to emulating that instruction with four scalar
+  int8 multiply-adds, which slows down **every** quantized matrix multiplication.
+  IQ-quants additionally need lookup/unpacking work per weight, so they suffer
+  most. (Source: `ggml/src/ggml-cuda/common.cuh` in `ggml-org/llama.cpp`.)
+* A known llama.cpp issue affects exactly this GPU: on `sm_60` some FP32 math is
+  silently truncated to FP16 on the fast-FP16 path, measurably deviating from the
+  FP32 reference. If output quality looks subtly off, this may be why – see
+  <https://github.com/ggml-org/llama.cpp/issues/25593>.
 * **ComfyUI and Oobabooga must normally run serially** on a single 16 GB card:
 
   ```bash
