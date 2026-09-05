@@ -282,7 +282,8 @@ Repeat this after every change to `textgenerator/extractor/`.
 | --- | --- | --- | --- |
 | `TEXTGEN_CONTEXT_SIZE` | ConfigMap `textgen-config` | `8192` | Maximum context length, passed to the backend as `--ctx-size` |
 | `OOBABOOGA_API_BASE_URL` | ConfigMap `textgen-config` | internal Service DNS | Endpoint the extractor talks to |
-| `EXTRA_LAUNCH_ARGS` | `02-oobabooga.yaml` | `--api --listen --listen-port 7860 --api-port 5000 --ctx-size $(TEXTGEN_CONTEXT_SIZE)` | Backend launch arguments. The atinoda entrypoint reads **only** this variable – `CLI_ARGS` is ignored by this image. |
+| `EXTRA_LAUNCH_ARGS` | `02-oobabooga.yaml` | `--api --listen --listen-port 7860 --api-port 5000 --ctx-size $(TEXTGEN_CONTEXT_SIZE) --settings /config/settings.yaml` | Backend launch arguments. The atinoda entrypoint reads **only** this variable – `CLI_ARGS` is ignored by this image. |
+| `settings.yaml` | ConfigMap `textgen-settings` | see manifest | Default response length and sampler values of the backend, passed with `--settings`. Applies to Oobabooga's own UI; API clients such as SillyTavern override it per request. |
 | `HF_TOKEN` | Secret `huggingface-token` | *unset* | HuggingFace access token for the model downloader. Set it with `scripts/set-hf-token.sh`, **never** in a manifest. |
 | `EXTRACTOR_MODEL` | `04-character-extractor.yaml` | `""` (currently loaded model) | Model name sent to the API |
 | `EXTRACTOR_MAX_TOKENS` | `04-character-extractor.yaml` | `2048` | Answer length limit of one extraction |
@@ -544,6 +545,77 @@ kubectl -n ai-stack exec deploy/text-generation-webui -- printenv HF_TOKEN
 
 If the variable is set and the download still returns `403`, accept the model
 licence with the same account on the model's HuggingFace page.
+
+### Answers are cut off after ~20 lines
+
+Almost always a **token limit in the frontend**, not a lack of VRAM. An 8B model
+in Q6_K/Q8_0 occupies roughly 6.6–8.5 GB; seeing ~8 GB of 16 GB used means the
+model is fully loaded. VRAM usage says nothing about how long an answer may be –
+that is decided by the requested number of tokens.
+
+Roughly 20 lines is 300–350 tokens, which is exactly where the defaults sit:
+
+| Where | Setting | Default | Effect |
+| --- | --- | --- | --- |
+| SillyTavern, Chat Completion | *Response (tokens)* (`openai_max_tokens`) | `300` | sent as `max_tokens`, **overrides the backend** |
+| SillyTavern, Text Completion | *Response (tokens)* (`amount_gen`) | `350` | same |
+| SillyTavern | *Context (tokens)* (`max_context`) | `8192` | prompt budget |
+| Oobabooga UI | `max_new_tokens` | `512` (`2048` via `textgen-settings`) | only for its own chat tab |
+
+Fix it in SillyTavern: **AI Response Configuration** (the leftmost slider icon)
+→ raise *Response (tokens)* to e.g. 1024–2048, and leave *Context (tokens)* at
+`8192`.
+
+Two things to keep in mind:
+
+* Prompt and answer **share** the same window. With `TEXTGEN_CONTEXT_SIZE=8192`,
+  a response of 2048 tokens leaves about 6000 tokens for character card, chat
+  history and system prompt. Raising the response size shortens the memory.
+* Raising `TEXTGEN_CONTEXT_SIZE` beyond what the model was trained for (8192 for
+  Llama-3-8B) is RoPE extrapolation and degrades quality – it does not come for
+  free just because VRAM is available.
+
+If the text stops mid-sentence *before* reaching the limit, check the stopping
+strings in SillyTavern; a custom stop sequence such as `\n\n{{user}}` ends the
+generation as soon as the model inserts a blank line.
+
+### The model refuses topics although it is "uncensored"
+
+Worth stating plainly: the model card of `Sao10K/L3-8B-Stheno-v3.2` (the source
+of the `bartowski/L3-8B-Stheno-v3.2-GGUF` quants) **never advertises the model
+as uncensored**. It only claims to handle SFW and NSFW content separately
+better. It is a Llama-3-8B fine-tune and inherits refusal behaviour from the
+base model. No configuration removes that completely.
+
+What does change the outcome, in order of impact:
+
+1. **Use the correct instruction template.** The card requires
+   **Llama-3-Instruct**. In SillyTavern: *Advanced Formatting* → *Instruct Mode*
+   → enable it and select the `Llama 3 Instruct` preset. A mismatched template
+   is the most common cause of refusals and of odd, truncated output.
+2. **Set a system prompt.** With an empty system prompt the model falls back to
+   assistant behaviour. The card suggests:
+
+   > You are an expert actor that can fully immerse yourself into any role
+   > given. You do not break character for any reason, even if someone tries
+   > addressing you as an AI or language model. Currently your role is
+   > {{char}}, which is described in detail below. As {{char}}, continue the
+   > exchange with {{user}}.
+
+   Put this into *Advanced Formatting* → *System Prompt* (SillyTavern sends its
+   own prompt, so `custom_system_message` in `textgen-settings` has no effect on
+   this path).
+3. **Use the card's sampler values.** Temperature `1.12`–`1.22`, Min-P `0.075`,
+   Top-K `50`, Repetition Penalty `1.1`. These are pre-set in the
+   `textgen-settings` ConfigMap for the Oobabooga UI; in SillyTavern set them in
+   *AI Response Configuration*. The card gives no Top-P value, so Top-P is
+   disabled (`1`) rather than guessed.
+4. **A well written character card** with an explicit scenario carries more
+   weight than any sampler setting.
+
+If refusals persist for your subject matter, the model itself is the limit –
+switch to a fine-tune that explicitly documents uncensored behaviour instead of
+fighting the configuration.
 
 ### `text-generation-webui`: `error: unrecognized arguments: --auto-devices`
 

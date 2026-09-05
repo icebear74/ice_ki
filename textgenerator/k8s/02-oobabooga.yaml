@@ -27,6 +27,65 @@ data:
   # Internal OpenAI-compatible endpoint used by the extractor.
   OOBABOOGA_API_BASE_URL: "http://text-generation-webui.ai-stack.svc.cluster.local:5000/v1"
 ---
+# ---------------------------------------------------------------------------
+# Default generation settings for text-generation-webui.
+#
+# Loaded with --settings (see the Deployment below). Without this file the
+# image falls back to its built-in defaults, and any change made in the web UI
+# lives in the container layer only - it is lost on the next restart, because
+# /app/user_data/settings.yaml is not on a PersistentVolume.
+#
+# This ConfigMap is therefore the source of truth: edit it here, then
+#   kubectl apply -k textgenerator/k8s
+#   kubectl -n ai-stack rollout restart deploy/text-generation-webui
+# The mount is read-only, so the "save settings" button in the UI cannot
+# write to it.
+#
+# NOTE: these values only apply to Oobabooga's own UI. A frontend that talks
+# to the API (SillyTavern, the extractor) sends its own max_tokens/sampler
+# values with every request and those win. See README.md ("Answers are cut
+# off after ~20 lines").
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: textgen-settings
+  namespace: ai-stack
+  labels:
+    app.kubernetes.io/part-of: textgenerator
+data:
+  settings.yaml: |
+    # --- Response length ---------------------------------------------------
+    # The image default is 512, which ends a story after roughly 20 lines.
+    max_new_tokens: 2048
+    # Raises the upper end of the UI slider (image default: 4096).
+    max_new_tokens_max: 8192
+    # When true the backend generates until the context window is full
+    # instead of stopping at max_new_tokens:
+    #   n_predict = truncation_length - prompt_tokens
+    auto_max_new_tokens: true
+    # Must match TEXTGEN_CONTEXT_SIZE above - it is the prompt+answer budget.
+    # These two are not templated, so keep them in sync by hand.
+    truncation_length: 8192
+
+    # --- Sampling ----------------------------------------------------------
+    # Values recommended by the model card of Sao10K/L3-8B-Stheno-v3.2
+    # (temperature 1.12-1.22, min_p 0.075, top_k 50, repetition penalty 1.1).
+    # Adjust when you switch to a different model - they are not universal.
+    temperature: 1.17
+    min_p: 0.075
+    top_k: 50
+    repetition_penalty: 1.1
+    # The card gives no top_p value. min_p is doing the filtering here, so
+    # top_p is disabled (1 = no cut-off) instead of guessing a number.
+    top_p: 1
+
+    # --- Prompting ---------------------------------------------------------
+    # Empty = use the instruction template that ships with the model (for
+    # GGUF files it comes from the file's own metadata). Only override this
+    # if a model has no usable template.
+    custom_system_message: ''
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -83,6 +142,7 @@ spec:
               value: >-
                 --api --listen --listen-port 7860 --api-port 5000
                 --ctx-size $(TEXTGEN_CONTEXT_SIZE)
+                --settings /config/settings.yaml
             # HuggingFace access token, needed for gated repos (Llama,
             # Gemma, ...) and to avoid the anonymous rate limit.
             #
@@ -124,6 +184,12 @@ spec:
             - name: character
               mountPath: /app/user_data/loras
               subPath: loras
+            # Deliberately NOT mounted inside /app/user_data: the entrypoint
+            # chowns that tree on every start and would fail noisily on a
+            # read-only ConfigMap mount.
+            - name: settings
+              mountPath: /config
+              readOnly: true
           # Loading a large model from disk into VRAM can take several
           # minutes; the startup probe allows up to 30 minutes before the
           # container is considered failed.
@@ -160,6 +226,9 @@ spec:
         - name: character
           persistentVolumeClaim:
             claimName: oobabooga-character-pvc
+        - name: settings
+          configMap:
+            name: textgen-settings
 ---
 # Internal service. The model API (port 5000) is intentionally ClusterIP only.
 apiVersion: v1
