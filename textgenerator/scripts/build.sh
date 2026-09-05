@@ -215,8 +215,9 @@ info "  kubectl -n ${NAMESPACE} port-forward svc/character-extractor 8080:8080"
 
 if [[ "${rollout_rc}" -ne 0 ]]; then
   echo
-  warn "Not everything is ready. Inspect with:"
-  warn "  kubectl -n ${NAMESPACE} describe pod -l app.kubernetes.io/part-of=textgenerator"
+  warn "Not everything is ready. Collect the details with:"
+  warn "  ${SCRIPT_DIR}/diagnose.sh"
+  warn "or look directly at:"
   warn "  kubectl -n ${NAMESPACE} logs -f deploy/text-generation-webui"
   warn "See the troubleshooting section in textgenerator/README.md."
 fi

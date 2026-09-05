@@ -66,7 +66,7 @@ textgenerator/
 │   └── kustomization.yaml
 ├── extractor/                       Dockerfile, requirements, app code, schema, prompt
 ├── image-pipeline/                  ComfyUI workflow/prompt integration placeholders
-└── scripts/                         build.sh, verify-gpu.sh, verify-storage.sh, backup.sh
+└── scripts/                         build.sh, diagnose.sh, verify-gpu.sh, verify-storage.sh, backup.sh
 ```
 
 There is no `06-nodeports.yaml`: every Service lives next to its Deployment.
@@ -144,10 +144,17 @@ of the `longhorn` class against Longhorn's global setting, lists the existing
 Longhorn volumes with their actual replica count and robustness, and checks
 that all PVCs are `Bound`.
 
-> **Sizing.** The requests above are generous. Longhorn allows over-provisioning
-> by default, but the sum still has to fit on the node's Longhorn disk – reduce
-> `oobabooga-models-pvc` / `comfyui-data-pvc` before applying if the disk is
-> smaller.
+> **Sizing.** The requests add up to **345Gi**. Longhorn's scheduler refuses to
+> place a replica once `storageScheduled` would exceed the disk's
+> `storageMaximum` × `storage-over-provisioning-percentage` (default 100%), and
+> it also keeps `storage-minimal-available-percentage` (default 25%) free. A
+> volume whose replica cannot be scheduled never attaches, and its pod stays
+> **Pending** – see §11. Check the disk first and shrink
+> `oobabooga-models-pvc` / `comfyui-data-pvc` if needed:
+>
+> ```bash
+> kubectl -n longhorn-system get nodes.longhorn.io -o yaml | grep -A4 storageMaximum
+> ```
 
 > **Permissions.** Longhorn's CSI driver uses the Kubernetes default
 > `fsGroupPolicy: ReadWriteOnceWithFSType`, so `fsGroup` is applied to the
@@ -459,6 +466,51 @@ kubectl -n ai-stack logs -f deploy/text-generation-webui
 
 If it later crashes with `no kernel image is available for execution on the
 device`, the image lacks Pascal (`sm_60`) support – see §7.
+
+### Pod stuck in `Pending` / `ContainerCreating` (volume never attaches)
+
+Run the collector first – it prints the pod events, PVC state, Longhorn volume
+and replica scheduling status and the node's disk capacity in one go:
+
+```bash
+textgenerator/scripts/diagnose.sh
+```
+
+The decisive information is in the `Events:` section of the pod and in
+*"Longhorn volumes that are not schedulable"*. The most common causes:
+
+* **`ReplicaSchedulingFailure` / insufficient storage** – the sum of the PVC
+  requests (345Gi by default) does not fit on the Longhorn disk. Longhorn
+  creates the volume but can never schedule its replica, so the volume stays
+  `detached` and the pod waits forever. Either shrink the requests in
+  `k8s/01-storage.yaml` (`oobabooga-models-pvc`, `comfyui-data-pvc`) and
+  re-apply, or raise Longhorn's over-provisioning limit:
+
+  ```bash
+  kubectl -n longhorn-system get settings.longhorn.io \
+    storage-over-provisioning-percentage storage-minimal-available-percentage
+  ```
+
+  A PVC cannot be shrunk in place – delete it (**this deletes its data**, see
+  §8) and re-apply, e.g. with `build.sh --clean --purge-data`.
+* **`FailedMount` on the shared RWX volume** – the Longhorn share-manager pod
+  for `shared-characters-pvc` is not running or `nfs-common` is missing on the
+  node:
+
+  ```bash
+  kubectl -n longhorn-system get pods | grep share-manager
+  ```
+* **`FailedAttachVolume` with `open-iscsi` errors** – run
+  `sudo modprobe iscsi_tcp` and make sure `iscsid` is running.
+
+Note that a *missing* Longhorn volume is usually not the problem: with
+`volumeBindingMode: Immediate` all six volumes are created as soon as the PVCs
+are applied. If you see fewer than six, list them with their claim names:
+
+```bash
+kubectl -n longhorn-system get volumes.longhorn.io \
+  -o custom-columns=NAME:.metadata.name,STATE:.status.state,PVC:.status.kubernetesStatus.pvcName
+```
 
 ### PVC stays `Pending`
 
