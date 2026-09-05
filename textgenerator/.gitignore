@@ -1,0 +1,40 @@
+# Local runtime data must never be committed - it belongs in the hostPath
+# PersistentVolumes under /mnt/aistack (see README.md).
+data/
+*.local.yaml
+*.local.yml
+
+# Model weights, checkpoints, LoRAs
+*.gguf
+*.safetensors
+*.ckpt
+*.bin
+*.pt
+*.pth
+
+# Generated media and extraction output
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.mp4
+*.profile.json
+*.raw.json
+
+# Secrets - use Kubernetes Secrets, never files in Git.
+# The HuggingFace token is set with scripts/set-hf-token.sh and lives only in
+# the cluster, never in a manifest.
+secrets/
+*secret*.yaml
+*secret*.yml
+*.env
+.env
+*token*.yaml
+*token*.yml
+*.token
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/

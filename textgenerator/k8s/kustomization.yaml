@@ -1,0 +1,22 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Namespace-scoped objects inherit ai-stack; cluster-scoped objects
+# (StorageClass, PersistentVolume) are unaffected.
+namespace: ai-stack
+
+# Added as metadata only - selectors stay exactly as written in the manifests
+# (a Deployment selector is immutable after the first apply).
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/part-of: textgenerator
+
+resources:
+  - 00-namespace.yaml
+  - 01-storage.yaml
+  - 02-oobabooga.yaml
+  - 03-sillytavern.yaml
+  - 04-character-extractor.yaml
+  # Optional, ships with replicas: 0 - remove the line to skip it entirely.
+  - 05-comfyui.yaml

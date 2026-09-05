@@ -1,0 +1,222 @@
+# ---------------------------------------------------------------------------
+# SillyTavern - storytelling / roleplay front-end.
+#
+# CPU only workload. It talks to the model backend through the internal
+# ClusterIP service http://text-generation-webui.ai-stack.svc.cluster.local:5000
+# (configure it in the SillyTavern UI: API -> Text Completion / OpenAI
+# compatible -> the URL above).
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sillytavern
+  namespace: ai-stack
+  labels:
+    app.kubernetes.io/name: sillytavern
+    app.kubernetes.io/part-of: textgenerator
+spec:
+  replicas: 1
+  strategy:
+    # ReadWriteOnce hostPath volume - never run two writers at once.
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sillytavern
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sillytavern
+        app.kubernetes.io/part-of: textgenerator
+    spec:
+      securityContext:
+        # NO runAsUser here on purpose: the upstream image has no USER
+        # directive and its entrypoint MUST start as root. With PUID/PGID set
+        # (below) it fixes the ownership of the mounted directories and then
+        # drops the actual node server to uid/gid 1000 via su-exec
+        # ("Mode: PUID/PGID" in the pod log).
+        #
+        # Forcing runAsUser: 1000 here breaks startup with
+        # "EACCES: permission denied, mkdir 'backups/'", because
+        # /home/node/app is root-owned inside the image.
+        #
+        # fsGroup has no effect on hostPath volumes - Kubernetes never
+        # applies it to them. The host directory ownership set by
+        # scripts/prepare-host-dirs.sh is what counts; the initContainer
+        # below is a safety net for directories the kubelet auto-created.
+        fsGroup: 1000
+      initContainers:
+        # hostPath volumes with type: DirectoryOrCreate are created by the
+        # kubelet as root:root if prepare-host-dirs.sh has not run, and
+        # fsGroup does not apply to hostPath. Take ownership of the shared
+        # mount for uid/gid 1000 - the identity both SillyTavern (via
+        # PUID/PGID) and the extractor run as.
+        - name: fix-shared-permissions
+          image: busybox:1.36
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - chown 1000:1000 /shared && chmod 0775 /shared
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+          volumeMounts:
+            - name: shared-characters
+              mountPath: /shared
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+      containers:
+        - name: sillytavern
+          # Pinned on purpose - bump deliberately after testing.
+          # 1.17.0+ is required for the PUID/PGID non-root mode used below.
+          image: ghcr.io/sillytavern/sillytavern:1.18.0
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: NODE_ENV
+              value: production
+            # Drop privileges to this uid/gid after the entrypoint has fixed
+            # directory ownership. Must match the uid the character extractor
+            # runs as, so both can share character files.
+            - name: PUID
+              value: "1000"
+            - name: PGID
+              value: "1000"
+            # SILLYTAVERN_* variables map to config.yaml keys (key path
+            # upper-cased, dots replaced by underscores). NOTE: this mapping
+            # only exists in 1.13.0+ - on 1.12.x these variables are silently
+            # ignored and config.yaml has to be edited on the host instead.
+            - name: SILLYTAVERN_LISTEN
+              value: "true"
+            - name: SILLYTAVERN_WHITELISTMODE
+              value: "false"
+            # Required: SillyTavern refuses to start when it listens on a
+            # non-localhost address while whitelist, basic auth and user
+            # accounts are all disabled. Only acceptable because this service
+            # is reachable from the trusted local network only. Set this back
+            # to "false" as soon as you enable basic auth or an Ingress with
+            # authentication (see README, "Migration path").
+            - name: SILLYTAVERN_SECURITYOVERRIDE
+              value: "true"
+            # Authentication placeholders. Enable them (or put an
+            # authenticating reverse proxy / Ingress in front) before exposing
+            # this service beyond the trusted local network. Never commit real
+            # credentials - use a Kubernetes Secret instead.
+            # - name: SILLYTAVERN_BASICAUTHMODE
+            #   value: "true"
+            # - name: SILLYTAVERN_BASICAUTHUSER__USERNAME
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: sillytavern-basicauth
+            #       key: username
+            # - name: SILLYTAVERN_BASICAUTHUSER__PASSWORD
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: sillytavern-basicauth
+            #       key: password
+          ports:
+            - name: http
+              containerPort: 8000
+          volumeMounts:
+            - name: sillytavern-data
+              mountPath: /home/node/app/config
+              subPath: config
+            - name: sillytavern-data
+              mountPath: /home/node/app/data
+              subPath: data
+            # SillyTavern creates these directories relative to its working
+            # directory /home/node/app at startup (PUBLIC_DIRECTORIES /
+            # CORE_DIRS). They are mounted so they are writable AND survive
+            # a pod restart - "backups/" in particular holds the automatic
+            # chat and settings backups.
+            - name: sillytavern-data
+              mountPath: /home/node/app/backups
+              subPath: backups
+            - name: sillytavern-data
+              mountPath: /home/node/app/plugins
+              subPath: plugins
+            - name: sillytavern-data
+              mountPath: /home/node/app/public/scripts/extensions/third-party
+              subPath: extensions
+            # Shared character card directory, also written by the extractor.
+            # Nested inside the data mount on purpose so SillyTavern picks the
+            # cards up without knowing anything about the extractor pod.
+            - name: shared-characters
+              mountPath: /home/node/app/data/default-user/characters
+          # The image ships its own health check (used by the upstream
+          # docker-compose healthcheck). It is preferred over an HTTP GET on
+          # "/" because it keeps working once basic auth is enabled, which
+          # would make an unauthenticated HTTP probe fail with 401.
+          startupProbe:
+            exec:
+              command: ["node", "src/healthcheck.js"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            exec:
+              command: ["node", "src/healthcheck.js"]
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command: ["node", "src/healthcheck.js"]
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+      volumes:
+        - name: sillytavern-data
+          persistentVolumeClaim:
+            claimName: sillytavern-data-pvc
+        - name: shared-characters
+          persistentVolumeClaim:
+            claimName: shared-characters-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sillytavern
+  namespace: ai-stack
+  labels:
+    app.kubernetes.io/name: sillytavern
+    app.kubernetes.io/part-of: textgenerator
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: sillytavern
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+# Primary user entry point. NodePort for now; an Ingress with authentication
+# can be added later without touching the Deployment (see README.md).
+apiVersion: v1
+kind: Service
+metadata:
+  name: sillytavern-nodeport
+  namespace: ai-stack
+  labels:
+    app.kubernetes.io/name: sillytavern
+    app.kubernetes.io/part-of: textgenerator
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: sillytavern
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+      nodePort: 30800
