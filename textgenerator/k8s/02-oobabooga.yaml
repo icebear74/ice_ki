@@ -63,22 +63,26 @@ spec:
                 configMapKeyRef:
                   name: textgen-config
                   key: TEXTGEN_CONTEXT_SIZE
-            # CLI_ARGS is honoured by most text-generation-webui images,
-            # EXTRA_LAUNCH_ARGS by the atinoda images. Both are set to the
-            # same value so a different image can be swapped in without
-            # editing the argument list twice.
-            # NOTE: the context flag differs between releases/loaders
-            # (--ctx-size on current releases, --n_ctx on older llama.cpp
-            # loaders). Verify with `--help` of the chosen image and adjust
-            # here instead of inventing a flag the image does not accept.
-            - name: CLI_ARGS
-              value: >-
-                --api --listen --listen-port 7860 --api-port 5000
-                --auto-devices --ctx-size $(TEXTGEN_CONTEXT_SIZE)
+            # The atinoda entrypoint appends EXTRA_LAUNCH_ARGS to the
+            # server.py command line. That is the ONLY argument variable it
+            # reads - CLI_ARGS (used by some other text-generation-webui
+            # images) is ignored here, so do not add flags there expecting
+            # them to take effect.
+            #
+            # Verify every flag against `server.py --help` of the pinned
+            # image before adding it; the argument list changes between major
+            # releases. Notably --auto-devices was REMOVED in v3+/v4 and the
+            # server exits with "unrecognized arguments" if it is passed.
+            # Automatic GPU offloading is the default now: --gpu-layers
+            # defaults to -1 ("auto"), so no replacement flag is needed.
+            #
+            # --ctx-size is the current context flag (aliases: --n_ctx,
+            # --max_seq_len). Adjust here rather than inventing a flag the
+            # image does not accept.
             - name: EXTRA_LAUNCH_ARGS
               value: >-
                 --api --listen --listen-port 7860 --api-port 5000
-                --auto-devices --ctx-size $(TEXTGEN_CONTEXT_SIZE)
+                --ctx-size $(TEXTGEN_CONTEXT_SIZE)
             - name: NVIDIA_VISIBLE_DEVICES
               value: "all"
             - name: NVIDIA_DRIVER_CAPABILITIES
@@ -89,13 +93,18 @@ spec:
             - name: api
               containerPort: 5000
           volumeMounts:
+            # text-generation-webui v3+ keeps all user data under
+            # /app/user_data. Mounting the old top-level /app/models,
+            # /app/characters and /app/loras paths silently does nothing:
+            # the app never reads them and the downloaded models end up in
+            # the container layer, so they are lost on every restart.
             - name: models
-              mountPath: /app/models
+              mountPath: /app/user_data/models
             - name: character
-              mountPath: /app/characters
+              mountPath: /app/user_data/characters
               subPath: characters
             - name: character
-              mountPath: /app/loras
+              mountPath: /app/user_data/loras
               subPath: loras
           # Loading a large model from disk into VRAM can take several
           # minutes; the startup probe allows up to 30 minutes before the

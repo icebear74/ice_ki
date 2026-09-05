@@ -237,7 +237,7 @@ Repeat this after every change to `textgenerator/extractor/`.
 | --- | --- | --- | --- |
 | `TEXTGEN_CONTEXT_SIZE` | ConfigMap `textgen-config` | `8192` | Maximum context length, passed to the backend as `--ctx-size` |
 | `OOBABOOGA_API_BASE_URL` | ConfigMap `textgen-config` | internal Service DNS | Endpoint the extractor talks to |
-| `CLI_ARGS` / `EXTRA_LAUNCH_ARGS` | `02-oobabooga.yaml` | `--api --listen ... --auto-devices --ctx-size $(TEXTGEN_CONTEXT_SIZE)` | Backend launch arguments |
+| `EXTRA_LAUNCH_ARGS` | `02-oobabooga.yaml` | `--api --listen --listen-port 7860 --api-port 5000 --ctx-size $(TEXTGEN_CONTEXT_SIZE)` | Backend launch arguments. The atinoda entrypoint reads **only** this variable – `CLI_ARGS` is ignored by this image. |
 | `EXTRACTOR_MODEL` | `04-character-extractor.yaml` | `""` (currently loaded model) | Model name sent to the API |
 | `EXTRACTOR_MAX_TOKENS` | `04-character-extractor.yaml` | `2048` | Answer length limit of one extraction |
 | `EXTRACTOR_ALLOW_OVERWRITE` | `04-character-extractor.yaml` | `false` | Allow replacing existing cards/profiles |
@@ -260,9 +260,33 @@ application-side truncation of the input text – oversized inputs are rejected
 by the backend rather than silently cut.
 
 The context flag differs between text-generation-webui releases and loaders
-(`--ctx-size` on current releases, `--n_ctx` on older llama.cpp loaders). Run
+(`--ctx-size` on current releases, aliases `--n_ctx` / `--max_seq_len`). Run
 `--help` in the image you pinned and adjust the value in `02-oobabooga.yaml`
-instead of using a flag the image does not accept.
+instead of using a flag the image does not accept:
+
+```bash
+docker run --rm --entrypoint bash atinoda/text-generation-webui:default-nvidia \
+  -c 'cd /app && python3.13 server.py --help'
+```
+
+> **The argument list changes between major releases.** `--auto-devices` was
+> removed in v3+/v4; passing it makes the server exit immediately with
+> `server.py: error: unrecognized arguments: --auto-devices`. It has no
+> replacement here because automatic GPU offloading is now the default –
+> `--gpu-layers` defaults to `-1` ("auto"). Check any flag against `--help`
+> before adding it.
+
+### Data layout inside the container
+
+text-generation-webui v3+ keeps all user data under **`/app/user_data/`**, so
+the PVCs are mounted at `/app/user_data/models`, `/app/user_data/characters`
+and `/app/user_data/loras`. The pre-v3 top-level paths (`/app/models` …) are
+never read by the application: mounting them appears to work, but downloaded
+models land in the container layer and are gone after every restart.
+
+The container entrypoint runs as root, seeds empty directories with the
+upstream defaults and `chown`s `/app/user_data` to uid/gid `1000` – so do not
+force a `runAsUser` on this pod.
 
 ## 7. GPU, Tesla P100 / CUDA caveats
 
@@ -452,6 +476,33 @@ sudo k3s ctr images ls -q | grep character-extractor
 
 `ErrImageNeverPull` means the image is still missing (the deployment uses
 `imagePullPolicy: Never` so containerd never contacts Docker Hub).
+
+### `text-generation-webui`: `error: unrecognized arguments: --auto-devices`
+
+```
+server.py: error: unrecognized arguments: --auto-devices
+```
+
+The launch arguments do not match the pinned image. text-generation-webui v3+
+removed `--auto-devices`; automatic GPU offloading is the default (`--gpu-layers`
+defaults to `-1`). Remove the flag from `EXTRA_LAUNCH_ARGS` in
+`02-oobabooga.yaml`. The same applies to any other flag – check it against
+`server.py --help` of the pinned image first (§6).
+
+Note that this image only reads `EXTRA_LAUNCH_ARGS`; a `CLI_ARGS` variable is
+silently ignored.
+
+### `text-generation-webui`: downloaded models disappear after a restart
+
+The model PVC is mounted at the wrong path. v3+ reads everything from
+`/app/user_data/`, so the mounts must be `/app/user_data/models`,
+`/app/user_data/characters` and `/app/user_data/loras` – see §6. A mount at the
+old `/app/models` is simply never read, and the download lands in the
+container's writable layer. Verify with:
+
+```bash
+kubectl -n ai-stack exec deploy/text-generation-webui -- ls /app/user_data/models
+```
 
 ### `text-generation-webui` stuck in `PodInitializing`
 
