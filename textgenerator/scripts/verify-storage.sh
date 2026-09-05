@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
-# Check the host and cluster prerequisites for the Longhorn backed PVCs of the
-# textgenerator stack. Replaces the old prepare-host-dirs.sh - no host
-# directories have to be created any more, Longhorn provisions the volumes.
+# Check the host storage prerequisites for the hostPath PersistentVolumes of
+# the textgenerator stack.
 #
-#   textgenerator/scripts/verify-storage.sh
+#   textgenerator/scripts/verify-storage.sh [STORAGE_ROOT]
 #
 # Exits non-zero if a hard requirement is missing.
 set -uo pipefail
 
+STORAGE_ROOT="${1:-/mnt/aistack}"
 NAMESPACE="${NAMESPACE:-ai-stack}"
-STORAGE_CLASS="${STORAGE_CLASS:-longhorn}"
-LONGHORN_NAMESPACE="${LONGHORN_NAMESPACE:-longhorn-system}"
+OWNER_UID="${OWNER_UID:-1000}"
+OWNER_GID="${OWNER_GID:-1000}"
+# Minimum free space to consider the volume usable at all (GiB). Model files
+# alone are easily tens of GiB.
+MIN_FREE_GIB="${MIN_FREE_GIB:-50}"
 rc=0
 
 note() { printf '  %s\n' "$*"; }
@@ -18,105 +21,110 @@ ok()   { printf '[ ok ] %s\n' "$*"; }
 warn() { printf '[warn] %s\n' "$*"; }
 fail() { printf '[fail] %s\n' "$*"; rc=1; }
 
-echo "== Host packages =="
-# open-iscsi is required for every Longhorn volume, nfs-common only for
-# ReadWriteMany volumes (shared-characters-pvc uses RWX).
-if command -v iscsiadm >/dev/null 2>&1; then
-  ok "open-iscsi present ($(command -v iscsiadm))"
+# Keep in sync with scripts/prepare-host-dirs.sh and the hostPath values in
+# k8s/01-storage.yaml.
+DIRS=(
+  "sillytavern/config"
+  "sillytavern/data"
+  "sillytavern/data/default-user/characters"
+  "sillytavern/backups"
+  "sillytavern/plugins"
+  "sillytavern/extensions"
+  "oobabooga/models"
+  "oobabooga/character/characters"
+  "oobabooga/character/loras"
+  "shared/characters"
+  "extractor/profiles"
+  "extractor/raw"
+  "comfyui/models"
+  "comfyui/input"
+  "comfyui/output"
+  "comfyui/user"
+  "comfyui/workflows"
+)
+
+echo "== Storage root ${STORAGE_ROOT} =="
+if [[ ! -d "${STORAGE_ROOT}" ]]; then
+  fail "${STORAGE_ROOT} does not exist - run: sudo scripts/prepare-host-dirs.sh"
+  exit "${rc}"
+fi
+ok "${STORAGE_ROOT} exists"
+
+if mountpoint -q "${STORAGE_ROOT}" 2>/dev/null; then
+  ok "${STORAGE_ROOT} is a dedicated mount point"
 else
-  fail "iscsiadm not found - install with: sudo apt-get install -y open-iscsi"
+  note "${STORAGE_ROOT} is not a separate mount - it shares the parent filesystem."
 fi
 
-if command -v mount.nfs >/dev/null 2>&1 || command -v mount.nfs4 >/dev/null 2>&1; then
-  ok "NFS client present (needed for the ReadWriteMany shared volume)"
-else
-  fail "mount.nfs not found - install with: sudo apt-get install -y nfs-common"
+free_gib="$(df -BG --output=avail "${STORAGE_ROOT}" 2>/dev/null | tail -1 | tr -dc '0-9')"
+if [[ -n "${free_gib}" ]]; then
+  if [[ "${free_gib}" -lt "${MIN_FREE_GIB}" ]]; then
+    warn "only ${free_gib}Gi free - model files need considerably more."
+  else
+    ok "${free_gib}Gi free"
+  fi
 fi
 
-# The module is often loaded on demand when the first volume is attached, so
-# a missing module is only a hint, not an error.
-if [[ -d /sys/module/iscsi_tcp ]] || lsmod 2>/dev/null | grep -q '^iscsi_tcp'; then
-  ok "iscsi_tcp kernel module loaded"
-elif systemctl is-active --quiet iscsid 2>/dev/null; then
-  ok "iscsid running (iscsi_tcp is loaded on demand)"
+echo
+echo "== Directories and ownership =="
+# hostPath volumes ignore fsGroup, so the ownership on disk is what decides
+# whether the containers (uid/gid 1000) can write.
+missing=0
+wrong_owner=0
+for dir in "${DIRS[@]}"; do
+  target="${STORAGE_ROOT}/${dir}"
+  if [[ ! -d "${target}" ]]; then
+    echo "  missing: ${target}"
+    missing=$((missing + 1))
+    continue
+  fi
+  owner="$(stat -c '%u:%g' "${target}" 2>/dev/null)"
+  if [[ "${owner}" != "${OWNER_UID}:${OWNER_GID}" ]]; then
+    echo "  wrong owner (${owner}, expected ${OWNER_UID}:${OWNER_GID}): ${target}"
+    wrong_owner=$((wrong_owner + 1))
+  fi
+done
+
+if [[ "${missing}" -eq 0 && "${wrong_owner}" -eq 0 ]]; then
+  ok "all ${#DIRS[@]} directories present and owned by ${OWNER_UID}:${OWNER_GID}"
 else
-  note "iscsi_tcp not loaded yet - normally loaded automatically on first attach."
-  note "Load it up front with: sudo modprobe iscsi_tcp"
+  fail "${missing} missing, ${wrong_owner} with wrong ownership"
+  note "Fix with: sudo textgenerator/scripts/prepare-host-dirs.sh ${STORAGE_ROOT}"
 fi
 
 echo
 echo "== Cluster =="
-if ! command -v kubectl >/dev/null 2>&1; then
-  warn "kubectl not found - skipping cluster checks"
-  exit "${rc}"
-fi
-
-if ! kubectl version >/dev/null 2>&1; then
+if ! command -v kubectl >/dev/null 2>&1 || ! kubectl version >/dev/null 2>&1; then
   warn "cannot reach the cluster - skipping cluster checks"
   exit "${rc}"
 fi
 
-if kubectl get storageclass "${STORAGE_CLASS}" >/dev/null 2>&1; then
-  ok "StorageClass ${STORAGE_CLASS} installed"
-  replicas="$(kubectl get storageclass "${STORAGE_CLASS}" \
-    -o jsonpath='{.parameters.numberOfReplicas}' 2>/dev/null)"
-  reclaim="$(kubectl get storageclass "${STORAGE_CLASS}" \
-    -o jsonpath='{.reclaimPolicy}' 2>/dev/null)"
-  note "numberOfReplicas=${replicas:-<unset, global default applies>} reclaimPolicy=${reclaim:-<unset>}"
-
-  # The Longhorn global setting "Default Replica Count" only applies when the
-  # StorageClass carries NO numberOfReplicas parameter: the volume mutating
-  # webhook fills it in solely when spec.numberOfReplicas == 0. A value set on
-  # the class therefore always wins. Show both so the difference is obvious.
-  global_replicas="$(kubectl -n "${LONGHORN_NAMESPACE}" get settings.longhorn.io \
-    default-replica-count -o jsonpath='{.value}' 2>/dev/null)"
-  if [[ -n "${global_replicas}" ]]; then
-    note "Longhorn global default-replica-count=${global_replicas} (used ONLY when the class sets no parameter)"
-  fi
-
-  nodes="$(kubectl get nodes --no-headers 2>/dev/null | wc -l)"
-  if [[ "${nodes}" -le 1 && -n "${replicas}" && "${replicas}" -gt 1 ]]; then
-    warn "Single node cluster, but StorageClass ${STORAGE_CLASS} requests ${replicas} replicas."
-    warn "New volumes will be created Degraded (only 1 of ${replicas} replicas schedulable)."
-    if [[ -n "${global_replicas}" && "${global_replicas}" -eq 1 ]]; then
-      warn "The global setting of ${global_replicas} does NOT override this - the class parameter wins."
-    fi
-    warn "Fix with:"
-    warn "  kubectl patch storageclass ${STORAGE_CLASS} --type=merge \\"
-    warn "    -p '{\"parameters\":{\"numberOfReplicas\":\"1\"}}'"
-    warn "Existing volumes keep the count they were created with (see below)."
-  fi
-  if [[ "${reclaim}" == "Delete" ]]; then
-    note "reclaimPolicy is Delete: deleting a PVC also deletes its data."
-    note "build.sh --clean therefore keeps the PVCs unless --purge-data is given."
-  fi
+if kubectl get storageclass textgen-hostpath >/dev/null 2>&1; then
+  ok "StorageClass textgen-hostpath exists"
 else
-  fail "StorageClass '${STORAGE_CLASS}' not found - is Longhorn installed?"
+  note "StorageClass textgen-hostpath not applied yet (kubectl apply -k textgenerator/k8s)"
 fi
 
-# Ground truth: what the existing volumes were actually created with. A
-# StorageClass change is never propagated back to volumes that already exist.
-if kubectl get crd volumes.longhorn.io >/dev/null 2>&1; then
-  echo
-  echo "== Longhorn volumes (desired replicas vs. health) =="
-  kubectl -n "${LONGHORN_NAMESPACE}" get volumes.longhorn.io \
-    -o custom-columns=NAME:.metadata.name,REPLICAS:.spec.numberOfReplicas,STATE:.status.state,ROBUSTNESS:.status.robustness,PVC:.status.kubernetesStatus.pvcName \
-    2>/dev/null || note "no Longhorn volumes yet"
-fi
+echo
+echo "== PersistentVolumes =="
+kubectl get pv -l app.kubernetes.io/part-of=textgenerator 2>/dev/null || true
 
 echo
 echo "== PersistentVolumeClaims in ${NAMESPACE} =="
 if kubectl get namespace "${NAMESPACE}" >/dev/null 2>&1; then
   kubectl -n "${NAMESPACE}" get pvc 2>/dev/null || true
-  pending="$(kubectl -n "${NAMESPACE}" get pvc --no-headers 2>/dev/null | awk '$2!="Bound"' | wc -l)"
-  if [[ "${pending}" -gt 0 ]]; then
-    warn "${pending} PVC(s) not Bound - check: kubectl -n ${NAMESPACE} describe pvc"
+  # jsonpath rather than parsing the table: no header/column surprises.
+  pending="$(kubectl -n "${NAMESPACE}" get pvc \
+    -o jsonpath='{range .items[?(@.status.phase!="Bound")]}{.metadata.name}{" "}{end}' 2>/dev/null)"
+  if [[ -n "${pending// /}" ]]; then
+    warn "PVC(s) not Bound: ${pending}"
+    note "Inspect with: textgenerator/scripts/diagnose.sh"
   fi
 else
   note "namespace ${NAMESPACE} does not exist yet"
 fi
 
 echo
-echo "Longhorn replicates inside the cluster - it is NOT a backup."
-echo "Use textgenerator/scripts/backup.sh and/or a Longhorn backup target."
+echo "Local storage does not protect against disk failure - copy the backups"
+echo "produced by textgenerator/scripts/backup.sh to another machine."
 exit "${rc}"

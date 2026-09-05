@@ -1,64 +1,59 @@
 #!/usr/bin/env bash
-# Back up the small, valuable parts of the stack: SillyTavern config/chats,
-# shared character cards and extracted person profiles.
+# Back up the textgenerator stack data from the host storage root.
 #
-# The data lives in Longhorn volumes, so it is not reachable through a host
-# directory any more. This script streams a tar archive out of the running
-# pods that already have the volumes mounted.
+#   sudo textgenerator/scripts/backup.sh [DESTINATION_DIR] [STORAGE_ROOT]
 #
-# Model files, checkpoints and generated images are EXCLUDED on purpose -
-# they are large and reproducible.
-#
-#   textgenerator/scripts/backup.sh [TARGET_DIR]
-#
-# For a scheduled, application consistent backup of the whole volume set,
-# configure a Longhorn backup target (S3 or NFS) and recurring snapshots in
-# the Longhorn UI instead - see textgenerator/README.md.
+# Because all volumes are hostPath directories, this reads straight from disk -
+# no running pod is required. Model weights and generated images are excluded:
+# they are large and re-downloadable/re-creatable. Set INCLUDE_MODELS=1 to
+# include them anyway.
 set -euo pipefail
 
-TARGET_DIR="${1:-/var/backups/k3s-ai-stack}"
-NAMESPACE="${NAMESPACE:-ai-stack}"
-STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-OUT_DIR="${TARGET_DIR}/textgenerator-${STAMP}"
+DEST="${1:-/var/backups/textgenerator}"
+STORAGE_ROOT="${2:-/mnt/aistack}"
+INCLUDE_MODELS="${INCLUDE_MODELS:-0}"
+KEEP="${KEEP:-7}"
 
-if ! command -v kubectl >/dev/null 2>&1; then
-  echo "kubectl not found." >&2
+if [[ ! -d "${STORAGE_ROOT}" ]]; then
+  echo "Storage root ${STORAGE_ROOT} does not exist." >&2
   exit 1
 fi
 
-mkdir -p "${OUT_DIR}"
+mkdir -p "${DEST}"
+stamp="$(date +%Y%m%d-%H%M%S)"
+archive="${DEST}/textgenerator-${stamp}.tar.gz"
 
-# dump <name> <deployment> <container> <parent-dir> <entry> [entry...]
-dump() {
-  local name="$1" deploy="$2" container="$3" parent="$4"
-  shift 4
-  local archive="${OUT_DIR}/${name}.tar.gz"
+excludes=()
+if [[ "${INCLUDE_MODELS}" != "1" ]]; then
+  excludes+=(
+    --exclude="./oobabooga/models"
+    --exclude="./comfyui/models"
+    --exclude="./comfyui/output"
+  )
+  echo "Excluding model weights and ComfyUI output (INCLUDE_MODELS=1 to keep them)."
+fi
 
-  if ! kubectl -n "${NAMESPACE}" get "deployment/${deploy}" >/dev/null 2>&1; then
-    echo "skip ${name}: deployment/${deploy} not found"
-    return 0
-  fi
+echo "Archiving ${STORAGE_ROOT} -> ${archive}"
+# Backing up a live directory tree can catch a file mid-write. Stop the
+# workloads first for a fully consistent snapshot:
+#   kubectl -n ai-stack scale deploy --all --replicas=0
+tar -czf "${archive}" -C "${STORAGE_ROOT}" "${excludes[@]}" .
+chmod 0600 "${archive}"
 
-  echo "backing up ${name} from deployment/${deploy} ..."
-  if kubectl -n "${NAMESPACE}" exec "deployment/${deploy}" -c "${container}" -- \
-      tar czf - -C "${parent}" "$@" > "${archive}"; then
-    echo "  -> ${archive}"
-  else
-    echo "  !! failed for ${name}" >&2
-    rm -f "${archive}"
-    return 1
-  fi
-}
+echo "Wrote $(du -h "${archive}" | cut -f1) to ${archive}"
 
-dump sillytavern sillytavern sillytavern /home/node/app config data
-dump shared-characters sillytavern sillytavern /home/node/app/data/default-user characters
-dump extractor character-extractor character-extractor /data extractor
+# Rotate: keep the newest ${KEEP} archives.
+mapfile -t old < <(ls -1t "${DEST}"/textgenerator-*.tar.gz 2>/dev/null | tail -n "+$((KEEP + 1))")
+for f in "${old[@]:-}"; do
+  [[ -n "${f}" ]] || continue
+  echo "Removing old backup ${f}"
+  rm -f "${f}"
+done
 
 echo
-echo "Backup written: ${OUT_DIR}"
-echo "Restore example (SillyTavern):"
-echo "  kubectl -n ${NAMESPACE} exec -i deployment/sillytavern -c sillytavern -- \\"
-echo "    tar xzf - -C /home/node/app < ${OUT_DIR}/sillytavern.tar.gz"
-echo
-echo "Longhorn replicas protect against a single disk failing, not against"
-echo "deletion or host loss - copy this directory to another machine."
+echo "Copy the archive off this machine - hostPath storage has no redundancy."
+echo "Restore with:"
+echo "  kubectl -n ai-stack scale deploy --all --replicas=0"
+echo "  sudo tar -xzf ${archive} -C ${STORAGE_ROOT}"
+echo "  sudo textgenerator/scripts/prepare-host-dirs.sh ${STORAGE_ROOT}"
+echo "  kubectl -n ai-stack scale deploy --all --replicas=1"

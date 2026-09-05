@@ -58,7 +58,7 @@ Key decisions:
 textgenerator/
 ├── k8s/
 │   ├── 00-namespace.yaml            namespace ai-stack
-│   ├── 01-storage.yaml              Longhorn StorageClass + PVCs
+│   ├── 01-storage.yaml              static hostPath PVs + PVCs
 │   ├── 02-oobabooga.yaml            ConfigMap, Deployment, ClusterIP + NodePort
 │   ├── 03-sillytavern.yaml          Deployment, ClusterIP + NodePort
 │   ├── 04-character-extractor.yaml  Deployment + ClusterIP
@@ -66,7 +66,7 @@ textgenerator/
 │   └── kustomization.yaml
 ├── extractor/                       Dockerfile, requirements, app code, schema, prompt
 ├── image-pipeline/                  ComfyUI workflow/prompt integration placeholders
-└── scripts/                         build.sh, diagnose.sh, verify-gpu.sh, verify-storage.sh, backup.sh
+└── scripts/                         build.sh, diagnose.sh, prepare-host-dirs.sh, verify-gpu.sh, verify-storage.sh, backup.sh
 ```
 
 There is no `06-nodeports.yaml`: every Service lives next to its Deployment.
@@ -83,95 +83,84 @@ There is no `06-nodeports.yaml`: every Service lives next to its Deployment.
 
   It checks `nvidia-smi`, the `nvidia` RuntimeClass, the advertised
   `nvidia.com/gpu` capacity and runs an in-cluster CUDA smoke test.
-* **Longhorn** installed in the cluster (it provides all PersistentVolumes,
-  see §4), with `open-iscsi` and `nfs-common` installed on the node:
+* A dedicated data filesystem mounted at `/mnt/aistack` (the current host uses
+  a 1 TB volume there). Prepare it once and verify it before deploying:
 
   ```bash
-  sudo apt-get install -y open-iscsi nfs-common
+  sudo textgenerator/scripts/prepare-host-dirs.sh
   textgenerator/scripts/verify-storage.sh
   ```
 
 ## 4. Storage
 
-Every data set is a **dynamically provisioned PersistentVolumeClaim backed by
-Longhorn**. No host directories have to be created and nothing has to be
-chowned on the node – Longhorn creates, formats and mounts the volumes.
+The stack uses **static hostPath PersistentVolumes** on the dedicated host
+filesystem under `/mnt/aistack`. There is one PV per PVC. Each PV is pre-bound
+to its claim with `claimRef`, and each PVC is pinned back to the intended PV
+with `volumeName`. The `textgen-hostpath` StorageClass uses
+`provisioner: kubernetes.io/no-provisioner`, `reclaimPolicy: Retain` and
+`volumeBindingMode: Immediate`; it exists only so the claims never fall through
+to a cluster default StorageClass.
 
-All claims use the cluster's **`longhorn` StorageClass**. `storageClassName:
-longhorn` is written out explicitly rather than relying on the default-class
-annotation, so the manifests stay unambiguous. The stack ships **no
-StorageClass of its own**.
+| PVC | Size | Access | hostPath |
+| --- | --- | --- | --- |
+| `sillytavern-data-pvc` | 20Gi | RWO | `/mnt/aistack/sillytavern` |
+| `oobabooga-models-pvc` | 500Gi | RWO | `/mnt/aistack/oobabooga/models` |
+| `oobabooga-character-pvc` | 50Gi | RWO | `/mnt/aistack/oobabooga/character` |
+| `shared-characters-pvc` | 20Gi | **RWX** | `/mnt/aistack/shared/characters` |
+| `extractor-data-pvc` | 20Gi | RWO | `/mnt/aistack/extractor` |
+| `comfyui-data-pvc` | 300Gi | RWO | `/mnt/aistack/comfyui` |
 
-Two properties of that class are worth knowing:
+`reclaimPolicy: Retain` is set on the PVs. Deleting a PVC never deletes files
+under `/mnt/aistack`. A retained PV moves to `Released` and will not bind again,
+so `scripts/build.sh --clean --purge-data` deletes the PVCs **and** the PVs;
+the on-disk files still remain.
 
-* **Replica count** – it must be `1` on a single node cluster, and it has to be
-  set **on the StorageClass**. Longhorn's global *Default Replica Count* setting
-  is only consulted when the class carries no `numberOfReplicas` parameter (the
-  volume mutating webhook fills it in solely when the value is `0`), so a global
-  `1` does **not** override a class parameter of `3`. Check and fix with:
+> **Sizing.** The requested sizes are metadata only. hostPath does not enforce
+> capacity or quotas; the real limit is the free space on `/mnt/aistack`. Check
+> it with `df -h /mnt/aistack` before downloading large models.
 
-  ```bash
-  kubectl get storageclass longhorn -o jsonpath='{.parameters.numberOfReplicas}{"\n"}'
-  kubectl patch storageclass longhorn --type=merge \
-    -p '{"parameters":{"numberOfReplicas":"1"}}'
-  ```
+> **Permissions.** Kubernetes never applies `fsGroup` to hostPath volumes, so
+> host directory ownership decides whether the containers can write. Everything
+> runs as uid/gid `1000`. `prepare-host-dirs.sh` creates the tree with
+> `chown 1000:1000` and `chmod 0775`. `type: DirectoryOrCreate` means the
+> kubelet creates anything missing as **root**, which is why the root
+> `initContainer`s in `03-sillytavern.yaml` and `04-character-extractor.yaml`
+> `chown` the mounts as a safety net. `subPath` parent directories must
+> pre-exist for the same reason.
 
-  `verify-storage.sh` reports both values and warns when they disagree.
-  A StorageClass change only affects **new** volumes.
-* **`reclaimPolicy: Delete`** – deleting a PVC also deletes its data. That is
-  why `build.sh --clean` keeps the PVCs and only removes them when you add
-  `--purge-data`.
+> `backups/`, `plugins/` and the third-party extensions directory are **not**
+> under `dataRoot`: SillyTavern creates them relative to its working directory
+> `/home/node/app`. They are mounted from the hostPath tree so they are writable
+> and persistent – see §11 if you see `EACCES: permission denied, mkdir
+> 'backups/'`.
 
-| PVC | Size / mode | Mounted at |
-| --- | --- | --- |
-| `sillytavern-data-pvc` | 5Gi RWO | `/home/node/app/{config,data,backups,plugins,public/scripts/extensions/third-party}` (`subPath` `config`, `data`, `backups`, `plugins`, `extensions`) |
-| `oobabooga-models-pvc` | 200Gi RWO | `/app/models` |
-| `oobabooga-character-pvc` | 20Gi RWO | `/app/characters`, `/app/loras` (`subPath`) |
-| `shared-characters-pvc` | 10Gi **RWX** | ST: `/home/node/app/data/default-user/characters`, extractor: `/data/characters` |
-| `extractor-data-pvc` | 10Gi RWO | `/data/extractor` (`profiles/`, `raw/`) |
-| `comfyui-data-pvc` | 100Gi RWO | `/opt/ComfyUI/{models,input,output,user,workflows}` (`subPath`) |
+If you move the storage root, edit **both** the `hostPath` values in
+`k8s/01-storage.yaml` and `STORAGE_ROOT` in the scripts. They are not templated.
 
-Check the prerequisites and the resulting claims with:
+Local hostPath storage has no replication. It does not survive disk failure or a
+move to another node – copy backups off the machine (§8).
+
+Check the host directories and the resulting claims with:
 
 ```bash
 textgenerator/scripts/verify-storage.sh
 ```
 
-It verifies that `open-iscsi` (needed by every Longhorn volume) and
-`nfs-common` (needed by the ReadWriteMany shared volume, which Longhorn serves
-through a share-manager NFS export) are installed, compares the replica count
-of the `longhorn` class against Longhorn's global setting, lists the existing
-Longhorn volumes with their actual replica count and robustness, and checks
-that all PVCs are `Bound`.
+### Migrating from Longhorn
 
-> **Sizing.** The requests add up to **345Gi**. Longhorn's scheduler refuses to
-> place a replica once `storageScheduled` would exceed the disk's
-> `storageMaximum` × `storage-over-provisioning-percentage` (default 100%), and
-> it also keeps `storage-minimal-available-percentage` (default 25%) free. A
-> volume whose replica cannot be scheduled never attaches, and its pod stays
-> **Pending** – see §11. Check the disk first and shrink
-> `oobabooga-models-pvc` / `comfyui-data-pvc` if needed:
->
-> ```bash
-> kubectl -n longhorn-system get nodes.longhorn.io -o yaml | grep -A4 storageMaximum
-> ```
+PVC fields such as `storageClassName` and `volumeName` are immutable. Existing
+Longhorn-backed PVCs must be deleted before the hostPath manifests can bind:
 
-> **Permissions.** Longhorn's CSI driver uses the Kubernetes default
-> `fsGroupPolicy: ReadWriteOnceWithFSType`, so `fsGroup` is applied to the
-> ReadWriteOnce volumes but **skipped for the ReadWriteMany** shared volume.
-> SillyTavern and the extractor therefore run a small root `initContainer` that
-> `chown`s the shared mount to `1000:1000` before the application starts.
+1. Scale the deployments to zero.
+2. Copy any data you want to keep out of the old volumes.
+3. Delete the PVCs and the old PVs.
+4. Run `sudo textgenerator/scripts/prepare-host-dirs.sh`.
+5. Apply the stack again with `kubectl apply -k textgenerator/k8s`.
 
-> `backups/`, `plugins/` and the third-party extensions directory are **not**
-> under `dataRoot`: SillyTavern creates them relative to its working directory
-> `/home/node/app`. They are mounted so they are writable and persistent – see
-> §11 if you see `EACCES: permission denied, mkdir 'backups/'`.
-
-> Verify the container-internal paths against the image tags you actually
-> deploy (SillyTavern moved its data directory in the past); adjust the
-> `mountPath` values if a future tag differs.
-
-> Longhorn replicates inside the cluster – that is **not** a backup. See §8.
+`scripts/build.sh --clean --purge-data` performs the delete step for the current
+stack objects. If you forget this migration step, `kubectl apply` fails with an
+immutable-field error, or the PVC stays `Pending` because it is still tied to the
+old storage definition.
 
 ## 5. Deployment
 
@@ -189,15 +178,16 @@ containerd store.
 | Option | Effect |
 | --- | --- |
 | `--clean` | Delete Deployments/Services/ConfigMaps before deploying. **PVCs are kept**, so no data is lost. |
-| `--purge-data` | Only with `--clean`: also delete the PVCs. Because the `longhorn` class uses `reclaimPolicy: Delete` this **destroys models, chats, character cards and profiles**. Asks for confirmation. |
+| `--purge-data` | Only with `--clean`: also delete the PVCs and PVs. Files under `/mnt/aistack` stay in place; delete them manually with `sudo rm -rf /mnt/aistack/*` if you really want to erase data. Asks for confirmation. |
 | `--clean-only` | Clean up and exit without deploying. |
 | `--skip-build` | Do not rebuild the extractor image. |
 | `--skip-verify` | Skip `verify-gpu.sh` / `verify-storage.sh`. |
 | `--with-comfyui` | Scale the optional ComfyUI deployment to 1 (competes for the single GPU – see §7). |
 | `-y`, `--yes` | Do not ask for confirmation on destructive actions. |
 
-`NAMESPACE`, `EXTRACTOR_TAG` and `ROLLOUT_TIMEOUT` can be overridden through
-the environment.
+`build.sh` also runs `prepare-host-dirs.sh` automatically (via `sudo` when it is
+not already running as root). `NAMESPACE`, `EXTRACTOR_TAG`, `ROLLOUT_TIMEOUT`
+and `STORAGE_ROOT` can be overridden through the environment.
 
 Typical redeploy after changing manifests or extractor code:
 
@@ -205,7 +195,7 @@ Typical redeploy after changing manifests or extractor code:
 sudo textgenerator/scripts/build.sh --clean
 ```
 
-Full reset including all data:
+Reset the Kubernetes storage objects while keeping the files on disk:
 
 ```bash
 sudo textgenerator/scripts/build.sh --clean --purge-data
@@ -297,27 +287,37 @@ instead of using a flag the image does not accept.
 
 ## 8. Backups
 
-The data lives in Longhorn volumes, so there is no host directory to tar up.
-`backup.sh` streams archives out of the running pods that already have the
-volumes mounted:
+`backup.sh` archives `/mnt/aistack` directly from disk, so no running pod is
+needed:
 
 ```bash
-textgenerator/scripts/backup.sh /var/backups/k3s-ai-stack
+sudo textgenerator/scripts/backup.sh
 ```
 
-Backs up SillyTavern config/chats, the shared character cards and the extracted
-profiles. Model files, checkpoints and generated images are excluded (large and
-reproducible). Restore with the `tar xzf - ` command the script prints.
+The destination defaults to `/var/backups/textgenerator`; pass another
+directory as the first argument if needed. `KEEP` controls rotation and defaults
+to `7` archives. By default the archive excludes large, reproducible data:
+`oobabooga/models`, `comfyui/models` and `comfyui/output`. Set
+`INCLUDE_MODELS=1` to include those directories anyway.
 
-For scheduled, volume level protection configure a **Longhorn backup target**
-(S3 or NFS) plus recurring snapshot/backup jobs in the Longhorn UI. Longhorn
-replicas alone protect against a failing disk, **not** against accidental
-deletion or losing the host – copy the archives off the machine either way.
+A live backup can catch a file mid-write. For a fully consistent snapshot, scale
+the deployments down first:
 
-Because the `longhorn` class uses `reclaimPolicy: Delete`, deleting a PVC also
-deletes its data. Take a backup before running
-`build.sh --clean --purge-data`, and switch the class (or the individual
-claims) to `Retain` if you want deletion to be reversible.
+```bash
+kubectl -n ai-stack scale deploy --all --replicas=0
+sudo textgenerator/scripts/backup.sh
+kubectl -n ai-stack scale deploy --all --replicas=1
+```
+
+Copy the archive off this machine – hostPath storage has no redundancy. The
+script prints the restore procedure for the archive it just wrote:
+
+```bash
+kubectl -n ai-stack scale deploy --all --replicas=0
+sudo tar -xzf /var/backups/textgenerator/textgenerator-<timestamp>.tar.gz -C /mnt/aistack
+sudo textgenerator/scripts/prepare-host-dirs.sh /mnt/aistack
+kubectl -n ai-stack scale deploy --all --replicas=1
+```
 
 ## 9. Migration path: Ingress + authentication
 
@@ -467,84 +467,71 @@ kubectl -n ai-stack logs -f deploy/text-generation-webui
 If it later crashes with `no kernel image is available for execution on the
 device`, the image lacks Pascal (`sm_60`) support – see §7.
 
-### Pod stuck in `Pending` / `ContainerCreating` (volume never attaches)
+### Pod stuck in `Pending` / `ContainerCreating`
 
-Run the collector first – it prints the pod events, PVC state, Longhorn volume
-and replica scheduling status and the node's disk capacity in one go:
+Run the collector first – it prints pod events, PVC/PV state, StorageClass
+presence, host directory ownership and node details in one go:
 
 ```bash
 textgenerator/scripts/diagnose.sh
 ```
 
-The decisive information is in the `Events:` section of the pod and in
-*"Longhorn volumes that are not schedulable"*. The most common causes:
-
-* **`ReplicaSchedulingFailure` / insufficient storage** – the sum of the PVC
-  requests (345Gi by default) does not fit on the Longhorn disk. Longhorn
-  creates the volume but can never schedule its replica, so the volume stays
-  `detached` and the pod waits forever. Either shrink the requests in
-  `k8s/01-storage.yaml` (`oobabooga-models-pvc`, `comfyui-data-pvc`) and
-  re-apply, or raise Longhorn's over-provisioning limit:
-
-  ```bash
-  kubectl -n longhorn-system get settings.longhorn.io \
-    storage-over-provisioning-percentage storage-minimal-available-percentage
-  ```
-
-  A PVC cannot be shrunk in place – delete it (**this deletes its data**, see
-  §8) and re-apply, e.g. with `build.sh --clean --purge-data`.
-* **`FailedMount` on the shared RWX volume** – the Longhorn share-manager pod
-  for `shared-characters-pvc` is not running or `nfs-common` is missing on the
-  node:
-
-  ```bash
-  kubectl -n longhorn-system get pods | grep share-manager
-  ```
-* **`FailedAttachVolume` with `open-iscsi` errors** – run
-  `sudo modprobe iscsi_tcp` and make sure `iscsid` is running.
-
-Note that a *missing* Longhorn volume is usually not the problem: with
-`volumeBindingMode: Immediate` all six volumes are created as soon as the PVCs
-are applied. If you see fewer than six, list them with their claim names:
-
-```bash
-kubectl -n longhorn-system get volumes.longhorn.io \
-  -o custom-columns=NAME:.metadata.name,STATE:.status.state,PVC:.status.kubernetesStatus.pvcName
-```
+The decisive information is usually in the pod `Events:` section or in the PVC
+/PV tables. With static hostPath storage, attach failures usually mean a pinned
+PV is missing, a PVC does not match its PV, or the host directory is not writable
+by uid/gid `1000`.
 
 ### PVC stays `Pending`
 
+A PVC is pinned with `volumeName`, so the matching PV must already exist and its
+size, accessModes and `storageClassName: textgen-hostpath` must match the claim.
+Run:
+
 ```bash
-textgenerator/scripts/verify-storage.sh
+textgenerator/scripts/diagnose.sh
 kubectl -n ai-stack describe pvc <name>
 ```
 
-Usual causes: Longhorn is not installed, `open-iscsi` is missing on the node,
-or the requested size does not fit on the Longhorn disk (§4 sizing note).
+### Immutable-field error / PVC stuck after the storage change
 
-### Longhorn volume reported `Degraded`
+See §4, **Migrating from Longhorn**. Delete the old PVCs before applying the
+hostPath manifests; `storageClassName` and `volumeName` cannot be changed in
+place. `scripts/build.sh --clean --purge-data` deletes the current PVCs and PVs
+while leaving `/mnt/aistack` untouched.
 
-The `longhorn` StorageClass asks for more replicas than the cluster has nodes.
-Setting Longhorn's global *Default Replica Count* to `1` does **not** help –
-that setting is only used when the class has no `numberOfReplicas` parameter.
-Patch the class itself:
+### `EACCES` / `Permission denied` in any pod
 
-```bash
-kubectl get storageclass longhorn -o jsonpath='{.parameters.numberOfReplicas}{"\n"}'
-kubectl patch storageclass longhorn --type=merge \
-  -p '{"parameters":{"numberOfReplicas":"1"}}'
-```
-
-Parameters apply at creation time only, so volumes that already exist keep
-their replica count. Inspect the actual state with:
+hostPath volumes ignore `fsGroup`, so ownership on the node decides. Run the
+preparation script on the node that runs the pods and verify ownership:
 
 ```bash
-kubectl -n longhorn-system get volumes.longhorn.io \
-  -o custom-columns=NAME:.metadata.name,REPLICAS:.spec.numberOfReplicas,ROBUSTNESS:.status.robustness
+sudo textgenerator/scripts/prepare-host-dirs.sh
+stat -c '%u:%g' /mnt/aistack /mnt/aistack/shared/characters
 ```
 
-The volumes stay usable either way – Longhorn just keeps retrying the missing
-replicas.
+Everything the containers write to must be owned by uid/gid `1000:1000`.
+
+### PV stuck `Released` and not re-binding
+
+This is the `Retain` policy. Delete the PV object and re-apply the manifests;
+the files under `/mnt/aistack` stay in place:
+
+```bash
+kubectl delete pv <name>
+kubectl apply -k textgenerator/k8s
+```
+
+### Node disk full
+
+PVC sizes are not enforced for hostPath volumes. Check the real filesystem:
+
+```bash
+df -h /mnt/aistack
+```
+
+Free space by deleting or moving files under `/mnt/aistack`, or move the stack to
+a larger mounted filesystem and update both `k8s/01-storage.yaml` and the
+scripts' `STORAGE_ROOT`.
 
 ### `namespaces "ai-stack" not found`
 
@@ -554,17 +541,3 @@ image-build steps. If you call the individual scripts by hand, apply
 `default` namespace for its CUDA smoke test, and
 `build-extractor-image.sh` skips the rollout restart when the deployment does
 not exist yet.
-
-### `Permission denied` on the shared character directory
-
-The ReadWriteMany volume is exported over NFS by a Longhorn share-manager pod,
-so the node needs `nfs-common`, and `fsGroup` does not apply to it (§4). Both
-consumers run a root `initContainer` that `chown`s the mount to `1000:1000`.
-Check it ran:
-
-```bash
-kubectl -n ai-stack logs deploy/character-extractor -c fix-volume-permissions
-kubectl -n ai-stack exec deploy/character-extractor -- ls -ln /data
-```
-
-Everything the containers write to must be owned by uid/gid `1000`.
