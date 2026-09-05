@@ -97,16 +97,27 @@ Every data set is a **dynamically provisioned PersistentVolumeClaim backed by
 Longhorn**. No host directories have to be created and nothing has to be
 chowned on the node – Longhorn creates, formats and mounts the volumes.
 
-All claims use the cluster's **`longhorn` StorageClass**, which on this node is
-already configured for a single replica. `storageClassName: longhorn` is written
-out explicitly rather than relying on the default-class annotation, so the
-manifests stay unambiguous. The stack ships **no StorageClass of its own**.
+All claims use the cluster's **`longhorn` StorageClass**. `storageClassName:
+longhorn` is written out explicitly rather than relying on the default-class
+annotation, so the manifests stay unambiguous. The stack ships **no
+StorageClass of its own**.
 
 Two properties of that class are worth knowing:
 
-* **Replica count** – it must be `1` on a single node cluster. With the Longhorn
-  default of `3`, two replicas can never be scheduled and every volume stays
-  permanently *Degraded*. `verify-storage.sh` warns if it finds a value `> 1`.
+* **Replica count** – it must be `1` on a single node cluster, and it has to be
+  set **on the StorageClass**. Longhorn's global *Default Replica Count* setting
+  is only consulted when the class carries no `numberOfReplicas` parameter (the
+  volume mutating webhook fills it in solely when the value is `0`), so a global
+  `1` does **not** override a class parameter of `3`. Check and fix with:
+
+  ```bash
+  kubectl get storageclass longhorn -o jsonpath='{.parameters.numberOfReplicas}{"\n"}'
+  kubectl patch storageclass longhorn --type=merge \
+    -p '{"parameters":{"numberOfReplicas":"1"}}'
+  ```
+
+  `verify-storage.sh` reports both values and warns when they disagree.
+  A StorageClass change only affects **new** volumes.
 * **`reclaimPolicy: Delete`** – deleting a PVC also deletes its data. That is
   why `build.sh --clean` keeps the PVCs and only removes them when you add
   `--purge-data`.
@@ -128,9 +139,10 @@ textgenerator/scripts/verify-storage.sh
 
 It verifies that `open-iscsi` (needed by every Longhorn volume) and
 `nfs-common` (needed by the ReadWriteMany shared volume, which Longhorn serves
-through a share-manager NFS export) are installed, reports the replica count
-and reclaim policy of the `longhorn` class, and checks that all PVCs are
-`Bound`.
+through a share-manager NFS export) are installed, compares the replica count
+of the `longhorn` class against Longhorn's global setting, lists the existing
+Longhorn volumes with their actual replica count and robustness, and checks
+that all PVCs are `Bound`.
 
 > **Sizing.** The requests above are generous. Longhorn allows over-provisioning
 > by default, but the sum still has to fit on the node's Longhorn disk – reduce
@@ -461,14 +473,35 @@ or the requested size does not fit on the Longhorn disk (§4 sizing note).
 ### Longhorn volume reported `Degraded`
 
 The `longhorn` StorageClass asks for more replicas than the cluster has nodes.
-Set its replica count to `1` for this single node host:
+Setting Longhorn's global *Default Replica Count* to `1` does **not** help –
+that setting is only used when the class has no `numberOfReplicas` parameter.
+Patch the class itself:
 
 ```bash
 kubectl get storageclass longhorn -o jsonpath='{.parameters.numberOfReplicas}{"\n"}'
+kubectl patch storageclass longhorn --type=merge \
+  -p '{"parameters":{"numberOfReplicas":"1"}}'
 ```
 
-`verify-storage.sh` reports the same value. The volume stays usable either
-way, but Longhorn keeps retrying the missing replicas.
+Parameters apply at creation time only, so volumes that already exist keep
+their replica count. Inspect the actual state with:
+
+```bash
+kubectl -n longhorn-system get volumes.longhorn.io \
+  -o custom-columns=NAME:.metadata.name,REPLICAS:.spec.numberOfReplicas,ROBUSTNESS:.status.robustness
+```
+
+The volumes stay usable either way – Longhorn just keeps retrying the missing
+replicas.
+
+### `namespaces "ai-stack" not found`
+
+Fixed: `build.sh` now creates the namespace before running the verification and
+image-build steps. If you call the individual scripts by hand, apply
+`k8s/00-namespace.yaml` first – `verify-gpu.sh` otherwise falls back to the
+`default` namespace for its CUDA smoke test, and
+`build-extractor-image.sh` skips the rollout restart when the deployment does
+not exist yet.
 
 ### `Permission denied` on the shared character directory
 

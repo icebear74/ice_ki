@@ -32,6 +32,14 @@ echo "Imported images matching character-extractor:"
 k3s ctr images ls -q | grep -F "character-extractor" || true
 
 echo
-echo "Restarting the deployment ..."
-kubectl -n "${NAMESPACE}" rollout restart deploy/character-extractor
-kubectl -n "${NAMESPACE}" rollout status deploy/character-extractor --timeout=180s
+# On a fresh cluster the deployment does not exist yet - the image simply has
+# to be in the image store before `kubectl apply -k` runs. Only restart an
+# already running deployment so it picks up the new image.
+if kubectl -n "${NAMESPACE}" get deploy/character-extractor >/dev/null 2>&1; then
+  echo "Restarting the deployment ..."
+  kubectl -n "${NAMESPACE}" rollout restart deploy/character-extractor
+  kubectl -n "${NAMESPACE}" rollout status deploy/character-extractor --timeout=180s
+else
+  echo "deploy/character-extractor does not exist yet - skipping the restart."
+  echo "Deploy the stack with: kubectl apply -k textgenerator/k8s"
+fi

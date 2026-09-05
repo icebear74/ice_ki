@@ -27,6 +27,13 @@ kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.c
 
 echo
 echo "== In-cluster CUDA smoke test =="
+# The stack namespace may not exist yet (fresh cluster, or run before
+# `kubectl apply -k`). Fall back to "default" instead of failing with
+# `namespaces "ai-stack" not found`.
+if ! kubectl get namespace "${NAMESPACE}" >/dev/null 2>&1; then
+  echo "namespace ${NAMESPACE} does not exist yet - running the test in 'default'"
+  NAMESPACE=default
+fi
 kubectl -n "${NAMESPACE}" delete pod gpu-smoke-test --ignore-not-found >/dev/null
 kubectl -n "${NAMESPACE}" run gpu-smoke-test \
   --image="${CUDA_TEST_IMAGE}" \

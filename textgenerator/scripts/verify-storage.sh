@@ -10,6 +10,7 @@ set -uo pipefail
 
 NAMESPACE="${NAMESPACE:-ai-stack}"
 STORAGE_CLASS="${STORAGE_CLASS:-longhorn}"
+LONGHORN_NAMESPACE="${LONGHORN_NAMESPACE:-longhorn-system}"
 rc=0
 
 note() { printf '  %s\n' "$*"; }
@@ -32,10 +33,15 @@ else
   fail "mount.nfs not found - install with: sudo apt-get install -y nfs-common"
 fi
 
-if lsmod 2>/dev/null | grep -q '^iscsi_tcp'; then
+# The module is often loaded on demand when the first volume is attached, so
+# a missing module is only a hint, not an error.
+if [[ -d /sys/module/iscsi_tcp ]] || lsmod 2>/dev/null | grep -q '^iscsi_tcp'; then
   ok "iscsi_tcp kernel module loaded"
+elif systemctl is-active --quiet iscsid 2>/dev/null; then
+  ok "iscsid running (iscsi_tcp is loaded on demand)"
 else
-  warn "iscsi_tcp module not loaded - run: sudo modprobe iscsi_tcp"
+  note "iscsi_tcp not loaded yet - normally loaded automatically on first attach."
+  note "Load it up front with: sudo modprobe iscsi_tcp"
 fi
 
 echo
@@ -56,12 +62,29 @@ if kubectl get storageclass "${STORAGE_CLASS}" >/dev/null 2>&1; then
     -o jsonpath='{.parameters.numberOfReplicas}' 2>/dev/null)"
   reclaim="$(kubectl get storageclass "${STORAGE_CLASS}" \
     -o jsonpath='{.reclaimPolicy}' 2>/dev/null)"
-  note "numberOfReplicas=${replicas:-<unset>} reclaimPolicy=${reclaim:-<unset>}"
+  note "numberOfReplicas=${replicas:-<unset, global default applies>} reclaimPolicy=${reclaim:-<unset>}"
+
+  # The Longhorn global setting "Default Replica Count" only applies when the
+  # StorageClass carries NO numberOfReplicas parameter: the volume mutating
+  # webhook fills it in solely when spec.numberOfReplicas == 0. A value set on
+  # the class therefore always wins. Show both so the difference is obvious.
+  global_replicas="$(kubectl -n "${LONGHORN_NAMESPACE}" get settings.longhorn.io \
+    default-replica-count -o jsonpath='{.value}' 2>/dev/null)"
+  if [[ -n "${global_replicas}" ]]; then
+    note "Longhorn global default-replica-count=${global_replicas} (used ONLY when the class sets no parameter)"
+  fi
 
   nodes="$(kubectl get nodes --no-headers 2>/dev/null | wc -l)"
   if [[ "${nodes}" -le 1 && -n "${replicas}" && "${replicas}" -gt 1 ]]; then
-    warn "single node cluster but numberOfReplicas=${replicas} - volumes will stay Degraded."
-    warn "Set the replica count of the ${STORAGE_CLASS} class to 1."
+    warn "Single node cluster, but StorageClass ${STORAGE_CLASS} requests ${replicas} replicas."
+    warn "New volumes will be created Degraded (only 1 of ${replicas} replicas schedulable)."
+    if [[ -n "${global_replicas}" && "${global_replicas}" -eq 1 ]]; then
+      warn "The global setting of ${global_replicas} does NOT override this - the class parameter wins."
+    fi
+    warn "Fix with:"
+    warn "  kubectl patch storageclass ${STORAGE_CLASS} --type=merge \\"
+    warn "    -p '{\"parameters\":{\"numberOfReplicas\":\"1\"}}'"
+    warn "Existing volumes keep the count they were created with (see below)."
   fi
   if [[ "${reclaim}" == "Delete" ]]; then
     note "reclaimPolicy is Delete: deleting a PVC also deletes its data."
@@ -69,6 +92,16 @@ if kubectl get storageclass "${STORAGE_CLASS}" >/dev/null 2>&1; then
   fi
 else
   fail "StorageClass '${STORAGE_CLASS}' not found - is Longhorn installed?"
+fi
+
+# Ground truth: what the existing volumes were actually created with. A
+# StorageClass change is never propagated back to volumes that already exist.
+if kubectl get crd volumes.longhorn.io >/dev/null 2>&1; then
+  echo
+  echo "== Longhorn volumes (desired replicas vs. health) =="
+  kubectl -n "${LONGHORN_NAMESPACE}" get volumes.longhorn.io \
+    -o custom-columns=NAME:.metadata.name,REPLICAS:.spec.numberOfReplicas,STATE:.status.state,ROBUSTNESS:.status.robustness,PVC:.status.kubernetesStatus.pvcName \
+    2>/dev/null || note "no Longhorn volumes yet"
 fi
 
 echo

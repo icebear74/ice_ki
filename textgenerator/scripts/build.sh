@@ -143,6 +143,21 @@ if [[ "${DO_CLEAN}" -eq 1 ]]; then
 fi
 
 # --------------------------------------------------------------------------
+step "Ensuring namespace ${NAMESPACE} exists"
+# Created before the verification and build steps on purpose: the in-cluster
+# CUDA smoke test and the rollout restart of the extractor both need it, and
+# on a fresh cluster (or right after --clean --purge-data) it does not exist.
+if kubectl get namespace "${NAMESPACE}" >/dev/null 2>&1; then
+  info "namespace ${NAMESPACE} already exists"
+elif [[ "${NAMESPACE}" == "ai-stack" ]]; then
+  kubectl apply -f "${K8S_DIR}/00-namespace.yaml"
+else
+  # kustomization.yaml pins the manifests to ai-stack, so a custom namespace
+  # only works together with a kustomize overlay - create it anyway.
+  kubectl create namespace "${NAMESPACE}"
+fi
+
+# --------------------------------------------------------------------------
 if [[ "${DO_VERIFY}" -eq 1 ]]; then
   step "Verifying GPU and storage prerequisites"
   # Informational: a failure here is reported but does not abort the deploy,
