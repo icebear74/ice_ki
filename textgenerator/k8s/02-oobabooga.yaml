@@ -83,6 +83,24 @@ spec:
               value: >-
                 --api --listen --listen-port 7860 --api-port 5000
                 --ctx-size $(TEXTGEN_CONTEXT_SIZE)
+            # HuggingFace access token, needed for gated repos (Llama,
+            # Gemma, ...) and to avoid the anonymous rate limit.
+            #
+            # The token is NOT stored in this repository. Create the Secret
+            # on the node with:
+            #   textgenerator/scripts/set-hf-token.sh hf_xxxxxxxx
+            #
+            # optional: true means the pod still starts when the Secret does
+            # not exist - public models download fine without a token.
+            #
+            # download-model.py resolves the token via
+            # huggingface_hub.get_token(), which reads exactly this variable.
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: huggingface-token
+                  key: HF_TOKEN
+                  optional: true
             - name: NVIDIA_VISIBLE_DEVICES
               value: "all"
             - name: NVIDIA_DRIVER_CAPABILITIES

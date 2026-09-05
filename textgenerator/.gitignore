@@ -1,5 +1,5 @@
-# Local runtime data must never be committed - it belongs in the Longhorn
-# backed PersistentVolumes of the stack (see README.md).
+# Local runtime data must never be committed - it belongs in the hostPath
+# PersistentVolumes under /mnt/aistack (see README.md).
 data/
 *.local.yaml
 *.local.yml
@@ -21,12 +21,17 @@ data/
 *.profile.json
 *.raw.json
 
-# Secrets - use Kubernetes Secrets, never files in Git
+# Secrets - use Kubernetes Secrets, never files in Git.
+# The HuggingFace token is set with scripts/set-hf-token.sh and lives only in
+# the cluster, never in a manifest.
 secrets/
 *secret*.yaml
 *secret*.yml
 *.env
 .env
+*token*.yaml
+*token*.yml
+*.token
 
 # Python
 __pycache__/

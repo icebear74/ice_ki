@@ -66,7 +66,7 @@ textgenerator/
 │   └── kustomization.yaml
 ├── extractor/                       Dockerfile, requirements, app code, schema, prompt
 ├── image-pipeline/                  ComfyUI workflow/prompt integration placeholders
-└── scripts/                         build.sh, diagnose.sh, prepare-host-dirs.sh, verify-gpu.sh, verify-storage.sh, backup.sh
+└── scripts/                         build.sh, diagnose.sh, prepare-host-dirs.sh, set-hf-token.sh, verify-gpu.sh, verify-storage.sh, backup.sh
 ```
 
 There is no `06-nodeports.yaml`: every Service lives next to its Deployment.
@@ -214,8 +214,53 @@ Then:
 1. Open `http://<node-ip>:30786` (Oobabooga) → *Model* tab → download a model
    by HuggingFace repo id (e.g. a GGUF repo) → load it. First load can take
    several minutes; the startup probe allows up to 30 minutes.
+   Gated repos (Llama, Gemma, …) need a token first – see
+   *HuggingFace access token* below.
 2. Open `http://<node-ip>:30800` (SillyTavern) → *API Connections* → OpenAI
    compatible → `http://text-generation-webui.ai-stack.svc.cluster.local:5000/v1`.
+
+### HuggingFace access token
+
+Public models download without any credentials. A token is required for
+**gated repositories** (Llama, Gemma, Mistral-Instruct, …, where you have to
+accept a licence on the model page first) and it raises the rate limit for
+anonymous downloads.
+
+Create a token at <https://huggingface.co/settings/tokens> – a **read** token
+is enough – and store it in the cluster:
+
+```bash
+# Prompts for the token without echoing it (does not touch the shell history)
+textgenerator/scripts/set-hf-token.sh
+
+# Non-interactive alternatives
+textgenerator/scripts/set-hf-token.sh --from-env   # reads $HF_TOKEN
+textgenerator/scripts/set-hf-token.sh hf_xxxxxxxx  # stays in the shell history
+
+# Remove it again
+textgenerator/scripts/set-hf-token.sh --delete
+```
+
+The script writes the Kubernetes Secret `huggingface-token` in the `ai-stack`
+namespace. The backend reads it as the `HF_TOKEN` environment variable, which
+is what `download-model.py` resolves through `huggingface_hub.get_token()`.
+
+The Secret is **not** part of the manifests on purpose, so the token can never
+be committed. `kustomize build` therefore never contains it, and the env
+reference is marked `optional: true` – the pod starts normally when no token
+is configured.
+
+The pod picks the token up **only on restart**:
+
+```bash
+kubectl -n ai-stack rollout restart deploy/text-generation-webui
+kubectl -n ai-stack exec deploy/text-generation-webui -- printenv HF_TOKEN
+```
+
+> Kubernetes Secrets are only base64 encoded, not encrypted, unless encryption
+> at rest is enabled for etcd. Anyone with `get secret` permission in the
+> namespace can read the token. Use a read-only token and revoke it on the
+> HuggingFace website if it leaks.
 
 ### Building the extractor image
 
@@ -238,6 +283,7 @@ Repeat this after every change to `textgenerator/extractor/`.
 | `TEXTGEN_CONTEXT_SIZE` | ConfigMap `textgen-config` | `8192` | Maximum context length, passed to the backend as `--ctx-size` |
 | `OOBABOOGA_API_BASE_URL` | ConfigMap `textgen-config` | internal Service DNS | Endpoint the extractor talks to |
 | `EXTRA_LAUNCH_ARGS` | `02-oobabooga.yaml` | `--api --listen --listen-port 7860 --api-port 5000 --ctx-size $(TEXTGEN_CONTEXT_SIZE)` | Backend launch arguments. The atinoda entrypoint reads **only** this variable – `CLI_ARGS` is ignored by this image. |
+| `HF_TOKEN` | Secret `huggingface-token` | *unset* | HuggingFace access token for the model downloader. Set it with `scripts/set-hf-token.sh`, **never** in a manifest. |
 | `EXTRACTOR_MODEL` | `04-character-extractor.yaml` | `""` (currently loaded model) | Model name sent to the API |
 | `EXTRACTOR_MAX_TOKENS` | `04-character-extractor.yaml` | `2048` | Answer length limit of one extraction |
 | `EXTRACTOR_ALLOW_OVERWRITE` | `04-character-extractor.yaml` | `false` | Allow replacing existing cards/profiles |
@@ -476,6 +522,28 @@ sudo k3s ctr images ls -q | grep character-extractor
 
 `ErrImageNeverPull` means the image is still missing (the deployment uses
 `imagePullPolicy: Never` so containerd never contacts Docker Hub).
+
+### Model download fails: `401`, `403` or "gated repo"
+
+The repository is gated or the anonymous rate limit was hit. Store a
+HuggingFace token (see §5, *HuggingFace access token*):
+
+```bash
+textgenerator/scripts/set-hf-token.sh
+kubectl -n ai-stack rollout restart deploy/text-generation-webui
+```
+
+Check that the token actually reached the pod – it is injected with
+`optional: true`, so a missing or misnamed Secret is silently ignored and the
+variable is simply absent:
+
+```bash
+kubectl -n ai-stack get secret huggingface-token
+kubectl -n ai-stack exec deploy/text-generation-webui -- printenv HF_TOKEN
+```
+
+If the variable is set and the download still returns `403`, accept the model
+licence with the same account on the model's HuggingFace page.
 
 ### `text-generation-webui`: `error: unrecognized arguments: --auto-devices`
 
