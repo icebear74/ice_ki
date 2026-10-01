@@ -35,31 +35,37 @@ spec:
       runtimeClassName: nvidia
       containers:
       - name: hunyuan3d
-        image: pytorch/pytorch:2.2.0-cuda12.1-cudnn8-devel
-        workingDir: /app/Hunyuan3D-2
+        image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
+        workingDir: /workspace
         command: ["/bin/bash", "-c"]
         args:
           - |
-            set -e
-            apt-get update && apt-get install -y git ffmpeg libsm6 libxext6 build-essential
-            mkdir -p /app
-            if [ ! -d "/app/Hunyuan3D-2/.git" ]; then
-              echo "Cloning Tencent-Hunyuan/Hunyuan3D-2..."
-              git clone --depth 1 https://github.com/Tencent-Hunyuan/Hunyuan3D-2.git /app/Hunyuan3D-2
-            fi
-            cd /app/Hunyuan3D-2
+            set -euo pipefail
+            apt-get update
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+              git libgl1 libegl1 libglib2.0-0 libgomp1 libsm6 libxext6 libxrender1
+            git clone --depth 1 https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1.git /workspace/Hunyuan3D-2.1
+            cd /workspace/Hunyuan3D-2.1
             pip install --no-cache-dir -r requirements.txt
-            python3 app.py --host 0.0.0.0 --port 7860
+            exec python3 gradio_app.py \
+              --model_path tencent/Hunyuan3D-2.1 \
+              --subfolder hunyuan3d-dit-v2-1 \
+              --disable_tex --host 0.0.0.0 --port 7860
         ports:
         - containerPort: 7860
           name: http
+        readinessProbe:
+          httpGet:
+            path: /
+            port: http
+          periodSeconds: 10
         resources:
           limits:
             nvidia.com/gpu: "1"
-            memory: 16Gi
+            memory: 32Gi
           requests:
             nvidia.com/gpu: "1"
-            memory: 8Gi
+            memory: 16Gi
         volumeMounts:
         - mountPath: /root/.cache/huggingface
           name: hf-cache
