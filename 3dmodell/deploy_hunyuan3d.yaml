@@ -36,7 +36,7 @@ spec:
       containers:
       - name: hunyuan3d
         image: registry.example.invalid:5000/hunyuan3d:2.1-shape-1
-        imagePullPolicy: IfNotPresent
+        imagePullPolicy: Always
         ports:
         - containerPort: 7860
           name: http
