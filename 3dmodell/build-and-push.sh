@@ -36,3 +36,5 @@ sed "s|registry.example.invalid:5000/hunyuan3d:2.1-shape-1|${image}|" "$template
 echo "Pushed $image"
 echo "Deployment manifest: $output"
 echo "Apply with: kubectl apply -f $output"
+echo "Ensure all k3s nodes can pull from $registry and have enough image storage (~8 GB)."
+echo "Model weights and generated data are downloaded to the 30Gi hunyuan3d-hf-cache-pvc on first start."
