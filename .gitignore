@@ -95,3 +95,4 @@ comfyui_webui/data/users.json
 comfyui_webui/data/bootstrap_credentials.txt
 comfyui_webui/data/templates.json
 comfyui_webui/data/templates/*.json
+.aider*
