@@ -12,7 +12,7 @@ RUN git init . \
     && git fetch --depth 1 origin "${HUNYUAN_REF}" \
     && git checkout --detach FETCH_HEAD \
     && rm -rf .git \
-    && grep -E '^(ninja|pybind11|transformers|diffusers|accelerate|huggingface-hub|safetensors|numpy|scipy|einops|pandas|opencv-python|imageio|scikit-image|rembg|trimesh|pymeshlab|pygltflib|xatlas|omegaconf|pyyaml|configargparse|gradio|fastapi|uvicorn|tqdm|psutil|onnxruntime|pydantic|timm|torchdiffeq)(==|$)' requirements.txt > /tmp/shape-requirements.txt \
+    && grep -E '^(ninja|pybind11|transformers|diffusers|accelerate|pytorch-lightning|huggingface-hub|safetensors|numpy|scipy|einops|pandas|opencv-python|imageio|scikit-image|rembg|trimesh|pymeshlab|pygltflib|xatlas|omegaconf|pyyaml|configargparse|gradio|fastapi|uvicorn|tqdm|psutil|onnxruntime|torchmetrics|pydantic|timm|torchdiffeq)(==|$)' requirements.txt > /tmp/shape-requirements.txt \
     && pip install --no-cache-dir -r /tmp/shape-requirements.txt \
     && rm /tmp/shape-requirements.txt
 
