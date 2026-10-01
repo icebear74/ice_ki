@@ -46,7 +46,9 @@ spec:
               git libgl1 libegl1 libglib2.0-0 libgomp1 libsm6 libxext6 libxrender1
             git clone --depth 1 https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1.git /workspace/Hunyuan3D-2.1
             cd /workspace/Hunyuan3D-2.1
-            pip install --no-cache-dir -r requirements.txt
+            # Blender's archived bpy==4.0 wheel is unnecessary for shape-only STL export.
+            grep -v '^bpy==4.0$' requirements.txt > /tmp/hunyuan3d-shape-requirements.txt
+            pip install --no-cache-dir -r /tmp/hunyuan3d-shape-requirements.txt
             exec python3 gradio_app.py \
               --model_path tencent/Hunyuan3D-2.1 \
               --subfolder hunyuan3d-dit-v2-1 \
