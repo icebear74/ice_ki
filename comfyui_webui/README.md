@@ -185,6 +185,57 @@ COMFY_POD=$(kubectl -n comfyui get pod -l app=comfyui -o jsonpath='{.items[0].me
 kubectl -n comfyui cp ./mein-modell.safetensors "$COMFY_POD:/data/models/checkpoints/mein-modell.safetensors"
 ```
 
+### ComfyUI Manager und Modell-Downloads
+
+Der **ComfyUI Manager ist im ComfyUI-Image installiert** und wird beim Start
+aktiviert. Für ComfyUI v0.38.0 nutzen wir dessen offizielles
+`manager_requirements.txt` (Manager 4.2.2) statt eines zusätzlichen Git-Clones
+nach `custom_nodes`. Die Legacy-Manager-Oberfläche ist aktiviert, damit
+**Manager → Model Manager** für Modell-Downloads verfügbar ist.
+
+Nach einem Update mit neuem Tag bauen und das generierte Manifest anwenden:
+
+```bash
+cd comfyui_webui
+IMAGE_TAG=p100-manager-1 ./build-and-push.sh 192.168.1.10:5000 /tmp/deploy_comfyui.yaml
+kubectl apply -f /tmp/deploy_comfyui.yaml
+kubectl -n comfyui rollout status deployment/comfyui
+kubectl -n comfyui logs deployment/comfyui | grep -i manager
+```
+
+Die Registry-Adresse ersetzen. Danach **ComfyUI** unter
+`http://<node-ip>:30188` öffnen (bzw. dem konfigurierten NodePort),
+Browser neu laden und im Manager „Model Manager“ auswählen. Der Manager
+gehört zur ComfyUI-Oberfläche, nicht zum Admin-Tab der separaten WebUI.
+Heruntergeladene Modelle liegen unter `/data/models/` auf `comfyui-data`;
+Manager-Konfiguration und Cache unter `/data/user/__manager/` ebenfalls auf
+dem PVC. Anschließend die Modellliste in der WebUI aktualisieren.
+Die Pods benötigen Internetzugriff auf Modellquellen; nicht jeder Download
+ist ohne Freischaltung oder Zugang beim jeweiligen Anbieter verfügbar.
+
+Beim ersten Containerstart wird `/data/user/__manager/config.ini` aus der
+Image-Vorlage angelegt. Vorhandene Einstellungen werden **nicht überschrieben**.
+Die Vorlage verwendet `security_level = normal` und
+`network_mode = personal_cloud`, damit gelistete Modell-Downloads über den
+LAN-NodePort möglich sind. Beliebige Git-URL- und Pip-Installationen bleiben
+mit `allow_git_url_install = False` und `allow_pip_install = False` gesperrt.
+Keine Absenkung auf `weak` ist nötig; bevorzugt vertrauenswürdige
+`.safetensors`-Modelle verwenden.
+
+Bei einem bestehenden Manager-Config mit 403 beim Download die genannten
+Werte in `/data/user/__manager/config.ini` prüfen und anschließend den
+ComfyUI-Pod neu starten. `personal_cloud` ist **keine Authentifizierung**:
+Den ComfyUI-NodePort nur Administratoren im vertrauenswürdigen Netz zugänglich
+machen oder einen authentifizierenden Reverse-Proxy vorschalten. Die
+WebUI-Anmeldung schützt die separate ComfyUI-/Manager-Oberfläche nicht.
+
+Manager und ComfyUI selbst werden über **Image-Rebuilds** aktualisiert,
+nicht per „Update all“ im laufenden Container. Für CPU-only- oder andere
+manuelle `args`-Overrides die Flags `--enable-manager` und
+`--enable-manager-legacy-ui` beibehalten. Kein zusätzliches
+`ComfyUI-Manager`-Verzeichnis auf dem PVC klonen: Der integrierte Manager
+deaktiviert solche Doppelinstallationen.
+
 Keine Modelle sind im Image enthalten. Nur vertrauenswürdige Modelle und
 Custom Nodes verwenden. Zusätzliche Python-Abhängigkeiten von Custom Nodes
 in einem abgeleiteten Dockerfile installieren und neu bauen, **nicht** nur
@@ -220,7 +271,8 @@ Für Ollama-GPU-Betrieb eine weitere GPU und dieselbe NVIDIA-Runtime plus
 zwischen Pods geteilt. Für CPU-only-ComfyUI `runtimeClassName` und beide
 `nvidia.com/gpu`-Einträge entfernen und die vollständigen Container-Argumente
 auf `["--listen", "0.0.0.0", "--port", "8188", "--disable-auto-launch",
-"--base-directory", "/data", "--cpu"]` setzen (deutlich langsamer).
+"--base-directory", "/data", "--enable-manager", "--enable-manager-legacy-ui",
+"--cpu"]` setzen (deutlich langsamer).
 
 ## Voraussetzungen
 

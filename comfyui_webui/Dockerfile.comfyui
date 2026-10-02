@@ -3,7 +3,7 @@ FROM python:3.12-slim
 # ComfyUI v0.38.0; keep custom nodes and their dependencies in reviewed images.
 ARG COMFYUI_REF=6b747c0428c343e1417219641db93a4fb7cb69ae
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl libgl1 libglib2.0-0 libgomp1 \
+    curl git libgl1 libglib2.0-0 libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/ComfyUI
@@ -16,6 +16,7 @@ COPY docker/torch-constraints.txt /opt/torch-constraints.txt
 RUN pip install --no-cache-dir -r /opt/torch-constraints.txt \
     --index-url https://download.pytorch.org/whl/cu126 \
     && pip install --no-cache-dir -r requirements.txt -c /opt/torch-constraints.txt \
+    && pip install --no-cache-dir -r manager_requirements.txt -c /opt/torch-constraints.txt \
     && pip check \
     && python -c "import torch; assert torch.version.cuda == '12.6'; assert 'sm_60' in torch._C._cuda_getArchFlags().split(), 'PyTorch wheel lacks Tesla P100 support'" \
     && groupadd --gid 1000 app \
@@ -27,7 +28,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HOME=/data \
     HF_HOME=/data/cache/huggingface \
     XDG_CACHE_HOME=/data/cache \
-    TORCH_HOME=/data/cache/torch
+    TORCH_HOME=/data/cache/torch \
+    PIP_CONSTRAINT=/opt/torch-constraints.txt
+COPY docker/manager-config.ini /opt/manager-config.ini
 COPY docker/comfyui-entrypoint.sh /usr/local/bin/comfyui-entrypoint
 RUN chmod 755 /usr/local/bin/comfyui-entrypoint
 USER 1000:1000
@@ -35,4 +38,4 @@ EXPOSE 8188
 HEALTHCHECK --interval=30s --timeout=5s --start-period=120s \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8188/system_stats', timeout=3)"
 ENTRYPOINT ["/usr/local/bin/comfyui-entrypoint"]
-CMD ["--listen", "0.0.0.0", "--port", "8188", "--disable-auto-launch", "--base-directory", "/data"]
+CMD ["--listen", "0.0.0.0", "--port", "8188", "--disable-auto-launch", "--base-directory", "/data", "--enable-manager", "--enable-manager-legacy-ui"]

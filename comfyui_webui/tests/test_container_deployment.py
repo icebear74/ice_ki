@@ -1,5 +1,6 @@
 """Container build and rendered Service regression tests (no Docker required)."""
 import os
+import configparser
 from pathlib import Path
 import subprocess
 import tempfile
@@ -79,6 +80,27 @@ bash "$SCRIPT" registry.lan:5000 "$OUTPUT"
         self.assertIn("-r requirements.txt -c /opt/torch-constraints.txt", dockerfile)
         self.assertIn("torch._C._cuda_getArchFlags()", dockerfile)
         self.assertIn("'sm_60'", dockerfile)
+
+    def test_manager_is_built_in_and_enabled_with_persistent_configuration(self):
+        dockerfile = (APP_DIR / "Dockerfile.comfyui").read_text()
+        entrypoint = (APP_DIR / "docker/comfyui-entrypoint.sh").read_text()
+        self.assertIn("curl git ", dockerfile)
+        self.assertIn("-r manager_requirements.txt -c /opt/torch-constraints.txt", dockerfile)
+        self.assertIn("PIP_CONSTRAINT=/opt/torch-constraints.txt", dockerfile)
+        self.assertIn('"--enable-manager"', dockerfile)
+        self.assertIn('"--enable-manager-legacy-ui"', dockerfile)
+        self.assertIn('"/data"', dockerfile)
+        self.assertIn("COPY docker/manager-config.ini /opt/manager-config.ini", dockerfile)
+        self.assertIn("if [ ! -e /data/user/__manager/config.ini ]; then", entrypoint)
+        self.assertIn("cp /opt/manager-config.ini /data/user/__manager/config.ini", entrypoint)
+        self.assertNotIn("pip install", entrypoint)
+        self.assertNotIn("git clone", entrypoint)
+        config = configparser.ConfigParser()
+        config.read(APP_DIR / "docker/manager-config.ini")
+        self.assertEqual(config["default"]["network_mode"], "personal_cloud")
+        self.assertEqual(config["default"]["security_level"], "normal")
+        self.assertFalse(config["default"].getboolean("allow_git_url_install"))
+        self.assertFalse(config["default"].getboolean("allow_pip_install"))
 
 
 if __name__ == "__main__":
