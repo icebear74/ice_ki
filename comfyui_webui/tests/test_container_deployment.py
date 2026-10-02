@@ -1,0 +1,85 @@
+"""Container build and rendered Service regression tests (no Docker required)."""
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+
+
+APP_DIR = Path(__file__).resolve().parent.parent
+
+
+class ContainerDeploymentTests(unittest.TestCase):
+    def run_build(self, directory, **settings):
+        output = directory / "deploy.yaml"
+        log = directory / "commands.log"
+        env = os.environ.copy()
+        for key in ("IMAGE_TAG", "OLLAMA_IMAGE", "WEBUI_NODEPORT", "COMFYUI_NODEPORT"):
+            env.pop(key, None)
+        env.update(settings)
+        env.update(SCRIPT=str(APP_DIR / "build-and-push.sh"),
+                   OUTPUT=str(output), COMMAND_LOG=str(log))
+        result = subprocess.run(
+            ["bash", "-c", """
+docker() { printf 'docker %s\\n' "$*" >> "$COMMAND_LOG"; }
+curl() { printf 'curl %s\\n' "$*" >> "$COMMAND_LOG"; }
+export -f docker curl
+bash "$SCRIPT" registry.lan:5000 "$OUTPUT"
+"""],
+            env=env, capture_output=True, text=True, timeout=30,
+        )
+        return result, output, log
+
+    def test_rendered_manifest_contains_both_nodeport_services(self):
+        for settings, ports in (
+            ({}, (30080, 30188)),
+            ({"WEBUI_NODEPORT": "31080", "COMFYUI_NODEPORT": "31188"}, (31080, 31188)),
+            ({"WEBUI_NODEPORT": "30188", "COMFYUI_NODEPORT": "30080"}, (30188, 30080)),
+        ):
+            with self.subTest(settings=settings), tempfile.TemporaryDirectory() as temp:
+                result, output, log = self.run_build(Path(temp), IMAGE_TAG="p100-2", **settings)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                manifest = output.read_text()
+                services = [doc for doc in manifest.split("---") if "\nkind: Service\n" in doc]
+                self.assertEqual(len(services), 3)
+                for name, port, target in (("webui", ports[0], 8080), ("comfyui", ports[1], 8188)):
+                    service = next(doc for doc in services if f"\n  name: {name}\n" in doc)
+                    self.assertIn("\n  namespace: comfyui\n", service)
+                    self.assertIn("type: NodePort", service)
+                    self.assertIn(f"nodePort: {port}", service)
+                    self.assertIn(f"port: {target}", service)
+                    self.assertIn(f"app: {name}", service)
+                    self.assertIn(f"http://<node-ip>:{port}", result.stdout)
+                self.assertNotIn("registry.example.invalid", manifest)
+                for image in ("comfyui-webui", "comfyui", "comfyui-ollama"):
+                    self.assertIn(f"registry.lan:5000/{image}:p100-2", manifest)
+                self.assertEqual(log.read_text().count("docker push "), 3)
+
+    def test_invalid_or_duplicate_ports_fail_before_build(self):
+        for settings in (
+            {"COMFYUI_NODEPORT": "29999"},
+            {"WEBUI_NODEPORT": "32768"},
+            {"COMFYUI_NODEPORT": "abc"},
+            {"COMFYUI_NODEPORT": "30080"},
+        ):
+            with self.subTest(settings=settings), tempfile.TemporaryDirectory() as temp:
+                result, output, log = self.run_build(Path(temp), **settings)
+                self.assertEqual(result.returncode, 2)
+                self.assertFalse(output.exists())
+                self.assertFalse(log.exists())
+
+    def test_cuda126_wheels_are_pinned_through_comfyui_install(self):
+        dockerfile = (APP_DIR / "Dockerfile.comfyui").read_text()
+        constraints = (APP_DIR / "docker/torch-constraints.txt").read_text()
+        self.assertIn("torch==2.8.0+cu126", constraints)
+        self.assertIn("torchvision==0.23.0+cu126", constraints)
+        self.assertIn("--index-url https://download.pytorch.org/whl/cu126", dockerfile)
+        self.assertNotIn("cu128", dockerfile)
+        self.assertIn("-r /opt/torch-constraints.txt", dockerfile)
+        self.assertIn("-r requirements.txt -c /opt/torch-constraints.txt", dockerfile)
+        self.assertIn("torch._C._cuda_getArchFlags()", dockerfile)
+        self.assertIn("'sm_60'", dockerfile)
+
+
+if __name__ == "__main__":
+    unittest.main()

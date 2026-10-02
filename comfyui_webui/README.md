@@ -11,12 +11,22 @@ Lokale Python-Weboberfläche für:
 
 Der Containerbetrieb benötigt **keine Python-/venv-Installation auf den Nodes**.
 WebUI, ComfyUI und Ollama laufen in getrennten Containern. Die Dockerfiles bauen
-die WebUI und ComfyUI (v0.38.0, festgelegter Commit, PyTorch 2.8/CUDA 12.8);
+die WebUI und ComfyUI (v0.38.0, festgelegter Commit, PyTorch 2.8/CUDA 12.6);
 das offizielle Ollama-Image wird ebenfalls in die lokale Registry gespiegelt.
 Benötigt werden Docker auf dem Build-Rechner, kubectl, ein laufender Cluster und
-Longhorn. Für ComfyUI müssen NVIDIA-Treiber mit CUDA-12.8-Unterstützung,
+Longhorn. Für ComfyUI müssen NVIDIA-Treiber mit CUDA-12.6-Unterstützung,
 Container Toolkit, NVIDIA Device Plugin und die RuntimeClass `nvidia` vorhanden
 sein. Ressourcen und PVC-Größen im Manifest an die vorhandene Hardware anpassen.
+
+**Tesla P100 (Pascal, `sm_60`):** Die CUDA-12.8-Wheels von PyTorch 2.8
+unterstützen diese GPU nicht. Das Image verwendet deshalb explizit
+`torch==2.8.0+cu126` und `torchvision==0.23.0+cu126`, auch während der
+ComfyUI-Abhängigkeitsinstallation. Der Build prüft CUDA-Version und die
+einkompilierte `sm_60`-Architektur ohne eine GPU auf dem Build-Rechner zu benötigen.
+Zusätzliche Custom Nodes müssen ebenfalls diese Constraints beachten.
+P100 unterstützt kein natives BF16; bei einem Workflow mit BF16-Anforderung
+ein passendes FP16/FP32-Modell verwenden, ggf. ComfyUI mit `--force-fp32`
+starten (höherer Speicherbedarf).
 
 ### Images bauen und deployen
 
@@ -31,6 +41,16 @@ kubectl apply -f /tmp/deploy_comfyui.yaml
 kubectl -n comfyui rollout status deployment/webui
 kubectl -n comfyui rollout status deployment/comfyui
 kubectl -n comfyui rollout status deployment/ollama
+```
+
+Bei einem bestehenden CUDA-12.8-Image ist ein **Rebuild mit neuem Tag** nötig,
+z. B. `IMAGE_TAG=p100-cu126-2 ./build-and-push.sh 192.168.1.10:5000 /tmp/deploy_comfyui.yaml`,
+danach das generierte Manifest erneut anwenden. Nur ein Pod-Neustart repariert
+ein unverändertes Image nicht. Nach dem Rollout auf der GPU prüfen:
+
+```bash
+kubectl -n comfyui exec deployment/comfyui -- python -c \
+  "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.get_arch_list()); print(torch.ones(1, device='cuda') + 1)"
 ```
 
 Die LAN-Adresse ersetzen! `127.0.0.1:5000` als Pull-Adresse funktioniert nur,
@@ -65,6 +85,39 @@ vertrauenswürdigen, per Firewall geschützten Netz betreiben.
 | WebUI | `http://<node-ip>:30080` (NodePort) |
 | ComfyUI | `http://<node-ip>:30188` (NodePort) |
 | Ollama | nur intern: `http://ollama:11434` (ClusterIP) |
+
+### Fehlende Services oder belegte NodePorts
+
+Das Build-Skript baut/pusht Images und erzeugt ein Manifest; es führt
+**kein `kubectl apply`** aus. Das generierte Manifest enthält alle drei Services,
+einschließlich `comfyui` auf Port 8188 / NodePort 30188. Auch ein
+abgestürzter GPU-Pod entfernt seinen Service nicht: Fehlt der Service selbst,
+ist dies ein separates Deployment-/Apply-Problem, kein CUDA-Fehler.
+
+```bash
+kubectl apply -f /tmp/deploy_comfyui.yaml
+kubectl -n comfyui get service webui comfyui ollama
+kubectl -n comfyui get pods -l app=comfyui
+kubectl -n comfyui get endpointslices -l kubernetes.io/service-name=comfyui
+```
+
+**Die komplette Ausgabe von `kubectl apply` beachten.** Einzelne Ressourcen
+können angelegt werden, obwohl andere fehlschlagen. Bei
+`provided port is already allocated` sind die NodePorts clusterweit belegt:
+
+```bash
+kubectl get services -A -o wide
+WEBUI_NODEPORT=31080 COMFYUI_NODEPORT=31188 IMAGE_TAG=p100-cu126-3 \
+  ./build-and-push.sh 192.168.1.10:5000 /tmp/deploy_comfyui.yaml
+kubectl apply -f /tmp/deploy_comfyui.yaml
+```
+
+Freie Ports im Standardbereich 30000–32767 auswählen. Die Variablen ändern
+nur externe NodePorts; interne Service-Namen und Ports bleiben gleich.
+Ein Service ohne bereite Endpoints weist dagegen auf einen nicht bereiten Pod
+hin (`kubectl -n comfyui describe pod -l app=comfyui` und Pod-Logs prüfen).
+Für die genaue Ursache eines fehlenden Services werden die Apply-Fehler benötigt;
+ein belegter NodePort ist ohne diese Ausgabe nur eine mögliche Ursache.
 
 Die WebUI verwendet Service-DNS (`http://comfyui:8188`, `http://ollama:11434`),
 nicht localhost. Ein Übersetzungsmodell wird bewusst **nicht automatisch**

@@ -13,10 +13,11 @@ RUN curl --fail --location --retry 3 \
     && tar -xzf /tmp/comfyui.tar.gz --strip-components=1 \
     && rm /tmp/comfyui.tar.gz
 COPY docker/torch-constraints.txt /opt/torch-constraints.txt
-RUN pip install --no-cache-dir torch==2.8.0 torchvision==0.23.0 \
-    --index-url https://download.pytorch.org/whl/cu128 \
+RUN pip install --no-cache-dir -r /opt/torch-constraints.txt \
+    --index-url https://download.pytorch.org/whl/cu126 \
     && pip install --no-cache-dir -r requirements.txt -c /opt/torch-constraints.txt \
     && pip check \
+    && python -c "import torch; assert torch.version.cuda == '12.6'; assert 'sm_60' in torch._C._cuda_getArchFlags().split(), 'PyTorch wheel lacks Tesla P100 support'" \
     && groupadd --gid 1000 app \
     && useradd --uid 1000 --gid app --no-create-home app \
     && mkdir /data && chown app:app /data

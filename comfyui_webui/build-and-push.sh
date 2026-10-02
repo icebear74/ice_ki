@@ -10,6 +10,18 @@ push_registry=127.0.0.1:5000
 pull_registry=${1:-$push_registry}
 tag=${IMAGE_TAG:-1}
 ollama_image=${OLLAMA_IMAGE:-ollama/ollama:0.35.0}
+webui_nodeport=${WEBUI_NODEPORT:-30080}
+comfyui_nodeport=${COMFYUI_NODEPORT:-30188}
+for port in "$webui_nodeport" "$comfyui_nodeport"; do
+  if [[ ! "$port" =~ ^[0-9]{5}$ ]] || (( 10#$port < 30000 || 10#$port > 32767 )); then
+    echo "NodePorts must be integers in the default Kubernetes range 30000-32767." >&2
+    exit 2
+  fi
+done
+if [[ "$webui_nodeport" == "$comfyui_nodeport" ]]; then
+  echo "WebUI and ComfyUI require distinct NodePorts." >&2
+  exit 2
+fi
 case "$pull_registry" in
   ""|*[!a-zA-Z0-9.:-]*) echo "Registry must be a hostname or IP with optional port (no URL scheme or path)." >&2; exit 2 ;;
 esac
@@ -35,9 +47,16 @@ for name in comfyui-webui comfyui comfyui-ollama; do
   docker push "${push_registry}/${name}:${tag}"
 done
 
-sed -E "s#registry.example.invalid:5000/(comfyui-webui|comfyui|comfyui-ollama):1#${pull_registry}/\\1:${tag}#g" \
+sed -E \
+  -e "s#registry.example.invalid:5000/(comfyui-webui|comfyui|comfyui-ollama):1#${pull_registry}/\\1:${tag}#g" \
+  -e 's#nodePort: 30080#nodePort: __WEBUI_NODEPORT__#' \
+  -e 's#nodePort: 30188#nodePort: __COMFYUI_NODEPORT__#' \
+  -e "s#__WEBUI_NODEPORT__#${webui_nodeport}#" \
+  -e "s#__COMFYUI_NODEPORT__#${comfyui_nodeport}#" \
   "$template" > "$output"
 echo "Deployment manifest: $output"
 echo "Apply with: kubectl apply -f $output"
 echo "Configure HTTP registry access on ALL nodes; use the registry's LAN address for a multi-node cluster."
-echo "WebUI: http://<node-ip>:30080 | ComfyUI: http://<node-ip>:30188"
+echo "WebUI: http://<node-ip>:${webui_nodeport} | ComfyUI: http://<node-ip>:${comfyui_nodeport}"
+echo "Services are included in this manifest; building images alone does not create them."
+echo "Check kubectl apply errors (especially occupied NodePorts), then: kubectl -n comfyui get services"
