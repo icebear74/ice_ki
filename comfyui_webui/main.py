@@ -25,10 +25,9 @@ import auth as _auth
 import mapping_registry as _mappings
 import template_registry as _registry
 import workflow_analyzer as _analyzer
+from config import APP_DIR, DATA_DIR
 
-APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
-DATA_DIR = APP_DIR / "data"
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +134,12 @@ class GenerateRequest(BaseModel):
 app = FastAPI(title="ComfyUI Ollama WebUI", version="0.1.0")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
+
+@app.get("/healthz")
+async def healthz() -> dict[str, str]:
+    """Report process liveness without contacting external backends."""
+    return {"status": "ok"}
+
 # ---------------------------------------------------------------------------
 # In-memory session store  {token: {"username": str, "role": str}}
 # Sessions are intentionally not persisted – users must log in again after
@@ -158,7 +163,7 @@ async def _startup() -> None:
             "  FIRST START – admin account created",
             "  username   : admin",
             "  credential : " + bootstrap_credential,
-            "  See comfyui_webui/data/bootstrap_credentials.txt",
+            f"  See {_auth.BOOTSTRAP_CREDS_FILE}",
             "  Delete that file after first login!",
             "=" * 60,
         ]
@@ -394,6 +399,11 @@ async def admin_register_template(
     payload: RegisterTemplateRequest,
     _: dict[str, str] = Depends(require_admin),
 ) -> dict[str, Any]:
+    if payload.approved:
+        record = _registry.get_template(payload.name) or {
+            "name": payload.name,
+        }
+        _validate_template_approval(record)
     record = _registry.register_template(
         name=payload.name,
         display_name=payload.display_name,
@@ -415,10 +425,29 @@ async def admin_update_template(
     fields: dict[str, Any] = {
         k: v for k, v in payload.model_dump().items() if v is not None
     }
+    if fields.get("approved"):
+        record = _registry.get_template(name)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Template nicht gefunden.")
+        _validate_template_approval(record)
     updated = _registry.update_template(name, **fields)
     if updated is None:
         raise HTTPException(status_code=404, detail="Template nicht gefunden.")
     return updated
+
+
+def _validate_template_approval(record: dict[str, Any]) -> None:
+    if record.get("name") == "default" and record.get("source") == "local" and not record.get("filename"):
+        return
+    if not record.get("filename"):
+        raise HTTPException(status_code=400, detail="Kein Workflow-JSON für dieses Template gespeichert (nur Metadaten-Eintrag).")
+    try:
+        path = _registry.resolve_template_path(record["filename"])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    validation = _registry.analyze_template_file(path)
+    if not validation.get("valid") or not (validation.get("analysis") or {}).get("is_usable"):
+        raise HTTPException(status_code=400, detail="Workflow-Template nicht verwendbar oder Workflow-Datei fehlt.")
 
 
 @app.delete("/api/admin/templates/{name}")
@@ -462,7 +491,7 @@ async def admin_discover_local_templates(
 
     Drop any ``.json`` ComfyUI workflow file into the ``comfyui_webui/data/templates/``
     directory and click this button – the file will be registered as an approved
-    template immediately.
+    template immediately, provided the workflow is usable.
     """
     registered = _registry.discover_local_templates()
     return {"found": len(registered), "templates": [t["name"] for t in registered]}
@@ -476,7 +505,7 @@ async def admin_upload_template(
     """Upload a ComfyUI workflow JSON file and register it as a template.
 
     The file is saved to ``data/templates/`` and immediately registered as an
-    approved + enabled template (same behaviour as *Lokale Templates laden*).
+    approved + enabled template if usable (same behaviour as *Lokale Templates laden*).
     """
     if not file.filename or not file.filename.lower().endswith(".json"):
         raise HTTPException(status_code=400, detail="Nur JSON-Dateien erlaubt.")
@@ -501,7 +530,10 @@ async def admin_upload_template(
     if not safe_name.lower().endswith(".json"):
         safe_name += ".json"
 
-    dest = _registry.TEMPLATES_DIR / safe_name
+    try:
+        dest = _registry.resolve_template_path(safe_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     _registry.TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(raw)
 
@@ -522,8 +554,8 @@ async def admin_upload_template(
             source="local",
             description=f"Hochgeladen: {safe_name}",
             filename=safe_name,
-            approved=True,
-            enabled=True,
+            approved=analysis_meta["is_usable"],
+            enabled=analysis_meta["is_usable"],
             model_type=model_type,
             analysis=analysis_meta,
         )
@@ -579,7 +611,10 @@ async def admin_template_analysis(
             status_code=400,
             detail="Kein Workflow-JSON für dieses Template gespeichert (nur Metadaten-Eintrag).",
         )
-    tpath = _registry.TEMPLATES_DIR / record["filename"]
+    try:
+        tpath = _registry.resolve_template_path(record["filename"])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not tpath.exists():
         raise HTTPException(status_code=404, detail=f"Workflow-Datei nicht gefunden: {record['filename']}")
 
@@ -706,7 +741,7 @@ async def admin_delete_mapping(
 # Model aliases  {technical_filename: display_alias}
 # ---------------------------------------------------------------------------
 
-_ALIASES_FILE = APP_DIR / "data" / "model_aliases.json"
+_ALIASES_FILE = DATA_DIR / "model_aliases.json"
 
 
 def _load_aliases() -> dict[str, str]:
@@ -1519,24 +1554,30 @@ def _build_workflow(
     workflow_json: dict[str, Any] | None = None
     if payload.workflow_template and payload.workflow_template != "default":
         record = _registry.get_template(payload.workflow_template)
-        if record and record.get("filename"):
-            tpath = _registry.TEMPLATES_DIR / record["filename"]
-            try:
-                data = json.loads(tpath.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    workflow_json = data
-                    template_source = payload.workflow_template
-            except (OSError, json.JSONDecodeError) as exc:
-                logger.warning("_build_workflow: Konnte Template-Datei nicht laden %s: %s", tpath, exc)
-                _gen_logger.warning(
-                    "TEMPLATE_LOAD_ERROR id=%s template=%r file=%s error=%r",
-                    req_id, payload.workflow_template, tpath.name, str(exc),
-                )
+        if record is None:
+            raise ValueError(f"Workflow-Template nicht gefunden: {payload.workflow_template}")
+        if not record.get("filename"):
+            raise ValueError("Kein Workflow-JSON für dieses Template gespeichert (nur Metadaten-Eintrag).")
+        tpath = _registry.resolve_template_path(record["filename"])
+        try:
+            data = json.loads(tpath.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            logger.warning("_build_workflow: Konnte Template-Datei nicht laden %s: %s", tpath, exc)
+            raise ValueError(f"Workflow-Datei fehlt oder ist ungültig: {tpath.name}") from exc
+        if not isinstance(data, dict):
+            raise ValueError("Workflow-JSON muss ein Objekt sein.")
+        workflow_json = data
+        template_source = payload.workflow_template
 
     if workflow_json is None:
         workflow_json = _load_default_workflow()
 
     _gen_logger.info("TEMPLATE id=%s source=%r", req_id, template_source)
+
+    for node in workflow_json.values():
+        if isinstance(node, dict) and "class_type" in node:
+            if not isinstance(node["class_type"], str) or not isinstance(node.get("inputs"), dict):
+                raise ValueError("Workflow-Knoten benötigen class_type und ein inputs-Objekt.")
 
     # ── Strip UI-only keys (keep only class_type + inputs) ──────────────────
     workflow: dict[str, dict[str, Any]] = {
@@ -1546,7 +1587,10 @@ def _build_workflow(
     }
 
     # ── Graph analysis ───────────────────────────────────────────────────────
-    roles = _analyzer.analyze_workflow(workflow)
+    try:
+        roles = _analyzer.analyze_workflow(workflow)
+    except (TypeError, ValueError, AttributeError, KeyError) as exc:
+        raise ValueError("Ungültige Workflow-Knoten oder Verbindungen.") from exc
     _gen_logger.info(
         "ANALYSIS id=%s usable=%s sampler=%r model_type=%s pos_clips=%s "
         "neg_clips=%s neg_zero_out=%s latent=%r model_loader=%r warnings=%s",

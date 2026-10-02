@@ -7,6 +7,168 @@ Lokale Python-Weboberfläche für:
 3. Benutzerverwaltung mit Rollen (admin / user)
 4. Template-Freigabe-System: Admins können Workflow-Templates testen und freigeben
 
+## K3s / Kubernetes mit Docker und Longhorn
+
+Der Containerbetrieb benötigt **keine Python-/venv-Installation auf den Nodes**.
+WebUI, ComfyUI und Ollama laufen in getrennten Containern. Die Dockerfiles bauen
+die WebUI und ComfyUI (v0.38.0, festgelegter Commit, PyTorch 2.8/CUDA 12.8);
+das offizielle Ollama-Image wird ebenfalls in die lokale Registry gespiegelt.
+Benötigt werden Docker auf dem Build-Rechner, kubectl, ein laufender Cluster und
+Longhorn. Für ComfyUI müssen NVIDIA-Treiber mit CUDA-12.8-Unterstützung,
+Container Toolkit, NVIDIA Device Plugin und die RuntimeClass `nvidia` vorhanden
+sein. Ressourcen und PVC-Größen im Manifest an die vorhandene Hardware anpassen.
+
+### Images bauen und deployen
+
+Wie im Build-Skript unter `3dmodell` wird ohne Anmeldung nach
+**`127.0.0.1:5000`** gepusht. Als erstes Argument wird die Registry-Adresse
+angegeben, unter der **alle Cluster-Nodes** die Images abrufen können:
+
+```bash
+cd comfyui_webui
+IMAGE_TAG=1 ./build-and-push.sh 192.168.1.10:5000 /tmp/deploy_comfyui.yaml
+kubectl apply -f /tmp/deploy_comfyui.yaml
+kubectl -n comfyui rollout status deployment/webui
+kubectl -n comfyui rollout status deployment/comfyui
+kubectl -n comfyui rollout status deployment/ollama
+```
+
+Die LAN-Adresse ersetzen! `127.0.0.1:5000` als Pull-Adresse funktioniert nur,
+wenn die Registry auf **jedem** Node lokal erreichbar ist. `k8s/deploy.yaml` ist
+die Vorlage mit absichtlich ungültigen Image-Adressen; das Build-Skript rendert
+alle drei Image-Adressen in die Ausgabedatei. Bei Updates einen neuen `IMAGE_TAG`
+verwenden. `OLLAMA_IMAGE` kann das zu spiegelnde Image überschreiben
+(Standard: `ollama/ollama:0.35.0`). Der Build lädt Quellen und Python-Pakete aus
+dem Internet; die Cluster-Nodes ziehen anschließend ausschließlich aus der
+lokalen Registry. Es wird kein Registry-Secret benötigt.
+
+Für eine HTTP-Registry auf **jedem K3s-Node** in
+`/etc/rancher/k3s/registries.yaml` konfigurieren:
+
+```yaml
+mirrors:
+  "192.168.1.10:5000":
+    endpoint:
+      - "http://192.168.1.10:5000"
+```
+
+Danach K3s bzw. `k3s-agent` neu starten. Bei anderen Kubernetes-Distributionen
+den entsprechenden Container-Runtime-Mirror konfigurieren. Für Docker muss
+eine nicht lokale HTTP-Registry ggf. als `insecure-registries` freigegeben sein.
+Eine Registry ohne Authentifizierung/HTTPS ausschließlich in einem
+vertrauenswürdigen, per Firewall geschützten Netz betreiben.
+
+### Ports und erster Start
+
+| Anwendung | Zugriff |
+|---|---|
+| WebUI | `http://<node-ip>:30080` (NodePort) |
+| ComfyUI | `http://<node-ip>:30188` (NodePort) |
+| Ollama | nur intern: `http://ollama:11434` (ClusterIP) |
+
+Die WebUI verwendet Service-DNS (`http://comfyui:8188`, `http://ollama:11434`),
+nicht localhost. Ein Übersetzungsmodell wird bewusst **nicht automatisch**
+heruntergeladen; z. B.:
+
+```bash
+kubectl -n comfyui exec deployment/ollama -- ollama pull qwen2.5:7b
+kubectl -n comfyui exec deployment/webui -- cat /data/bootstrap_credentials.txt
+```
+
+Das heruntergeladene Modell in der WebUI auswählen. Die Bootstrap-Datei nach
+dem ersten Login löschen und das Passwort über die WebUI ändern:
+
+```bash
+kubectl -n comfyui exec deployment/webui -- rm /data/bootstrap_credentials.txt
+```
+
+Das Manifest unterdrückt das Bootstrap-Passwort im Pod-Log über
+`COMFYUI_WEBUI_LOG_BOOTSTRAP_PASSWORD=false`; es bleibt nur in der geschützten
+Datei verfügbar. Ohne diese Einstellung bleibt das lokale Verhalten
+(Ausgabe im Terminal) erhalten. Zugriff auf Logs und PVC beschränken. ComfyUI bietet hier
+**keine eigene Authentifizierung**. Beide NodePorts nur für vertrauenswürdige
+LAN-Clients freigeben; für externe Nutzung einen authentifizierenden
+HTTPS-Reverse-Proxy vorschalten. Nicht ungeschützt ins Internet stellen.
+
+### Persistenz und Longhorn-Replikation
+
+| PVC | Größe | Inhalt (jeweils unter `/data`) |
+|---|---|---|
+| `webui-data` | 10 GiB | Benutzer, Templates, Mappings, Modell-Aliase, Galerie, Logs |
+| `comfyui-data` | 100 GiB | Modelle, Input/Output, Benutzer-Workflows, temporäre Dateien, Caches, Custom Nodes |
+| `ollama-data` | 30 GiB | Ollama-Modelle und Konfiguration |
+
+Alle PVCs verwenden `ReadWriteOnce` und die eigene StorageClass
+`comfyui-longhorn-single` mit **`numberOfReplicas: "1"`**. Dies ist die
+Longhorn-Datenreplikation; ein PVC selbst besitzt kein `replicas`-Feld.
+Die Deployments laufen ebenfalls mit einer Instanz und `Recreate`, damit
+Updates keine parallelen Writer bzw. RWO-Multi-Attach-Probleme verursachen.
+Die WebUI verwendet einen Uvicorn-Worker; Sessions liegen im Arbeitsspeicher,
+nach einem Neustart ist ein erneuter Login erforderlich.
+
+**Eine Longhorn-Replik ist keine Hochverfügbarkeit:** Beim Ausfall des
+Storage-Nodes können die Daten vorübergehend oder dauerhaft verloren gehen.
+Backups einrichten. `reclaimPolicy: Retain` bewahrt Volumes nach dem Löschen
+der PVCs; endgültige Löschung ist eine bewusste Administratoraktion.
+Ohne Longhorn die StorageClass im Manifest ersetzen und deren Definition
+entfernen; eine Replikation 1 kann dann nicht zugesichert werden.
+StorageClass-Parameter gelten für **neu angelegte** Volumes, nicht rückwirkend.
+
+Bestehende lokale WebUI-Daten vor dem ersten Start ins WebUI-PVC übernehmen.
+Die Container verwenden UID/GID 1000 mit `fsGroup: 1000`; migrierte Dateien
+müssen für diesen Benutzer les- und schreibbar sein. `data/` wird nicht ins
+Image kopiert, um Benutzerdateien und Zugangsdaten nicht mitzubauen.
+Für Docker außerhalb Kubernetes ist entsprechend ein beschreibbares Volume
+an `/data` zu mounten.
+
+ComfyUI verwendet `--base-directory /data`. Modelldateien in die üblichen
+Unterverzeichnisse legen, etwa `/data/models/checkpoints`,
+`/data/models/diffusion_models`, `/data/models/text_encoders` und
+`/data/models/vae`. Beispiel (zuerst passende Verzeichnisse anlegen):
+
+```bash
+kubectl -n comfyui exec deployment/comfyui -- mkdir -p /data/models/checkpoints
+COMFY_POD=$(kubectl -n comfyui get pod -l app=comfyui -o jsonpath='{.items[0].metadata.name}')
+kubectl -n comfyui cp ./mein-modell.safetensors "$COMFY_POD:/data/models/checkpoints/mein-modell.safetensors"
+```
+
+Keine Modelle sind im Image enthalten. Nur vertrauenswürdige Modelle und
+Custom Nodes verwenden. Zusätzliche Python-Abhängigkeiten von Custom Nodes
+in einem abgeleiteten Dockerfile installieren und neu bauen, **nicht** nur
+im laufenden Pod: Eine Pod-Neuerstellung würde diese Installation verlieren.
+Custom Nodes auf dem PVC sind ausführbarer Code und benötigen dieselbe Prüfung
+wie Änderungen am Image.
+
+### Templates und Betriebsprüfung
+
+Workflow-JSONs in der Admin-UI hochladen oder ins WebUI-PVC unter
+`/data/templates/` kopieren und „lokale Templates entdecken“ ausführen.
+Für Generierung den Workflow im **ComfyUI-API-Format** exportieren.
+ComfyUI-Benutzer-Workflows auf dem separaten ComfyUI-PVC sind nicht automatisch
+WebUI-Templates. Unbrauchbare lokale Workflows werden nicht automatisch
+freigegeben; reine entdeckte Metadaten ohne Workflow-Datei können nicht
+freigegeben oder stillschweigend durch das Standard-Template ersetzt werden.
+
+`COMFYUI_WEBUI_DATA_DIR` steuert alle beschreibbaren WebUI-Dateien
+(Standard im lokalen Betrieb: `data/` neben `main.py`, im Container: `/data`).
+`/healthz` prüft nur die WebUI selbst, damit ein Ausfall von Ollama/ComfyUI nicht
+zu Neustart-Schleifen der WebUI führt. Alle Deployments besitzen Startup-,
+Readiness- und Liveness-Probes.
+
+```bash
+kubectl -n comfyui get pods,pvc,svc
+kubectl -n comfyui logs deployment/comfyui
+kubectl -n comfyui describe pod -l app=comfyui
+```
+
+Ollama läuft standardmäßig auf der CPU, sodass nur ComfyUI eine GPU belegt.
+Für Ollama-GPU-Betrieb eine weitere GPU und dieselbe NVIDIA-Runtime plus
+`nvidia.com/gpu`-Ressourcen konfigurieren; eine GPU wird nicht automatisch
+zwischen Pods geteilt. Für CPU-only-ComfyUI `runtimeClassName` und beide
+`nvidia.com/gpu`-Einträge entfernen und die vollständigen Container-Argumente
+auf `["--listen", "0.0.0.0", "--port", "8188", "--disable-auto-launch",
+"--base-directory", "/data", "--cpu"]` setzen (deutlich langsamer).
+
 ## Voraussetzungen
 
 - Lokales **Ollama** (Standard: `http://127.0.0.1:11434`)

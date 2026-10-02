@@ -25,12 +25,12 @@ from __future__ import annotations
 import datetime
 import json
 import logging
-from pathlib import Path
 from typing import Any
+
+from config import DATA_DIR
 
 logger = logging.getLogger(__name__)
 
-DATA_DIR = Path(__file__).resolve().parent / "data"
 MAPPINGS_FILE = DATA_DIR / "mappings.json"
 
 

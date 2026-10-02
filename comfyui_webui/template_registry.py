@@ -22,10 +22,10 @@ from pathlib import Path
 from typing import Any
 
 import workflow_analyzer as _analyzer
+from config import DATA_DIR
 
 logger = logging.getLogger(__name__)
 
-DATA_DIR = Path(__file__).resolve().parent / "data"
 TEMPLATES_FILE = DATA_DIR / "templates.json"
 TEMPLATES_DIR = DATA_DIR / "templates"
 
@@ -37,6 +37,15 @@ TEMPLATES_DIR = DATA_DIR / "templates"
 def _ensure_data_dir() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def resolve_template_path(filename: str) -> Path:
+    """Resolve a workflow filename without allowing it to escape templates/."""
+    directory = TEMPLATES_DIR.resolve()
+    path = (directory / filename).resolve()
+    if not path.is_relative_to(directory):
+        raise ValueError("Workflow-Datei muss im Template-Verzeichnis liegen.")
+    return path
 
 
 def load_templates() -> list[dict[str, Any]]:
@@ -143,11 +152,22 @@ def analyze_template_file(path: Path) -> dict[str, Any]:
         result["parse_error"] = "JSON ist kein Objekt (erwartet wird ein ComfyUI-Workflow-JSON)."
         return result
 
+    for node in data.values():
+        if isinstance(node, dict) and "class_type" in node:
+            if not isinstance(node["class_type"], str) or not isinstance(node.get("inputs"), dict):
+                result["parse_error"] = "Workflow-Knoten benötigen class_type und ein inputs-Objekt."
+                return result
+
+    try:
+        roles = _analyzer.analyze_workflow(data)
+        defaults = _analyzer.extract_workflow_defaults(data, roles)
+    except (TypeError, ValueError, AttributeError, KeyError):
+        result["parse_error"] = "Ungültige Workflow-Knoten oder Verbindungen."
+        return result
     result["valid"] = True
-    roles = _analyzer.analyze_workflow(data)
     result["analysis"] = roles.to_dict()
     result["model_type"] = roles.model_type
-    result["defaults"] = _analyzer.extract_workflow_defaults(data, roles)
+    result["defaults"] = defaults
 
     if not roles.is_usable:
         logger.warning(
@@ -193,6 +213,8 @@ def register_template(
                 t["model_type"] = model_type
             if analysis is not None:
                 t["analysis"] = analysis
+                if not analysis.get("is_usable"):
+                    t["approved"] = False
             save_templates(templates)
             return t
 
@@ -244,11 +266,11 @@ def delete_template(name: str) -> bool:
 def discover_local_templates() -> list[dict[str, Any]]:
     """Scan ``data/templates/`` for ``.json`` workflow files and auto-register new ones.
 
-    Files found here are registered as *approved* + *enabled* because the admin
-    intentionally placed them in that directory.  If a template with the same
+    Usable files found here are registered as *approved* + *enabled* because the
+    admin intentionally placed them in that directory.  If a template with the same
     slug already exists its ``filename`` reference is updated but its
-    ``approved``/``enabled`` flags are **not** changed (so a deliberately
-    disabled template stays disabled).
+    ``approved``/``enabled`` flags are preserved (so a deliberately disabled
+    template stays disabled), except that unusable files lose approval.
 
     Each file is deeply validated via :func:`analyze_template_file` and the
     result is stored in the template record's ``analysis`` field.
@@ -256,6 +278,11 @@ def discover_local_templates() -> list[dict[str, Any]]:
     _ensure_data_dir()
     registered: list[dict[str, Any]] = []
     for json_file in sorted(TEMPLATES_DIR.glob("*.json")):
+        try:
+            resolve_template_path(json_file.name)
+        except ValueError:
+            logger.warning("discover_local_templates: skipping file outside templates/: %s", json_file.name)
+            continue
         stem = json_file.stem
         slug = stem.lower().replace(" ", "_").replace("-", "_")
         display_name = stem.replace("_", " ").replace("-", " ").title()
@@ -271,16 +298,16 @@ def discover_local_templates() -> list[dict[str, Any]]:
             "negative_is_zero_out": validation["analysis"].get("negative_is_zero_out", False) if validation.get("analysis") else False,
             "is_potentially_img2img": validation["analysis"].get("is_potentially_img2img", False) if validation.get("analysis") else False,
             "warnings": validation["analysis"].get("warnings", []) if validation.get("analysis") else [],
-            "errors": validation["analysis"].get("errors", [validation.get("parse_error", "Datei konnte nicht gelesen werden")]) if not validation.get("valid") else (validation["analysis"].get("errors", []) if validation.get("analysis") else []),
+            "errors": validation["analysis"].get("errors", []) if validation.get("analysis") else [validation.get("parse_error") or "Datei konnte nicht gelesen werden"],
             "analyzed_at": validation.get("analyzed_at"),
             "parse_error": validation.get("parse_error"),
         }
 
-        if not validation.get("valid"):
+        if not validation.get("valid") or not analysis_meta["is_usable"]:
             logger.warning(
-                "discover_local_templates: %s konnte nicht geparst werden: %s",
+                "discover_local_templates: %s ist nicht verwendbar: %s",
                 json_file.name,
-                validation.get("parse_error"),
+                validation.get("parse_error") or "; ".join(analysis_meta["errors"]),
             )
             # Still register it so admins can see it and the parse error
             existing = get_template(slug)
@@ -317,7 +344,7 @@ def discover_local_templates() -> list[dict[str, Any]]:
                 source="local",
                 description=f"Lokales Workflow-Template: {json_file.name}",
                 filename=json_file.name,
-                approved=True,
+                approved=analysis_meta["is_usable"],
                 enabled=True,
                 model_type=model_type,
                 analysis=analysis_meta,

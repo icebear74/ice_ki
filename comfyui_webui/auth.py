@@ -20,12 +20,12 @@ import json
 import logging
 import os
 import secrets
-from pathlib import Path
 from typing import Any
+
+from config import DATA_DIR
 
 logger = logging.getLogger(__name__)
 
-DATA_DIR = Path(__file__).resolve().parent / "data"
 USERS_FILE = DATA_DIR / "users.json"
 BOOTSTRAP_CREDS_FILE = DATA_DIR / "bootstrap_credentials.txt"
 
