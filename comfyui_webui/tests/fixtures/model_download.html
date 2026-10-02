@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="de">
+<head><meta charset="utf-8"><title>ComfyUI 1.53.6 MissingModelRow integration fixture</title></head>
+<body style="background:#181818;color:white;font-family:sans-serif">
+<h1>Missing Models — Sidebar DOM fixture</h1>
+<p>This test uses the public data-testid and title structure of ComfyUI frontend v1.53.6, without a GPU.</p>
+<section id="models">
+  <div class="model-row"><span><span title="ae.safetensors">ae.safetensors</span><span>vae · 319.77 MB</span></span><button data-testid="missing-model-download">Download</button></div>
+  <div class="model-row"><span><span title="qwen_3_4b.safetensors">qwen_3_4b.safetensors</span><span>text_encoders · 7.49 GB</span></span><button data-testid="missing-model-download">Download</button></div>
+  <div class="model-row"><span><span title="z_image_turbo_bf16.safetensors">z_image_turbo_bf16.safetensors</span><span>diffusion_models · 11.46 GB</span></span><button data-testid="missing-model-download">Download</button></div>
+  <div data-testid="missing-model-actions"><button data-testid="missing-model-download-all">Download all (19.27 GB)</button></div>
+</section>
+<div class="comfy-missing-models"><div class="p-listbox-option"><span title="https://huggingface.co/test/resolve/main/legacy.safetensors">checkpoints / legacy.safetensors</span></div></div>
+<script type="module">
+const base = "/comfyui_webui/docker/model_downloader/web/";
+window.requests = [];
+window.states = {};
+window.testApp = {
+    refreshMissingModels: async () => { window.refreshed = true; },
+    registerExtension: (extension) => {
+        window.extension = extension;
+        extension.beforeConfigureGraph({models: [
+            {name:"ae.safetensors",directory:"vae",url:"https://huggingface.co/test/resolve/main/ae.safetensors"},
+            {name:"qwen_3_4b.safetensors",directory:"text_encoders",url:"https://huggingface.co/test/resolve/main/qwen_3_4b.safetensors"},
+            {name:"z_image_turbo_bf16.safetensors",directory:"diffusion_models",url:"https://huggingface.co/test/resolve/main/z_image_turbo_bf16.safetensors"},
+        ]});
+        extension.setup();
+        extension.afterConfigureGraph();
+    },
+};
+window.testApi = {
+    fetchApi: async (path, options) => {
+        window.requests.push({path, body:options.body ? JSON.parse(options.body) : null, authenticated:!!options.headers.Authorization});
+        if (path.endsWith("/start")) {
+            const model = JSON.parse(options.body);
+            const id = `${model.save_path}/${model.filename}`;
+            window.states[id] = {status:"completed",progress:100,filename:model.filename};
+            return Response.json({download_id:id});
+        }
+        if (path.endsWith("/directories")) return Response.json({directories:["checkpoints","diffusion_models","text_encoders","vae","loras","clip"]});
+        return Response.json({downloads:window.states});
+    },
+};
+// Substitute only ComfyUI host imports; execute the actual extension source.
+let source = await (await fetch(base + "serverDownload.js")).text();
+source = source.replace('import { app } from "../../scripts/app.js";', "const app = window.testApp;");
+source = source.replace('import { api } from "../../scripts/api.js";', "const api = window.testApi;");
+source = source.replace('from "./modelMetadata.js"', `from "${location.origin}${base}modelMetadata.js"`);
+await import(URL.createObjectURL(new Blob([source], {type:"text/javascript"})));
+if (new URL(location.href).searchParams.has("autorun")) {
+    const result = document.createElement("p");
+    result.id = "test-result";
+    document.body.append(result);
+    const check = (condition, message) => { if (!condition) throw new Error(message); };
+    try {
+        check(document.querySelectorAll(".ice-model-download").length === 4, "Sidebar/legacy injection failed");
+        window.extension.afterConfigureGraph();
+        check(document.querySelectorAll(".ice-model-download").length === 4, "Duplicate buttons injected");
+        document.querySelector(".ice-model-download").click();
+        const input = document.querySelector('input[type="password"]');
+        check(!!input, "Missing credential dialog");
+        input.value = crypto.randomUUID();
+        [...document.querySelectorAll("dialog button")].find(el => el.textContent === "Freischalten").click();
+        await new Promise(resolve => setTimeout(resolve, 50));
+        check(window.requests.some(r => r.path.endsWith("/start") && r.authenticated && r.body.save_path === "vae"), "Authenticated server download failed");
+        document.querySelector(".ice-model-download-all").click();
+        await new Promise(resolve => setTimeout(resolve, 50));
+        check(window.requests.filter(r => r.path.endsWith("/start")).length === 3, "Download-all did not queue remaining sidebar models");
+        check(window.requests.some(r => r.body?.filename === "z_image_turbo_bf16.safetensors" && r.body.save_path === "diffusion_models"), "Z-Image target incorrect");
+        check(document.querySelector(".ice-model-download").textContent === "Fertig auf PVC", "Progress UI failed");
+        check(!localStorage.length && !sessionStorage.length, "Token persisted in browser storage");
+        document.querySelector("#ice-model-download-panel").click();
+        check(document.querySelector('input[aria-label="Modell Downloadlink"]'), "Manual link fallback missing");
+        [...document.querySelectorAll("dialog button")].find(el => el.textContent === "Freischalten / Verzeichnisse laden").click();
+        await new Promise(resolve => setTimeout(resolve, 50));
+        document.querySelector('input[aria-label="Modell Downloadlink"]').value = "https://huggingface.co/test/resolve/main/manual.safetensors";
+        document.querySelector('input[aria-label="Modell Dateiname"]').value = "manual.safetensors";
+        document.querySelector('select[aria-label="Modell Zielverzeichnis"]').value = "clip";
+        const manual = [...document.querySelectorAll("dialog button")].find(el => el.textContent === "Download starten");
+        manual.click();
+        await new Promise(resolve => setTimeout(resolve, 50));
+        check(window.requests.some(r => r.body?.filename === "manual.safetensors" && r.body.save_path === "text_encoders"), "Alias target not canonicalized");
+        check(!manual.disabled, "Manual transfer button cannot start another model");
+        document.querySelector('input[aria-label="Modell Dateiname"]').value = "second.safetensors";
+        manual.click();
+        await new Promise(resolve => setTimeout(resolve, 50));
+        check(window.requests.some(r => r.body?.filename === "second.safetensors"), "Second manual transfer failed");
+        result.textContent = "PASS: sidebar, legacy, download-all, auth, progress, manual fallback";
+    } catch (error) {
+        result.textContent = "FAIL: " + error.message;
+    }
+}
+</script>
+</body>
+</html>

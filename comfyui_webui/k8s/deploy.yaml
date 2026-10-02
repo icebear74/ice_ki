@@ -21,7 +21,7 @@ metadata:
   name: webui-data
   namespace: comfyui
 spec:
-  accessModes: [ReadWriteOnce]
+  accessModes: [ReadWriteMany]
   storageClassName: comfyui-longhorn-single
   resources:
     requests:
@@ -33,7 +33,7 @@ metadata:
   name: comfyui-data
   namespace: comfyui
 spec:
-  accessModes: [ReadWriteOnce]
+  accessModes: [ReadWriteMany]
   storageClassName: comfyui-longhorn-single
   resources:
     requests:
@@ -45,7 +45,7 @@ metadata:
   name: ollama-data
   namespace: comfyui
 spec:
-  accessModes: [ReadWriteOnce]
+  accessModes: [ReadWriteMany]
   storageClassName: comfyui-longhorn-single
   resources:
     requests:
@@ -73,8 +73,21 @@ spec:
         runAsNonRoot: true
         runAsUser: 1000
         runAsGroup: 1000
-        fsGroup: 1000
-        fsGroupChangePolicy: OnRootMismatch
+      initContainers:
+        - name: volume-permissions
+          image: registry.example.invalid:5000/comfyui-webui:1
+          imagePullPolicy: Always
+          command: ["/bin/sh", "-c", "chown 1000:1000 /data"]
+          securityContext:
+            runAsNonRoot: false
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+              add: [CHOWN]
+          volumeMounts:
+            - name: data
+              mountPath: /data
       containers:
         - name: webui
           image: registry.example.invalid:5000/comfyui-webui:1
@@ -92,6 +105,12 @@ spec:
               value: http://comfyui:8188
             - name: OLLAMA_BASE_URL
               value: http://ollama:11434
+            - name: COMFYUI_MODEL_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: comfyui-model-api
+                  key: token
+                  optional: true
           ports:
             - name: http
               containerPort: 8080
@@ -148,8 +167,21 @@ spec:
         runAsNonRoot: true
         runAsUser: 1000
         runAsGroup: 1000
-        fsGroup: 1000
-        fsGroupChangePolicy: OnRootMismatch
+      initContainers:
+        - name: volume-permissions
+          image: registry.example.invalid:5000/comfyui:1
+          imagePullPolicy: Always
+          command: ["/bin/sh", "-c", "chown 1000:1000 /data"]
+          securityContext:
+            runAsNonRoot: false
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+              add: [CHOWN]
+          volumeMounts:
+            - name: data
+              mountPath: /data
       containers:
         - name: comfyui
           image: registry.example.invalid:5000/comfyui:1
@@ -158,6 +190,13 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: [ALL]
+          env:
+            - name: COMFYUI_MODEL_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: comfyui-model-api
+                  key: token
+                  optional: true
           ports:
             - name: http
               containerPort: 8188
@@ -214,8 +253,21 @@ spec:
         runAsNonRoot: true
         runAsUser: 1000
         runAsGroup: 1000
-        fsGroup: 1000
-        fsGroupChangePolicy: OnRootMismatch
+      initContainers:
+        - name: volume-permissions
+          image: registry.example.invalid:5000/comfyui-ollama:1
+          imagePullPolicy: Always
+          command: ["/bin/sh", "-c", "chown 1000:1000 /data"]
+          securityContext:
+            runAsNonRoot: false
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+              add: [CHOWN]
+          volumeMounts:
+            - name: data
+              mountPath: /data
       containers:
         - name: ollama
           image: registry.example.invalid:5000/comfyui-ollama:1

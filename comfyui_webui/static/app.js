@@ -149,6 +149,7 @@ function showTab(name) {
     loadAdminMappings();
     loadAdminTemplates();
     loadAdminModelAliases();
+    loadAdminModelDirectories();
     loadAdminUsers();
     populateMappingFormSelects();
   }
@@ -991,6 +992,8 @@ function _updateMappingFormTemplateHint(templateName) {
     ? `⚙ Workflow-Standards: ${parts.join(", ")}`
     : "Workflow-Standards konnten nicht extrahiert werden.";
 }
+
+function openMappingForm(editName) {
   const form = $("addMappingForm");
   form.classList.remove("hidden");
   populateMappingFormSelects();
@@ -1343,6 +1346,142 @@ async function addTemplate() {
     populateMappingFormSelects();
   } catch (err) {
     alert(`Fehler: ${err.message}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Admin – manual model upload
+// ---------------------------------------------------------------------------
+let modelUploadActive = false;
+let modelRestartPending = false;
+
+async function loadAdminModelDirectories() {
+  if (modelUploadActive || modelRestartPending) return;
+  const select = $("adminModelDirectory");
+  const status = $("adminModelUploadStatus");
+  const previous = select.value;
+  select.disabled = true;
+  $("adminModelUploadBtn").disabled = true;
+  $("adminModelRefreshBtn").disabled = true;
+  select.replaceChildren();
+  status.textContent = "Zielverzeichnisse werden geladen …";
+  try {
+    const data = await api("/api/admin/models/directories");
+    if (modelRestartPending) return;
+    for (const directory of data.directories) {
+      const option = document.createElement("option");
+      option.value = directory;
+      option.textContent = directory;
+      select.appendChild(option);
+    }
+    if (data.directories.includes(previous)) select.value = previous;
+    select.disabled = !select.options.length;
+    $("adminModelUploadBtn").disabled = select.disabled;
+    status.textContent = "Ziel auswählen, Datei wählen und Upload ausdrücklich starten.";
+  } catch (err) {
+    status.textContent = err.message;
+  } finally {
+    $("adminModelRefreshBtn").disabled = false;
+  }
+}
+
+function uploadAdminModel() {
+  if (modelUploadActive || modelRestartPending) return;
+  const file = $("adminModelFile").files[0];
+  const directory = $("adminModelDirectory").value;
+  const status = $("adminModelUploadStatus");
+  const progress = $("adminModelProgress");
+  if (!file || !directory) {
+    status.textContent = "Bitte Zielverzeichnis und eine Modelldatei auswählen.";
+    return;
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9._ -]{0,239}$/.test(file.name) ||
+      file.name.includes("..") || !/\.(safetensors|gguf|pt|pth|ckpt|bin)$/i.test(file.name) ||
+      !file.size) {
+    status.textContent = "Bitte eine nicht leere Modelldatei mit einfachem Dateinamen und unterstützter Endung auswählen.";
+    return;
+  }
+  const form = new FormData();
+  form.append("save_path", directory);
+  form.append("file", file);
+  const xhr = new XMLHttpRequest();
+  xhr.open("POST", "/api/admin/models/upload");
+  modelUploadActive = true;
+  for (const id of ["adminModelFile", "adminModelDirectory", "adminModelUploadBtn", "adminModelRefreshBtn"]) {
+    $(id).disabled = true;
+  }
+  progress.value = 0;
+  progress.classList.remove("hidden");
+  status.textContent = `Upload nach ComfyUI/models/${directory}/ läuft …`;
+  if (xhr.upload) {
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) {
+        progress.value = Math.round(event.loaded / event.total * 100);
+        status.textContent = progress.value === 100
+          ? "Datei an WebUI übertragen; ComfyUI speichert auf dem Modellvolume …"
+          : `Übertragung an WebUI: ${progress.value} %`;
+      } else {
+        progress.removeAttribute("value");
+      }
+    };
+  } else {
+    progress.removeAttribute("value");
+  }
+  xhr.onload = () => {
+    let payload = {};
+    try { payload = JSON.parse(xhr.responseText); } catch { /* Use a safe fallback below. */ }
+    if (xhr.status === 201) {
+      progress.value = 100;
+      status.textContent = `Gespeichert: ComfyUI/models/${payload.save_path}/${payload.filename} (${payload.bytes} Bytes) auf dem persistenten Modellvolume.`;
+      $("adminModelFile").value = "";
+    } else {
+      if (xhr.status === 401) showLogin();
+      status.textContent = typeof payload.detail === "string" ? payload.detail : `Upload fehlgeschlagen (${xhr.status}).`;
+    }
+  };
+  xhr.onerror = () => { status.textContent = "Upload fehlgeschlagen: Verbindung unterbrochen. Ziel vor erneutem Upload prüfen."; };
+  xhr.onabort = () => { status.textContent = "Upload abgebrochen."; };
+  xhr.onloadend = () => {
+    modelUploadActive = false;
+    for (const id of ["adminModelFile", "adminModelDirectory", "adminModelUploadBtn", "adminModelRefreshBtn"]) {
+      $(id).disabled = false;
+    }
+  };
+  try {
+    xhr.send(form);
+  } catch {
+    modelUploadActive = false;
+    for (const id of ["adminModelFile", "adminModelDirectory", "adminModelUploadBtn", "adminModelRefreshBtn"]) {
+      $(id).disabled = false;
+    }
+    status.textContent = "Upload konnte nicht gestartet werden.";
+  }
+}
+
+async function restartAdminComfyUI() {
+  const status = $("adminModelRestartStatus");
+  if (modelRestartPending) return;
+  if (modelUploadActive) {
+    status.textContent = "Neustart nicht möglich: Der Modell-Upload läuft noch.";
+    return;
+  }
+  if (!confirm("ComfyUI wirklich neu starten? Laufende Generierungen werden unterbrochen. Persistente Modelle bleiben erhalten. Oft reicht es, die Seite neu zu laden.")) {
+    return;
+  }
+  const button = $("adminModelRestartBtn");
+  button.disabled = true;
+  modelRestartPending = true;
+  $("adminModelUploadBtn").disabled = true;
+  status.textContent = "ComfyUI-Neustart wird angefordert …";
+  try {
+    await api("/api/admin/models/restart", { method: "POST", body: JSON.stringify({}) });
+    status.textContent = "Neustart angefordert. ComfyUI ist kurz nicht erreichbar; bitte warten und anschließend die Seite neu laden.";
+  } catch (err) {
+    modelRestartPending = false;
+    $("adminModelUploadBtn").disabled = $("adminModelDirectory").disabled;
+    status.textContent = err.message;
+  } finally {
+    button.disabled = modelRestartPending;
   }
 }
 
@@ -2197,6 +2336,9 @@ $("generateBtn").addEventListener("click", async () => {
 // ---------------------------------------------------------------------------
 // Event listeners – admin tab
 // ---------------------------------------------------------------------------
+$("adminModelUploadBtn").addEventListener("click", uploadAdminModel);
+$("adminModelRefreshBtn").addEventListener("click", loadAdminModelDirectories);
+$("adminModelRestartBtn").addEventListener("click", restartAdminComfyUI);
 $("adminAddMappingBtn").addEventListener("click", () => {
   const form = $("addMappingForm");
   if (form.classList.contains("hidden")) {
@@ -2336,4 +2478,3 @@ $("tmGalleryBtn").addEventListener("click", () => {
 // Bootstrap: check session, show login or app
 // ---------------------------------------------------------------------------
 tryAutoLogin();
-

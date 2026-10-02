@@ -151,11 +151,14 @@ HTTPS-Reverse-Proxy vorschalten. Nicht ungeschützt ins Internet stellen.
 | `comfyui-data` | 100 GiB | Modelle, Input/Output, Benutzer-Workflows, temporäre Dateien, Caches, Custom Nodes |
 | `ollama-data` | 30 GiB | Ollama-Modelle und Konfiguration |
 
-Alle PVCs verwenden `ReadWriteOnce` und die eigene StorageClass
+Alle PVCs verwenden `ReadWriteMany` (RWX) und die eigene StorageClass
 `comfyui-longhorn-single` mit **`numberOfReplicas: "1"`**. Dies ist die
 Longhorn-Datenreplikation; ein PVC selbst besitzt kein `replicas`-Feld.
-Die Deployments laufen ebenfalls mit einer Instanz und `Recreate`, damit
-Updates keine parallelen Writer bzw. RWO-Multi-Attach-Probleme verursachen.
+Longhorn muss RWX-Share-Manager/NFS unterstützen; die Cluster-Nodes benötigen
+einen NFSv4-Client. Die Deployments laufen weiterhin mit einer Instanz und
+`Recreate`, um parallele Writer während Updates zu vermeiden. RWX bedeutet
+nicht, dass die JSON-Datenbanken oder Transferverwaltung für mehrere
+Anwendungsinstanzen ausgelegt sind.
 Die WebUI verwendet einen Uvicorn-Worker; Sessions liegen im Arbeitsspeicher,
 nach einem Neustart ist ein erneuter Login erforderlich.
 
@@ -168,7 +171,10 @@ entfernen; eine Replikation 1 kann dann nicht zugesichert werden.
 StorageClass-Parameter gelten für **neu angelegte** Volumes, nicht rückwirkend.
 
 Bestehende lokale WebUI-Daten vor dem ersten Start ins WebUI-PVC übernehmen.
-Die Container verwenden UID/GID 1000 mit `fsGroup: 1000`; migrierte Dateien
+Die Container verwenden UID/GID 1000. Ein eingeschränkter Root-Init-Container
+setzt den Besitzer der jeweiligen PVC-Wurzel auf UID/GID 1000; `fsGroup`
+wird wegen Longhorn-RWX/NFS nicht verwendet. Bereits vorhandene Unterverzeichnisse
+werden nicht rekursiv verändert; migrierte Dateien
 müssen für diesen Benutzer les- und schreibbar sein. `data/` wird nicht ins
 Image kopiert, um Benutzerdateien und Zugangsdaten nicht mitzubauen.
 Für Docker außerhalb Kubernetes ist entsprechend ein beschreibbares Volume
@@ -242,6 +248,98 @@ in einem abgeleiteten Dockerfile installieren und neu bauen, **nicht** nur
 im laufenden Pod: Eine Pod-Neuerstellung würde diese Installation verlieren.
 Custom Nodes auf dem PVC sind ausführbarer Code und benötigen dieselbe Prüfung
 wie Änderungen am Image.
+
+### Direkte Downloads, manueller Modell-Upload und Neustart
+
+Das Image enthält den fest gepinnten Fork
+[FNGarvin/ComfyUI-AutoModelDownloader](https://github.com/FNGarvin/ComfyUI-AutoModelDownloader)
+(`419fd24ba57d20334351ddfff28ab93c84163a67`).
+Die Integration ersetzt dessen ungeschützte Download-Endpunkte durch eine
+lokal geprüfte Implementierung und ergänzt die aktuelle Missing-Models-Seitenleiste.
+Der Custom Node wird aus einem zusätzlichen **Image-Pfad** geladen, nicht
+ins PVC kopiert: `--base-directory /data` verdeckt ihn somit nicht.
+Ein vorhandener eigener Clone dieses Add-ons auf `/data/custom_nodes` muss
+vor dem Start entfernt/deaktiviert werden, damit nicht dessen ungeschützte
+Endpunkte zusätzlich geladen werden.
+
+Die neuen Transfer- und Neustart-Endpunkte sind ohne Token **gesperrt**.
+Dasselbe Kubernetes-Secret versorgt ComfyUI und die WebUI; der WebUI-Server
+gibt den Token niemals an den Browser weiter. Einmal einrichten:
+
+```bash
+kubectl create namespace comfyui --dry-run=client -o yaml | kubectl apply -f -
+umask 077
+openssl rand -hex 32 > /tmp/comfyui-model-token
+kubectl -n comfyui create secret generic comfyui-model-api \
+  --from-file=token=/tmp/comfyui-model-token \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
+Die Token-Datei sicher aufbewahren und **nicht committen**. Für direkten Zugriff
+in ComfyUI wird der Token im Passwortdialog abgefragt und nur im Arbeitsspeicher
+der Seite gehalten. Falls nur der WebUI-Upload genutzt wird, kann die lokale
+Token-Datei nach Secret-Erstellung gelöscht werden. Bei Token-Rotation
+ComfyUI und WebUI neu starten, damit die neuen Umgebungsvariablen geladen werden.
+Bei bereits laufenden Pods nach erstmaliger Secret-Erstellung ebenfalls:
+
+```bash
+kubectl -n comfyui rollout restart deployment/comfyui deployment/webui
+```
+
+Nach Rebuild mit neuem `IMAGE_TAG` und Apply:
+
+* **ComfyUI / Missing Models:** Zusätzlicher Button „Auf PVC laden“ pro Modell,
+  „Alle auf PVC laden“ für die aktuelle Seitenleiste. Die ursprünglichen
+  Browser-Download-Buttons bleiben unverändert. Der Workflow muss
+  Download-Metadaten (Name, Verzeichnis, URL) enthalten.
+* **„Modell-Downloads (PVC)“:** Bei fehlenden Metadaten direkten HTTPS-Link,
+  Dateinamen und Zielverzeichnis eingeben, Transfer freischalten, Fortschritt
+  verfolgen. Für Modelle mit Anbieter-Login/Lizenzfreigabe stattdessen lokal
+  herunterladen und über die WebUI hochladen; keine Anbieter-Tokens in URLs
+  eintragen.
+* **WebUI / Admin / Modell-Upload:** Als Admin eine Modelldatei auswählen,
+  Zielverzeichnis wählen und hochladen. Der WebUI-Server streamt die Datei an
+  ComfyUI; die Datei landet **auf dem ComfyUI-PVC**, nicht im Browser und nicht
+  auf dem separaten WebUI-PVC. U. a. Checkpoints, Diffusionsmodelle,
+  Textencoder, VAE, LoRAs, ControlNet, CLIP-Vision, Embeddings und Upscaler werden
+  angeboten; ausführbare Custom Nodes sind keine Upload-Ziele.
+* **ComfyUI neu starten:** Geschützter Admin-Button in der WebUI. Er beendet
+  ausschließlich den ComfyUI-Prozess; Kubernetes startet den Container neu,
+  Dateien auf dem PVC bleiben erhalten. Laufende Transfers blockieren den
+  Neustart. Modelllisten-Aktualisierung genügt oft ohne Neustart; ein Neustart
+  bricht laufende Bildgenerierung ab. Kein Kubernetes-ServiceAccount-Token
+  oder Cluster-Admin-Recht wird hierfür benötigt.
+
+Transfers schreiben zunächst eine temporäre Datei, veröffentlichen nur
+vollständige Dateien und überschreiben keine vorhandenen Modelle.
+Standardlimit pro Datei ist 40 GiB (`COMFYUI_MODEL_MAX_BYTES` in **beiden**
+Deployments konsistent setzen). Genügend freien PVC-Speicher vorhalten.
+Die WebUI nimmt manuelle Uploads zuerst als temporäre Multipart-Dateien unter
+`/tmp` entgegen und leitet sie anschließend in begrenzten Blöcken weiter.
+Für große Uploads braucht daher auch der WebUI-Pod ausreichend temporären
+Speicher; das endgültige Modell liegt ausschließlich auf dem ComfyUI-PVC.
+Downloads erlauben ausschließlich HTTPS zu freigegebenen Modellhosts;
+private/lokale Zieladressen und unsichere Redirects werden abgelehnt.
+Zusätzliche vertrauenswürdige Hosts lassen sich in ComfyUI über
+`COMFYUI_MODEL_ALLOWED_HOSTS` freigeben. Nur vertrauenswürdige Modell-Dateien
+verwenden: Die erlaubte Endung allein garantiert keine sichere Datei,
+insbesondere bei Pickle-basierten `.pt`/`.pth`/`.ckpt`-Dateien.
+Transfers nach einem Containerabbruch gegebenenfalls erneut starten;
+Fortschritt/Warteschlange werden nicht persistent wiederaufgenommen.
+
+**Wichtig für vorhandene RWO-PVCs:** `accessModes` eines gebundenen Claims lässt
+sich nicht einfach auf RWX umstellen. Nicht bestehende Claims löschen!
+Zuerst Backups/Snapshots erstellen, Deployments stoppen, neue RWX-Claims mit
+neuen Namen anlegen, Daten kontrolliert übernehmen und die Claim-Namen im
+Manifest anpassen. Erst nach Prüfung auf die neuen Claims umstellen.
+Auch bei RWX lädt die WebUI per HTTP hoch; sie benötigt keinen eigenen
+Mount des ComfyUI-Volumes. Longhorn-Replikation bleibt unabhängig davon **1**.
+
+Diese Token-Prüfung schützt nur die neuen Transfer-/Neustart-Endpunkte,
+nicht die komplette ComfyUI- oder Manager-API. ComfyUI weiterhin ausschließlich
+im geschützten Admin-Netz oder hinter einem authentifizierenden
+HTTPS-Reverse-Proxy betreiben. Bei HTTP gehen Zugangsdaten unverschlüsselt
+über das Netz; HTTPS ist für nicht vollständig vertrauenswürdige Netze nötig.
 
 ### Templates und Betriebsprüfung
 

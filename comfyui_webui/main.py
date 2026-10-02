@@ -16,7 +16,7 @@ from urllib.parse import urlencode
 
 import httpx
 import websockets
-from fastapi import Cookie, Depends, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import Cookie, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -802,6 +802,178 @@ async def admin_delete_model_alias(
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
+
+
+_MODEL_EXTENSIONS = {".safetensors", ".gguf", ".pt", ".pth", ".ckpt", ".bin"}
+_MODEL_UPLOAD_CHUNK_BYTES = 1024 * 1024
+_MODEL_DIRECTORY_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,63}")
+_MODEL_FILENAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._ -]{0,239}")
+_MODEL_DIRECTORY_ALIASES = {
+    "unet": "diffusion_models",
+    "clip": "text_encoders",
+    "t2i_adapter": "controlnet",
+}
+
+
+def _model_api_token() -> str:
+    token = os.getenv("COMFYUI_MODEL_API_TOKEN", "").strip()
+    if not token:
+        raise HTTPException(status_code=503, detail="ComfyUI-Modellservice nicht konfiguriert: Server-Token fehlt.")
+    return token
+
+
+def _model_upload_max_bytes() -> int:
+    try:
+        maximum = int(os.getenv("COMFYUI_MODEL_MAX_BYTES", str(40 * 1024**3)))
+        if maximum <= 0:
+            raise ValueError
+    except ValueError:
+        raise HTTPException(status_code=503, detail="Modell-Upload: ungültige Größenkonfiguration.") from None
+    return maximum
+
+
+def _model_backend_status(response: httpx.Response) -> None:
+    messages = {
+        400: "ComfyUI hat den Modell-Upload abgelehnt.",
+        409: "Eine Modelldatei mit diesem Namen existiert bereits.",
+        413: "Die Modelldatei überschreitet die erlaubte Größe.",
+    }
+    if response.status_code in messages:
+        raise HTTPException(status_code=response.status_code, detail=messages[response.status_code])
+    if response.status_code not in (200, 201):
+        raise HTTPException(status_code=502, detail="ComfyUI-Modellservice nicht verfügbar.")
+
+
+async def _model_directories(client: httpx.AsyncClient, token: str) -> list[str]:
+    response = await client.get(
+        f"{COMFYUI_BASE_URL}/server_download/directories",
+        headers={"Authorization": "Bearer " + token},
+    )
+    _model_backend_status(response)
+    try:
+        payload = response.json()
+        directories = payload["directories"]
+        if not isinstance(directories, list) or not directories:
+            raise ValueError
+        if any(not isinstance(item, str) or not _MODEL_DIRECTORY_PATTERN.fullmatch(item) for item in directories):
+            raise ValueError
+    except (ValueError, KeyError, TypeError):
+        raise HTTPException(status_code=502, detail="Ungültige Antwort des ComfyUI-Modellservice.") from None
+    return list(dict.fromkeys(directories))
+
+
+@app.get("/api/admin/models/directories")
+async def admin_model_directories(
+    _: dict[str, str] = Depends(require_admin),
+) -> dict[str, list[str]]:
+    token = _model_api_token()
+    try:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
+            directories = await _model_directories(client, token)
+    except httpx.HTTPError:
+        raise HTTPException(status_code=502, detail="ComfyUI-Modellservice nicht erreichbar.") from None
+    return {"directories": directories}
+
+
+@app.post("/api/admin/models/upload", status_code=201)
+async def admin_upload_model(
+    save_path: str = Form(...),
+    file: UploadFile = File(...),
+    _: dict[str, str] = Depends(require_admin),
+) -> dict[str, Any]:
+    token = _model_api_token()
+    maximum = _model_upload_max_bytes()
+    filename = file.filename or ""
+    if (
+        not _MODEL_FILENAME_PATTERN.fullmatch(filename)
+        or ".." in filename
+        or Path(filename).suffix.lower() not in _MODEL_EXTENSIONS
+    ):
+        raise HTTPException(status_code=400, detail="Ungültiger Modell-Dateiname oder nicht unterstütztes Dateiformat.")
+    if not _MODEL_DIRECTORY_PATTERN.fullmatch(save_path):
+        raise HTTPException(status_code=400, detail="Ungültiges Modell-Zielverzeichnis.")
+    save_path = _MODEL_DIRECTORY_ALIASES.get(save_path, save_path)
+    if file.size is not None and file.size > maximum:
+        raise HTTPException(status_code=413, detail="Die Modelldatei überschreitet die erlaubte Größe.")
+    if file.size == 0:
+        raise HTTPException(status_code=400, detail="Die Modelldatei ist leer.")
+
+    boundary = f"iceki-{secrets.token_hex(24)}"
+    uploaded_bytes = 0
+
+    async def multipart_body() -> AsyncGenerator[bytes, None]:
+        nonlocal uploaded_bytes
+        # ComfyUI validates the destination before streaming the file to its PVC.
+        yield (
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"save_path\"\r\n\r\n"
+            f"{save_path}\r\n--{boundary}\r\n"
+            f"Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n"
+            "Content-Type: application/octet-stream\r\n\r\n"
+        ).encode("ascii")
+        while chunk := await file.read(_MODEL_UPLOAD_CHUNK_BYTES):
+            uploaded_bytes += len(chunk)
+            if uploaded_bytes > maximum:
+                raise HTTPException(status_code=413, detail="Die Modelldatei überschreitet die erlaubte Größe.")
+            yield chunk
+        if not uploaded_bytes:
+            raise HTTPException(status_code=400, detail="Die Modelldatei ist leer.")
+        yield f"\r\n--{boundary}--\r\n".encode("ascii")
+
+    try:
+        timeout = httpx.Timeout(connect=10.0, read=3600.0, write=3600.0, pool=30.0)
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+            if save_path not in await _model_directories(client, token):
+                raise HTTPException(status_code=400, detail="Modell-Zielverzeichnis ist nicht freigegeben.")
+            response = await client.post(
+                f"{COMFYUI_BASE_URL}/server_download/upload",
+                headers={
+                    "Authorization": "Bearer " + token,
+                    "Content-Type": f"multipart/form-data; boundary={boundary}",
+                },
+                content=multipart_body(),
+            )
+        _model_backend_status(response)
+        try:
+            payload = response.json()
+            if (
+                response.status_code != 201
+                or payload["filename"] != filename
+                or payload["save_path"] != save_path
+                or type(payload["bytes"]) is not int
+                or payload["bytes"] != uploaded_bytes
+            ):
+                raise ValueError
+        except (ValueError, KeyError, TypeError):
+            raise HTTPException(status_code=502, detail="Ungültige Antwort des ComfyUI-Modellservice.") from None
+        return {"filename": filename, "save_path": save_path, "bytes": uploaded_bytes}
+    except httpx.HTTPError:
+        raise HTTPException(status_code=502, detail="ComfyUI-Modellservice nicht erreichbar.") from None
+    finally:
+        await file.close()
+
+
+@app.post("/api/admin/models/restart", status_code=202)
+async def admin_restart_comfyui(
+    _: dict[str, str] = Depends(require_admin),
+) -> dict[str, str]:
+    token = _model_api_token()
+    try:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
+            response = await client.post(
+                f"{COMFYUI_BASE_URL}/server_download/restart",
+                headers={"Authorization": "Bearer " + token},
+                json={},
+            )
+        if response.status_code == 409:
+            raise HTTPException(
+                status_code=409,
+                detail="ComfyUI ist beschäftigt: aktive Uploads oder Downloads zuerst abschließen.",
+            )
+        if response.status_code != 202:
+            raise HTTPException(status_code=502, detail="ComfyUI-Neustart konnte nicht angefordert werden.")
+        return {"status": "restarting"}
+    except httpx.HTTPError:
+        raise HTTPException(status_code=502, detail="ComfyUI-Modellservice nicht erreichbar.") from None
 
 
 @app.get("/api/config")

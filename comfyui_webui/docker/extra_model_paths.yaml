@@ -1,0 +1,3 @@
+image_custom_nodes:
+  base_path: /opt/model-custom-nodes
+  custom_nodes: .

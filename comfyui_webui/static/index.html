@@ -404,6 +404,45 @@
           </table>
         </section>
 
+        <section class="card">
+          <h2>Modelle manuell hochladen</h2>
+          <p class="hint">
+            Die Datei wird per HTTP in <code>ComfyUI/models/&lt;Zielverzeichnis&gt;/</code>
+            auf dem persistenten ComfyUI-Modellvolume gespeichert, nicht im WebUI-Volume.
+            Bestehende Dateien werden nicht &uuml;berschrieben.
+          </p>
+          <p class="hint">
+            <strong>Nur vertrauensw&uuml;rdige Modelldateien hochladen!</strong>
+            Insbesondere Pickle-basierte Formate (.pt, .pth, .ckpt, .bin) k&ouml;nnen beim Laden Code ausf&uuml;hren.
+            Bevorzugt .safetensors oder .gguf verwenden.
+          </p>
+          <div class="admin-form card-inner">
+            <label>Zielverzeichnis
+              <select id="adminModelDirectory" disabled>
+                <option value="">Zielverzeichnisse laden …</option>
+              </select>
+            </label>
+            <label>Modelldatei
+              <input id="adminModelFile" type="file" accept=".safetensors,.gguf,.pt,.pth,.ckpt,.bin" />
+            </label>
+            <div class="admin-toolbar">
+              <button id="adminModelUploadBtn" type="button" disabled>Modell hochladen</button>
+              <button id="adminModelRefreshBtn" class="btn-secondary" type="button">Zielverzeichnisse laden</button>
+            </div>
+            <progress id="adminModelProgress" class="model-upload-progress hidden" max="100" value="0"
+                      aria-label="Modell-Upload-Fortschritt"></progress>
+            <p id="adminModelUploadStatus" class="hint" role="status" aria-live="polite"></p>
+            <p class="hint">
+              Nach einem Upload reicht oft das Aktualisieren der Modellliste (Seite neu laden).
+              Falls n&ouml;tig kann ComfyUI neu gestartet werden. Laufende Generierungen
+              werden unterbrochen; bei aktiven Uploads oder Downloads wird der Neustart abgelehnt.
+              Persistente Modelle bleiben erhalten.
+            </p>
+            <button id="adminModelRestartBtn" class="btn-secondary" type="button">ComfyUI neu starten</button>
+            <p id="adminModelRestartStatus" class="hint" role="status" aria-live="polite"></p>
+          </div>
+        </section>
+
         <!-- Model Aliases -->
         <section class="card">
           <h2>Modell-Aliase</h2>

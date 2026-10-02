@@ -2,6 +2,7 @@ FROM python:3.12-slim
 
 # ComfyUI v0.38.0; keep custom nodes and their dependencies in reviewed images.
 ARG COMFYUI_REF=6b747c0428c343e1417219641db93a4fb7cb69ae
+ARG MODEL_DOWNLOADER_REF=419fd24ba57d20334351ddfff28ab93c84163a67
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl git libgl1 libglib2.0-0 libgomp1 \
     && rm -rf /var/lib/apt/lists/*
@@ -9,9 +10,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /opt/ComfyUI
 RUN curl --fail --location --retry 3 \
     "https://github.com/Comfy-Org/ComfyUI/archive/${COMFYUI_REF}.tar.gz" \
-    -o /tmp/comfyui.tar.gz \
-    && tar -xzf /tmp/comfyui.tar.gz --strip-components=1 \
-    && rm /tmp/comfyui.tar.gz
+    -o /opt/comfyui.tar.gz \
+    && tar -xzf /opt/comfyui.tar.gz --strip-components=1 \
+    && rm /opt/comfyui.tar.gz
+RUN mkdir -p /opt/model-custom-nodes/ComfyUI-AutoModelDownloader \
+    && curl --fail --location --retry 3 \
+    "https://github.com/FNGarvin/ComfyUI-AutoModelDownloader/archive/${MODEL_DOWNLOADER_REF}.tar.gz" \
+    -o /opt/model-downloader.tar.gz \
+    && tar -xzf /opt/model-downloader.tar.gz \
+    -C /opt/model-custom-nodes/ComfyUI-AutoModelDownloader --strip-components=1 \
+    && rm -rf /opt/model-custom-nodes/ComfyUI-AutoModelDownloader/web \
+    && rm -f /opt/model-custom-nodes/ComfyUI-AutoModelDownloader/prestartup_script.py
+# Replace the upstream routes and browser extension with reviewed image-owned code.
+COPY docker/model_downloader/ /opt/model-custom-nodes/ComfyUI-AutoModelDownloader/
+COPY docker/extra_model_paths.yaml /opt/extra_model_paths.yaml
 COPY docker/torch-constraints.txt /opt/torch-constraints.txt
 RUN pip install --no-cache-dir -r /opt/torch-constraints.txt \
     --index-url https://download.pytorch.org/whl/cu126 \
@@ -38,4 +50,4 @@ EXPOSE 8188
 HEALTHCHECK --interval=30s --timeout=5s --start-period=120s \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8188/system_stats', timeout=3)"
 ENTRYPOINT ["/usr/local/bin/comfyui-entrypoint"]
-CMD ["--listen", "0.0.0.0", "--port", "8188", "--disable-auto-launch", "--base-directory", "/data", "--enable-manager", "--enable-manager-legacy-ui"]
+CMD ["--listen", "0.0.0.0", "--port", "8188", "--disable-auto-launch", "--base-directory", "/data", "--extra-model-paths-config", "/opt/extra_model_paths.yaml", "--enable-manager", "--enable-manager-legacy-ui"]

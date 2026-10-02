@@ -11,6 +11,27 @@ APP_DIR = Path(__file__).resolve().parent.parent
 
 
 class ContainerDeploymentTests(unittest.TestCase):
+    def test_pinned_downloader_loads_image_code_without_copying_it_to_pvc(self):
+        dockerfile = (APP_DIR / "Dockerfile.comfyui").read_text()
+        paths = (APP_DIR / "docker/extra_model_paths.yaml").read_text()
+        entrypoint = (APP_DIR / "docker/comfyui-entrypoint.sh").read_text()
+        self.assertIn("MODEL_DOWNLOADER_REF=419fd24ba57d20334351ddfff28ab93c84163a67", dockerfile)
+        self.assertIn("FNGarvin/ComfyUI-AutoModelDownloader/archive/${MODEL_DOWNLOADER_REF}", dockerfile)
+        self.assertIn("-o /opt/model-downloader.tar.gz", dockerfile)
+        self.assertNotIn("rm /opt/model-downloader.tar.gz", dockerfile)
+        self.assertIn("rm -rf /opt/model-custom-nodes/ComfyUI-AutoModelDownloader/web", dockerfile)
+        self.assertIn("rm -f /opt/model-custom-nodes/ComfyUI-AutoModelDownloader/prestartup_script.py", dockerfile)
+        self.assertLess(dockerfile.index("rm -rf /opt/model-custom-nodes"),
+                        dockerfile.index("COPY docker/model_downloader/"))
+        self.assertIn("COPY docker/model_downloader/ /opt/model-custom-nodes/ComfyUI-AutoModelDownloader/", dockerfile)
+        self.assertIn('"--base-directory", "/data"', dockerfile)
+        self.assertIn('"--extra-model-paths-config", "/opt/extra_model_paths.yaml"', dockerfile)
+        self.assertIn("base_path: /opt/model-custom-nodes", paths)
+        self.assertIn("custom_nodes: .", paths)
+        self.assertNotIn("cp /opt/model-custom-nodes", entrypoint)
+        self.assertNotIn("git clone", entrypoint)
+        self.assertNotIn("curl ", entrypoint)
+
     def run_build(self, directory, **settings):
         output = directory / "deploy.yaml"
         log = directory / "commands.log"

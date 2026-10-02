@@ -528,3 +528,11 @@ button:disabled {
   font-size: 0.82rem;
   margin-top: 0.25rem;
 }
+
+.model-upload-progress {
+  display: block;
+  width: 100%;
+  margin-top: 0.75rem;
+}
+
+.model-upload-progress.hidden { display: none; }
