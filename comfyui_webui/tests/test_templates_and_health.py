@@ -1,6 +1,7 @@
 """Liveness and fail-closed workflow template regression tests."""
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 import unittest
@@ -24,9 +25,25 @@ class HealthTests(unittest.TestCase):
         backend.assert_not_called()
         self.assertEqual(client.get("/api/admin/templates").status_code, 401)
 
+    def test_bootstrap_credential_stdout_is_configurable(self) -> None:
+        for setting, should_print in ((None, True), ("false", False)):
+            with self.subTest(setting=setting):
+                env = {} if setting is None else {"COMFYUI_WEBUI_LOG_BOOTSTRAP_PASSWORD": setting}
+                with (
+                    patch.dict(main.os.environ, env, clear=True),
+                    patch.object(main, "_setup_file_logging"),
+                    patch.object(main._auth, "bootstrap_admin", return_value="example-generated-credential"),
+                    patch.object(registry, "get_template", return_value={"name": "default"}),
+                    patch.object(registry, "discover_local_templates", return_value=[]),
+                    patch("builtins.print") as output,
+                ):
+                    asyncio.run(main._startup())
+                self.assertEqual(output.called, should_print)
+
+
 class TemplateTests(unittest.TestCase):
     def setUp(self) -> None:
-        directory = self.enterContext(tempfile.TemporaryDirectory(dir=main.APP_DIR))
+        directory = self.enterContext(tempfile.TemporaryDirectory())
         self.data_dir = Path(directory)
         self.templates_dir = self.data_dir / "templates"
         self.templates_dir.mkdir()

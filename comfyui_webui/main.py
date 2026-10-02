@@ -155,7 +155,9 @@ async def _startup() -> None:
     _setup_file_logging()
     _gen_logger.info("=== ComfyUI WebUI gestartet ===")
     bootstrap_credential = _auth.bootstrap_admin()
-    if bootstrap_credential:
+    if bootstrap_credential and os.getenv("COMFYUI_WEBUI_LOG_BOOTSTRAP_PASSWORD", "true").lower() in {
+        "1", "true", "yes", "on",
+    }:
         # Print the one-time bootstrap credential to stdout only.
         # We deliberately avoid logger.* here so it is not captured in log files.
         _lines = [

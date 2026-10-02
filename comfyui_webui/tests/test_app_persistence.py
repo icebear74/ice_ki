@@ -34,7 +34,7 @@ assert main._ALIASES_FILE == expected / 'model_aliases.json'
 """)
 
     def test_all_components_persist_in_configured_directory_across_processes(self) -> None:
-        with tempfile.TemporaryDirectory(dir=APP_DIR) as directory:
+        with tempfile.TemporaryDirectory() as directory:
             data_dir = Path(directory) / "persistent"
             self.run_python("""
 import json
@@ -42,6 +42,7 @@ import auth, config, main, mapping_registry, template_registry
 for module in (auth, main, mapping_registry, template_registry):
     assert module.DATA_DIR == config.DATA_DIR, module.__name__
 assert auth.bootstrap_admin()
+assert auth.BOOTSTRAP_CREDS_FILE.stat().st_mode & 0o777 == 0o600
 mapping_registry.register_mapping('saved', 'Saved', template_name='saved')
 template_registry.TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
 path = template_registry.TEMPLATES_DIR / 'saved.json'
@@ -60,6 +61,7 @@ for filename in ('users.json', 'bootstrap_credentials.txt', 'mappings.json',
             self.run_python("""
 import auth, config, main, mapping_registry, template_registry
 assert auth.bootstrap_admin() is None
+assert auth.BOOTSTRAP_CREDS_FILE.stat().st_mode & 0o777 == 0o600
 assert auth.get_user('admin')['role'] == 'admin'
 assert mapping_registry.get_mapping('saved')['template_name'] == 'saved'
 assert template_registry.get_template('saved')['approved']

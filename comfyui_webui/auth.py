@@ -129,6 +129,7 @@ def bootstrap_admin() -> str | None:
     ]
     try:
         BOOTSTRAP_CREDS_FILE.write_text("\n".join(_cred_lines), encoding="utf-8")
+        BOOTSTRAP_CREDS_FILE.chmod(0o600)
     except OSError as exc:
         logger.warning("auth: could not write bootstrap_credentials.txt: %s", exc)
 
