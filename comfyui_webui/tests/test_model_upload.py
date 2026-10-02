@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 import httpx
+import starlette.formparsers as formparsers
 from fastapi import HTTPException, UploadFile
 from fastapi.testclient import TestClient
 
@@ -85,6 +86,90 @@ class ModelUploadTests(unittest.TestCase):
         return self.client.post("/api/admin/models/upload", data={"save_path": directory}, files={
             "file": (filename, contents, "application/octet-stream"),
         })
+
+    async def raw_upload(self, headers, receive):
+        messages = []
+
+        async def send(message):
+            messages.append(message)
+
+        await main.app({
+            "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+            "method": "POST", "scheme": "http", "path": "/api/admin/models/upload",
+            "raw_path": b"/api/admin/models/upload", "root_path": "", "query_string": b"",
+            "headers": headers, "server": ("testserver", 80), "client": ("testclient", 123),
+        }, receive, send)
+        status = next(message["status"] for message in messages if message["type"] == "http.response.start")
+        body = b"".join(message.get("body", b"") for message in messages if message["type"] == "http.response.body")
+        self.assertNotIn(self.token.encode(), body)
+        return status, body
+
+    def test_upload_auth_guard_never_consumes_unauthorized_body(self) -> None:
+        for cookie, expected in ((None, 401), ("unknown-session", 401), ("model-user", 403)):
+            with self.subTest(cookie=cookie):
+                headers = [(b"content-type", b"multipart/form-data; boundary=test")]
+                if cookie:
+                    headers.append((b"cookie", f"ki_session={cookie}".encode()))
+                receive = AsyncMock(side_effect=AssertionError("unauthorized body consumed"))
+                status, _ = asyncio.run(self.raw_upload(headers, receive))
+                self.assertEqual(status, expected)
+                receive.assert_not_awaited()
+        self.backend.assert_not_called()
+
+    def test_known_body_length_is_rejected_without_consuming_or_spooling(self) -> None:
+        maximum = main._MODEL_MULTIPART_MARGIN_BYTES + 4
+        with patch.dict(main.os.environ, {"COMFYUI_MODEL_MAX_BYTES": "4"}):
+            for value, expected in ((str(maximum + 1), 413), ("not-a-length", 400), ("-1", 400)):
+                with self.subTest(length=value):
+                    receive = AsyncMock(side_effect=AssertionError("rejected body consumed"))
+                    status, _ = asyncio.run(self.raw_upload([
+                        (b"cookie", b"ki_session=model-admin"), (b"content-length", value.encode()),
+                    ], receive))
+                    self.assertEqual(status, expected)
+                    receive.assert_not_awaited()
+        self.backend.assert_not_called()
+
+    def test_unknown_or_false_body_length_stops_stream_and_closes_spool_files(self) -> None:
+        prefix = (
+            b"--guard\r\nContent-Disposition: form-data; name=\"save_path\"\r\n\r\ncheckpoints\r\n"
+            b"--guard\r\nContent-Disposition: form-data; name=\"file\"; filename=\"weights.pt\"\r\n"
+            b"Content-Type: application/octet-stream\r\n\r\n"
+        )
+        original_spool = formparsers.SpooledTemporaryFile
+        for declared_length in (None, b"1"):
+            with self.subTest(declared_length=declared_length):
+                files = []
+
+                def spool(*args, **kwargs):
+                    kwargs["max_size"] = 64
+                    file = original_spool(*args, **kwargs)
+                    files.append(file)
+                    return file
+
+                receive = AsyncMock(side_effect=[
+                    {"type": "http.request", "body": prefix, "more_body": True},
+                    {"type": "http.request", "body": b"x" * (512 * 1024), "more_body": True},
+                    {"type": "http.request", "body": b"x" * (512 * 1024), "more_body": True},
+                    {"type": "http.request", "body": b"never consumed", "more_body": False},
+                ])
+                headers = [
+                    (b"cookie", b"ki_session=model-admin"),
+                    (b"content-type", b"multipart/form-data; boundary=guard"),
+                ]
+                if declared_length is None:
+                    headers.append((b"transfer-encoding", b"chunked"))
+                else:
+                    headers.append((b"content-length", declared_length))
+                with (
+                    patch.dict(main.os.environ, {"COMFYUI_MODEL_MAX_BYTES": "16"}),
+                    patch.object(formparsers, "SpooledTemporaryFile", side_effect=spool),
+                ):
+                    status, _ = asyncio.run(self.raw_upload(headers, receive))
+                self.assertEqual(status, 413)
+                self.assertEqual(receive.await_count, 3)
+                self.assertTrue(files)
+                self.assertTrue(all(file.closed for file in files))
+        self.backend.assert_not_called()
 
     def test_admin_authentication_required_for_both_endpoints(self) -> None:
         for cookie, expected in ((None, 401), ("model-user", 403)):

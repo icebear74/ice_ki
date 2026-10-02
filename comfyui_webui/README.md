@@ -326,6 +326,9 @@ verwenden: Die erlaubte Endung allein garantiert keine sichere Datei,
 insbesondere bei Pickle-basierten `.pt`/`.pth`/`.ckpt`-Dateien.
 Transfers nach einem Containerabbruch gegebenenfalls erneut starten;
 Fortschritt/Warteschlange werden nicht persistent wiederaufgenommen.
+Bei einem harten Abbruch können `*.part`-Dateien zurückbleiben. Diese erst
+nach Stoppen des ComfyUI-Pods und Prüfung gezielt entfernen; laufende
+Transfers oder bereits vollständige Modelle nicht löschen.
 
 **Wichtig für vorhandene RWO-PVCs:** `accessModes` eines gebundenen Claims lässt
 sich nicht einfach auf RWX umstellen. Nicht bestehende Claims löschen!

@@ -410,6 +410,10 @@
             Die Datei wird per HTTP in <code>ComfyUI/models/&lt;Zielverzeichnis&gt;/</code>
             auf dem persistenten ComfyUI-Modellvolume gespeichert, nicht im WebUI-Volume.
             Bestehende Dateien werden nicht &uuml;berschrieben.
+            Das WebUI puffert Multipart-Uploads vor der Weiterleitung als tempor&auml;re Datei
+            (im Container normalerweise <code>/tmp</code>, konfigurierbar mit <code>TMPDIR</code>).
+            Dort muss Platz f&uuml;r die gesamte Modelldatei vorhanden sein; das separate
+            ComfyUI-Modellvolume wird nicht in das WebUI eingebunden.
           </p>
           <p class="hint">
             <strong>Nur vertrauensw&uuml;rdige Modelldateien hochladen!</strong>

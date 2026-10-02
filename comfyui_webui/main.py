@@ -20,6 +20,8 @@ from fastapi import Cookie, Depends, FastAPI, File, Form, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.formparsers import MultiPartException
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 import auth as _auth
 import mapping_registry as _mappings
@@ -806,6 +808,7 @@ def index() -> FileResponse:
 
 _MODEL_EXTENSIONS = {".safetensors", ".gguf", ".pt", ".pth", ".ckpt", ".bin"}
 _MODEL_UPLOAD_CHUNK_BYTES = 1024 * 1024
+_MODEL_MULTIPART_MARGIN_BYTES = 1024 * 1024
 _MODEL_DIRECTORY_PATTERN = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _MODEL_FILENAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._ -]{0,239}")
 _MODEL_DIRECTORY_ALIASES = {
@@ -830,6 +833,73 @@ def _model_upload_max_bytes() -> int:
     except ValueError:
         raise HTTPException(status_code=503, detail="Modell-Upload: ungültige Größenkonfiguration.") from None
     return maximum
+
+
+class _ModelUploadBodyGuard:
+    """Authorize and bound uploads before FastAPI parses or spools multipart."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or scope.get("path", "").rstrip("/") != "/api/admin/models/upload":
+            await self.app(scope, receive, send)
+            return
+        request = Request(scope)
+        session = _sessions.get(request.cookies.get(_SESSION_COOKIE, ""))
+        error: HTTPException | None = None
+        if session is None:
+            error = HTTPException(status_code=401, detail="Nicht eingeloggt.")
+        elif session.get("role") != "admin":
+            error = HTTPException(status_code=403, detail="Admin-Berechtigung erforderlich.")
+        else:
+            try:
+                _model_api_token()
+                maximum = _model_upload_max_bytes() + _MODEL_MULTIPART_MARGIN_BYTES
+                length = request.headers.get("content-length")
+                if length is not None:
+                    try:
+                        declared_size = int(length)
+                        if declared_size < 0:
+                            raise ValueError
+                    except ValueError:
+                        raise HTTPException(status_code=400, detail="Ungültige Upload-Anfrage.") from None
+                    if declared_size > maximum:
+                        raise HTTPException(status_code=413, detail="Modell-Upload überschreitet die erlaubte Größe.")
+            except HTTPException as exc:
+                error = exc
+        if error is not None:
+            await JSONResponse(status_code=error.status_code, content={"detail": error.detail})(scope, receive, send)
+            return
+
+        received = 0
+        exceeded = False
+
+        async def counted_receive() -> Message:
+            nonlocal received, exceeded
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > maximum:
+                    exceeded = True
+                    # This parser exception closes provisional multipart spool files.
+                    raise MultiPartException("Modell-Upload überschreitet die erlaubte Größe.")
+            return message
+
+        async def guarded_send(message: Message) -> None:
+            if exceeded:
+                if message["type"] == "http.response.start":
+                    await JSONResponse(
+                        status_code=413,
+                        content={"detail": "Modell-Upload überschreitet die erlaubte Größe."},
+                    )(scope, receive, send)
+                return
+            await send(message)
+
+        await self.app(scope, counted_receive, guarded_send)
+
+
+app.add_middleware(_ModelUploadBodyGuard)
 
 
 def _model_backend_status(response: httpx.Response) -> None:

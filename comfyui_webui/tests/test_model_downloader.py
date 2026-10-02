@@ -5,9 +5,16 @@ import json
 import os
 from pathlib import Path
 import signal
+import select
+import shutil
+import subprocess
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
+import urllib.error
+import urllib.request
+import uuid
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -24,6 +31,49 @@ SPEC.loader.exec_module(backend)
 AUTH = {"Authorization": "Bearer " + "test-model-api"}
 PAYLOAD = {"url": "https://huggingface.co/team/model/resolve/main/test.safetensors",
            "save_path": "checkpoints", "filename": "test.safetensors"}
+
+# Match pinned ComfyUI's AppRunner and KeyboardInterrupt/finally shutdown flow.
+RESTART_SERVER = """
+import asyncio, importlib.util, os, pathlib, sys, types
+from aiohttp import web
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+app = web.Application()
+routes = web.RouteTableDef()
+server = types.ModuleType('server')
+server.PromptServer = types.SimpleNamespace(instance=types.SimpleNamespace(app=app, routes=routes))
+sys.modules['server'] = server
+directory = pathlib.Path(sys.argv[1]) / 'docker/model_downloader'
+name = str(directory).replace('.', '_x_')
+spec = importlib.util.spec_from_file_location(name, directory / '__init__.py')
+module = importlib.util.module_from_spec(spec)
+sys.modules[name] = module
+spec.loader.exec_module(module)
+app.add_routes(routes)
+async def start():
+    runner = web.AppRunner(app, handle_signals=False)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', int(os.getenv('COMFYUI_PID1_TEST_PORT', '0')))
+    await site.start()
+    print('PID=' + str(os.getpid()), flush=True)
+    print('PORT=' + str(site._server.sockets[0].getsockname()[1]), flush=True)
+    await asyncio.Future()
+try:
+    loop.run_until_complete(start())
+except KeyboardInterrupt:
+    print('STOPPED', flush=True)
+finally:
+    print('ASSET_MANAGER_SHUTDOWN', flush=True)
+"""
+
+
+def real_restart_request(port):
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/server_download/restart", data=b"{}",
+        headers={**AUTH, "Content-Type": "application/json"}, method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        return response.status, json.load(response)
 
 
 class Content:
@@ -574,8 +624,11 @@ class ResolverTests(unittest.IsolatedAsyncioTestCase):
         app = web.Application()
         instance = SimpleNamespace(routes=web.RouteTableDef(), app=app)
         server = SimpleNamespace(PromptServer=SimpleNamespace(instance=instance))
-        with patch.dict(sys.modules, {"server": server, module_name: module}):
+        with patch.dict(sys.modules, {"server": server, module_name: module}), patch.object(
+            signal, "signal"
+        ) as register_signal:
             spec.loader.exec_module(module)
+            register_signal.assert_called_once_with(signal.SIGTERM, signal.default_int_handler)
             self.assertEqual(module.NODE_CLASS_MAPPINGS, {})
             self.assertEqual(module.NODE_DISPLAY_NAME_MAPPINGS, {})
             self.assertEqual(module.WEB_DIRECTORY, "./web")
@@ -588,6 +641,79 @@ class ResolverTests(unittest.IsolatedAsyncioTestCase):
             })
             self.assertIn(module.cleanup_downloader, app.on_cleanup)
             await module.cleanup_downloader(app)
+
+
+class RealRestartTests(unittest.TestCase):
+    def test_real_sigterm_stops_server_through_comfyui_keyboardinterrupt_finally_flow(self):
+        env = {**os.environ, "COMFYUI_MODEL_API_TOKEN": "test-model-api",
+               "PYTHONDONTWRITEBYTECODE": "1"}
+        process = subprocess.Popen(
+            [sys.executable, "-u", "-c", RESTART_SERVER, str(APP_DIR)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+        )
+        try:
+            self.assertTrue(select.select([process.stdout], [], [], 10)[0], "Server did not start")
+            pid_line = process.stdout.readline()
+            port_line = process.stdout.readline()
+            self.assertTrue(pid_line.startswith("PID="), pid_line)
+            self.assertTrue(port_line.startswith("PORT="), port_line)
+            self.assertEqual(real_restart_request(int(port_line[5:])),
+                             (202, {"status": "restarting"}))
+            stdout, stderr = process.communicate(timeout=10)
+            self.assertEqual(process.returncode, 0, stderr)
+            self.assertIn("STOPPED", stdout)
+            self.assertIn("ASSET_MANAGER_SHUTDOWN", stdout)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate(timeout=5)
+
+    @unittest.skipUnless(os.getenv("COMFYUI_TEST_PID1_IMAGE") and shutil.which("docker"),
+                         "Set COMFYUI_TEST_PID1_IMAGE to an existing Python 3.12 image")
+    def test_restart_actually_exits_container_pid1(self):
+        name = "iceki-restart-smoke-" + uuid.uuid4().hex[:12]
+        dependency_roots = sorted({
+            str(Path(path).resolve()) for path in sys.path
+            if path.endswith(("site-packages", "dist-packages")) and Path(path).is_dir()
+        })
+        dependency_mounts = [f"/smoke-deps-{index}" for index in range(len(dependency_roots))]
+        command = [
+            "docker", "run", "--detach", "--name", name, "--read-only",
+            "--publish", "127.0.0.1::8188", "--env", "COMFYUI_MODEL_API_TOKEN=test-model-api",
+            "--env", "COMFYUI_PID1_TEST_PORT=8188", "--env", "PYTHONDONTWRITEBYTECODE=1",
+            "--env", "PYTHONPATH=" + ":".join(dependency_mounts),
+            "--volume", f"{APP_DIR}:/smoke-app:ro",
+        ]
+        for source, target in zip(dependency_roots, dependency_mounts):
+            command.extend(["--volume", f"{source}:{target}:ro"])
+        command.extend([
+            os.environ["COMFYUI_TEST_PID1_IMAGE"],
+            "python", "-u", "-c", RESTART_SERVER, "/smoke-app",
+        ])
+        try:
+            started = subprocess.run(command, capture_output=True, text=True, timeout=30)
+            self.assertEqual(started.returncode, 0, started.stderr)
+            published = subprocess.check_output(
+                ["docker", "port", name, "8188/tcp"], text=True, timeout=10)
+            port = int(published.strip().rsplit(":", 1)[1])
+            for attempt in range(50):
+                try:
+                    accepted = real_restart_request(port)
+                    break
+                except (OSError, urllib.error.URLError):
+                    time.sleep(0.1)
+            else:
+                logs = subprocess.check_output(["docker", "logs", name], text=True, timeout=10)
+                self.fail("PID1 smoke server did not respond: " + logs)
+            self.assertEqual(accepted, (202, {"status": "restarting"}))
+            exit_code = subprocess.check_output(["docker", "wait", name], text=True, timeout=15)
+            logs = subprocess.check_output(["docker", "logs", name], text=True, timeout=10)
+            self.assertEqual(exit_code.strip(), "0", logs)
+            self.assertIn("PID=1", logs)
+            self.assertIn("STOPPED", logs)
+            self.assertIn("ASSET_MANAGER_SHUTDOWN", logs)
+        finally:
+            subprocess.run(["docker", "rm", "--force", name], capture_output=True, timeout=15)
 
 
 if __name__ == "__main__":
