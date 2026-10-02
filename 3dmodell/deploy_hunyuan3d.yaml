@@ -35,33 +35,27 @@ spec:
       runtimeClassName: nvidia
       containers:
       - name: hunyuan3d
-        image: pytorch/pytorch:2.2.0-cuda12.1-cudnn8-devel
-        workingDir: /app/Hunyuan3D-2
-        command: ["/bin/bash", "-c"]
-        args:
-          - |
-            set -e
-            apt-get update && apt-get install -y git ffmpeg libsm6 libxext6 build-essential
-            mkdir -p /app
-            if [ ! -d "/app/Hunyuan3D-2/.git" ]; then
-              echo "Cloning Tencent-Hunyuan/Hunyuan3D-2..."
-              git clone --depth 1 https://github.com/Tencent-Hunyuan/Hunyuan3D-2.git /app/Hunyuan3D-2
-            fi
-            cd /app/Hunyuan3D-2
-            pip install --no-cache-dir -r requirements.txt
-            python3 app.py --host 0.0.0.0 --port 7860
+        image: registry.example.invalid:5000/hunyuan3d:2.1-shape-1
+        imagePullPolicy: Always
         ports:
         - containerPort: 7860
           name: http
+        readinessProbe:
+          httpGet:
+            path: /
+            port: http
+          periodSeconds: 10
         resources:
           limits:
             nvidia.com/gpu: "1"
-            memory: 16Gi
+            memory: 32Gi
+            ephemeral-storage: 2Gi
           requests:
             nvidia.com/gpu: "1"
-            memory: 8Gi
+            memory: 16Gi
+            ephemeral-storage: 512Mi
         volumeMounts:
-        - mountPath: /root/.cache/huggingface
+        - mountPath: /data
           name: hf-cache
       volumes:
       - name: hf-cache
