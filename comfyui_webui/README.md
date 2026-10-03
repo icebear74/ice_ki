@@ -132,8 +132,14 @@ heruntergeladen; z. B.:
 
 ```bash
 kubectl -n comfyui exec deployment/ollama -- ollama pull qwen2.5:7b
-kubectl -n comfyui exec deployment/webui -- cat /data/bootstrap_credentials.txt
+./show-initial-password.sh
 ```
+
+`show-initial-password.sh` zeigt Benutzername und Initialpasswort der **WebUI**
+aus `/data/bootstrap_credentials.txt` an, ohne sie zu ändern. Nicht in öffentliche
+Logs umleiten. Das ist nicht der Modelltransfer-API-Token aus `show-api-token.sh`;
+ComfyUI selbst besitzt hier kein separates Login-Passwort. Nach einer
+Passwortänderung zeigt die Datei weiterhin nur die ursprünglichen Zugangsdaten.
 
 Das heruntergeladene Modell in der WebUI auswählen. Die Bootstrap-Datei nach
 dem ersten Login löschen und das Passwort über die WebUI ändern:
