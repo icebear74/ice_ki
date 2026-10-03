@@ -1,5 +1,6 @@
 """Exercise token scripts with shell doubles, never a cluster or image build."""
 import base64
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -23,6 +24,8 @@ kubectl() {
                     return 23
                 fi
                 printf '%s' "$ENCODED"
+            elif [[ "$*" == *"jsonpath={.metadata.resourceVersion}"* ]]; then
+                printf '%s' "$RESOURCE_VERSION"
             elif [[ "$*" == *"-o name" ]]; then
                 if [[ "$GET_ERROR" == name ]]; then
                     printf 'Forbidden: cannot get secrets\n' >&2
@@ -59,7 +62,10 @@ kubectl() {
                 return 25
             fi
             ;;
-        "rollout restart deployment/comfyui deployment/webui") ;;
+        "patch deployment comfyui webui --type=merge -p "*)
+            local expected_patch="{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"comfyui.ice-ki/model-api-secret-version\":\"${RESOURCE_VERSION}\"}}}}}"
+            [[ $# == 7 && "$7" == "$expected_patch" ]] || return 97
+            ;;
         *)
             printf 'Unexpected kubectl arguments: %s\n' "$*" >&2
             return 97
@@ -113,6 +119,7 @@ class ApiTokenScriptTests(unittest.TestCase):
             GET_ERROR="",
             CREATE_FAIL="0",
             APPLY_FAIL="0",
+            RESOURCE_VERSION="12345",
         )
 
     def encode(self, token):
@@ -141,6 +148,7 @@ class ApiTokenScriptTests(unittest.TestCase):
         self.assertFalse(any(" create " in command for command in commands))
         self.assertFalse(any(" apply " in command for command in commands))
         self.assertFalse(any("rollout restart" in command for command in commands))
+        self.assertFalse(any(" patch " in command for command in commands))
         self.assertFalse(any(command.startswith("openssl ") for command in commands))
         self.assertEqual(list(self.token_directory.iterdir()), [])
 
@@ -153,7 +161,29 @@ class ApiTokenScriptTests(unittest.TestCase):
         self.assertEqual((self.directory / "token-mode").read_text().strip(), "600")
         self.assertEqual((self.directory / "directory-mode").read_text().strip(), "700")
 
-    def test_absent_secret_generates_token_and_restarts_after_apply(self):
+    def assert_version_apply_patch(self, version="12345"):
+        commands = self.commands()
+        version_get = (
+            "kubectl -n comfyui get secret comfyui-model-api "
+            "-o jsonpath={.metadata.resourceVersion}"
+        )
+        apply = f"kubectl apply -f {self.manifest}"
+        payload = json.dumps({
+            "spec": {"template": {"metadata": {"annotations": {
+                "comfyui.ice-ki/model-api-secret-version": version,
+            }}}},
+        }, separators=(",", ":"))
+        patch = (
+            "kubectl -n comfyui patch deployment comfyui webui "
+            f"--type=merge -p {payload}"
+        )
+        for command in (version_get, apply, patch):
+            self.assertEqual(commands.count(command), 1)
+        self.assertLess(commands.index(version_get), commands.index(apply))
+        self.assertLess(commands.index(apply), commands.index(patch))
+        self.assertFalse(any("rollout restart" in command for command in commands))
+
+    def test_absent_secret_generates_token_and_patches_after_apply(self):
         for trace in (False, True):
             with self.subTest(trace=trace):
                 result = self.run_script("deploy.sh", self.manifest, trace=trace)
@@ -166,10 +196,8 @@ class ApiTokenScriptTests(unittest.TestCase):
                 creation = next(command for command in commands
                                 if "create secret generic" in command)
                 apply = f"kubectl apply -f {self.manifest}"
-                restart = ("kubectl -n comfyui rollout restart "
-                           "deployment/comfyui deployment/webui")
                 self.assertLess(commands.index(creation), commands.index(apply))
-                self.assertLess(commands.index(apply), commands.index(restart))
+                self.assert_version_apply_patch()
                 self.assertEqual((self.directory / "created-payload").read_text(),
                                  self.generated + "\n")
                 self.assertEqual((self.directory / "applied-manifest").read_text(),
@@ -178,16 +206,20 @@ class ApiTokenScriptTests(unittest.TestCase):
                 self.assert_token_cleaned_up()
                 self.log.unlink()
 
-    def test_existing_token_is_preserved_without_generation_or_restart(self):
+    def test_existing_token_is_preserved_and_version_patched_without_generation(self):
         for trace in (False, True):
             with self.subTest(trace=trace):
                 result = self.run_script("deploy.sh", self.manifest, trace=trace,
-                                         ENCODED=self.encode(self.existing))
+                                         ENCODED=self.encode(self.existing),
+                                         RESOURCE_VERSION="67890")
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn("preserved", result.stdout)
-                self.assertEqual(len(self.commands()), 2)
-                self.assertEqual(self.commands()[-1],
-                                 f"kubectl apply -f {self.manifest}")
+                self.assertEqual(len(self.commands()), 4)
+                self.assert_version_apply_patch("67890")
+                self.assertFalse(any(command.startswith("openssl ")
+                                     for command in self.commands()))
+                self.assertFalse(any(" create " in command
+                                     for command in self.commands()))
                 self.assertEqual(list(self.token_directory.iterdir()), [])
                 self.assertFalse((self.directory / "created-payload").exists())
                 self.log.unlink()
@@ -217,13 +249,48 @@ class ApiTokenScriptTests(unittest.TestCase):
                 self.assert_no_mutations()
                 self.log.unlink()
 
-    def test_apply_failure_never_restarts_rollout(self):
+    def test_apply_failure_never_patches_deployments(self):
         result = self.run_script("deploy.sh", self.manifest, trace=True, APPLY_FAIL="1")
         self.assertEqual(result.returncode, 25)
         self.assertIn("Manifest apply rejected", result.stderr)
         self.assertIn(f"kubectl apply -f {self.manifest}", self.commands())
         self.assertFalse(any("rollout restart" in command for command in self.commands()))
+        self.assertFalse(any(" patch " in command for command in self.commands()))
         self.assert_token_cleaned_up()
+
+    def test_retry_after_apply_failure_patches_existing_secret_version(self):
+        failed = self.run_script("deploy.sh", self.manifest, APPLY_FAIL="1")
+        self.assertEqual(failed.returncode, 25)
+        self.assertFalse(any(" patch " in command for command in self.commands()))
+        self.assert_token_cleaned_up()
+        preserved_token = (self.directory / "created-payload").read_text()
+        self.log.unlink()
+
+        result = self.run_script("deploy.sh", self.manifest,
+                                 ENCODED=self.encode(preserved_token))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("preserved", result.stdout)
+        self.assert_version_apply_patch()
+        self.assertFalse(any(command.startswith("openssl ")
+                             or " create " in command for command in self.commands()))
+        self.assertEqual((self.directory / "created-payload").read_text(),
+                         preserved_token)
+        self.assertEqual(list(self.token_directory.iterdir()), [])
+
+    def test_invalid_secret_version_aborts_before_apply_or_patch(self):
+        for version in ("", "not-numeric", "123\n456", '123"}'):
+            with self.subTest(version=version):
+                result = self.run_script("deploy.sh", self.manifest, trace=True,
+                                         ENCODED=self.encode(self.existing),
+                                         RESOURCE_VERSION=version)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Cannot determine model API Secret version", result.stderr)
+                self.assertEqual(len(self.commands()), 2)
+                self.assertIn(
+                    "kubectl -n comfyui get secret comfyui-model-api "
+                    "-o jsonpath={.metadata.resourceVersion}", self.commands())
+                self.assert_no_mutations()
+                self.log.unlink()
 
     def test_secret_creation_failure_cleans_up_and_does_not_apply_manifest(self):
         result = self.run_script("deploy.sh", self.manifest, trace=True, CREATE_FAIL="1")
@@ -231,6 +298,7 @@ class ApiTokenScriptTests(unittest.TestCase):
         self.assertIn("Secret creation rejected", result.stderr)
         self.assertNotIn(f"kubectl apply -f {self.manifest}", self.commands())
         self.assertFalse(any("rollout restart" in command for command in self.commands()))
+        self.assertFalse(any(" patch " in command for command in self.commands()))
         self.assert_token_cleaned_up()
 
     def test_display_prints_decoded_token(self):
@@ -283,6 +351,7 @@ class ApiTokenScriptTests(unittest.TestCase):
         creation = next(command for command in commands if "create secret generic" in command)
         self.assertLess(commands.index(creation),
                         commands.index(f"kubectl apply -f {self.manifest}"))
+        self.assert_version_apply_patch()
         self.assertEqual((self.directory / "created-payload").read_text(),
                          self.generated + "\n")
         self.assert_token_cleaned_up()

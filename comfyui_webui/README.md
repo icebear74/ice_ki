@@ -290,10 +290,14 @@ auch Zugriffsfehler werden nicht als fehlendes Secret behandelt.
 zeigt ihn lokal zum Einfügen in den Passwortdialog an – nicht in öffentliche
 Logs umleiten oder weitergeben. Für direkten Zugriff in ComfyUI wird er nur
 im Arbeitsspeicher der Seite gehalten. Keine manuelle Token-Datei erforderlich.
-Nach erstmaliger Secret-Erstellung startet `deploy.sh` ComfyUI und WebUI neu,
-damit bereits laufende Pods die neuen Umgebungsvariablen laden; dies kann
-laufende Generierungen/Transfers unterbrechen. Bei späterer manueller
-Token-Rotation beide Deployments ebenfalls neu starten.
+`deploy.sh` hinterlegt die Secret-Version in den Pod-Vorlagen von ComfyUI
+und WebUI. Die erste Einrichtung oder eine geänderte Secret-Version löst
+einen Rollout aus, damit laufende Pods die Umgebungsvariablen neu laden.
+Das funktioniert auch nach einem fehlgeschlagenen Apply beim erneuten Aufruf.
+Dies kann laufende Generierungen/Transfers unterbrechen; ein unveränderter
+Token löst durch die Annotation keinen zusätzlichen Rollout aus.
+Nach manueller Token-Rotation `deploy.sh` erneut ausführen oder beide
+Deployments neu starten.
 
 Nach Rebuild mit neuem `IMAGE_TAG` und Apply:
 

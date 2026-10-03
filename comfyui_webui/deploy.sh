@@ -7,7 +7,6 @@ if (( $# != 1 )) || [[ ! -f "$1" ]]; then
   exit 2
 fi
 manifest=$1
-created=false
 encoded=$(kubectl -n comfyui get secret comfyui-model-api --ignore-not-found -o 'jsonpath={.data.token}')
 if [[ -n "$encoded" ]]; then
   token=$(printf '%s' "$encoded" | base64 --decode)
@@ -32,13 +31,16 @@ else
   kubectl -n comfyui create secret generic comfyui-model-api --from-file="token=$token_dir/token"
   rm -rf -- "$token_dir"
   trap - EXIT
-  created=true
   echo "Model API token generated and stored in Kubernetes Secret."
 fi
 
-kubectl apply -f "$manifest"
-if [[ "$created" == true ]]; then
-  # Already-running pods need to reload the newly provisioned environment.
-  kubectl -n comfyui rollout restart deployment/comfyui deployment/webui
+version=$(kubectl -n comfyui get secret comfyui-model-api -o 'jsonpath={.metadata.resourceVersion}')
+if [[ ! "$version" =~ ^[0-9]+$ ]]; then
+  echo "Cannot determine model API Secret version; refusing deployment." >&2
+  exit 1
 fi
+kubectl apply -f "$manifest"
+# The same annotation is a no-op; retries and Secret changes reload pod environments.
+kubectl -n comfyui patch deployment comfyui webui --type=merge \
+  -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"comfyui.ice-ki/model-api-secret-version\":\"${version}\"}}}}}"
 echo "Show the token locally with: $(dirname -- "${BASH_SOURCE[0]}")/show-api-token.sh"
