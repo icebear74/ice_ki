@@ -249,6 +249,7 @@ metadata:
   labels:
     app: ollama
 spec:
+  progressDeadlineSeconds: 1200
   replicas: 1
   strategy:
     type: Recreate

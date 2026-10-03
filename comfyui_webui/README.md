@@ -465,19 +465,34 @@ dedizierter Übersetzer; Übersetzungsqualität ist promptabhängig.
 ### Nur Ollama neu deployen
 
 Kein neues Ollama-Image nötig: Der vorhandene Registry-Mirror wird weiterverwendet.
-Die **aktuelle** Vorlage enthält die Bootstrap-Konfiguration. Auf dem Server
-die LAN-Registry und den bereits gepushten Image-Tag einsetzen:
+Die **aktuelle** Vorlage enthält die Bootstrap-Konfiguration.
+Das Skript übernimmt ohne Argument das bereits konfigurierte Ollama-Image:
 
 ```bash
-sed 's#registry.example.invalid:5000/comfyui-ollama:1#192.168.1.10:5000/comfyui-ollama:1#g' \
-  /home/icebear/ice_ki/comfyui_webui/k8s/deploy.yaml \
-  | kubectl apply -l app=ollama -f -
-kubectl -n comfyui rollout status deployment/ollama --timeout=20m
-kubectl -n comfyui exec deployment/ollama -- ollama list
+/home/icebear/ice_ki/comfyui_webui/deploy-ollama.sh
 ```
 
 Der Selektor wendet ausschließlich das Ollama-Deployment an; PVCs, ComfyUI
 und WebUI bleiben unverändert. Vorhandener PVC und Service werden vorausgesetzt.
+Falls die Adresse bereits durch eine Beispiel-IP überschrieben wurde, das
+korrekte, bereits gepushte Image explizit übergeben:
+`/home/icebear/ice_ki/comfyui_webui/deploy-ollama.sh REGISTRY-IP:5000/comfyui-ollama:TAG`.
+`REGISTRY-IP` und `TAG` ersetzen, **nicht** die Dokumentations-IP `192.168.1.10`
+ungeprüft übernehmen. Bei einem Single-Node-Cluster kann `127.0.0.1:5000`
+funktionieren, wenn dort die Registry läuft und K3s für HTTP konfiguriert ist.
+Bei mehreren Nodes muss die Registry auf allen Nodes unter der angegebenen
+Adresse erreichbar sein.
+
+`Init:ImagePullBackOff` bedeutet, dass bereits das Init-Container-Image nicht
+gezogen werden kann – nicht, dass der Modelldownload fehlgeschlagen ist.
+Das Skript gibt bei Rolloutfehlern die Pod-Events aus. Gezielt prüfen:
+`kubectl -n comfyui describe pods -l app=ollama`.
+Die Docker-Meldung „Not all multiplatform-content is present“ ist auf einem
+homogenen Cluster kein Fehler: Es wurde die lokale Plattform gespiegelt.
+Bei unterschiedlichen Node-Architekturen muss ein passendes Multiarch-Image
+bereitgestellt werden. Ein erfolgreicher Docker-Push beweist außerdem nicht,
+dass der K3s-Container-Runtime dieselbe HTTP-Registry-Konfiguration vorliegt.
+
 Nur Neustart ohne Konfigurationsänderung:
 `kubectl -n comfyui rollout restart deployment/ollama`.
 Für die neuen WebUI-Funktionen (Thread-Optionen und Modellvorauswahl) muss
