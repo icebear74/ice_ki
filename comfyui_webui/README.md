@@ -131,7 +131,7 @@ nicht localhost. Ein Übersetzungsmodell wird bewusst **nicht automatisch**
 heruntergeladen; z. B.:
 
 ```bash
-kubectl -n comfyui exec deployment/ollama -- ollama pull qwen2.5:7b
+kubectl -n comfyui exec deployment/ollama -- ollama list
 ./show-initial-password.sh
 ```
 
@@ -385,7 +385,52 @@ kubectl -n comfyui logs deployment/comfyui
 kubectl -n comfyui describe pod -l app=comfyui
 ```
 
+Ollama lädt beim ersten Start automatisch **`qwen2.5:1.5b`** (kleines
+mehrsprachiges Modell, rund 1 GB Download) für Deutsch→Englisch auf seinen PVC.
+Vorhandene Modelle werden nicht erneut heruntergeladen oder gelöscht.
+Der Init-Container benötigt dafür Internetzugriff auf die Ollama-Modellregistry;
+bei Downloadfehlern bleibt der Pod im Init-Zustand statt ohne Modell zu starten.
+Fortschritt: `kubectl -n comfyui logs deployment/ollama -c bootstrap-translation-model`.
+
 Ollama läuft standardmäßig auf der CPU, sodass nur ComfyUI eine GPU belegt.
+Das CPU-Limit ist **28 logische CPUs**; die WebUI übergibt `num_thread: 28`
+und `num_gpu: 0` an beide Ollama-Endpunkte. 14 physische Kerne mit SMT ergeben
+28 Threads, nicht 28 physische Kerne. Das Limit reserviert keine Kerne und
+erzwingt keine Volllast; für kleine Modelle können 14 Threads sogar schneller
+sein. `OLLAMA_NUM_THREADS` in der WebUI lässt sich entsprechend reduzieren.
+Nur eine Ollama-Anfrage wird gleichzeitig verarbeitet (`OLLAMA_NUM_PARALLEL=1`).
+
+Die WebUI liest installierte Modelle über `/api/tags`; früher wurde **kein**
+initiales Modell heruntergeladen (nur ein manueller Pull dokumentiert).
+Im Mapping-Editor wird die Liste erneut geladen, und für neue Mappings
+`qwen2.5:1.5b` vorausgewählt, sobald es verfügbar ist. Bei bestehenden Mappings
+das Modell selbst auswählen und speichern. Die Voreinstellung
+`OLLAMA_DEFAULT_MODEL` muss bei Änderung in WebUI und Ollama-Init-Container
+übereinstimmen. Das Modell ist ein allgemeines kleines Sprachmodell, kein
+dedizierter Übersetzer; Übersetzungsqualität ist promptabhängig.
+
+### Nur Ollama neu deployen
+
+Kein neues Ollama-Image nötig: Der vorhandene Registry-Mirror wird weiterverwendet.
+Die **aktuelle** Vorlage enthält die Bootstrap-Konfiguration. Auf dem Server
+die LAN-Registry und den bereits gepushten Image-Tag einsetzen:
+
+```bash
+sed 's#registry.example.invalid:5000/comfyui-ollama:1#192.168.1.10:5000/comfyui-ollama:1#g' \
+  /home/icebear/ice_ki/comfyui_webui/k8s/deploy.yaml \
+  | kubectl apply -l app=ollama -f -
+kubectl -n comfyui rollout status deployment/ollama --timeout=20m
+kubectl -n comfyui exec deployment/ollama -- ollama list
+```
+
+Der Selektor wendet ausschließlich das Ollama-Deployment an; PVCs, ComfyUI
+und WebUI bleiben unverändert. Vorhandener PVC und Service werden vorausgesetzt.
+Nur Neustart ohne Konfigurationsänderung:
+`kubectl -n comfyui rollout restart deployment/ollama`.
+Für die neuen WebUI-Funktionen (Thread-Optionen und Modellvorauswahl) muss
+zusätzlich das WebUI-Image neu gebaut/gepusht und dessen Deployment aktualisiert
+werden; der Ollama-only-Schritt ändert die laufende WebUI nicht.
+
 Für Ollama-GPU-Betrieb eine weitere GPU und dieselbe NVIDIA-Runtime plus
 `nvidia.com/gpu`-Ressourcen konfigurieren; eine GPU wird nicht automatisch
 zwischen Pods geteilt. Für CPU-only-ComfyUI `runtimeClassName` und beide

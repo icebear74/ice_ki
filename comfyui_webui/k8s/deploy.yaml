@@ -105,6 +105,10 @@ spec:
               value: http://comfyui:8188
             - name: OLLAMA_BASE_URL
               value: http://ollama:11434
+            - name: OLLAMA_DEFAULT_MODEL
+              value: qwen2.5:1.5b
+            - name: OLLAMA_NUM_THREADS
+              value: "28"
             - name: COMFYUI_MODEL_API_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -236,6 +240,8 @@ kind: Deployment
 metadata:
   name: ollama
   namespace: comfyui
+  labels:
+    app: ollama
 spec:
   replicas: 1
   strategy:
@@ -268,6 +274,51 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+        - name: bootstrap-translation-model
+          image: registry.example.invalid:5000/comfyui-ollama:1
+          imagePullPolicy: Always
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              ollama serve &
+              server_pid=$!
+              trap 'kill "$server_pid"; wait "$server_pid" || true' EXIT
+              attempts=0
+              until ollama list >/dev/null 2>&1; do
+                kill -0 "$server_pid"
+                attempts=$((attempts + 1))
+                [ "$attempts" -lt 60 ] || exit 1
+                sleep 1
+              done
+              if ! ollama show "$OLLAMA_DEFAULT_MODEL" >/dev/null 2>&1; then
+                ollama pull "$OLLAMA_DEFAULT_MODEL"
+              fi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          env:
+            - name: HOME
+              value: /data
+            - name: OLLAMA_HOST
+              value: 127.0.0.1:11434
+            - name: OLLAMA_MODELS
+              value: /data/models
+            - name: OLLAMA_DEFAULT_MODEL
+              value: qwen2.5:1.5b
+            - name: CUDA_VISIBLE_DEVICES
+              value: "-1"
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "28"
+              memory: 8Gi
+          volumeMounts:
+            - name: data
+              mountPath: /data
       containers:
         - name: ollama
           image: registry.example.invalid:5000/comfyui-ollama:1
@@ -283,6 +334,10 @@ spec:
               value: 0.0.0.0:11434
             - name: OLLAMA_MODELS
               value: /data/models
+            - name: CUDA_VISIBLE_DEVICES
+              value: "-1"
+            - name: OLLAMA_NUM_PARALLEL
+              value: "1"
           ports:
             - name: http
               containerPort: 11434
@@ -305,7 +360,7 @@ spec:
               cpu: 250m
               memory: 512Mi
             limits:
-              cpu: "4"
+              cpu: "28"
               memory: 8Gi
           volumeMounts:
             - name: data

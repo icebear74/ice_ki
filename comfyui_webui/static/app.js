@@ -4,6 +4,7 @@
 const state = {
   currentUser: null,   // { username, role, can_advanced }
   ollamaModels: [],
+  ollamaDefaultModel: "",
   checkpoints: [],     // all raw models from ComfyUI (including [unet] prefix)
   samplers: [],
   schedulers: [],
@@ -216,8 +217,14 @@ async function loadOllamaModels() {
   try {
     const data = await api("/api/ollama/models");
     state.ollamaModels = data.models || [];
-  } catch {
+    state.ollamaDefaultModel = data.default_model || "";
+  } catch (err) {
     state.ollamaModels = [];
+    state.ollamaDefaultModel = "";
+    throw new Error(`Ollama-Modellliste konnte nicht geladen werden: ${err.message}. Ollama-Dienst prüfen und Mapping-Editor erneut öffnen.`);
+  }
+  if (!state.ollamaModels.length) {
+    throw new Error(`Keine Ollama-Modelle verfügbar. Modellinitialisierung abwarten oder „ollama pull ${state.ollamaDefaultModel || "qwen2.5:1.5b"}“ im Ollama-Container ausführen, dann Mapping-Editor erneut öffnen.`);
   }
 }
 
@@ -993,9 +1000,13 @@ function _updateMappingFormTemplateHint(templateName) {
     : "Workflow-Standards konnten nicht extrahiert werden.";
 }
 
-function openMappingForm(editName) {
+async function openMappingForm(editName) {
   const form = $("addMappingForm");
-  form.classList.remove("hidden");
+  form.classList.add("hidden");
+  $("saveMappingBtn").disabled = true;
+  const errors = [];
+  let mappingLoaded = true;
+  await loadOllamaModels().catch((err) => errors.push(err.message));
   populateMappingFormSelects();
 
   if (editName) {
@@ -1003,9 +1014,9 @@ function openMappingForm(editName) {
     state.editingMappingName = editName;
     $("mappingFormTitle").textContent = `Mapping bearbeiten: ${editName}`;
     $("newMapName").disabled = true;
-    api(`/api/admin/mappings`).then((data) => {
+    await api(`/api/admin/mappings`).then((data) => {
       const m = (data.mappings || []).find((x) => x.name === editName);
-      if (!m) return;
+      if (!m) throw new Error(`Mapping „${editName}“ wurde nicht gefunden. Mapping-Liste neu laden.`);
       $("newMapName").value = m.name;
       $("newMapDisplay").value = m.display_name;
       $("newMapTemplate").value = m.template_name || "default";
@@ -1020,7 +1031,10 @@ function openMappingForm(editName) {
       if (state.samplers.includes(m.sampler)) $("newMapSampler").value = m.sampler;
       if (state.schedulers.includes(m.scheduler)) $("newMapScheduler").value = m.scheduler;
       $("newMapEnabled").checked = m.enabled !== false;
-    }).catch(() => {});
+    }).catch((err) => {
+      mappingLoaded = false;
+      errors.push(`Mapping konnte nicht geladen werden: ${err.message}. Mapping-Editor erneut öffnen.`);
+    });
   } else {
     state.editingMappingName = null;
     $("mappingFormTitle").textContent = "Neues Mapping";
@@ -1029,7 +1043,9 @@ function openMappingForm(editName) {
     $("newMapDisplay").value = "";
     $("newMapTemplate").value = "default";
     populateCheckpointSelect("");
-    populateOllamaModelSelect("");
+    populateOllamaModelSelect(
+      state.ollamaModels.includes(state.ollamaDefaultModel) ? state.ollamaDefaultModel : ""
+    );
     $("newMapSteps").value = 30;
     $("newMapCfg").value = 7;
     $("newMapSeed").value = -1;
@@ -1038,6 +1054,13 @@ function openMappingForm(editName) {
     $("newMapImageCount").value = 1;
     $("newMapEnabled").checked = true;
   }
+  $("saveMappingBtn").disabled = !mappingLoaded;
+  if (errors.length) {
+    const message = errors.join(" | ");
+    setStatus(message, true);
+    alert(message);
+  }
+  form.classList.remove("hidden");
 }
 
 async function saveMapping() {

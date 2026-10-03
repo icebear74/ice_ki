@@ -68,6 +68,13 @@ def _setup_file_logging() -> None:
 
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
+OLLAMA_DEFAULT_MODEL = os.getenv("OLLAMA_DEFAULT_MODEL", "qwen2.5:1.5b")
+try:
+    OLLAMA_NUM_THREADS = int(os.getenv("OLLAMA_NUM_THREADS", "28"))
+    if OLLAMA_NUM_THREADS <= 0:
+        raise ValueError
+except ValueError as exc:
+    raise ValueError("OLLAMA_NUM_THREADS must be a positive integer") from exc
 COMFYUI_BASE_URL = os.getenv("COMFYUI_BASE_URL", "http://127.0.0.1:8188").rstrip("/")
 # Optional: absolute path to ComfyUI's output folder (e.g. /home/user/ComfyUI/output).
 # When set, generated images are deleted from ComfyUI after being saved to the local gallery.
@@ -1057,7 +1064,7 @@ def get_config() -> dict[str, str]:
 @app.get("/api/ollama/models")
 async def get_ollama_models(
     _: dict[str, str] = Depends(require_user),
-) -> dict[str, list[str]]:
+) -> dict[str, list[str] | str]:
     logger.info("get_ollama_models: querying %s/api/tags", OLLAMA_BASE_URL)
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -1073,7 +1080,7 @@ async def get_ollama_models(
         logger.warning("get_ollama_models: unexpected error: %s", exc)
         raise HTTPException(status_code=502, detail=f"Ollama-Antwort konnte nicht gelesen werden: {exc}") from exc
 
-    return {"models": models}
+    return {"models": models, "default_model": OLLAMA_DEFAULT_MODEL}
 
 
 @app.post("/api/translate")
@@ -1601,7 +1608,7 @@ async def _call_ollama_raw(instruction: str, model: str) -> str:
                     "messages": [{"role": "user", "content": instruction}],
                     "stream": False,
                     "keep_alive": -1,
-                    "options": {"temperature": 0.1},
+                    "options": {"temperature": 0.1, "num_gpu": 0, "num_thread": OLLAMA_NUM_THREADS},
                 },
             )
         if response.status_code < 400:
@@ -1621,7 +1628,7 @@ async def _call_ollama_raw(instruction: str, model: str) -> str:
                     "prompt": instruction,
                     "stream": False,
                     "keep_alive": -1,
-                    "options": {"temperature": 0.1},
+                    "options": {"temperature": 0.1, "num_gpu": 0, "num_thread": OLLAMA_NUM_THREADS},
                 },
             )
         response.raise_for_status()

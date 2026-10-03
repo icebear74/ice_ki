@@ -11,6 +11,36 @@ APP_DIR = Path(__file__).resolve().parent.parent
 
 
 class ContainerDeploymentTests(unittest.TestCase):
+    def test_ollama_bootstraps_small_model_on_persistent_cpu_storage(self):
+        manifest = (APP_DIR / "k8s/deploy.yaml").read_text()
+        deployment = next(
+            doc for doc in manifest.split("---")
+            if "\nkind: Deployment\n" in doc and "\n  name: ollama\n" in doc
+        )
+        self.assertIn("  labels:\n    app: ollama\n", deployment)
+        self.assertEqual(manifest.count("  labels:\n    app: ollama\n"), 1)
+        init, runtime = deployment.split("      containers:\n")
+        self.assertIn("name: bootstrap-translation-model", init)
+        self.assertIn("ollama serve &", init)
+        self.assertIn('kill -0 "$server_pid"', init)
+        self.assertIn('ollama show "$OLLAMA_DEFAULT_MODEL"', init)
+        self.assertIn('ollama pull "$OLLAMA_DEFAULT_MODEL"', init)
+        self.assertIn('trap \'kill "$server_pid"; wait "$server_pid" || true\' EXIT', init)
+        self.assertIn("value: qwen2.5:1.5b", init)
+        for section in (init, runtime):
+            self.assertIn("name: OLLAMA_MODELS\n              value: /data/models", section)
+            self.assertIn('name: CUDA_VISIBLE_DEVICES\n              value: "-1"', section)
+            self.assertIn('cpu: "28"', section)
+            self.assertNotIn("nvidia.com/gpu", section)
+        self.assertIn('name: OLLAMA_NUM_PARALLEL\n              value: "1"', runtime)
+        self.assertIn("claimName: ollama-data", runtime)
+        webui = next(
+            doc for doc in manifest.split("---")
+            if "\nkind: Deployment\n" in doc and "\n  name: webui\n" in doc
+        )
+        self.assertIn("name: OLLAMA_DEFAULT_MODEL\n              value: qwen2.5:1.5b", webui)
+        self.assertIn('name: OLLAMA_NUM_THREADS\n              value: "28"', webui)
+
     def test_pinned_downloader_loads_image_code_without_copying_it_to_pvc(self):
         dockerfile = (APP_DIR / "Dockerfile.comfyui").read_text()
         paths = (APP_DIR / "docker/extra_model_paths.yaml").read_text()
