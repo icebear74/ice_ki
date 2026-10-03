@@ -11,6 +11,29 @@ APP_DIR = Path(__file__).resolve().parent.parent
 
 
 class ContainerDeploymentTests(unittest.TestCase):
+    def test_huggingface_secret_is_optional_and_comfyui_only(self):
+        manifest = (APP_DIR / "k8s/deploy.yaml").read_text()
+        documents = manifest.split("---")
+        comfyui = next(
+            doc for doc in documents
+            if "\nkind: Deployment\n" in doc and "\n  name: comfyui\n" in doc
+        )
+        self.assertIn(
+            "- name: HF_TOKEN\n"
+            "              valueFrom:\n"
+            "                secretKeyRef:\n"
+            "                  name: comfyui-huggingface\n"
+            "                  key: token\n"
+            "                  optional: true",
+            comfyui,
+        )
+        self.assertEqual(manifest.count("- name: HF_TOKEN"), 1)
+        self.assertIn("name: comfyui-model-api", comfyui)
+        for doc in documents:
+            if doc != comfyui:
+                self.assertNotIn("HF_TOKEN", doc)
+                self.assertNotIn("comfyui-huggingface", doc)
+
     def test_ollama_bootstraps_small_model_on_persistent_cpu_storage(self):
         manifest = (APP_DIR / "k8s/deploy.yaml").read_text()
         deployment = next(

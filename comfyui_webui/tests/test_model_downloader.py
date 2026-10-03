@@ -106,6 +106,7 @@ class Session:
     def __init__(self, responses):
         self.responses = list(responses)
         self.urls = []
+        self.headers = []
 
     async def __aenter__(self):
         return self
@@ -116,11 +117,15 @@ class Session:
     def get(self, url, **kwargs):
         assert kwargs["allow_redirects"] is False
         self.urls.append(url)
+        self.headers.append(kwargs["headers"])
         return self.responses.pop(0)
 
 
 class ModelAPITests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        env = patch.dict(os.environ, {"HF_TOKEN": ""})
+        env.start()
+        self.addCleanup(env.stop)
         self.temp = tempfile.TemporaryDirectory(dir=APP_DIR)
         self.root = Path(self.temp.name) / "models"
         self.service = backend.ModelDownloader(self.root, token="test-model-api", max_bytes=1024)
@@ -402,6 +407,7 @@ class ModelAPITests(unittest.IsolatedAsyncioTestCase):
                                  "total": 13, "error": None, "filename": "test.safetensors",
                                  "save_path": "checkpoints"})
         self.assertEqual(session.urls, [PAYLOAD["url"]])
+        self.assertEqual(session.headers, [{"Accept-Encoding": "identity"}])
         self.assertEqual((self.root / "checkpoints/test.safetensors").read_bytes(), b"model-weights")
         response = await self.request("GET", "/status")
         all_states = (await response.json())["downloads"]
@@ -411,6 +417,161 @@ class ModelAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await response.json(), state)
         response = await self.request("GET", "/status/unknown")
         self.assertEqual(response.status, 404)
+
+    async def test_hf_environment_token_is_trimmed_and_separate_from_admin_auth(self):
+        with patch.dict(os.environ, {"HF_TOKEN": " \thf_test_read_token\n",
+                                    "COMFYUI_MODEL_API_TOKEN": "test-model-api"}):
+            configured = backend.ModelDownloader(self.root)
+        self.assertEqual(configured.hf_token, "hf_test_read_token")
+        self.assertEqual(configured.token, "test-model-api")
+        self.service.hf_token = configured.hf_token
+        response = await self.request("GET", "/status", headers={
+            "Authorization": "Bearer " + configured.hf_token,
+        })
+        self.assertEqual(response.status, 403)
+        state, session = await self.transfer([Response()])
+        self.assertEqual(state["status"], "completed")
+        self.assertEqual(session.headers[0]["Authorization"], "Bearer " + configured.hf_token)
+        self.service.token = ""
+        response = await self.request("GET", "/status")
+        self.assertEqual(response.status, 403)
+        with patch.dict(os.environ, {"HF_TOKEN": " \t\n "}):
+            self.assertEqual(backend.ModelDownloader(self.root).hf_token, "")
+
+    async def test_hf_token_control_characters_are_rejected_without_value(self):
+        for control in (*map(chr, range(32)), *map(chr, range(127, 160))):
+            with self.subTest(control=ord(control)), patch.object(
+                backend.os, "environ", {**os.environ, "HF_TOKEN": "hf_private" + control + "secret"}
+            ):
+                with self.assertRaises(ValueError) as caught:
+                    backend.ModelDownloader(self.root)
+                self.assertEqual(str(caught.exception), "Invalid HF_TOKEN configuration")
+                self.assertNotIn("private", str(caught.exception))
+
+    async def test_hf_authorization_only_for_exact_https_hosts(self):
+        self.service.hf_token = "hf_test_read_token"
+        self.service.extra_hosts = (
+            "cdn.example.org", "huggingface.co.evil.example", "hf.co.evil.example",
+            "evil-huggingface.co", "huggingface.com",
+        )
+        urls = (
+            ("https://huggingface.co/model", True),
+            ("https://hf.co/model", True),
+            ("https://HUGGINGFACE.CO:443/model", True),
+            ("https://HF.CO:443/model", True),
+            ("https://cdn.huggingface.co/model", False),
+            ("https://cdn-lfs.huggingface.co/model", False),
+            ("https://cdn.xethub.hf.co/model", False),
+            ("https://sub.hf.co/model", False),
+            ("https://huggingface.co.evil.example/model", False),
+            ("https://hf.co.evil.example/model", False),
+            ("https://evil-huggingface.co/model", False),
+            ("https://huggingface.com/model", False),
+            ("https://cdn.example.org/model", False),
+            ("https://civitai.com/api/download/models/1", False),
+        )
+        for index, (url, authorized) in enumerate(urls):
+            with self.subTest(url=url):
+                state, session = await self.transfer(
+                    [Response()], url=url, filename=f"host-{index}.gguf")
+                self.assertEqual(state["status"], "completed")
+                expected = {"Accept-Encoding": "identity"}
+                if authorized:
+                    expected["Authorization"] = "Bearer " + self.service.hf_token
+                self.assertEqual(session.headers, [expected])
+
+    async def test_hf_redirect_headers_are_fresh_and_restore_only_on_hf(self):
+        self.service.hf_token = "hf_test_read_token"
+        self.service.extra_hosts = ("cdn.example.org",)
+        hops = [
+            "https://cdn-lfs.huggingface.co/model",
+            "https://cdn.example.org/model",
+            "https://hf.co:443/team/model",
+            "../relative-model",
+            "https://huggingface.co/model",
+        ]
+        state, session = await self.transfer([
+            *[Response(status=302, headers={"Location": hop}) for hop in hops],
+            Response(),
+        ])
+        self.assertEqual(state["status"], "completed")
+        self.assertEqual(session.urls, [
+            PAYLOAD["url"], *hops[:3], "https://hf.co:443/relative-model", hops[-1],
+        ])
+        bearer = "Bearer " + self.service.hf_token
+        self.assertEqual([headers.get("Authorization") for headers in session.headers], [
+            bearer, None, None, bearer, bearer, bearer,
+        ])
+        self.assertEqual(len({id(headers) for headers in session.headers}), len(session.headers))
+
+    async def test_no_hf_token_public_redirects_never_send_admin_credential(self):
+        state, session = await self.transfer([
+            Response(status=302, headers={"Location": "https://hf.co/model"}),
+            Response(status=302, headers={"Location": "https://cdn.huggingface.co/model"}),
+            Response(),
+        ])
+        self.assertEqual(state["status"], "completed")
+        self.assertEqual(session.headers, [{"Accept-Encoding": "identity"}] * 3)
+
+    async def test_hf_token_is_not_accepted_from_api_payload_or_exposed_in_status(self):
+        self.service.hf_token = "hf_server_only_secret"
+        session = Session([Response()])
+        with patch.object(self.service, "session", return_value=session):
+            response = await self.start(hf_token="hf_client_secret", token="client_admin_secret")
+            self.assertEqual(response.status, 202)
+            start_body = await response.text()
+            await self.service.worker
+        self.assertEqual(session.headers[0]["Authorization"], "Bearer " + self.service.hf_token)
+        download_id = next(iter(self.service.downloads))
+        for path in ("/status", "/status/" + download_id, "/directories"):
+            response = await self.request("GET", path)
+            self.assertEqual(response.status, 200)
+            text = start_body + await response.text()
+            for secret in ("hf_server_only_secret", "hf_client_secret",
+                           "client_admin_secret", self.service.token):
+                self.assertNotIn(secret, text)
+
+    async def test_hf_access_errors_are_generic_and_explain_read_token_and_gate(self):
+        self.service.hf_token = "hf_private_secret"
+        for index, (host, status) in enumerate(
+            (host, status) for host in ("huggingface.co", "hf.co") for status in (401, 403)
+        ):
+            state, _ = await self.transfer([
+                Response(status=status, chunks=(b"remote-private-response",)),
+            ], url=f"https://{host}/private-model?signature=private-signature",
+                filename=f"denied-{index}.gguf")
+            self.assertEqual(state["status"], "error")
+            self.assertIn("read token", state["error"])
+            self.assertIn("gated model", state["error"])
+            for private in ("hf_private_secret", self.service.token, "https://",
+                            "private-model", "private-signature", "remote-private-response"):
+                self.assertNotIn(private, json.dumps(state))
+        state, _ = await self.transfer([Response(status=403)], url="https://civitai.com/model")
+        self.assertEqual(state["error"], "Model server did not return a successful file response")
+        self.service.hf_token = ""
+        state, session = await self.transfer(
+            [Response(status=401)], filename="public-denied.gguf")
+        self.assertIn("read token", state["error"])
+        self.assertNotIn("Authorization", session.headers[0])
+
+    async def test_generic_network_and_api_exceptions_do_not_log_or_expose_credentials(self):
+        self.service.hf_token = "hf_private_secret"
+        detail = f"{self.service.hf_token} {self.service.token} https://hf.co/private?secret=1"
+        with patch("logging.Logger._log") as log:
+            state, _ = await self.transfer([Response(chunks=(RuntimeError(detail),))])
+            self.assertEqual(state["error"], "Model transfer failed")
+            download_id = next(iter(self.service.downloads))
+            for path in ("/status", "/status/" + download_id):
+                response = await self.request("GET", path)
+                text = await response.text()
+                self.assertNotIn(self.service.hf_token, text)
+                self.assertNotIn(self.service.token, text)
+                self.assertNotIn("https://", text)
+            with patch.object(self.service, "destination", side_effect=RuntimeError(detail)):
+                response = await self.start()
+            self.assertEqual(response.status, 500)
+            self.assertEqual(await response.json(), {"error": "Model API request failed"})
+            log.assert_not_called()
 
     async def test_remote_url_allowlist_rejects_arbitrary_ssrf(self):
         for url in ("http://huggingface.co/file", "https://evil.example/model",
@@ -434,12 +595,17 @@ class ModelAPITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(session.urls), 2)
 
     async def test_redirect_to_private_or_untrusted_host_is_never_requested(self):
+        self.service.hf_token = "hf_test_read_token"
         for location in ("https://127.0.0.1/model", "https://evil.example/model",
-                         "http://huggingface.co/model", "https://[::1]/model"):
+                         "http://huggingface.co/model", "https://[::1]/model",
+                         "https://hf.co:8443/model", "https://huggingface.co./model"):
             state, session = await self.transfer([
                 Response(status=302, headers={"Location": location})])
             self.assertEqual(state["status"], "error")
             self.assertEqual(session.urls, [PAYLOAD["url"]])
+            self.assertEqual(session.headers, [{
+                "Accept-Encoding": "identity", "Authorization": "Bearer " + self.service.hf_token,
+            }])
             self.assertFalse((self.root / "checkpoints/test.safetensors.part").exists())
             self.assertFalse((self.root / "checkpoints/test.safetensors").exists())
 
@@ -615,6 +781,10 @@ class ResolverTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(session.connector.use_dns_cache)
             self.assertTrue(session.connector.force_close)
             self.assertIsInstance(session.connector._resolver, backend.PublicResolver)
+            self.assertIsInstance(session.cookie_jar, aiohttp.DummyCookieJar)
+            self.assertNotIn("Authorization", session.headers)
+            session.cookie_jar.update_cookies({"remote_session": "private-cookie"})
+            self.assertEqual(len(session.cookie_jar), 0)
 
     async def test_image_package_registers_routes_with_pinned_comfyui_loader_metadata(self):
         directory = APP_DIR / "docker/model_downloader"

@@ -162,6 +162,9 @@ class ModelDownloader:
         self.root = Path(root).absolute()
         self.token = (os.environ.get("COMFYUI_MODEL_API_TOKEN", "")
                       if token is None else token).strip()
+        self.hf_token = os.environ.get("HF_TOKEN", "").strip()
+        if any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in self.hf_token):
+            raise ValueError("Invalid HF_TOKEN configuration")
         limit = os.environ.get("COMFYUI_MODEL_MAX_BYTES", str(DEFAULT_MAX_BYTES))
         self.max_bytes = int(limit) if max_bytes is None else max_bytes
         if self.max_bytes <= 0:
@@ -227,6 +230,8 @@ class ModelDownloader:
                     return web.json_response({"error": "Invalid model API request"}, status=400)
                 except OSError:
                     return web.json_response({"error": "Model storage unavailable"}, status=409)
+                except Exception:
+                    return web.json_response({"error": "Model API request failed"}, status=500)
             routes.route(method, path)(endpoint)
 
     async def directories(self, request):
@@ -327,6 +332,7 @@ class ModelDownloader:
                                         force_close=True)
         return aiohttp.ClientSession(
             connector=connector, trust_env=False, auto_decompress=False,
+            cookie_jar=aiohttp.DummyCookieJar(),
             timeout=aiohttp.ClientTimeout(total=24 * 3600, connect=30, sock_read=120),
         )
 
@@ -334,14 +340,26 @@ class ModelDownloader:
         async with self.session() as session:
             for redirect in range(6):
                 validate_url(url, self.extra_hosts)
+                parsed = urlsplit(url)
+                is_hf = (parsed.scheme == "https"
+                         and parsed.hostname in ("huggingface.co", "hf.co")
+                         and parsed.port in (None, 443))
+                headers = {"Accept-Encoding": "identity"}
+                if is_hf and self.hf_token:
+                    headers["Authorization"] = "Bearer " + self.hf_token
                 async with session.get(url, allow_redirects=False,
-                                       headers={"Accept-Encoding": "identity"}) as response:
+                                       headers=headers) as response:
                     if response.status in (301, 302, 303, 307, 308):
                         location = response.headers.get("Location")
                         if not location or redirect == 5:
                             raise TransferError("Invalid or excessive model download redirects")
                         url = urljoin(url, location)
                         continue
+                    if is_hf and response.status in (401, 403):
+                        raise TransferError(
+                            "Hugging Face access denied. Configure HF_TOKEN with a read token "
+                            "and ensure the account has access to the gated model."
+                        )
                     if response.status != 200:
                         raise TransferError("Model server did not return a successful file response")
                     content_type = response.headers.get("Content-Type", "").lower()

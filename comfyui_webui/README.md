@@ -313,9 +313,9 @@ Nach Rebuild mit neuem `IMAGE_TAG` und Apply:
   Download-Metadaten (Name, Verzeichnis, URL) enthalten.
 * **„Modell-Downloads (PVC)“:** Bei fehlenden Metadaten direkten HTTPS-Link,
   Dateinamen und Zielverzeichnis eingeben, Transfer freischalten, Fortschritt
-  verfolgen. Für Modelle mit Anbieter-Login/Lizenzfreigabe stattdessen lokal
-  herunterladen und über die WebUI hochladen; keine Anbieter-Tokens in URLs
-  eintragen.
+  verfolgen. Für gated Hugging-Face-Modelle das separate Secret wie unten
+  einrichten. Bei anderen Anbietern mit Login lokal herunterladen und über
+  die WebUI hochladen; keine Anbieter-Tokens in URLs eintragen.
 * **WebUI / Admin / Modell-Upload:** Als Admin eine Modelldatei auswählen,
   Zielverzeichnis wählen und hochladen. Der WebUI-Server streamt die Datei an
   ComfyUI; die Datei landet **auf dem ComfyUI-PVC**, nicht im Browser und nicht
@@ -345,6 +345,59 @@ verwenden: Die erlaubte Endung allein garantiert keine sichere Datei,
 insbesondere bei Pickle-basierten `.pt`/`.pth`/`.ckpt`-Dateien.
 Transfers nach einem Containerabbruch gegebenenfalls erneut starten;
 Fortschritt/Warteschlange werden nicht persistent wiederaufgenommen.
+
+#### Gated Hugging-Face-Modelle
+
+Zuerst auf der Modellseite mit dem eigenen Hugging-Face-Account die Lizenz
+akzeptieren bzw. Zugang beantragen. Ein Token umgeht diese Freigabe nicht.
+Danach einen **Read-Token** erstellen, dessen Berechtigungen das gewünschte
+gated Repository einschließen. Keine Account-Passwörter verwenden.
+
+Der AutoDownloader liest `HF_TOKEN` ausschließlich im ComfyUI-Backend aus
+dem separaten optionalen Secret **`comfyui-huggingface`**, Schlüssel `token`.
+Der lokale Modelltransfer-Admin-Token (`comfyui-model-api`) bleibt unverändert;
+im Browserdialog weiterhin diesen Admin-Token eingeben, nicht den HF-Token.
+WebUI und Browser erhalten den HF-Token nicht.
+
+Sichere Einrichtung im lokalen **Bash-Terminal** mit passendem kubectl-Kontext
+(Token-Eingabe unsichtbar, kein Token als Kommandozeilenargument):
+
+```bash
+(
+  set +x
+  set -euo pipefail
+  umask 077
+  secret_dir=$(mktemp -d)
+  trap 'rm -rf -- "$secret_dir"; unset hf_token' EXIT
+  IFS= read -r -s -p 'Hugging Face Read-Token: ' hf_token
+  printf '\n'
+  [[ -n "${hf_token//[[:space:]]/}" ]] || { echo 'Token fehlt.' >&2; exit 1; }
+  printf '%s' "$hf_token" > "$secret_dir/token"
+  unset hf_token
+  kubectl -n comfyui create secret generic comfyui-huggingface \
+    --from-file="token=$secret_dir/token" --dry-run=client -o yaml \
+    | kubectl -n comfyui apply --server-side --field-manager=hf-token-setup -f -
+)
+kubectl -n comfyui rollout restart deployment/comfyui
+```
+
+Zuvor das neue ComfyUI-Image mit neuem `IMAGE_TAG` bauen/pushen und das
+aktualisierte Deployment anwenden, damit Backend und Secret-Referenz vorhanden
+sind. Keine Änderung am WebUI-Image erforderlich. Zur Token-Rotation denselben
+Einrichtungsschritt wiederholen und ComfyUI neu starten. Ohne Secret bleiben
+öffentliche Downloads möglich. Kubernetes-Secrets sind nicht automatisch
+verschlüsselt: Cluster-/Secret-Zugriff beschränken; niemals Token-Dateien oder
+Secret-YAML ins Repository, in Tickets oder öffentliche Logs kopieren.
+
+Als Download-URL einen HTTPS-`resolve`-Link zur Datei verwenden, z. B.
+`https://huggingface.co/ORGANISATION/MODELL/resolve/main/datei.safetensors`.
+Der HF-Bearer-Token wird pro Request nur an die **exakten** Hosts
+`huggingface.co` und `hf.co` gesendet. Bei jedem Redirect wird das Ziel erneut
+geprüft; CDN-/Subdomain-/Civitai-/zusätzliche Hosts erhalten **keinen** HF-Token.
+Signierte, erlaubte CDN-Weiterleitungen werden ohne diesen Header verfolgt.
+Cookies werden nicht weitergereicht. Ein zusätzlicher Download-Host erweitert
+nie die Token-Empfängerliste.
+
 Bei einem harten Abbruch können `*.part`-Dateien zurückbleiben. Diese erst
 nach Stoppen des ComfyUI-Pods und Prüfung gezielt entfernen; laufende
 Transfers oder bereits vollständige Modelle nicht löschen.

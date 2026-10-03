@@ -201,6 +201,12 @@ spec:
                   name: comfyui-model-api
                   key: token
                   optional: true
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: comfyui-huggingface
+                  key: token
+                  optional: true
           ports:
             - name: http
               containerPort: 8188
