@@ -352,6 +352,10 @@ Zuerst auf der Modellseite mit dem eigenen Hugging-Face-Account die Lizenz
 akzeptieren bzw. Zugang beantragen. Ein Token umgeht diese Freigabe nicht.
 Danach einen **Read-Token** erstellen, dessen Berechtigungen das gewünschte
 gated Repository einschließen. Keine Account-Passwörter verwenden.
+Unter https://huggingface.co/settings/tokens „Create new token“ wählen.
+Bei einem Fine-grained-Token Leserechte für die betreffenden gated Modelle
+erteilen. Den erzeugten Token kopieren; das Skript erzeugt keinen HF-Account-Token,
+sondern hinterlegt den bei Hugging Face erstellten Token im Cluster.
 
 Der AutoDownloader liest `HF_TOKEN` ausschließlich im ComfyUI-Backend aus
 dem separaten optionalen Secret **`comfyui-huggingface`**, Schlüssel `token`.
@@ -363,23 +367,15 @@ Sichere Einrichtung im lokalen **Bash-Terminal** mit passendem kubectl-Kontext
 (Token-Eingabe unsichtbar, kein Token als Kommandozeilenargument):
 
 ```bash
-(
-  set +x
-  set -euo pipefail
-  umask 077
-  secret_dir=$(mktemp -d)
-  trap 'rm -rf -- "$secret_dir"; unset hf_token' EXIT
-  IFS= read -r -s -p 'Hugging Face Read-Token: ' hf_token
-  printf '\n'
-  [[ -n "${hf_token//[[:space:]]/}" ]] || { echo 'Token fehlt.' >&2; exit 1; }
-  printf '%s' "$hf_token" > "$secret_dir/token"
-  unset hf_token
-  kubectl -n comfyui create secret generic comfyui-huggingface \
-    --from-file="token=$secret_dir/token" --dry-run=client -o yaml \
-    | kubectl -n comfyui apply --server-side --field-manager=hf-token-setup -f -
-)
-kubectl -n comfyui rollout restart deployment/comfyui
+/home/icebear/ice_ki/comfyui_webui/setup-hf-token.sh
 ```
+
+Den Token an der unsichtbaren Eingabe einfügen und Enter drücken.
+Das Skript legt das Secret an oder aktualisiert es, löscht die geschützte
+temporäre Token-Datei und startet ausschließlich ComfyUI neu. Laufende
+Generierungen/Transfers können dabei unterbrochen werden. Der Token erscheint
+nicht in der Skriptausgabe; Eingabefehler oder Secret-Fehler brechen vor dem
+Neustart ab. Das Skript prüft das Tokenformat, nicht die Freigabe bei Hugging Face.
 
 Zuvor das neue ComfyUI-Image mit neuem `IMAGE_TAG` bauen/pushen und das
 aktualisierte Deployment anwenden, damit Backend und Secret-Referenz vorhanden
