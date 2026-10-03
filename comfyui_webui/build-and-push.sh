@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+deploy=false
+if [[ "${1:-}" == "--deploy" ]]; then
+  deploy=true
+  shift
+fi
 if (( $# > 2 )); then
-  echo "Usage: $0 [K3S_REGISTRY_HOST:PORT] [OUTPUT_MANIFEST]" >&2
+  echo "Usage: $0 [--deploy] [K3S_REGISTRY_HOST:PORT] [OUTPUT_MANIFEST]" >&2
   exit 2
 fi
 
@@ -55,8 +60,12 @@ sed -E \
   -e "s#__COMFYUI_NODEPORT__#${comfyui_nodeport}#" \
   "$template" > "$output"
 echo "Deployment manifest: $output"
-echo "Apply with: kubectl apply -f $output"
+if [[ "$deploy" == true ]]; then
+  bash "${script_dir}/deploy.sh" "$output"
+else
+  echo "Deploy with automatic API token provisioning: ${script_dir}/deploy.sh $output"
+fi
 echo "Configure HTTP registry access on ALL nodes; use the registry's LAN address for a multi-node cluster."
 echo "WebUI: http://<node-ip>:${webui_nodeport} | ComfyUI: http://<node-ip>:${comfyui_nodeport}"
-echo "Services are included in this manifest; building images alone does not create them."
+echo "Services are included in this manifest; use --deploy to apply it and provision the API token."
 echo "Check kubectl apply errors (especially occupied NodePorts), then: kubectl -n comfyui get services"

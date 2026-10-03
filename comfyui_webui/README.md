@@ -36,8 +36,7 @@ angegeben, unter der **alle Cluster-Nodes** die Images abrufen können:
 
 ```bash
 cd comfyui_webui
-IMAGE_TAG=1 ./build-and-push.sh 192.168.1.10:5000 /tmp/deploy_comfyui.yaml
-kubectl apply -f /tmp/deploy_comfyui.yaml
+IMAGE_TAG=1 ./build-and-push.sh --deploy 192.168.1.10:5000 /tmp/deploy_comfyui.yaml
 kubectl -n comfyui rollout status deployment/webui
 kubectl -n comfyui rollout status deployment/comfyui
 kubectl -n comfyui rollout status deployment/ollama
@@ -61,6 +60,14 @@ verwenden. `OLLAMA_IMAGE` kann das zu spiegelnde Image überschreiben
 (Standard: `ollama/ollama:0.35.0`). Der Build lädt Quellen und Python-Pakete aus
 dem Internet; die Cluster-Nodes ziehen anschließend ausschließlich aus der
 lokalen Registry. Es wird kein Registry-Secret benötigt.
+
+Mit `--deploy` wird nach dem Build das Manifest angewendet und der
+Modelltransfer-API-Token automatisch als Kubernetes-Secret eingerichtet.
+Vorhandene Tokens werden **beibehalten**, nicht bei jedem Build rotiert.
+Ohne `--deploy` bleibt das Skript ein reiner Build-/Push-/Render-Schritt
+ohne Clusterzugriff; anschließend `./deploy.sh /tmp/deploy_comfyui.yaml`
+ausführen. Beide Deployment-Wege benötigen einen gültigen kubectl-Kontext
+und Rechte zum Lesen/Anlegen von Secrets und Anwenden der Ressourcen.
 
 Für eine HTTP-Registry auf **jedem K3s-Node** in
 `/etc/rancher/k3s/registries.yaml` konfigurieren:
@@ -88,14 +95,14 @@ vertrauenswürdigen, per Firewall geschützten Netz betreiben.
 
 ### Fehlende Services oder belegte NodePorts
 
-Das Build-Skript baut/pusht Images und erzeugt ein Manifest; es führt
-**kein `kubectl apply`** aus. Das generierte Manifest enthält alle drei Services,
+Das Build-Skript baut/pusht Images und erzeugt ein Manifest; **ohne `--deploy`**
+führt es kein `kubectl apply` aus. Das generierte Manifest enthält alle drei Services,
 einschließlich `comfyui` auf Port 8188 / NodePort 30188. Auch ein
 abgestürzter GPU-Pod entfernt seinen Service nicht: Fehlt der Service selbst,
 ist dies ein separates Deployment-/Apply-Problem, kein CUDA-Fehler.
 
 ```bash
-kubectl apply -f /tmp/deploy_comfyui.yaml
+./deploy.sh /tmp/deploy_comfyui.yaml
 kubectl -n comfyui get service webui comfyui ollama
 kubectl -n comfyui get pods -l app=comfyui
 kubectl -n comfyui get endpointslices -l kubernetes.io/service-name=comfyui
@@ -109,7 +116,7 @@ können angelegt werden, obwohl andere fehlschlagen. Bei
 kubectl get services -A -o wide
 WEBUI_NODEPORT=31080 COMFYUI_NODEPORT=31188 IMAGE_TAG=p100-cu126-3 \
   ./build-and-push.sh 192.168.1.10:5000 /tmp/deploy_comfyui.yaml
-kubectl apply -f /tmp/deploy_comfyui.yaml
+./deploy.sh /tmp/deploy_comfyui.yaml
 ```
 
 Freie Ports im Standardbereich 30000–32767 auswählen. Die Variablen ändern
@@ -204,7 +211,7 @@ Nach einem Update mit neuem Tag bauen und das generierte Manifest anwenden:
 ```bash
 cd comfyui_webui
 IMAGE_TAG=p100-manager-1 ./build-and-push.sh 192.168.1.10:5000 /tmp/deploy_comfyui.yaml
-kubectl apply -f /tmp/deploy_comfyui.yaml
+./deploy.sh /tmp/deploy_comfyui.yaml
 kubectl -n comfyui rollout status deployment/comfyui
 kubectl -n comfyui logs deployment/comfyui | grep -i manager
 ```
@@ -264,27 +271,29 @@ Endpunkte zusätzlich geladen werden.
 
 Die neuen Transfer- und Neustart-Endpunkte sind ohne Token **gesperrt**.
 Dasselbe Kubernetes-Secret versorgt ComfyUI und die WebUI; der WebUI-Server
-gibt den Token niemals an den Browser weiter. Einmal einrichten:
+gibt den Token niemals an den Browser weiter. Automatisch beim Deployment
+einrichten (oder `build-and-push.sh --deploy` verwenden):
 
 ```bash
-kubectl create namespace comfyui --dry-run=client -o yaml | kubectl apply -f -
-umask 077
-openssl rand -hex 32 > /tmp/comfyui-model-token
-kubectl -n comfyui create secret generic comfyui-model-api \
-  --from-file=token=/tmp/comfyui-model-token \
-  --dry-run=client -o yaml | kubectl apply -f -
+./deploy.sh /tmp/deploy_comfyui.yaml
+./show-api-token.sh
 ```
 
-Die Token-Datei sicher aufbewahren und **nicht committen**. Für direkten Zugriff
-in ComfyUI wird der Token im Passwortdialog abgefragt und nur im Arbeitsspeicher
-der Seite gehalten. Falls nur der WebUI-Upload genutzt wird, kann die lokale
-Token-Datei nach Secret-Erstellung gelöscht werden. Bei Token-Rotation
-ComfyUI und WebUI neu starten, damit die neuen Umgebungsvariablen geladen werden.
-Bei bereits laufenden Pods nach erstmaliger Secret-Erstellung ebenfalls:
+`deploy.sh` erzeugt bei fehlendem Secret einen zufälligen 256-Bit-Token mit
+OpenSSL. Die kurzlebige Token-Datei ist nur für den Besitzer zugänglich und
+wird auch bei Fehlern entfernt. Der Token wird weder ins Deployment-Manifest
+geschrieben noch in der Deployment-Ausgabe angezeigt. Ein vorhandenes Secret
+ohne gültigen Token führt zum Abbruch statt zu einer stillen Überschreibung;
+auch Zugriffsfehler werden nicht als fehlendes Secret behandelt.
 
-```bash
-kubectl -n comfyui rollout restart deployment/comfyui deployment/webui
-```
+`show-api-token.sh` liest den aktuellen Token aus `comfyui-model-api` und
+zeigt ihn lokal zum Einfügen in den Passwortdialog an – nicht in öffentliche
+Logs umleiten oder weitergeben. Für direkten Zugriff in ComfyUI wird er nur
+im Arbeitsspeicher der Seite gehalten. Keine manuelle Token-Datei erforderlich.
+Nach erstmaliger Secret-Erstellung startet `deploy.sh` ComfyUI und WebUI neu,
+damit bereits laufende Pods die neuen Umgebungsvariablen laden; dies kann
+laufende Generierungen/Transfers unterbrechen. Bei späterer manueller
+Token-Rotation beide Deployments ebenfalls neu starten.
 
 Nach Rebuild mit neuem `IMAGE_TAG` und Apply:
 
